@@ -46,9 +46,12 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
             ManagedHostingCredentials credentials, AgentRuntimeAuthenticationService sessions, HostingControlChannel channel) {
         this.rent = rent; this.config = config; this.credentials = credentials; this.sessions = sessions; this.channel = channel;
     }
-    @Override public boolean available() { return rent.configured() && channel.available() && credentials.available(); }
+    private HostingOutboundProvisioning outbound;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setOutbound(HostingOutboundProvisioning outbound) { this.outbound = outbound; }
+    @Override public boolean available() { return rent.configured() && (outbound != null || channel.available()) && credentials.available(); }
     @Override public boolean availableFor(String tenantId, String clientId, String ownerJiacn) {
-        return available() && channel.availableFor(tenantId, clientId, ownerJiacn);
+        return available() && (outbound != null ? outbound.availableFor(tenantId, clientId) : channel.availableFor(tenantId, clientId, ownerJiacn));
     }
     @Override public boolean probeCapabilities(String tenantId, String clientId, String ownerJiacn) {
         return probeCapabilities(tenantId, clientId, ownerJiacn, null);
@@ -56,6 +59,8 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     @Override public boolean probeCapabilities(String tenantId, String clientId, String ownerJiacn, String existingAgentId) {
         outsideTransaction();
         if (!availableFor(tenantId, clientId, ownerJiacn)) return false;
+        // An offline outbound host is still eligible for an idempotent queued recovery request.
+        if (outbound != null) return existingAgentId != null && outbound.controls(tenantId, clientId, ownerJiacn, existingAgentId);
         String requestId = java.util.UUID.randomUUID().toString();
         try {
             var request = new LinkedHashMap<String, Object>();
@@ -375,6 +380,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     }
     Map<String, Object> exchange(Map<String, Object> request, String requestId, String preferredHost) throws IOException {
         outsideTransaction();
+        if (outbound != null) return outbound.exchange(request, preferredHost);
         var target = channel.target(request, preferredHost);
         var message = cn.jia.core.entity.ProtocolMessage.event(requestId, "hosting." + request.get("method"),
                 java.util.UUID.randomUUID().toString(), hostingData(request));

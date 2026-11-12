@@ -21,18 +21,20 @@ import java.util.Set;
  * No user-facing grant/command endpoint exists here; a transport ACK is NOT business readiness/capture. */
 public final class HostingOutboundExchangeService {
     public static final String PATH = "/agent/runtime/v1/hosting/exchanges";
-    private static final Set<String> METHODS = Set.of("capabilities", "inventory", "adopt", "prepare", "ensure", "observe", "current", "quiesce", "evidence", "cleanup");
+    private static final Set<String> METHODS = Set.of("capabilities", "target", "inventory", "adopt", "prepare", "ensure", "observe", "current", "quiesce", "evidence", "cleanup");
     private static final JsonMapper JSON = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     private static final TypeReference<Map<String, Object>> MAP = new TypeReference<>() {};
     private final HostingOutboundStore store;
     private final FixedTenantAdmissionPolicy scope;
     private final TransactionTemplate transactions;
+    private cn.jia.agent.mapper.hosting.HostingSetupStore setups;
+    public void setSetups(cn.jia.agent.mapper.hosting.HostingSetupStore value) { this.setups = value; }
     public HostingOutboundExchangeService(HostingOutboundStore store, FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
         this.store = store; this.scope = scope; this.transactions = new TransactionTemplate(manager);
     }
     @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.ALWAYS)
-    public record Reply(String authorizationId, String hostId, String acknowledgedMessageId, Map<String, Object> command) { }
+    public record Reply(String authorizationId, String hostId, String acknowledgedMessageId, Map<String, Object> command, HostingSetupService.Authorization controlAuthorization) { }
     public record Request(String authorizationId, String hostId, String runtimeInstanceId, Map<String, Object> result) { }
     static HostingRentApplicationException denied() { return new HostingRentApplicationException(403, "HOSTING_OUTBOUND_REJECTED"); }
     private static HostingRentApplicationException conflict() { return new HostingRentApplicationException(409, "HOSTING_OUTBOUND_CONFLICT"); }
@@ -107,7 +109,17 @@ public final class HostingOutboundExchangeService {
             var next = store.pending(grant);
             Map<String, Object> nextMessage = next == null ? null : parse(next.commandJson());
             if (nextMessage != null) command(grant, nextMessage);
-            return new Reply(grant.authorizationId(), grant.hostId(), acknowledgment, nextMessage);
+            HostingSetupService.Authorization control = null;
+            if (setups != null && "SETUP".equals(grant.purpose())) {
+                var activation = setups.activation(grant.tenantId(), grant.clientId(), grant.authorizationId());
+                if (activation != null) {
+                    var issued = store.lock(grant.tenantId(), grant.clientId(), activation.authorizationId());
+                    if (issued != null && "ACTIVE".equals(issued.status()) && "CONTROL".equals(issued.purpose()))
+                        control = new HostingSetupService.Authorization(issued.authorizationId(), issued.hostId(), issued.purpose(),
+                                issued.tenantId(), issued.clientId(), issued.ownerJiacn(), issued.canonicalAgentId());
+                }
+            }
+            return new Reply(grant.authorizationId(), grant.hostId(), acknowledgment, nextMessage, control);
         }); // Only a committed result produces an HTTP ACK. No network wait under SQL locks.
     }
     private static void requireActive(Grant grant) { if (grant == null || !"ACTIVE".equals(grant.status())) throw denied(); }
@@ -116,7 +128,7 @@ public final class HostingOutboundExchangeService {
         exact(message.messageId(), 100);
         if (message.correlationId() != null || !message.messageType().startsWith("hosting.")) throw denied();
         String method = message.messageType().substring("hosting.".length());
-        if (!METHODS.contains(method) || "SETUP".equals(grant.purpose()) && !Set.of("capabilities", "inventory").contains(method)) throw denied();
+        if (!METHODS.contains(method) || "SETUP".equals(grant.purpose()) && !Set.of("capabilities", "target", "inventory").contains(method)) throw denied();
         subject(grant, message.data(), method.equals("capabilities"));
         return message;
     }

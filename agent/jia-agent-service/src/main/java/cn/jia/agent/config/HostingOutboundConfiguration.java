@@ -21,9 +21,15 @@ public class HostingOutboundConfiguration {
             HostingOutboundStore store, HostingOutboundExchangeService exchanges, FixedTenantAdmissionPolicy scope, HostingSetupProperties properties) {
         return new cn.jia.agent.hosting.HostingSetupService(setups, store, exchanges, scope, properties);
     }
+    @Bean cn.jia.agent.hosting.HostingOutboundProvisioning hostingOutboundProvisioning(cn.jia.agent.mapper.hosting.HostingSetupStore setups,
+            HostingOutboundStore store, HostingOutboundExchangeService exchanges, FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
+        return new cn.jia.agent.hosting.HostingOutboundProvisioning(setups, store, exchanges, scope, manager);
+    }
     @Bean HostingOutboundStore hostingOutboundStore(JdbcTemplate jdbc) { return new HostingOutboundStore(jdbc); }
     @Bean HostingOutboundExchangeService hostingOutboundExchangeService(HostingOutboundStore store,
-            FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
-        return new HostingOutboundExchangeService(store, scope, manager);
+            FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager, cn.jia.agent.mapper.hosting.HostingSetupStore setups) {
+        var service = new HostingOutboundExchangeService(store, scope, manager);
+        service.setSetups(setups);
+        return service;
     }
 }

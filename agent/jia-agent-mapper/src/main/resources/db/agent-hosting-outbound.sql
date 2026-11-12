@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS agent_hosting_setup (
   deployment_mode VARCHAR(16) NOT NULL,
   idempotency_key VARCHAR(36) NOT NULL,
   request_hash BINARY(32) NOT NULL,
+  control_token_hash BINARY(32) NOT NULL,
   created_at BIGINT NOT NULL,
   PRIMARY KEY (tenant_id, client_id, setup_id),
   UNIQUE KEY uk_hosting_setup_request (tenant_id, client_id, actor_id, idempotency_key),
@@ -63,4 +64,21 @@ CREATE TABLE IF NOT EXISTS agent_hosting_setup_quote (
   PRIMARY KEY (tenant_id, client_id, quote_id),
   CONSTRAINT fk_hosting_setup_quote FOREIGN KEY (tenant_id, client_id, setup_id)
     REFERENCES agent_hosting_setup (tenant_id, client_id, setup_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Exact paid relationship; one setup cannot authorize a second lease or user.
+CREATE TABLE IF NOT EXISTS agent_hosting_setup_activation (
+  tenant_id VARCHAR(50) NOT NULL,
+  client_id VARCHAR(50) NOT NULL,
+  setup_id VARCHAR(100) NOT NULL,
+  authorization_id VARCHAR(100) NOT NULL,
+  binding_id VARCHAR(100) NOT NULL,
+  lease_id VARCHAR(100) NOT NULL,
+  PRIMARY KEY (tenant_id,client_id,setup_id),
+  UNIQUE KEY uk_hosting_activation_lease (tenant_id,client_id,lease_id),
+  UNIQUE KEY uk_hosting_activation_grant (tenant_id,client_id,authorization_id),
+  CONSTRAINT fk_hosting_activation_setup FOREIGN KEY (tenant_id,client_id,setup_id)
+    REFERENCES agent_hosting_setup (tenant_id,client_id,setup_id),
+  CONSTRAINT fk_hosting_activation_grant FOREIGN KEY (tenant_id,client_id,authorization_id)
+    REFERENCES agent_hosting_authorization (tenant_id,client_id,authorization_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

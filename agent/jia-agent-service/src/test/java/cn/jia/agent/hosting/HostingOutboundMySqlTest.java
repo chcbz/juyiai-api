@@ -248,7 +248,8 @@ class HostingOutboundMySqlTest {
     static final String SETUP_TOKEN = "rth1_" + "c".repeat(64);
     static final String KEY = "00000000-0000-4000-8000-000000000010";
     static Map<String,String> setupBody() { return Map.of("mode", "local", "hostId", "fixture-host", "tokenSha256",
-            java.util.HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash(SETUP_TOKEN))); }
+            java.util.HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash(SETUP_TOKEN)), "controlTokenSha256",
+            java.util.HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash("rth1_" + "d".repeat(64)))); }
     record Invitation(HostingRentApplicationService app, HostingRentOwnerResolver owners,
             cn.jia.agent.mapper.AgentHostingRentBindingMapper roots, cn.jia.economy.service.EconomyPostingService posting,
             cn.jia.agent.dao.AgentPersonaBindingDao bindings, ManagedHostingProvisioner oldProvider) { }
@@ -298,7 +299,7 @@ class HostingOutboundMySqlTest {
         data.put("inventorySha256", corruptDigest ? "f".repeat(64) : java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(JSON.writeValueAsBytes(skills))));
         if (actualTarget) data.put("inventorySource", "TARGET");
         while (command != null) {
-            command = setupPoll(target, setupResult(command, "hosting.capabilities".equals(command.get("messageType")) ? Map.of("available", true) : data)).command();
+            command = setupPoll(target, setupResult(command, "hosting.capabilities".equals(command.get("messageType")) ? Map.of("available", true) : "hosting.target".equals(command.get("messageType")) ? Map.of("outcome", "TARGET_READY") : data)).command();
         }
     }
     @Test void setupCreatesOnlyRestrictedAuthorityAndPublicReplayMetadata() throws Exception {
@@ -307,7 +308,7 @@ class HostingOutboundMySqlTest {
         assertEquals(created, f.app().startSetup(ACTOR, "wuyong", KEY, setupBody()));
         assertFalse(JSON.writeValueAsString(created).contains(SETUP_TOKEN));
         assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
-        assertEquals(2, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange WHERE authorization_id=?", Integer.class, created.setupId()));
+        assertEquals(3, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange WHERE authorization_id=?", Integer.class, created.setupId()));
         assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_lease", Integer.class));
         verifyNoInteractions(f.bindings(), f.posting(), f.oldProvider());
         var changed = new HashMap<>(setupBody()); changed.put("hostId", "other-host");
@@ -336,7 +337,7 @@ class HostingOutboundMySqlTest {
         verifyNoInteractions(f.oldProvider(), f.bindings(), f.posting());
         var confirm = Map.of("mode", "local", "hostingAction", "INITIAL", "agentId", quote.agentId(), "quoteId", quote.quoteId(),
                 "expectedPlanVersion", quote.planVersion(), "expectedAmountWen", quote.amountWen(), "expectedPeriodSeconds", quote.periodSeconds());
-        assertEquals("HOSTING_SETUP_ACTIVATION_PENDING", assertThrows(HostingRentApplicationException.class,
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
                 () -> f.app().bind(ACTOR, "wuyong", UUID.randomUUID().toString(), confirm)).code());
         assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_provisioning_intent", Integer.class));
         verifyNoInteractions(f.oldProvider(), f.bindings(), f.posting());
@@ -396,7 +397,7 @@ class HostingOutboundMySqlTest {
         assertEquals("500", quote.recurringAmountWen());
         int grants = db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class);
         assertThrows(IllegalStateException.class, () -> tx.executeWithoutResult(status -> {
-            setups.create(ACTOR, "wuyong", UUID.randomUUID().toString(), new byte[32], "agt_other", "server", "fixture-host", "e".repeat(64), 5);
+            setups.create(ACTOR, "wuyong", UUID.randomUUID().toString(), new byte[32], "agt_other", "server", "fixture-host", "e".repeat(64), "f".repeat(64), 5);
             throw new IllegalStateException("fixture rollback");
         }));
         assertEquals(grants, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class));
@@ -462,4 +463,49 @@ class HostingOutboundMySqlTest {
             assertNull(failure.get()); assertEquals(2, receipts.size()); assertEquals(receipts.get(0), receipts.get(1)); assertEquals(1, completed());
         } finally { if (node != null && node.isAlive()) { node.destroy(); node.waitFor(); } server.stop(0); }
     }
+    @Test void activationIssuesOnlyExactSeparateControlAndReleaseRevokesBothWithoutHostIo() throws Exception {
+        var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var setups = security.getBean(HostingSetupService.class);
+        assertNull(setupPoll(view, null).controlAuthorization());
+        tx.executeWithoutResult(status -> {
+            var setup = setups.find(ACTOR, "wuyong", view.setupId());
+            setups.activate(ACTOR, setup, "123", "lease-activation", 10);
+        });
+        var metadata = setupPoll(view, null).controlAuthorization();
+        assertNotNull(metadata); assertEquals("CONTROL", metadata.purpose());
+        assertNotEquals(view.setupId(), metadata.authorizationId());
+        assertEquals(view.agentId(), metadata.canonicalAgentId());
+        assertEquals(metadata, setupPoll(view, null).controlAuthorization());
+        assertThrows(HostingRentApplicationException.class, () -> f.app().cancelSetup(ACTOR, "wuyong", view.setupId()));
+        assertThrows(HostingRentApplicationException.class, () -> service.exchange(SETUP_TOKEN,
+                new HostingOutboundExchangeService.Request(metadata.authorizationId(), "fixture-host", "instance", null), 11));
+        assertNull(service.exchange("rth1_" + "d".repeat(64),
+                new HostingOutboundExchangeService.Request(metadata.authorizationId(), "fixture-host", "instance", null), 11).command());
+        var adapter = security.getBean(HostingOutboundProvisioning.class);
+        var request = new LinkedHashMap<String,Object>();
+        request.putAll(SUBJECT); request.put("canonicalAgentId", view.agentId());
+        request.put("protocol", "runtime-hosting-v1"); request.put("method", "prepare");
+        request.put("bindingId", "123"); request.put("leaseId", "lease-activation");
+        assertNull(adapter.exchange(request, "other-host"));
+        assertNull(adapter.exchange(request, "fixture-host")); // queued, not ready
+        assertNull(adapter.exchange(request, "fixture-host")); // exact replay, not a second command
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange WHERE authorization_id=?", Integer.class, metadata.authorizationId()));
+        tx.executeWithoutResult(status -> setups.revokeLease("0", "fixture-client", "fixture-owner", view.agentId(), "123", "lease-activation", 12));
+        assertThrows(HostingRentApplicationException.class, () -> setupPoll(view, null));
+        assertFalse(adapter.controls("0", "fixture-client", "fixture-owner", view.agentId()));
+        assertNull(adapter.exchange(request, "fixture-host"));
+        verifyNoInteractions(f.posting(), f.oldProvider());
+    }
+    @Test void rolledBackReserveCannotPublishControlAuthority() throws Exception {
+        var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var setups = security.getBean(HostingSetupService.class);
+        tx.executeWithoutResult(status -> {
+            setups.activate(ACTOR, setups.find(ACTOR, "wuyong", view.setupId()), "123", "rolled-back-lease", 10);
+            status.setRollbackOnly();
+        });
+        assertNull(setupPoll(view, null).controlAuthorization());
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup_activation", Integer.class));
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization WHERE purpose='CONTROL'", Integer.class));
+    }
+
 }

@@ -30,6 +30,9 @@ public final class HostingOutboundStore {
                 + "AND token_hash=? AND (? IS NULL OR client_id=?) FOR UPDATE", GRANT,
                 tenant, id, hash, configuredClient, configuredClient));
     }
+    public Grant activeSubject(String tenant, String client, String owner, String agent) {
+        return one(jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND canonical_agent_id=? AND purpose='CONTROL' AND status='ACTIVE'", GRANT, tenant, client, owner, agent));
+    }
     public Grant lock(String tenant, String client, String id) {
         return one(jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND authorization_id=? FOR UPDATE",
                 GRANT, tenant, client, id));
@@ -46,6 +49,10 @@ public final class HostingOutboundStore {
     public Command command(Grant grant, String messageId) {
         return one(jdbc.query("SELECT * FROM agent_hosting_exchange WHERE tenant_id=? AND client_id=? AND authorization_id=? AND message_id=? FOR UPDATE",
                 COMMAND, grant.tenantId(), grant.clientId(), grant.authorizationId(), messageId));
+    }
+    public Command latest(Grant grant, String prefix) {
+        return one(jdbc.query("SELECT * FROM agent_hosting_exchange WHERE tenant_id=? AND client_id=? AND authorization_id=? AND message_id LIKE ? ORDER BY id DESC LIMIT 1 FOR UPDATE",
+                COMMAND, grant.tenantId(), grant.clientId(), grant.authorizationId(), prefix + "%"));
     }
     public Command pending(Grant grant) {
         return one(jdbc.query("SELECT * FROM agent_hosting_exchange WHERE tenant_id=? AND client_id=? AND authorization_id=? AND completed_at IS NULL ORDER BY id LIMIT 1 FOR UPDATE",
