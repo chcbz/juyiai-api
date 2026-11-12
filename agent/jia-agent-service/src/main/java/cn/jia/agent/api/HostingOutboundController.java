@@ -43,7 +43,8 @@ public final class HostingOutboundController {
     }
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<JsonResult<Void>> failure(RuntimeException error, HttpServletRequest request) {
-        var response = HostingRentErrors.response(error); response.getBody().setRequestId(RequestIdFilter.current(request));
+        var response = HostingRentErrors.response(error instanceof org.springframework.http.converter.HttpMessageNotReadableException
+                ? new IllegalArgumentException("Invalid hosting envelope") : error); response.getBody().setRequestId(RequestIdFilter.current(request));
         return ResponseEntity.status(response.getStatusCode()).header("Cache-Control", "private, no-store")
                 .header(RequestIdFilter.HEADER_NAME, response.getBody().getRequestId()).body(response.getBody());
     }

@@ -2,11 +2,9 @@ package cn.jia.agent.mapper.hosting;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
-import org.springframework.stereotype.Repository;
 import java.util.List;
 
 /** Independent JDBC storage boundary: explicit partitioning, including before ORDER/LIMIT/locks. */
-@Repository
 public final class HostingOutboundStore {
     public record Grant(String tenantId, String clientId, String authorizationId, String hostId,
             String ownerJiacn, String canonicalAgentId, String purpose, byte[] tokenHash, String status) {

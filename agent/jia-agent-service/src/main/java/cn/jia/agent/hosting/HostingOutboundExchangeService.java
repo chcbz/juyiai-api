@@ -4,7 +4,6 @@ import cn.jia.agent.mapper.hosting.HostingOutboundStore;
 import cn.jia.agent.mapper.hosting.HostingOutboundStore.Grant;
 import cn.jia.core.entity.ProtocolMessage;
 import cn.jia.core.security.FixedTenantAdmissionPolicy;
-import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -20,7 +19,6 @@ import java.util.Set;
 
 /** Transport only. Issuance and command production must join the authoritative onboarding/rent transaction.
  * No user-facing grant/command endpoint exists here; a transport ACK is NOT business readiness/capture. */
-@Service
 public final class HostingOutboundExchangeService {
     public static final String PATH = "/agent/runtime/v1/hosting/exchanges";
     private static final Set<String> METHODS = Set.of("capabilities", "inventory", "adopt", "prepare", "ensure", "observe", "current", "quiesce", "evidence", "cleanup");
