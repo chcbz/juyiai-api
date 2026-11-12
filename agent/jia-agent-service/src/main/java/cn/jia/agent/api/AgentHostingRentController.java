@@ -75,7 +75,25 @@ public final class AgentHostingRentController {
             return null;
         }
         return success(application.quote(HostingRentHttp.actor(authentication), personaCode,
-                HostingRentHttp.key(request), HostingRentHttp.body(rawBody, Set.of("purpose", "agentId"), Set.of("agentId"))));
+                HostingRentHttp.key(request), HostingRentHttp.body(rawBody, Set.of("purpose", "agentId", "setupId"), Set.of("agentId"))));
+    }
+
+    @PostMapping(value = "/personas/{personaCode}/hosting-setups", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Object setup(@PathVariable String personaCode, Authentication authentication, HttpServletRequest request,
+            @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] body) {
+        return success(application.startSetup(HostingRentHttp.actor(authentication), personaCode, HostingRentHttp.key(request),
+                HostingRentHttp.body(body, Set.of("mode", "hostId", "tokenSha256"), Set.of())));
+    }
+    @GetMapping("/personas/{personaCode}/hosting-setups/{setupId}")
+    public Object setup(@PathVariable String personaCode, @PathVariable String setupId, Authentication authentication, HttpServletRequest request) {
+        HostingRentHttp.noQuery(request);
+        return success(application.lookupSetup(HostingRentHttp.actor(authentication), personaCode, setupId));
+    }
+    @PostMapping(value = "/personas/{personaCode}/hosting-setups/{setupId}/cancel", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public Object cancelSetup(@PathVariable String personaCode, @PathVariable String setupId, Authentication authentication, HttpServletRequest request,
+            @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] body) {
+        HostingRentHttp.noQuery(request); HostingRentHttp.body(body, Set.of(), Set.of());
+        return success(application.cancelSetup(HostingRentHttp.actor(authentication), personaCode, setupId));
     }
 
     @GetMapping("/{agentId}/hosting-lease")

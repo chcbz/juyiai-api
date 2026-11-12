@@ -30,6 +30,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 
 /** Real InnoDB transactions and production HttpSecurity/MVC/codec; only isolated fixture credentials. */
@@ -242,6 +244,195 @@ class HostingOutboundMySqlTest {
                     .contentType("application/json").content(body(null))).andReturn().getResponse().getStatus());
         }
     }
+    static final HostingRentHttp.Actor ACTOR = new HostingRentHttp.Actor("fixture-login", "0", "fixture-client", "fixture-owner");
+    static final String SETUP_TOKEN = "rth1_" + "c".repeat(64);
+    static final String KEY = "00000000-0000-4000-8000-000000000010";
+    static Map<String,String> setupBody() { return Map.of("mode", "local", "hostId", "fixture-host", "tokenSha256",
+            java.util.HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash(SETUP_TOKEN))); }
+    record Invitation(HostingRentApplicationService app, HostingRentOwnerResolver owners,
+            cn.jia.agent.mapper.AgentHostingRentBindingMapper roots, cn.jia.economy.service.EconomyPostingService posting,
+            cn.jia.agent.dao.AgentPersonaBindingDao bindings, ManagedHostingProvisioner oldProvider) { }
+    Invitation invitation() throws Exception {
+        new ResourceDatabasePopulator(new ClassPathResource("db/economy-v0-foundation.sql"),
+                new ClassPathResource("db/economy-v0-hosting-rent.sql")).execute(db.dataSource());
+        var config = new com.baomidou.mybatisplus.core.MybatisConfiguration(); config.setMapUnderscoreToCamelCase(true);
+        config.addMapper(cn.jia.economy.mapper.EconomyHostingRentMapper.class); config.addMapper(cn.jia.economy.mapper.EconomyLedgerMapper.class);
+        var factory = new com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean(); factory.setDataSource(db.dataSource()); factory.setConfiguration(config);
+        var template = new org.mybatis.spring.SqlSessionTemplate(factory.getObject());
+        var rent = template.getMapper(cn.jia.economy.mapper.EconomyHostingRentMapper.class);
+        var posting = mock(cn.jia.economy.service.EconomyPostingService.class);
+        var manager = new DataSourceTransactionManager(db.dataSource());
+        var ledger = new cn.jia.economy.service.impl.HostingRentLedgerServiceImpl(rent,
+                template.getMapper(cn.jia.economy.mapper.EconomyLedgerMapper.class), posting, manager);
+        var owners = mock(HostingRentOwnerResolver.class); when(owners.requireOwner(any())).thenAnswer(call -> ((HostingRentHttp.Actor)call.getArgument(0)).ownerJiacn());
+        var roots = mock(cn.jia.agent.mapper.AgentHostingRentBindingMapper.class);
+        when(roots.lockPersona("wuyong")).thenReturn(new cn.jia.agent.entity.AgentPersonaEntity().setPersonaCode("wuyong").setActive(true).setSystemAgent(false));
+        var bindings = mock(cn.jia.agent.dao.AgentPersonaBindingDao.class);
+        var providers = mock(org.springframework.beans.factory.ObjectProvider.class);
+        var provider = mock(ManagedHostingProvisioner.class); when(providers.getIfAvailable()).thenReturn(provider);
+        var app = new HostingRentApplicationService(new cn.jia.agent.config.AgentHostingRentProperties(true, "1", "500", "2592000", "1", "50"),
+                new cn.jia.economy.config.EconomyPreviewGate(new cn.jia.economy.config.EconomyPreviewProperties(true,
+                        List.of(new cn.jia.economy.config.EconomyPreviewProperties.AllowedScope("0", "fixture-client")))), owners, rent,
+                ledger, mock(cn.jia.economy.hosting.HostingRentRenewalService.class), roots, bindings, mock(cn.jia.agent.dao.AgentRuntimeDao.class),
+                mock(cn.jia.agent.service.AgentIdentityService.class), providers, mock(HostingRentReconciler.class), manager, true);
+        app.setHostingSetups(security.getBean(HostingSetupService.class));
+        return new Invitation(app, owners, roots, posting, bindings, provider);
+    }
+    HostingOutboundExchangeService.Reply setupPoll(HostingSetupService.View target, Map<String,Object> result) {
+        return service.exchange(SETUP_TOKEN, new HostingOutboundExchangeService.Request(target.setupId(), "fixture-host", "fixture-instance-1", result), 5);
+    }
+    Map<String,Object> setupResult(Map<String,Object> command, Map<String,Object> additions) {
+        @SuppressWarnings("unchecked") var subject = (Map<String,Object>)command.get("data");
+        var data = new LinkedHashMap<>(subject); data.put("hostId", "fixture-host"); data.putAll(additions);
+        return Map.of("protocolVersion", 1, "requestId", command.get("requestId"), "messageType", command.get("messageType") + ".result",
+                "messageId", "result-" + command.get("messageId"), "correlationId", command.get("messageId"), "code", "E0", "msg", "ok", "data", data);
+    }
+    void deliverInventory(HostingSetupService.View target, boolean actualTarget, boolean corruptDigest) throws Exception {
+        var command = setupPoll(target, null).command();
+        var skills = new ArrayList<Map<String,Object>>();
+        for (String name : List.of("alpha", "beta")) {
+            var row = new LinkedHashMap<String,Object>(); row.put("skillKey", name); row.put("source", "NATIVE"); row.put("revision", "d".repeat(64));
+            row.put("enabled", name.equals("alpha")); row.put("installation", null); skills.add(row);
+        }
+        var data = new LinkedHashMap<String,Object>(); data.put("inventoryVersion", "1"); data.put("installedSkillCount", "2"); data.put("skills", skills);
+        data.put("inventorySha256", corruptDigest ? "f".repeat(64) : java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(JSON.writeValueAsBytes(skills))));
+        if (actualTarget) data.put("inventorySource", "TARGET");
+        while (command != null) {
+            command = setupPoll(target, setupResult(command, "hosting.capabilities".equals(command.get("messageType")) ? Map.of("available", true) : data)).command();
+        }
+    }
+    @Test void setupCreatesOnlyRestrictedAuthorityAndPublicReplayMetadata() throws Exception {
+        var f = invitation(); var created = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        assertEquals("WAITING_INVENTORY", created.status()); assertEquals("SETUP", created.authorization().purpose());
+        assertEquals(created, f.app().startSetup(ACTOR, "wuyong", KEY, setupBody()));
+        assertFalse(JSON.writeValueAsString(created).contains(SETUP_TOKEN));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
+        assertEquals(2, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange WHERE authorization_id=?", Integer.class, created.setupId()));
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_lease", Integer.class));
+        verifyNoInteractions(f.bindings(), f.posting(), f.oldProvider());
+        var changed = new HashMap<>(setupBody()); changed.put("hostId", "other-host");
+        assertEquals(409, assertThrows(HostingRentApplicationException.class, () -> f.app().startSetup(ACTOR, "wuyong", KEY, changed)).status());
+    }
+    @Test void realQuoteUsesTargetSkillCountIncludingDisabledAndNeverCallsOldProvider() throws Exception {
+        var f = invitation(); var setup = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var request = Map.of("purpose", "INITIAL", "setupId", setup.setupId());
+        String quoteKey = UUID.randomUUID().toString();
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().quote(ACTOR, "wuyong", quoteKey, request)).code());
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
+        deliverInventory(setup, true, false);
+        assertEquals("INVENTORY_READY", f.app().lookupSetup(ACTOR, "wuyong", setup.setupId()).status());
+        var quote = f.app().quote(ACTOR, "wuyong", quoteKey, request);
+        assertEquals(setup.agentId(), quote.agentId()); assertEquals("agent-self-hosted", quote.planId());
+        assertEquals("2", quote.initialSkillCount()); assertEquals("100", quote.initialSkillAmountWen());
+        assertEquals("50", quote.recurringAmountWen()); assertEquals("150", quote.amountWen());
+        assertEquals(quote, f.app().quote(ACTOR, "wuyong", quoteKey, request));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup_quote", Integer.class));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
+        // A new quote key cannot reuse the completed first observation indefinitely.
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), request)).code());
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
+        verifyNoInteractions(f.oldProvider(), f.bindings(), f.posting());
+        var confirm = Map.of("mode", "local", "hostingAction", "INITIAL", "agentId", quote.agentId(), "quoteId", quote.quoteId(),
+                "expectedPlanVersion", quote.planVersion(), "expectedAmountWen", quote.amountWen(), "expectedPeriodSeconds", quote.periodSeconds());
+        assertEquals("HOSTING_SETUP_ACTIVATION_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().bind(ACTOR, "wuyong", UUID.randomUUID().toString(), confirm)).code());
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_provisioning_intent", Integer.class));
+        verifyNoInteractions(f.oldProvider(), f.bindings(), f.posting());
+    }
+    @Test void unknownLegacyOrCorruptInventoryCannotBecomeAZeroQuote() throws Exception {
+        var f = invitation(); var setup = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        deliverInventory(setup, false, false);
+        assertEquals("WAITING_INVENTORY", f.app().lookupSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertThrows(HostingRentApplicationException.class, () -> f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), Map.of("purpose", "INITIAL", "setupId", setup.setupId())));
+        // Invalid digest cannot be used even when a producer asserts a real target observation.
+        var storeSetup = security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class);
+        var row = tx.execute(s -> storeSetup.find("0", "fixture-client", setup.setupId()));
+        assertNotNull(row);
+        var resultJson = db.jdbc().queryForObject("SELECT result_json FROM agent_hosting_exchange WHERE authorization_id=? AND message_id='setup-inventory'", String.class, setup.setupId());
+        var invalid = HostingOutboundExchangeService.parse(resultJson);
+        @SuppressWarnings("unchecked") var fields = new LinkedHashMap<>((Map<String,Object>)invalid.get("data"));
+        fields.put("inventorySource", "TARGET"); fields.put("inventorySha256", "f".repeat(64));
+        db.jdbc().update("UPDATE agent_hosting_exchange SET result_json=? WHERE authorization_id=? AND message_id='setup-inventory'", JSON.writeValueAsString(changed(invalid, "data", fields)), setup.setupId());
+        assertEquals("WAITING_INVENTORY", f.app().lookupSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
+    }
+    @Test void unprovenOwnerAndCrossOwnerCannotCreateReadQuoteOrCancelSetup() throws Exception {
+        var f = invitation(); var setup = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var other = new HostingRentHttp.Actor("other-login", "0", "fixture-client", "other-owner");
+        assertThrows(HostingRentApplicationException.class, () -> f.app().lookupSetup(other, "wuyong", setup.setupId()));
+        assertThrows(HostingRentApplicationException.class, () -> f.app().cancelSetup(other, "wuyong", setup.setupId()));
+        assertThrows(HostingRentApplicationException.class, () -> f.app().quote(other, "wuyong", UUID.randomUUID().toString(), Map.of("purpose", "INITIAL", "setupId", setup.setupId())));
+        doThrow(new HostingRentApplicationException(403, "HOSTING_RENT_OWNER_UNPROVEN")).when(f.owners()).requireOwner(ACTOR);
+        assertThrows(HostingRentApplicationException.class, () -> f.app().startSetup(ACTOR, "wuyong", UUID.randomUUID().toString(), setupBody()));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
+    }
+    @Test void cancelledSetupRevokesPollingWithoutRemoteCleanupOrNewQuote() throws Exception {
+        var f = invitation(); var setup = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        deliverInventory(setup, true, false);
+        assertEquals("REVOKED", f.app().cancelSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertEquals("REVOKED", f.app().cancelSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertEquals("REVOKED", f.app().lookupSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertThrows(HostingRentApplicationException.class, () -> setupPoll(setup, null));
+        assertThrows(HostingRentApplicationException.class, () -> f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), Map.of("purpose", "INITIAL", "setupId", setup.setupId())));
+        verifyNoInteractions(f.oldProvider(), f.posting(), f.bindings());
+    }
+    @Test void managedCatalogCannotBeRelabeledAndSetupRollbackIncludesGrantAndCommands() throws Exception {
+        var f = invitation();
+        var setups = new HostingSetupService(security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class), store, service,
+                new FixedTenantAdmissionPolicy("0", "fixture-client"), new cn.jia.agent.config.HostingSetupProperties(Map.of("fixture-host",
+                new cn.jia.agent.config.HostingSetupProperties.ManagedHost("0", "fixture-client", "fixture-owner"))));
+        f.app().setHostingSetups(setups);
+        assertThrows(HostingRentApplicationException.class, () -> f.app().startSetup(ACTOR, "wuyong", KEY, setupBody()));
+        var managed = new HashMap<>(setupBody()); managed.put("mode", "server");
+        var created = f.app().startSetup(ACTOR, "wuyong", KEY, managed);
+        String quoteKey = UUID.randomUUID().toString(); var quoteRequest = Map.of("purpose", "INITIAL", "setupId", created.setupId());
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().quote(ACTOR, "wuyong", quoteKey, quoteRequest)).code());
+        deliverInventory(created, true, false);
+        var quote = f.app().quote(ACTOR, "wuyong", quoteKey, quoteRequest);
+        assertEquals("agent-hosting-preview", quote.planId()); assertEquals("600", quote.amountWen());
+        assertEquals("500", quote.recurringAmountWen());
+        int grants = db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class);
+        assertThrows(IllegalStateException.class, () -> tx.executeWithoutResult(status -> {
+            setups.create(ACTOR, "wuyong", UUID.randomUUID().toString(), new byte[32], "agt_other", "server", "fixture-host", "e".repeat(64), 5);
+            throw new IllegalStateException("fixture rollback");
+        }));
+        assertEquals(grants, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
+    }
+    @Test @EnabledIfEnvironmentVariable(named = "CYF_GSS_RUNTIME_TEST_SOURCE", matches = ".+")
+    void setupHttpUsesExistingUserBoundaryAndNeverReturnsBearer() throws Exception {
+        var f = invitation();
+        var userMvc = MockMvcBuilders.standaloneSetup(new cn.jia.agent.api.AgentHostingRentController(f.app()))
+                .setControllerAdvice(new ApiEnvelopeAdvice(), new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(), security.getBean(FilterChainProxy.class)).build();
+        var jwt = org.springframework.security.oauth2.jwt.Jwt.withTokenValue("fixture").claim("tenant_id", "0").header("alg", "none")
+                .subject("fixture-login").claim("jiacn", "fixture-owner").claim("client_id", "fixture-client").build();
+        var auth = new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(jwt); auth.setAuthenticated(true);
+        var fixture = JSON.readTree(Files.readString(Path.of(System.getenv("CYF_GSS_RUNTIME_TEST_SOURCE"), "test/fixtures/hosting-setup-v1.json")));
+        String body = fixture.get("registrationRequest").toString();
+        assertEquals(JSON.valueToTree(setupBody()), fixture.get("registrationRequest").get("data"));
+        var response = userMvc.perform(post("/agent/personas/wuyong/hosting-setups").principal(auth).header("Idempotency-Key", KEY)
+                .contentType("application/json").content(body)).andReturn().getResponse();
+        assertEquals(200, response.getStatus(), response.getContentAsString());
+        var actual = JSON.readTree(response.getContentAsString());
+        var data = (tools.jackson.databind.node.ObjectNode)actual.get("data");
+        String setupId = data.get("setupId").asString(), agentId = data.get("agentId").asString();
+        var authorization = (tools.jackson.databind.node.ObjectNode)data.get("authorization");
+        assertEquals(setupId, authorization.get("authorizationId").asString());
+        assertEquals(agentId, authorization.get("canonicalAgentId").asString());
+        // Normalize only server-generated opaque IDs, not the wire shape or authority fields.
+        data.put("setupId", "hca_setup_fixture"); data.put("agentId", "agt_setup_fixture");
+        authorization.put("authorizationId", "hca_setup_fixture"); authorization.put("canonicalAgentId", "agt_setup_fixture");
+        assertEquals(fixture.get("registrationResponse"), actual);
+        assertFalse(response.getContentAsString().contains(SETUP_TOKEN)); assertTrue(response.getHeader("Cache-Control").contains("no-store"));
+        assertEquals(401, userMvc.perform(post("/agent/personas/wuyong/hosting-setups").header("Idempotency-Key", KEY)
+                .contentType("application/json").content(body)).andReturn().getResponse().getStatus());
+        assertEquals(403, userMvc.perform(post("/agent/personas/wuyong/hosting-setups").header("Authorization", "RuntimeHosting " + TOKEN)
+                .contentType("application/json").content(body)).andReturn().getResponse().getStatus());
+    }
+
     @Test @EnabledIfEnvironmentVariable(named = "CYF_HOSTING_NODE_FIXTURE", matches = ".+")
     void actualNodeWorkerUsesJavaMvcAndMysqlAndReplaysLostAck() throws Exception {
         enqueue("inventory-1");

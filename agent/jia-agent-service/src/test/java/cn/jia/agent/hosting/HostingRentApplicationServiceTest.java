@@ -123,11 +123,22 @@ class HostingRentApplicationServiceTest {
     }
 
     @Test void externalModelAndTariffChangeNewQuotesWithoutCodeChanges() {
+        for (boolean setupFlow : new boolean[]{false, true}) {
         for (long amount : new long[]{730L, 890L}) {
             long version = amount + 100;
             useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
                     Map.of("wuyong", "arbitrary-provider.model"),
                     Map.of("arbitrary-provider.model", new AgentHostingRentProperties.ModelPlan("" + version, "" + amount))));
+            if (setupFlow) {
+                var setups = mock(HostingSetupService.class);
+                application.setHostingSetups(setups);
+                var target = new cn.jia.agent.mapper.hosting.HostingSetupStore.Setup("0", "Client-A", "setup", "login-sub",
+                        "Tenant-A", "wuyong", AGENT, "fixture-host", "server", KEY, new byte[32]);
+                when(setups.find(ACTOR, "wuyong", "setup")).thenReturn(target);
+                when(setups.requestInventory(ACTOR, "wuyong", "setup", KEY)).thenReturn(true);
+                when(setups.inventory(ACTOR, "wuyong", "setup", KEY)).thenReturn(new HostingSetupService.Target(target,
+                        new ManagedHostingProvisioner.SkillInventory("fixture-host", EMPTY_INVENTORY.inventorySha256(), List.of(), "[]")));
+            }
             when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", version)).thenReturn(
                     new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(version)
                             .setAmountWen(amount).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
@@ -138,7 +149,9 @@ class HostingRentApplicationServiceTest {
                         amount, 2592000L, "wuyong", command.agentId(), null, null,
                         1800000000000L, amount, command.initialSkills());
             }).when(ledger).quote(any());
-            assertEquals("" + amount, application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL")).recurringAmountWen());
+            assertEquals("" + amount, application.quote(ACTOR, "wuyong", KEY, setupFlow ? Map.of("purpose", "INITIAL", "setupId", "setup")
+                    : Map.of("purpose", "INITIAL")).recurringAmountWen());
+        }
         }
         verify(ledger, never()).reserve(any());
         assertEquals(0, count());
