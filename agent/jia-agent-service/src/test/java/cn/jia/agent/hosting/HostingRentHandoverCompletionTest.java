@@ -92,7 +92,7 @@ class HostingRentHandoverCompletionTest {
         verify(renewal,never()).recordExecutorStopped(any(),any(),anyString(),anyString(),anyString(),anyString());
     }
     @Test void selfHostedUnsettledFundsDoNotDisappearOnDetach() {
-        selfHosted();when(skills.selfHostedHandoverSettled(partition,"old-owner","agent","installation")).thenReturn(false);
+        selfHosted();doReturn(false).when(skills).selfHostedHandoverSettled(partition,"old-owner","agent","installation");
         assertThrows(IllegalStateException.class,()->service.completeSelfHostedIfApplicable(partition,binding,intent));
         assertEquals(0,effects());verifyNoInteractions(runtime,identities,keys);
     }
