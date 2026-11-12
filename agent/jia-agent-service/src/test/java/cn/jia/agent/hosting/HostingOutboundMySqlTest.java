@@ -55,13 +55,17 @@ class HostingOutboundMySqlTest {
         mysql = new EconomyMySqlTestFixture(); mysql.start(); db = mysql.newDatabase("outbound");
         new ResourceDatabasePopulator(new ClassPathResource("db/agent-hosting-outbound.sql")).execute(db.dataSource());
         var manager = new DataSourceTransactionManager(db.dataSource()); tx = new TransactionTemplate(manager);
-        store = new HostingOutboundStore(db.jdbc());
-        service = new HostingOutboundExchangeService(store, new FixedTenantAdmissionPolicy("0", "fixture-client"), manager);
+        security = new AnnotationConfigWebApplicationContext(); security.setServletContext(new MockServletContext());
+        security.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("fixture", Map.of("agent.hosting-outbound.enabled", "true")));
+        security.addBeanFactoryPostProcessor(factory -> {
+            factory.registerSingleton("jdbc", db.jdbc()); factory.registerSingleton("manager", manager);
+            factory.registerSingleton("scope", new FixedTenantAdmissionPolicy("0", "fixture-client"));
+        });
+        security.register(Security.class, cn.jia.agent.config.HostingOutboundConfiguration.class); security.refresh();
+        store = security.getBean(HostingOutboundStore.class); service = security.getBean(HostingOutboundExchangeService.class);
         grant = new Grant("0", "fixture-client", "hca_fixture", "fixture-host", "fixture-owner", "agt_outbound_new",
                 "SETUP", HostingOutboundExchangeService.tokenHash(TOKEN), "ACTIVE");
         tx.executeWithoutResult(s -> service.register(grant, 1));
-        security = new AnnotationConfigWebApplicationContext(); security.setServletContext(new MockServletContext());
-        security.register(Security.class); security.refresh();
         mvc = MockMvcBuilders.standaloneSetup(new HostingOutboundController(service))
                 .setControllerAdvice(new ApiEnvelopeAdvice(), new ApiRequestEnvelopeAdvice())
                 .addFilters(new RequestIdFilter(), security.getBean(FilterChainProxy.class)).build();
@@ -178,6 +182,41 @@ class HostingOutboundMySqlTest {
         }
         assertEquals(1, completed());
     }
+    @Test void revokeWinsAgainstWaitingPollAndReceipt() throws Exception {
+        enqueue("one");
+        var started = new CountDownLatch(2);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var futures = new ArrayList<Future<HostingOutboundExchangeService.Reply>>();
+            tx.executeWithoutResult(status -> {
+                store.lock("0", "fixture-client", "hca_fixture");
+                futures.add(pool.submit(() -> { started.countDown(); return poll(null); }));
+                futures.add(pool.submit(() -> { started.countDown(); return poll(result("one", "r1")); }));
+                try { started.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+                service.revoke("0", "fixture-client", "hca_fixture", 4);
+            });
+            for (var future : futures) assertInstanceOf(HostingRentApplicationException.class,
+                    assertThrows(ExecutionException.class, future::get).getCause());
+        }
+        assertEquals(0, completed());
+    }
+    @Test void reusedResultIdForDifferentCommandIsPermanentConflict() throws Exception {
+        enqueue("one"); enqueue("two"); poll(result("one", "same-result"));
+        assertEquals(409, http("RuntimeHosting " + TOKEN, body(result("two", "same-result"))));
+        assertEquals(1, completed()); assertEquals(command("two"), poll(null).command());
+    }
+    @Test void disabledFeatureNeedsNoDatabaseAndStillRejectsCredentialFallback() throws Exception {
+        try (var context = new AnnotationConfigWebApplicationContext()) {
+            context.setServletContext(new MockServletContext());
+            context.register(Security.class, cn.jia.agent.config.HostingOutboundConfiguration.class, HostingOutboundController.class);
+            context.refresh();
+            assertEquals(0, context.getBeansOfType(HostingOutboundStore.class).size());
+            assertEquals(0, context.getBeansOfType(HostingOutboundExchangeService.class).size());
+            assertEquals(0, context.getBeansOfType(HostingOutboundController.class).size());
+            var disabled = MockMvcBuilders.standaloneSetup(new Object()).addFilters(new RequestIdFilter(), context.getBean(FilterChainProxy.class)).build();
+            assertEquals(403, disabled.perform(post("/user/profile").header("Authorization", "RuntimeHosting " + TOKEN))
+                    .andReturn().getResponse().getStatus());
+        }
+    }
     @Test void mvcEnvelopePreservesMandatoryNullsAndRejectsMalformedWire() throws Exception {
         var response = mvc.perform(post(HostingOutboundExchangeService.PATH).header("Authorization", "RuntimeHosting " + TOKEN)
                 .contentType("application/json").content(body(null))).andReturn().getResponse();
@@ -190,6 +229,7 @@ class HostingOutboundMySqlTest {
         assertEquals(400, http("RuntimeHosting " + TOKEN, body(null).replace("\"result\":null", "\"result\":null,\"result\":null")));
         assertEquals(400, http("RuntimeHosting " + TOKEN, body(null) + "{}"));
         assertEquals(400, http("RuntimeHosting " + TOKEN, "{}"));
+        assertEquals(200, http("RuntimeHosting " + TOKEN, body(null).replace("\"result\":null", "\"result\":null,\"futureHint\":true")));
     }
     @Test void actualSecurityChainRejectsCredentialConfusionAndAlternateRoutes() throws Exception {
         for (String auth : List.of("Bearer " + TOKEN, "AgentRuntime " + TOKEN, "RuntimeHosting " + TOKEN + " ", "RuntimeHosting invalid"))

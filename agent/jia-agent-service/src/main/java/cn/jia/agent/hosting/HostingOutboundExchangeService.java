@@ -96,7 +96,11 @@ public final class HostingOutboundExchangeService {
                     // A result for an undispatched later command cannot skip the head.
                     var head = store.pending(grant);
                     if (head == null || head.id() != original.id()) throw conflict();
-                    if (store.complete(grant, original, result.messageId(), json(request.result()), now) != 1) throw conflict();
+                    try {
+                        if (store.complete(grant, original, result.messageId(), json(request.result()), now) != 1) throw conflict();
+                    } catch (org.springframework.dao.DuplicateKeyException reusedResultId) {
+                        throw conflict(); // A result ID cannot complete two commands; do not retry this as unavailable.
+                    }
                 }
                 acknowledgment = result.messageId();
             }
