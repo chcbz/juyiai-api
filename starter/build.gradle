@@ -241,7 +241,7 @@ tasks.withType(Test).configureEach { dependsOn verifyPdfProcessingBoundary }
 tasks.named('bootJar') { dependsOn verifyPdfProcessingBoundary }
 
 // Exact maintenance graph/input contract. Keep unrelated historical startup fixtures
-// (including intentionally omitted archive bootstrap components) out of this slice.
+// (including omitted archive bootstrap components) out of this slice.
 def hostingRentMaintenanceSourceSet = sourceSets.create('hostingRentMaintenance') {
     java {
         srcDir 'src/test/java'

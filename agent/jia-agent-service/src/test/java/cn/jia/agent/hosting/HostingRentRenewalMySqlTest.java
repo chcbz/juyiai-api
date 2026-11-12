@@ -322,7 +322,7 @@ class HostingRentRenewalMySqlTest {
                 var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
                 assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
                 assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
-                new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(tx ->
+                new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(transaction ->
                         assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
                 assertEquals(950,balance()); assertNull(httpFailure.get());
                 return;
