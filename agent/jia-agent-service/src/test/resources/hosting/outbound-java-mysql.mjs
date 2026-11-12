@@ -1,0 +1,24 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir, readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const runtime = process.env.CYF_GSS_RUNTIME_TEST_SOURCE;
+const { HostingOutbound } = await import(pathToFileURL(resolve(runtime, 'lib/hosting-outbound.mjs')));
+const { hostingFixture, fixtureInventory, unchangedPeers } = await import(pathToFileURL(resolve(runtime, 'test/hosting-fixture.mjs')));
+const wire = JSON.parse(await readFile(resolve(runtime, 'test/fixtures/hosting-outbound-v1.json')));
+test('actual Java security/MVC/MySQL roundtrip with real Runtime lifecycle and lost committed ACK', async t => {
+  const closers = []; t.after(async () => { for (const close of closers.reverse()) await close(); });
+  const f = await hostingFixture(t, { observeInventory: fixtureInventory });
+  const before = f.peers.map(peer => structuredClone(f.states.get(peer.subjectKey)[0]));
+  const stateRoot = resolve(f.root, 'outbound'); await mkdir(stateRoot, { mode: 0o700 });
+  const options = { control: f.control(), authorization: { ...wire.authorization, token: `rth1_${'a'.repeat(64)}` }, stateRoot, apiOrigin: process.argv[2] };
+  const worker = await new HostingOutbound(options).initialize(); closers.push(() => worker.close());
+  await worker.exchange(); assert.deepEqual(worker.state.command, wire.response.data.command);
+  const original = structuredClone(worker.state.result);
+  await assert.rejects(worker.exchange()); assert.deepEqual(worker.state.result, original);
+  await worker.close();
+  const restarted = await new HostingOutbound(options).initialize(); closers.push(() => restarted.close());
+  await restarted.exchange(); assert.equal(restarted.state.result, null); assert.equal(restarted.state.command, null);
+  assert.equal(f.enrollmentCount(), 0); unchangedPeers(f, before);
+});
