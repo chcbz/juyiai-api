@@ -63,7 +63,7 @@ public record AgentHostingRentProperties(
         // One existing managed plan namespace: each model tariff gets its own immutable version.
         var versions = new java.util.HashSet<String>();
         for (var entry : modelPlans.entrySet()) {
-            if (entry.getKey().isBlank() || entry.getKey().length() > 100
+            if (entry.getKey().isBlank()
                     || entry.getValue().planVersion().equals(planVersion)
                     || !versions.add(entry.getValue().planVersion()))
                 throw new IllegalArgumentException("Model tariffs require distinct versions, separate from the uniform tariff");

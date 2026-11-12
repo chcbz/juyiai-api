@@ -43,6 +43,7 @@ class HostingRentApplicationServiceTest {
     private final HostingRentOwnerResolver owners = mock(HostingRentOwnerResolver.class);
     private final HostingRentReconciler reconciler = mock(HostingRentReconciler.class);
     private final ManagedHostingProvisioner provider = mock(ManagedHostingProvisioner.class);
+    private final ObjectProvider<ManagedHostingProvisioner> providers = mock(ObjectProvider.class);
     private JdbcTemplate jdbc;
     private HostingRentApplicationService application;
     private final HostingRentMutationReceipt receipt = new HostingRentMutationReceipt(
@@ -57,7 +58,6 @@ class HostingRentApplicationServiceTest {
         var dataSource = new DriverManagerDataSource("jdbc:h2:mem:rent_app_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1", "sa", "");
         jdbc = new JdbcTemplate(dataSource);
         jdbc.execute("CREATE TABLE effects(name VARCHAR(100))");
-        ObjectProvider<ManagedHostingProvisioner> providers = mock(ObjectProvider.class);
         when(providers.getIfAvailable()).thenReturn(provider);
         when(provider.available()).thenReturn(true);
         when(provider.deploymentMode(anyString(), anyString(), anyString(), anyString())).thenReturn("server");
@@ -119,7 +119,7 @@ class HostingRentApplicationServiceTest {
                 new EconomyPreviewGate(new EconomyPreviewProperties(true, List.of(
                         new EconomyPreviewProperties.AllowedScope("0", "Client-A")))), owners, rent,
                 ledger, renewal, roots, bindings, runtimes, identities, providers, reconciler,
-                new DataSourceTransactionManager(dataSource), true);
+                new DataSourceTransactionManager(jdbc.getDataSource()), true);
     }
 
     @Test void externalModelAndTariffChangeNewQuotesWithoutCodeChanges() {
@@ -150,6 +150,17 @@ class HostingRentApplicationServiceTest {
         assertEquals("HOSTING_RENT_NOT_CONFIGURED", assertThrows(HostingRentApplicationException.class,
                 () -> application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL"))).code());
         verifyNoInteractions(ledger);
+    }
+
+    @Test void changingAmountWithoutNewVersionCannotOverwriteStoredTariff() {
+        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
+                Map.of("wuyong", "configured-model"), Map.of("configured-model", new AgentHostingRentProperties.ModelPlan("29", "730"))));
+        when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", 29L)).thenReturn(
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(29L)
+                        .setAmountWen(600L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
+        assertEquals("HOSTING_RENT_PLAN_VERSION_CONFLICT", assertThrows(HostingRentApplicationException.class,
+                () -> application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL"))).code());
+        verifyNoInteractions(ledger); verify(rent, never()).insertPlanVersion(any());
     }
 
     private AgentRuntimeEntity releasedInvitation() {
@@ -637,6 +648,8 @@ class HostingRentApplicationServiceTest {
                 "expectedPlanVersion", "1", "expectedAmountWen", "1000000000", "expectedPeriodSeconds", "2592000");
     }
     @Test void selfHostedQuoteUsesTrustedHostPlanAndRetainsSkillInventory() {
+        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
+                Map.of("wuyong", "configured-model"), Map.of("configured-model", new AgentHostingRentProperties.ModelPlan("29", "730"))));
         when(provider.deploymentMode(anyString(), anyString(), anyString(), eq("fixture-host"))).thenReturn("local");
         when(rent.selectPlanForUpdate("0", "Client-A", "agent-self-hosted", 1L)).thenReturn(
                 new EconomyHostingRentPlanEntity().setPlanId("agent-self-hosted").setPlanVersion(1L)
