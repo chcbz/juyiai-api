@@ -288,8 +288,7 @@ class HostingOutboundMySqlTest {
                 "messageId", "result-" + command.get("messageId"), "correlationId", command.get("messageId"), "code", "E0", "msg", "ok", "data", data);
     }
     void deliverInventory(HostingSetupService.View target, boolean actualTarget, boolean corruptDigest) throws Exception {
-        var capabilities = setupPoll(target, null).command();
-        var inventory = setupPoll(target, setupResult(capabilities, Map.of("available", true))).command();
+        var command = setupPoll(target, null).command();
         var skills = new ArrayList<Map<String,Object>>();
         for (String name : List.of("alpha", "beta")) {
             var row = new LinkedHashMap<String,Object>(); row.put("skillKey", name); row.put("source", "NATIVE"); row.put("revision", "d".repeat(64));
@@ -298,7 +297,9 @@ class HostingOutboundMySqlTest {
         var data = new LinkedHashMap<String,Object>(); data.put("inventoryVersion", "1"); data.put("installedSkillCount", "2"); data.put("skills", skills);
         data.put("inventorySha256", corruptDigest ? "f".repeat(64) : java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(JSON.writeValueAsBytes(skills))));
         if (actualTarget) data.put("inventorySource", "TARGET");
-        setupPoll(target, setupResult(inventory, data));
+        while (command != null) {
+            command = setupPoll(target, setupResult(command, "hosting.capabilities".equals(command.get("messageType")) ? Map.of("available", true) : data)).command();
+        }
     }
     @Test void setupCreatesOnlyRestrictedAuthorityAndPublicReplayMetadata() throws Exception {
         var f = invitation(); var created = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
@@ -327,6 +328,10 @@ class HostingOutboundMySqlTest {
         assertEquals("50", quote.recurringAmountWen()); assertEquals("150", quote.amountWen());
         assertEquals(quote, f.app().quote(ACTOR, "wuyong", quoteKey, request));
         assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup_quote", Integer.class));
+        assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
+        // A new quote key cannot reuse the completed first observation indefinitely.
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), request)).code());
         assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM economy_hosting_rent_quote", Integer.class));
         verifyNoInteractions(f.oldProvider(), f.bindings(), f.posting());
         var confirm = Map.of("mode", "local", "hostingAction", "INITIAL", "agentId", quote.agentId(), "quoteId", quote.quoteId(),
@@ -368,6 +373,7 @@ class HostingOutboundMySqlTest {
         deliverInventory(setup, true, false);
         assertEquals("REVOKED", f.app().cancelSetup(ACTOR, "wuyong", setup.setupId()).status());
         assertEquals("REVOKED", f.app().cancelSetup(ACTOR, "wuyong", setup.setupId()).status());
+        assertEquals("REVOKED", f.app().lookupSetup(ACTOR, "wuyong", setup.setupId()).status());
         assertThrows(HostingRentApplicationException.class, () -> setupPoll(setup, null));
         assertThrows(HostingRentApplicationException.class, () -> f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), Map.of("purpose", "INITIAL", "setupId", setup.setupId())));
         verifyNoInteractions(f.oldProvider(), f.posting(), f.bindings());
@@ -380,8 +386,12 @@ class HostingOutboundMySqlTest {
         f.app().setHostingSetups(setups);
         assertThrows(HostingRentApplicationException.class, () -> f.app().startSetup(ACTOR, "wuyong", KEY, setupBody()));
         var managed = new HashMap<>(setupBody()); managed.put("mode", "server");
-        var created = f.app().startSetup(ACTOR, "wuyong", KEY, managed); deliverInventory(created, true, false);
-        var quote = f.app().quote(ACTOR, "wuyong", UUID.randomUUID().toString(), Map.of("purpose", "INITIAL", "setupId", created.setupId()));
+        var created = f.app().startSetup(ACTOR, "wuyong", KEY, managed);
+        String quoteKey = UUID.randomUUID().toString(); var quoteRequest = Map.of("purpose", "INITIAL", "setupId", created.setupId());
+        assertEquals("HOSTING_SETUP_INVENTORY_PENDING", assertThrows(HostingRentApplicationException.class,
+                () -> f.app().quote(ACTOR, "wuyong", quoteKey, quoteRequest)).code());
+        deliverInventory(created, true, false);
+        var quote = f.app().quote(ACTOR, "wuyong", quoteKey, quoteRequest);
         assertEquals("agent-hosting-preview", quote.planId()); assertEquals("600", quote.amountWen());
         assertEquals("500", quote.recurringAmountWen());
         int grants = db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class);
@@ -392,18 +402,30 @@ class HostingOutboundMySqlTest {
         assertEquals(grants, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization", Integer.class));
         assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
     }
-    @Test void setupHttpUsesExistingUserBoundaryAndNeverReturnsBearer() throws Exception {
+    @Test @EnabledIfEnvironmentVariable(named = "CYF_GSS_RUNTIME_TEST_SOURCE", matches = ".+")
+    void setupHttpUsesExistingUserBoundaryAndNeverReturnsBearer() throws Exception {
         var f = invitation();
         var userMvc = MockMvcBuilders.standaloneSetup(new cn.jia.agent.api.AgentHostingRentController(f.app()))
                 .setControllerAdvice(new ApiEnvelopeAdvice(), new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(), security.getBean(FilterChainProxy.class)).build();
         var jwt = org.springframework.security.oauth2.jwt.Jwt.withTokenValue("fixture").claim("tenant_id", "0").header("alg", "none")
                 .subject("fixture-login").claim("jiacn", "fixture-owner").claim("client_id", "fixture-client").build();
         var auth = new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(jwt); auth.setAuthenticated(true);
-        String body = JSON.writeValueAsString(Map.of("protocolVersion", 1, "requestId", "setup-http", "data", setupBody()));
+        var fixture = JSON.readTree(Files.readString(Path.of(System.getenv("CYF_GSS_RUNTIME_TEST_SOURCE"), "test/fixtures/hosting-setup-v1.json")));
+        String body = fixture.get("registrationRequest").toString();
+        assertEquals(JSON.valueToTree(setupBody()), fixture.get("registrationRequest").get("data"));
         var response = userMvc.perform(post("/agent/personas/wuyong/hosting-setups").principal(auth).header("Idempotency-Key", KEY)
                 .contentType("application/json").content(body)).andReturn().getResponse();
         assertEquals(200, response.getStatus(), response.getContentAsString());
-        assertEquals("WAITING_INVENTORY", JSON.readTree(response.getContentAsString()).get("data").get("status").asString());
+        var actual = JSON.readTree(response.getContentAsString());
+        var data = (tools.jackson.databind.node.ObjectNode)actual.get("data");
+        String setupId = data.get("setupId").asString(), agentId = data.get("agentId").asString();
+        var authorization = (tools.jackson.databind.node.ObjectNode)data.get("authorization");
+        assertEquals(setupId, authorization.get("authorizationId").asString());
+        assertEquals(agentId, authorization.get("canonicalAgentId").asString());
+        // Normalize only server-generated opaque IDs, not the wire shape or authority fields.
+        data.put("setupId", "hca_setup_fixture"); data.put("agentId", "agt_setup_fixture");
+        authorization.put("authorizationId", "hca_setup_fixture"); authorization.put("canonicalAgentId", "agt_setup_fixture");
+        assertEquals(fixture.get("registrationResponse"), actual);
         assertFalse(response.getContentAsString().contains(SETUP_TOKEN)); assertTrue(response.getHeader("Cache-Control").contains("no-store"));
         assertEquals(401, userMvc.perform(post("/agent/personas/wuyong/hosting-setups").header("Idempotency-Key", KEY)
                 .contentType("application/json").content(body)).andReturn().getResponse().getStatus());

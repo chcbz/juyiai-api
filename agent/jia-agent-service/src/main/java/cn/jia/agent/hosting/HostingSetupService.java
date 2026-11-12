@@ -87,7 +87,10 @@ public final class HostingSetupService {
         return owned(actor, persona, setups.find(actor.tenantId(), actor.clientId(), id));
     }
     public View lookup(Actor actor, String persona, String id) {
-        var setup = find(actor, persona, id); return view(setup, active(setup));
+        var setup = find(actor, persona, id);
+        var grant = transport.lock(setup.tenantId(), setup.clientId(), setup.setupId());
+        if (grant != null && "REVOKED".equals(grant.status())) return new View(id, persona, setup.canonicalAgentId(), setup.mode(), "REVOKED", null);
+        return view(setup, active(setup));
     }
     public View revoke(Actor actor, String persona, String id, long now) {
         var setup = find(actor, persona, id);
@@ -95,17 +98,25 @@ public final class HostingSetupService {
         return new View(id, persona, setup.canonicalAgentId(), setup.mode(), "REVOKED", null);
     }
     private View view(Setup setup, HostingOutboundStore.Grant grant) {
-        String status = inventory(setup, grant) == null ? "WAITING_INVENTORY" : "INVENTORY_READY";
+        String status = inventory(setup, grant, INVENTORY) == null ? "WAITING_INVENTORY" : "INVENTORY_READY";
         return new View(setup.setupId(), setup.personaCode(), setup.canonicalAgentId(), setup.mode(), status,
                 new Authorization(grant.authorizationId(), grant.hostId(), grant.purpose(), grant.tenantId(), grant.clientId(), grant.ownerJiacn(), grant.canonicalAgentId()));
     }
-    public Target inventory(Actor actor, String persona, String id) {
-        var setup = find(actor, persona, id); var inventory = inventory(setup, active(setup));
+    /** Queue the exact fresh observation outside the later quote transaction. A pending reply must
+     * commit this command, not roll it back by throwing inside the enqueue transaction. */
+    public boolean requestInventory(Actor actor, String persona, String id, String quoteKey) {
+        key(quoteKey); var setup = find(actor, persona, id); var grant = active(setup);
+        String messageId = "quote-inventory:" + quoteKey;
+        exchanges.enqueue(actor.tenantId(), actor.clientId(), id, message(setup, "inventory", messageId), System.currentTimeMillis());
+        return inventory(setup, grant, messageId) != null;
+    }
+    public Target inventory(Actor actor, String persona, String id, String quoteKey) {
+        var setup = find(actor, persona, id); var inventory = inventory(setup, active(setup), "quote-inventory:" + key(quoteKey));
         if (inventory == null) throw pending();
         return new Target(setup, inventory);
     }
-    private ManagedHostingProvisioner.SkillInventory inventory(Setup setup, HostingOutboundStore.Grant grant) {
-        var capabilities = result(grant, CAPABILITIES); var inventory = result(grant, INVENTORY);
+    private ManagedHostingProvisioner.SkillInventory inventory(Setup setup, HostingOutboundStore.Grant grant, String messageId) {
+        var capabilities = result(grant, CAPABILITIES); var inventory = result(grant, messageId);
         if (capabilities == null || !Boolean.TRUE.equals(capabilities.get("available")) || inventory == null) return null;
         // Old template-generated empty inventories are not evidence about the user's target environment.
         if (!"TARGET".equals(inventory.get("inventorySource"))) return null;
@@ -120,7 +131,10 @@ public final class HostingSetupService {
                 HostingOutboundExchangeService.parse(row.resultJson())); }
         catch (java.io.IOException invalid) { throw new IllegalStateException("Invalid persisted hosting result", invalid); }
     }
-    public void attachQuote(Target target, String quoteId) { setups.attachQuote(target.setup(), quoteId); }
+    public void attachQuote(Target target, String quoteId) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Quote attachment requires its business transaction");
+        setups.attachQuote(target.setup(), quoteId);
+    }
     public boolean isSetupQuote(Actor actor, String quoteId) {
         transaction(actor); return setups.isSetupQuote(actor.tenantId(), actor.clientId(), quoteId);
     }

@@ -103,13 +103,21 @@ public final class HostingRentApplicationService {
         if (setups == null) throw new HostingRentApplicationException(503, "HOSTING_SETUP_UNAVAILABLE");
         return setups;
     }
+    private record SetupQuotePreparation(cn.jia.agent.mapper.hosting.HostingSetupStore.Setup target, boolean ready, QuoteView replay) { }
     private QuoteView quoteSetup(Actor actor, String personaCode, String idempotencyKey, Map<String,String> body) {
         String setupId = required(body, "setupId");
         byte[] hash = hash("INITIAL:" + personaCode, body);
         // Immutable metadata selects the plan; lock order remains plan -> persona -> grant.
-        var target = transactions.execute(status -> {
-            owners.requireOwner(actor); return setups.find(actor, personaCode, setupId);
+        var prepared = transactions.execute(status -> {
+            owners.requireOwner(actor);
+            var replay = actorQuote(actor, idempotencyKey);
+            if (replay != null) return new SetupQuotePreparation(null, true, initialQuoteReplay(actor, personaCode, idempotencyKey, hash, replay));
+            var target = setups.find(actor, personaCode, setupId);
+            return new SetupQuotePreparation(target, setups.requestInventory(actor, personaCode, setupId, idempotencyKey), null);
         });
+        if (prepared.replay() != null) return prepared.replay();
+        if (!prepared.ready()) throw new HostingRentApplicationException(409, "HOSTING_SETUP_INVENTORY_PENDING");
+        var target = prepared.target();
         return transactions.execute(status -> {
             String owner = owners.requireOwner(actor);
             var replay = actorQuote(actor, idempotencyKey);
@@ -123,7 +131,7 @@ public final class HostingRentApplicationService {
                 var released = releasedInstance(actor, personaCode);
                 if (released != null && !released.getAgentId().equals(target.canonicalAgentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
             }
-            var actual = setups.inventory(actor, personaCode, setupId);
+            var actual = setups.inventory(actor, personaCode, setupId, idempotencyKey);
             var inventory = actual.inventory();
             var receipt = ledger.quote(quoteCommand(actor, idempotencyKey, hash, personaCode,
                     target.canonicalAgentId(), plan.getPlanId(), plan.getPlanVersion(), HostingRentQuotePurpose.INITIAL, null, null,
