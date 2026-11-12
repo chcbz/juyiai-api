@@ -508,4 +508,14 @@ class HostingOutboundMySqlTest {
         assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization WHERE purpose='CONTROL'", Integer.class));
     }
 
+    @Test void sharedTargetEnvelopeIsPermittedOnlyForTheExactSetupSubject() throws Exception {
+        var bytes = new ClassPathResource("hosting/hosting-activation-v1.json").getInputStream().readAllBytes();
+        var fixture = HostingOutboundExchangeService.parse(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        @SuppressWarnings("unchecked") var response = (Map<String,Object>)fixture.get("response");
+        @SuppressWarnings("unchecked") var data = (Map<String,Object>)response.get("data");
+        @SuppressWarnings("unchecked") var command = (Map<String,Object>)data.get("command");
+        tx.executeWithoutResult(status -> service.enqueue("0", "fixture-client", "hca_fixture", command, 2));
+        assertEquals(data, JSON.convertValue(poll(null), new tools.jackson.core.type.TypeReference<Map<String,Object>>() {}));
+    }
+
 }

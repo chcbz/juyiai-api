@@ -1,0 +1,66 @@
+{
+  "authorization": {
+    "authorizationId": "hca_fixture",
+    "hostId": "fixture-host",
+    "purpose": "SETUP",
+    "tenantId": "0",
+    "clientId": "fixture-client",
+    "ownerJiacn": "fixture-owner",
+    "canonicalAgentId": "agt_outbound_new"
+  },
+  "request": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "runtimeInstanceId": "fixture-instance-1",
+      "result": null
+    }
+  },
+  "response": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "code": "E0",
+    "msg": "ok",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "acknowledgedMessageId": null,
+      "command": {
+        "protocolVersion": 1,
+        "requestId": "request-fixture",
+        "messageType": "hosting.target",
+        "messageId": "setup-target",
+        "data": {
+          "tenantId": "0",
+          "clientId": "fixture-client",
+          "ownerJiacn": "fixture-owner",
+          "canonicalAgentId": "agt_outbound_new"
+        }
+      },
+      "controlAuthorization": null
+    }
+  },
+  "activationResponse": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "code": "E0",
+    "msg": "ok",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "acknowledgedMessageId": null,
+      "command": null,
+      "controlAuthorization": {
+        "authorizationId": "hca_control",
+        "hostId": "fixture-host",
+        "purpose": "CONTROL",
+        "tenantId": "0",
+        "clientId": "fixture-client",
+        "ownerJiacn": "fixture-owner",
+        "canonicalAgentId": "agt_outbound_new"
+      }
+    }
+  }
+}
