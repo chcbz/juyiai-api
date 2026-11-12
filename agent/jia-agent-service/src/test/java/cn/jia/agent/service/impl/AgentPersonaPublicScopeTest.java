@@ -77,6 +77,21 @@ class AgentPersonaPublicScopeTest {
         assertNull(unknown.getConfiguredModel()); assertNull(unknown.getPlatformHostingAmountWen());
     }
 
+    @Test void systemPersonaUsesTrustedCallerScopeWithoutReadingRequestContext() {
+        var service = service(mock(AgentPersonaDao.class));
+        var prices = mock(cn.jia.agent.mapper.hosting.PersonaModelHostingStore.class);
+        service.setHostingModelConfiguration(prices);
+        when(prices.find("tenant-blue", "trusted-client", "songjiang")).thenReturn(
+                new cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff("songjiang", "configured.model",
+                        "agent-hosting-preview", 92, 500, 2592000, "WEN", "ACTIVE"));
+        cn.jia.agent.entity.AgentRuntimeDTO dto = ReflectionTestUtils.invokeMethod(service,
+                "buildSongjiangDTO", "tenant-blue", "trusted-client");
+        assertNotNull(dto);
+        assertEquals("configured.model", dto.getConfiguredModel());
+        verify(prices).find("tenant-blue", "trusted-client", "songjiang");
+        verifyNoMoreInteractions(prices);
+    }
+
     private AgentServiceImpl service(AgentPersonaDao dao) {
         var service = mock(AgentServiceImpl.class, CALLS_REAL_METHODS);
         ReflectionTestUtils.setField(service, "agentPersonaDao", dao);

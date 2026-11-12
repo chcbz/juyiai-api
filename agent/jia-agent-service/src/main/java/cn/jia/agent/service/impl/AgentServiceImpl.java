@@ -482,7 +482,7 @@ public class AgentServiceImpl implements AgentService {
                 .stream()
                 .map(agent -> toCapabilityDTO(toRuntimeDTO(agent, clientId, ownerJiacn)))
                 .toList());
-        capabilities.add(toCapabilityDTO(buildSongjiangDTO(tenantId)));
+        capabilities.add(toCapabilityDTO(buildSongjiangDTO(tenantId, clientId)));
         return capabilities;
     }
 
@@ -2142,11 +2142,11 @@ public class AgentServiceImpl implements AgentService {
         return dto;
     }
 
-    private AgentRuntimeDTO buildSongjiangDTO(String tenantId) {
+    private AgentRuntimeDTO buildSongjiangDTO(String tenantId, String clientId) {
         AgentPersonaEntity persona = WaterMarginPersonaCatalog.publicPersona(
                 AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE);
         var dto = buildSongjiangDTO(persona);
-        applyConfiguredModel(dto, configuredModel(tenantId, resolveCurrentClientId(), dto.getPersonaCode()));
+        applyConfiguredModel(dto, configuredModel(tenantId, clientId, dto.getPersonaCode()));
         return dto;
     }
 
