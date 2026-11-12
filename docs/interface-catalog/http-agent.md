@@ -221,8 +221,6 @@ public Object capabilities()
 
 ## `GET /agent/personas/catalog`
 
-2026-11-12候选新增公开产品配置字段（统一规范v1.4，无害新增）：`configuredModel`、`modelAssignmentVersion`、`platformHostingAmountWen`、`platformHostingPeriodSeconds`、`platformHostingPriceVersion`，类型均string|null。内置108角色按固定配置投影，其他角色null；文金额和秒周期为正整数字符串（30天=2592000秒），价簿`hero-hosting-wen-v1`。目标模型不覆盖私有executionModel/真实调用观测，平台托管标价不冒充现有租约实付。系统角色与ACL不变。源数据：WaterMarginPersonaCatalog与经济域HostingModelPriceBook；本候选没有Runtime模型执行切换。
-
 - operationId：`AgentController.personaCatalog.GET`
 - 源码：`agent/jia-agent-service/src/main/java/cn/jia/agent/api/AgentController.java:176`
 - 标记：DYNAMIC_RETURN
@@ -702,8 +700,6 @@ public Object deleteEvaluation(@PathVariable Long id)
 - 未核定：嵌套DTO完整约束、实际认证链/资源ACL、全部错误码/状态、幂等持久键、实际消费者与条件装配。**此条不作为可发布完整契约**；关键链人工定义优先见上述链接。
 
 ## `POST /agent/personas/{personaCode}/hosting-rent/quotes`
-
-2026-11-12候选：可信server部署的新邀请按服务端personaCode的固定模型选择`agent-hosting-model-<modelId>`/planVersion=1；金额复用经济域成本比例价簿，不接收用户覆盖模型/价格。local仍为agent-self-hosted。旧报价重放及旧租约续期不切换planId或重算历史，首期技能费不变。无模型价格为503/HOSTING_RENT_NOT_READY；同版本不可变套餐冲突为409/HOSTING_RENT_PLAN_VERSION_CONFLICT，未预占；报价/确认wire形状未变。
 
 - operationId：`AgentHostingRentController.quote.POST`
 - 源码：`agent/jia-agent-service/src/main/java/cn/jia/agent/api/AgentHostingRentController.java:61`

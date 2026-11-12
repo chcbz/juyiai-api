@@ -107,10 +107,7 @@ class HostingRentHandoverCompletionTest {
         assertTrue(service.completeSelfHostedIfApplicable(partition,binding,intent));
         verifyNoInteractions(runtime,identities,runtimes,tasks,keys,skills);assertEquals(0,effects());
     }
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"agent-hosting-preview", "agent-hosting-model-gpt-6-astra", "agent-hosting-model-gpt-6.1-terra"})
-    void managedRelationshipIsNotReleasedBySelfHostedPath(String plan) {
-        lease.setPlanId(plan);
+    @Test void managedRelationshipIsNotReleasedBySelfHostedPath() {
         assertFalse(service.completeSelfHostedIfApplicable(partition,binding,intent));
         verifyNoInteractions(runtime,identities,keys,skills);assertEquals(0,effects());
     }
@@ -153,10 +150,7 @@ class HostingRentHandoverCompletionTest {
         assertThrows(IllegalStateException.class,()->service.recordManagedStop(cleaned));assertEquals(0,effects());
         verifyNoInteractions(runtime,identities,keys);
     }
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"agent-hosting-preview", "agent-hosting-model-gpt-6-astra", "agent-hosting-model-gpt-6.1-terra"})
-    void closesOriginalRelationshipInOneTransactionUsingInstallationFirstOrder(String plan) {
-        lease.setPlanId(plan);
+    @Test void closesOriginalRelationshipInOneTransactionUsingInstallationFirstOrder() {
         service.completeManaged(cleaned);assertEquals(5,effects());assertEquals(0,binding.getStatus());
         var order=inOrder(installations,bindings,runtime,renewal,identities,runtimes);
         order.verify(installations).lock("installation");order.verify(bindings).findByIdForUpdate(7L);

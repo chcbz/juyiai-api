@@ -62,33 +62,6 @@ class AgentPersonaPublicScopeTest {
         verifyNoMoreInteractions(dao);
     }
 
-    @Test void personaConfigurationIsPublicMetadataNotAnExecutionModelOrAnAuthorization() {
-        var service = service(mock(AgentPersonaDao.class));
-        var scope = new AgentOwnerScope("tenant", "client", "owner");
-        var catalog = new cn.jia.agent.cache.AgentPersonaCatalogCache().get("tenant", "client",
-                WaterMarginPersonaCatalog::publicPersonas);
-        for (var entry : catalog.entries()) {
-            cn.jia.agent.entity.AgentRuntimeDTO dto = ReflectionTestUtils.invokeMethod(service,
-                    "toCatalogDTO", entry, null, scope);
-            assertNotNull(dto);
-            var hero = WaterMarginPersonaCatalog.definition(entry.personaCode());
-            assertEquals(hero.modelId(), dto.getConfiguredModel());
-            assertEquals(WaterMarginPersonaCatalog.MODEL_ASSIGNMENT_VERSION, dto.getModelAssignmentVersion());
-            assertEquals(Long.toString(cn.jia.economy.hosting.HostingModelPriceBook.forModel(hero.modelId()).amountWen()),
-                    dto.getPlatformHostingAmountWen());
-            assertEquals("2592000", dto.getPlatformHostingPeriodSeconds());
-            assertEquals("hero-hosting-wen-v1", dto.getPlatformHostingPriceVersion());
-            assertNull(dto.getExecutionModel());
-            assertFalse(dto.getCanOperate());
-            assertEquals(!entry.systemAgent(), dto.getCanBind());
-        }
-        var privateAgent = new cn.jia.agent.entity.AgentRuntimeDTO();
-        privateAgent.setPersonaCode("custom-persona"); privateAgent.setExecutionModel("private-runtime-model");
-        ReflectionTestUtils.invokeMethod(service, "applyPersonaModelConfiguration", privateAgent);
-        assertNull(privateAgent.getConfiguredModel()); assertNull(privateAgent.getPlatformHostingAmountWen());
-        assertEquals("private-runtime-model", privateAgent.getExecutionModel());
-    }
-
     private AgentServiceImpl service(AgentPersonaDao dao) {
         var service = mock(AgentServiceImpl.class, CALLS_REAL_METHODS);
         ReflectionTestUtils.setField(service, "agentPersonaDao", dao);

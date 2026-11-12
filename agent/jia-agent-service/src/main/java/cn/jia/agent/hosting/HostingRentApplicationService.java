@@ -1,7 +1,6 @@
 package cn.jia.agent.hosting;
 
 import cn.jia.agent.common.AgentConstants;
-import cn.jia.agent.common.WaterMarginPersonaCatalog;
 import cn.jia.agent.config.AgentHostingRentProperties;
 import cn.jia.agent.dao.AgentPersonaBindingDao;
 import cn.jia.agent.dao.AgentRuntimeDao;
@@ -97,7 +96,7 @@ public final class HostingRentApplicationService {
             if (replay != null) return initialQuoteReplay(actor, personaCode, idempotencyKey, hash, replay);
             // Final short transaction keeps plan -> persona/binding -> quote ordering.
             EconomyHostingRentPlanEntity plan = plan(actor, "local".equals(deploymentMode)
-                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : managedPlanId(personaCode));
+                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID);
             String canonical = resolveInitialAgent(actor, owner, personaCode, requestedAgent, subject.agentId());
             if (!canonical.equals(subject.agentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
             return quoteView(ledger.quote(quoteCommand(actor, idempotencyKey, hash, personaCode,
@@ -466,37 +465,25 @@ public final class HostingRentApplicationService {
         if (!"server".equals(mode) && !"local".equals(mode)) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
         return mode;
     }
-    private String managedPlanId(String personaCode) {
-        var definition = WaterMarginPersonaCatalog.definition(personaCode);
-        var price = definition == null ? null : HostingModelPriceBook.forModel(definition.modelId());
-        if (price == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
-        return price.planId();
-    }
-
     private EconomyHostingRentPlanEntity plan(Actor actor, String planId) {
         String mode;
         try { mode = AgentHostingRentProperties.modeForPlan(planId); }
         catch (IllegalArgumentException unknown) { throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT"); }
-        var modelPrice = HostingModelPriceBook.forPlan(planId);
-        long version = modelPrice != null ? HostingModelPriceBook.VERSION
-                : positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
-        long amount = modelPrice != null ? modelPrice.amountWen()
-                : positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
-        long period = modelPrice != null ? HostingModelPriceBook.PERIOD_SECONDS : positive(properties.periodSeconds());
+        long version = positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
+        long amount = positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
         EconomyHostingRentPlanEntity plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         if (plan == null) {
             EconomyHostingRentPlanEntity proposed = new EconomyHostingRentPlanEntity().setPlanId(planId)
                     .setPlanVersion(version).setAmountWen(amount)
-                    .setPeriodSeconds(period).setQuoteTtlSeconds(300L)
+                    .setPeriodSeconds(positive(properties.periodSeconds())).setQuoteTtlSeconds(300L)
                     .setCurrency("WEN").setStatus("ACTIVE").setTenantId(actor.tenantId()).setClientId(actor.clientId())
                     .setCreateTime(System.currentTimeMillis());
             try { rent.insertPlanVersion(proposed); }
             catch (DataIntegrityViolationException concurrent) { /* Compare immutable winner below, never rewrite it. */ }
             plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         }
-        if (plan == null || !planId.equals(plan.getPlanId()) || !Long.valueOf(version).equals(plan.getPlanVersion())
-                || !Long.valueOf(amount).equals(plan.getAmountWen()) || !Long.valueOf(period).equals(plan.getPeriodSeconds())
-                || !"WEN".equals(plan.getCurrency()) || !"ACTIVE".equals(plan.getStatus())) {
+        if (plan == null || plan.getAmountWen() != amount
+                || plan.getPeriodSeconds() != positive(properties.periodSeconds()) || !"ACTIVE".equals(plan.getStatus())) {
             throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT");
         }
         return plan;

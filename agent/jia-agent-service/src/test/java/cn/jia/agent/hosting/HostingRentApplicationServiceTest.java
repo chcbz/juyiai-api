@@ -133,8 +133,8 @@ class HostingRentApplicationServiceTest {
     @Test void reInvitationQuoteUsesRetainedAgentWithoutNewBindingOrFunds() {
         releasedInvitation();
         when(rent.selectPlanForUpdate(anyString(),anyString(),anyString(),eq(1L))).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0); assertEquals(AGENT, command.agentId());
             return new HostingRentQuoteReceipt("quote",HostingRentQuotePurpose.INITIAL,"agent-hosting-preview",1L,500L,
@@ -163,8 +163,8 @@ class HostingRentApplicationServiceTest {
         var quote = rent.selectQuoteForUpdate("0", "Client-A", "hrq-test");
         quote.setAgentId(agent);
         when(rent.selectPlanForUpdate(anyString(), anyString(), anyString(), eq(1L))).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0);
             assertEquals(agent, command.agentId());
@@ -207,8 +207,8 @@ class HostingRentApplicationServiceTest {
     @Test void incompleteHandoverRefusesQuoteAndReserveWithoutFunds() {
         releasedInvitation();
         when(rent.selectPlanForUpdate(anyString(),anyString(),anyString(),eq(1L))).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(renewal.completedHandover(ACTOR.scope(),AGENT,"original-installation")).thenReturn(false);
         assertEquals("HOSTING_RENT_HANDOVER_PENDING", assertThrows(HostingRentApplicationException.class,
                 () -> application.quote(ACTOR,"wuyong",KEY,Map.of("purpose","INITIAL"))).code());
@@ -256,13 +256,9 @@ class HostingRentApplicationServiceTest {
         when(identities.requireRegistrationIdentityInScope("0", "Client-A", "Tenant-A", agent)).thenReturn(identity);
         when(identities.requireActiveBinding(identity, null)).thenReturn(binding);
         when(rent.selectPlanForUpdate(anyString(), anyString(), anyString(), eq(1L)))
-                .thenReturn(new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
-        when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", 1L))
                 .thenReturn(new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
-                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
     }
-
 
     @Test void existingCanonicalIdentityDoesNotNeedTheNewIdGeneratorPrefix() {
         String agent = "jyt-fixture-likui";
@@ -524,9 +520,9 @@ class HostingRentApplicationServiceTest {
 
     @Test
     void quoteAllocatesOnlyOpaqueProposedIdentityWithoutBindingOrRuntimeMutation() {
-        when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-model-gpt-6-astra", 1L)).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+        when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", 1L)).thenReturn(
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0);
             assertTrue(command.agentId().matches("agt_[0-9a-f]{32}"));
@@ -545,8 +541,8 @@ class HostingRentApplicationServiceTest {
     void retainedDisabledSkillInventoryIsPassedToLedgerAndItsAuthoritativeBreakdownIsDisplayed() {
         releasedInvitation();
         when(rent.selectPlanForUpdate(anyString(), anyString(), anyString(), eq(1L))).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(5000L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                        .setAmountWen(1000000000L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         var skill = new ManagedHostingProvisioner.InstalledSkill("disabled", "NATIVE", "a".repeat(64), false, null);
         var observed = new ManagedHostingProvisioner.SkillInventory("fixture-host", "b".repeat(64), List.of(skill), "fixture-public-snapshot");
         when(provider.inventory(anyString(), anyString(), anyString(), eq(AGENT))).thenAnswer(call -> {
@@ -608,7 +604,7 @@ class HostingRentApplicationServiceTest {
         when(provider.deploymentMode(anyString(), anyString(), anyString(), eq("fixture-host"))).thenReturn("local");
         when(rent.selectPlanForUpdate("0", "Client-A", "agent-self-hosted", 1L)).thenReturn(
                 new EconomyHostingRentPlanEntity().setPlanId("agent-self-hosted").setPlanVersion(1L)
-                        .setAmountWen(50L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                        .setAmountWen(50L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0);
             assertEquals("agent-self-hosted", command.planId());
@@ -647,7 +643,7 @@ class HostingRentApplicationServiceTest {
         when(rent.selectLeaseForUpdate("0", "Client-A", "hrl-test")).thenReturn(lease);
         when(rent.selectPlanForUpdate("0", "Client-A", "agent-self-hosted", 1L)).thenReturn(
                 new EconomyHostingRentPlanEntity().setPlanId("agent-self-hosted").setPlanVersion(1L)
-                        .setAmountWen(50L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
+                        .setAmountWen(50L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0);
             assertEquals("agent-self-hosted", command.planId());
@@ -667,50 +663,6 @@ class HostingRentApplicationServiceTest {
         body.remove("mode");
         assertThrows(HostingRentApplicationException.class, () -> application.bind(ACTOR, "wuyong", KEY, body));
         verifyNoInteractions(ledger, provider, bindings, identities, reconciler);
-    }
-
-    @Test void allConfiguredHeroesQuoteTheirModelPlanAndNeverTheLegacyFlatPrice() {
-        for (var hero : cn.jia.agent.common.WaterMarginPersonaCatalog.definitions()) {
-            if (hero.systemAgent()) continue; // Pricing metadata is not permission to rent the system Songjiang.
-            var price = HostingModelPriceBook.forModel(hero.modelId());
-            when(roots.lockPersona(hero.code())).thenReturn(hero.toPublicEntity());
-            when(roots.lockBindings("Client-A", hero.code())).thenReturn(List.of());
-            when(rent.selectPlanForUpdate("0", "Client-A", price.planId(), 1L)).thenReturn(
-                    new EconomyHostingRentPlanEntity().setPlanId(price.planId()).setPlanVersion(1L)
-                            .setAmountWen(price.amountWen()).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
-            doAnswer(call -> {
-                HostingRentQuoteCommand command = call.getArgument(0);
-                assertEquals(price.planId(), command.planId());
-                assertEquals(hero.code(), command.personaCode());
-                assertEquals(1L, command.planVersion());
-                return new HostingRentQuoteReceipt("quote", command.purpose(), command.planId(), command.planVersion(),
-                        price.amountWen(), 2592000L, hero.code(), command.agentId(), null, null,
-                        1800000000000L, price.amountWen(), command.initialSkills());
-            }).when(ledger).quote(any());
-            var view = application.quote(ACTOR, hero.code(), KEY, Map.of("purpose", "INITIAL"));
-            assertEquals(Long.toString(price.amountWen()), view.recurringAmountWen());
-            assertEquals(price.planId(), view.planId());
-        }
-        verify(ledger, never()).reserve(any());
-        verify(rent, never()).selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", 1L);
-        assertEquals(0, count());
-    }
-
-    @Test void modelPlanMismatchRejectsBeforeQuotingOrPostingMoney() {
-        when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-model-gpt-6-astra", 1L)).thenReturn(
-                new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-model-gpt-6-astra").setPlanVersion(1L)
-                        .setAmountWen(500L).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
-        assertEquals("HOSTING_RENT_PLAN_VERSION_CONFLICT", assertThrows(HostingRentApplicationException.class,
-                () -> application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL"))).code());
-        verifyNoInteractions(ledger); assertEquals(0, count());
-    }
-
-    @Test void modelPlanModesUseExactAllowlistAndKeepSelfHostedDistinct() {
-        for (var price : HostingModelPriceBook.prices())
-            assertEquals("server", AgentHostingRentProperties.modeForPlan(price.planId()));
-        assertEquals("server", AgentHostingRentProperties.modeForPlan("agent-hosting-preview"));
-        assertEquals("local", AgentHostingRentProperties.modeForPlan("agent-self-hosted"));
-        assertThrows(IllegalArgumentException.class, () -> AgentHostingRentProperties.modeForPlan("agent-hosting-model-unknown"));
     }
 
 }

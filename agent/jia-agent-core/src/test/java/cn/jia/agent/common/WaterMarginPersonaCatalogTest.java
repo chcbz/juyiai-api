@@ -6,8 +6,6 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -53,26 +51,5 @@ class WaterMarginPersonaCatalogTest {
                 .count();
         assertEquals(1, systemCount);
         assertTrue(WaterMarginPersonaCatalog.publicPersona("songjiang").getSystemAgent());
-    }
-    @Test
-    void eachHeroHasExactlyOneConfiguredModelWithCompleteHostingPriceCoverage() {
-        var counts = new java.util.HashMap<String, Long>();
-        var codes = new java.util.HashSet<String>();
-        int rank = 0;
-        for (var hero : WaterMarginPersonaCatalog.definitions()) {
-            assertEquals(++rank, hero.rankNo());
-            assertTrue(codes.add(hero.code()));
-            assertSame(hero, WaterMarginPersonaCatalog.definition(hero.code()));
-            assertNotNull(cn.jia.economy.hosting.HostingModelPriceBook.forModel(hero.modelId()));
-            counts.merge(hero.modelId(), 1L, Long::sum);
-        }
-        assertEquals(java.util.Map.of("gpt-6-astra", 3L, "gpt-6-sol", 14L,
-                "gpt-6.1-sol", 8L, "gpt-6.1-terra", 16L, "gpt-6-luna", 9L,
-                "gpt-5.6-sol", 18L, "gpt-5.6-terra", 25L, "gpt-5.6-luna", 15L), counts);
-        assertEquals("gpt-6.1-sol", WaterMarginPersonaCatalog.definition("zhuwu").modelId());
-        assertEquals("gpt-6.1-terra", WaterMarginPersonaCatalog.definition("andaoquan").modelId());
-        assertEquals("gpt-6-luna", WaterMarginPersonaCatalog.definition("zhangqing").modelId());
-        assertEquals("gpt-5.6-sol", WaterMarginPersonaCatalog.definition("zhangqing_gardener").modelId());
-        assertNull(WaterMarginPersonaCatalog.definition("unknown"));
     }
 }
