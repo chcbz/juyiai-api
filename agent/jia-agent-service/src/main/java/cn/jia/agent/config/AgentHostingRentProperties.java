@@ -3,8 +3,6 @@ package cn.jia.agent.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.util.regex.Pattern;
-import java.util.Map;
-import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 /**
  * Startup-only preview hosting-rent descriptor. The approved V1 values are defaults, while
@@ -15,8 +13,7 @@ public record AgentHostingRentProperties(
         boolean enabled,
         String planVersion,
         String amountWen,
-        String periodSeconds, String selfHostedPlanVersion, String selfHostedAmountWen,
-        Map<String, String> personaModels, Map<String, ModelPlan> modelPlans) {
+        String periodSeconds, String selfHostedPlanVersion, String selfHostedAmountWen) {
     public static final String MANAGED_PLAN_ID = "agent-hosting-preview";
     public static final String SELF_HOSTED_PLAN_ID = "agent-self-hosted";
     public static String modeForPlan(String planId) {
@@ -30,49 +27,12 @@ public record AgentHostingRentProperties(
 
     private static final Pattern POSITIVE_DECIMAL = Pattern.compile("[1-9][0-9]{0,18}");
 
-    /** Compatibility constructor for callers that use only the existing uniform tariff. */
-    public AgentHostingRentProperties(boolean enabled, String planVersion, String amountWen,
-            String periodSeconds, String selfHostedPlanVersion, String selfHostedAmountWen) {
-        this(enabled, planVersion, amountWen, periodSeconds, selfHostedPlanVersion, selfHostedAmountWen, Map.of(), Map.of());
-    }
-
-    /** External product tariff, deliberately independent of provider token cost and actual execution model. */
-    public record ModelPlan(String planVersion, String amountWen) {
-        public ModelPlan {
-            if (!canonicalPositiveLong(planVersion) || !canonicalPositiveLong(amountWen))
-                throw new IllegalArgumentException("Model hosting tariff requires a positive version and WEN amount");
-        }
-    }
-
-    public boolean differentiated() { return !personaModels.isEmpty() || !modelPlans.isEmpty(); }
-    public String configuredModel(String personaCode) { return personaCode == null ? null : personaModels.get(personaCode); }
-    public ModelPlan modelPlan(String personaCode) {
-        String model = configuredModel(personaCode);
-        return model == null ? null : modelPlans.get(model);
-    }
-
-    @ConstructorBinding
     public AgentHostingRentProperties {
         planVersion = planVersion == null ? PREVIEW_PLAN_VERSION : planVersion;
         amountWen = amountWen == null ? PREVIEW_AMOUNT_WEN : amountWen;
         periodSeconds = periodSeconds == null ? PREVIEW_PERIOD_SECONDS : periodSeconds;
         selfHostedPlanVersion = selfHostedPlanVersion == null ? "1" : selfHostedPlanVersion;
         selfHostedAmountWen = selfHostedAmountWen == null ? "50" : selfHostedAmountWen;
-        personaModels = personaModels == null ? Map.of() : Map.copyOf(personaModels);
-        modelPlans = modelPlans == null ? Map.of() : Map.copyOf(modelPlans);
-        // One existing managed plan namespace: each model tariff gets its own immutable version.
-        var versions = new java.util.HashSet<String>();
-        for (var entry : modelPlans.entrySet()) {
-            if (entry.getKey().isBlank()
-                    || entry.getValue().planVersion().equals(planVersion)
-                    || !versions.add(entry.getValue().planVersion()))
-                throw new IllegalArgumentException("Model tariffs require distinct versions, separate from the uniform tariff");
-        }
-        for (var entry : personaModels.entrySet()) {
-            if (entry.getKey().isBlank() || entry.getKey().length() > 100 || entry.getValue().isBlank()
-                    || !modelPlans.containsKey(entry.getValue()))
-                throw new IllegalArgumentException("Persona model requires an exact configured hosting tariff");
-        }
     }
 
     /** A complete descriptor is inert while the explicit charging switch is false. */

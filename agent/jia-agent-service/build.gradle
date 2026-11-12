@@ -446,6 +446,7 @@ def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegress
         include 'cn/jia/agent/hosting/HostingControlChannelTest.java'
         include 'cn/jia/agent/hosting/ManagedHostingCredentialsTest.java'
         include 'cn/jia/agent/hosting/HostingRentApplicationServiceTest.java'
+        include 'cn/jia/agent/hosting/HostingPersonaModelDatabaseMySqlTest.java'
         include 'cn/jia/agent/hosting/HostingRentTransitionApplicationTest.java'
         include 'cn/jia/agent/hosting/HostingOutbound*Test.java'
         include 'cn/jia/agent/service/impl/AgentIdentityServiceImplTest.java'
@@ -482,6 +483,7 @@ configurations.named(managedHostingRegressionSourceSet.runtimeOnlyConfigurationN
     extendsFrom configurations.testRuntimeOnly
 }
 tasks.register('managedHostingRegression', Test) {
+    systemProperty 'cyf.heroConfigSql', rootProject.file('docs/examples/hero-hosting.sql').absolutePath
     maxParallelForks = 1
     maxHeapSize = '256m'
     jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'

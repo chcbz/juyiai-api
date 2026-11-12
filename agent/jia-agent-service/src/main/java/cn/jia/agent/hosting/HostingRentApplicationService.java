@@ -52,6 +52,9 @@ public final class HostingRentApplicationService {
     private final TransactionTemplate transactions;
     private final TransactionTemplate reads;
     private final boolean schemaEnabled;
+    private cn.jia.agent.mapper.hosting.PersonaModelHostingStore modelPrices;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setModelPrices(cn.jia.agent.mapper.hosting.PersonaModelHostingStore modelPrices) { this.modelPrices = modelPrices; }
     private HostingSetupService setups;
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void setHostingSetups(HostingSetupService setups) { this.setups = setups; }
@@ -471,7 +474,7 @@ public final class HostingRentApplicationService {
     }
 
     private void requireEnabled(Actor actor) {
-        if (!properties.configured()) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_CONFIGURED");
+        if (!properties.enabled()) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_CONFIGURED");
         if (!schemaEnabled) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
         preview.requireMutationAllowed(actor.tenantId(), actor.clientId());
     }
@@ -550,14 +553,22 @@ public final class HostingRentApplicationService {
         String mode;
         try { mode = AgentHostingRentProperties.modeForPlan(planId); }
         catch (IllegalArgumentException unknown) { throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT"); }
-        long version = positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
-        long amount = positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
-        if ("server".equals(mode) && properties.differentiated()) {
-            var tariff = properties.modelPlan(personaCode);
-            if (tariff == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_CONFIGURED");
-            version = positive(tariff.planVersion());
-            amount = positive(tariff.amountWen());
+        if ("server".equals(mode)) {
+            var selected = modelPrices == null ? null : modelPrices.find(actor.tenantId(), actor.clientId(), personaCode);
+            if (selected == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_CONFIGURED");
+            if (!AgentHostingRentProperties.MANAGED_PLAN_ID.equals(selected.planId()) || selected.planVersion() <= 0
+                    || selected.amountWen() <= 0 || selected.periodSeconds() <= 0
+                    || !"WEN".equals(selected.currency()) || !"ACTIVE".equals(selected.status()))
+                throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT");
+            // Configuration selects a version once; the existing immutable plan is then locked before binding/quote.
+            var stored = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), selected.planId(), selected.planVersion());
+            if (stored == null || !Objects.equals(stored.getAmountWen(), selected.amountWen())
+                    || !Objects.equals(stored.getPeriodSeconds(), selected.periodSeconds())
+                    || !"ACTIVE".equals(stored.getStatus())) throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT");
+            return stored;
         }
+        long version = positive(properties.selfHostedPlanVersion());
+        long amount = positive(properties.selfHostedAmountWen());
         EconomyHostingRentPlanEntity plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         if (plan == null) {
             EconomyHostingRentPlanEntity proposed = new EconomyHostingRentPlanEntity().setPlanId(planId)

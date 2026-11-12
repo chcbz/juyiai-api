@@ -2575,4 +2575,4 @@ TASK概览和事项分页/阶段计数复用同一 `AgentTaskPhaseSql.PHASE`。`
 
 ### 好汉目标模型与托管参考价（2026-11-13候选）
 
-AgentRuntimeDTO新增可空string字段：configuredModel、platformHostingAmountWen、platformHostingPlanVersion、platformHostingPeriodSeconds；金额/版本/秒为正整数十进制字符串，无角色配置则空。来源为外置配置，仅表示目标模型和新邀请参考价，非实际执行模型或已有租约价格；系统宋江权限不变。消费方可忽略这些无害新增字段。配置入口、错误语义和历史价格保护见[外置配置说明](../hero-model-hosting-configuration.md)。未部署/未下发Runtime模型。
+AgentRuntimeDTO新增可空string字段：configuredModel、platformHostingAmountWen、platformHostingPlanVersion、platformHostingPeriodSeconds；金额/版本/秒为正整数十进制字符串，无角色配置则空。来源为当前scope的数据库配置，仅表示目标模型和新邀请参考价，非实际执行模型或已有租约价格；系统宋江权限不变。消费方可忽略这些无害新增字段。配置入口、错误语义和历史价格保护见[数据库配置说明](../hero-model-hosting-configuration.md)。未部署/未下发Runtime模型。

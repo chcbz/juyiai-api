@@ -82,6 +82,8 @@ import com.github.pagehelper.PageInfo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import cn.jia.agent.mapper.hosting.PersonaModelHostingStore;
+import cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.stereotype.Service;
@@ -142,21 +144,28 @@ public class AgentServiceImpl implements AgentService {
     private static final Set<String> TASK_ASSIGNMENT_SOURCES = Set.of(
             "manual", "auto", "migration", "legacy");
 
-    private cn.jia.agent.config.AgentHostingRentProperties hostingModelConfiguration;
+    private PersonaModelHostingStore hostingModelConfiguration;
 
     @Autowired
-    public void setHostingModelConfiguration(cn.jia.agent.config.AgentHostingRentProperties configuration) {
+    public void setHostingModelConfiguration(PersonaModelHostingStore configuration) {
         this.hostingModelConfiguration = Objects.requireNonNull(configuration);
     }
 
-    private void applyConfiguredModel(AgentRuntimeDTO dto) {
-        if (hostingModelConfiguration == null) return;
-        dto.setConfiguredModel(hostingModelConfiguration.configuredModel(dto.getPersonaCode()));
-        var tariff = hostingModelConfiguration.modelPlan(dto.getPersonaCode());
+    private Map<String, Tariff> configuredModels(String tenantId, String clientId) {
+        return hostingModelConfiguration == null ? Map.of() : hostingModelConfiguration.list(tenantId, clientId);
+    }
+
+    private Tariff configuredModel(String tenantId, String clientId, String personaCode) {
+        return hostingModelConfiguration == null || personaCode == null ? null
+                : hostingModelConfiguration.find(tenantId, clientId, personaCode);
+    }
+
+    private static void applyConfiguredModel(AgentRuntimeDTO dto, Tariff tariff) {
         if (tariff == null) return;
-        dto.setPlatformHostingAmountWen(tariff.amountWen());
-        dto.setPlatformHostingPlanVersion(tariff.planVersion());
-        dto.setPlatformHostingPeriodSeconds(hostingModelConfiguration.periodSeconds());
+        dto.setConfiguredModel(tariff.modelId());
+        dto.setPlatformHostingAmountWen(Long.toString(tariff.amountWen()));
+        dto.setPlatformHostingPlanVersion(Long.toString(tariff.planVersion()));
+        dto.setPlatformHostingPeriodSeconds(Long.toString(tariff.periodSeconds()));
     }
 
     private final AgentRuntimeDao agentRuntimeDao;
@@ -454,8 +463,9 @@ public class AgentServiceImpl implements AgentService {
         List<AgentRuntimeDTO> agents = new ArrayList<>(visible.stream()
                 .map(runtime -> toRuntimeDTO(runtime, clientId, ownerJiacn, enrichment))
                 .toList());
-        agents.add(buildSongjiangDTO(enrichment.personaByCode(
-                AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE)));
+        var songjiang = buildSongjiangDTO(enrichment.personaByCode(AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE));
+        applyConfiguredModel(songjiang, enrichment.modelPrices().get(songjiang.getPersonaCode()));
+        agents.add(songjiang);
         return agents;
     }
 
@@ -485,8 +495,9 @@ public class AgentServiceImpl implements AgentService {
                 scope.tenantId(), scope.clientId(),
                 () -> loadPersonaCatalog(scope)).entries();
         Map<String, AgentPersonaCatalogBindingRow> bindings = loadCatalogBindings(scope, catalog);
+        var modelPrices = configuredModels(scope.tenantId(), scope.clientId());
         return catalog.stream()
-                .map(persona -> toCatalogDTO(persona, bindings.get(persona.personaCode()), scope))
+                .map(persona -> toCatalogDTO(persona, bindings.get(persona.personaCode()), scope, modelPrices.get(persona.personaCode())))
                 .toList();
     }
 
@@ -2042,7 +2053,7 @@ public class AgentServiceImpl implements AgentService {
         if (includeStats) dto.setStats(usesLegacyTaskStats(entity)
                 ? buildLegacyTaskStats(entity, persona)
                 : buildStats(entity, persona, null));
-        applyConfiguredModel(dto);
+        applyConfiguredModel(dto, configuredModel(entity.getTenantId(), clientId, dto.getPersonaCode()));
         return dto;
     }
 
@@ -2087,12 +2098,12 @@ public class AgentServiceImpl implements AgentService {
         dto.setCanOperate(Boolean.TRUE.equals(dto.getBoundToMe())
                 && !Boolean.TRUE.equals(dto.getSystemAgent()));
         dto.setStats(buildStats(entity, persona, enrichment.taskStats(entity)));
-        applyConfiguredModel(dto);
+        applyConfiguredModel(dto, enrichment.modelPrices().get(dto.getPersonaCode()));
         return dto;
     }
 
     private AgentRuntimeDTO toCatalogDTO(CatalogEntry persona,
-            AgentPersonaCatalogBindingRow binding, AgentOwnerScope scope) {
+            AgentPersonaCatalogBindingRow binding, AgentOwnerScope scope, Tariff modelPrice) {
         if (persona.systemAgent() && binding != null) {
             throw personaCatalogForbidden("System persona must not have a user binding");
         }
@@ -2127,14 +2138,16 @@ public class AgentServiceImpl implements AgentService {
         stats.setCompletedTaskCount(0);
         stats.setFailedTaskCount(0);
         dto.setStats(stats);
-        applyConfiguredModel(dto);
+        applyConfiguredModel(dto, modelPrice);
         return dto;
     }
 
     private AgentRuntimeDTO buildSongjiangDTO(String tenantId) {
         AgentPersonaEntity persona = WaterMarginPersonaCatalog.publicPersona(
                 AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE);
-        return buildSongjiangDTO(persona);
+        var dto = buildSongjiangDTO(persona);
+        applyConfiguredModel(dto, configuredModel(tenantId, resolveCurrentClientId(), dto.getPersonaCode()));
+        return dto;
     }
 
     private AgentRuntimeDTO buildSongjiangDTO(AgentPersonaEntity persona) {
@@ -2168,7 +2181,6 @@ public class AgentServiceImpl implements AgentService {
             dto.setTitle("及时雨");
             dto.setAbilities(List.of("coordination", "dispatch", "planning", "briefing", "task_management"));
         }
-        applyConfiguredModel(dto);
         return dto;
     }
 
@@ -2233,7 +2245,7 @@ public class AgentServiceImpl implements AgentService {
         }
         return new RuntimeBatchEnrichment(
                 Map.copyOf(personasByCode), Map.copyOf(personasByName),
-                Map.copyOf(statsByScope));
+                Map.copyOf(statsByScope), configuredModels(tenantId, clientId));
     }
 
     private void putUniquePersona(Map<String, AgentPersonaEntity> target, String key,
@@ -2333,9 +2345,9 @@ public class AgentServiceImpl implements AgentService {
     private record RuntimeBatchEnrichment(
             Map<String, AgentPersonaEntity> personasByCode,
             Map<String, AgentPersonaEntity> personasByName,
-            Map<RuntimeScopeKey, AgentTaskStatsRow> statsByScope) {
+            Map<RuntimeScopeKey, AgentTaskStatsRow> statsByScope, Map<String, Tariff> modelPrices) {
         private static RuntimeBatchEnrichment empty() {
-            return new RuntimeBatchEnrichment(Map.of(), Map.of(), Map.of());
+            return new RuntimeBatchEnrichment(Map.of(), Map.of(), Map.of(), Map.of());
         }
 
         private AgentPersonaEntity resolvePersona(AgentRuntimeEntity runtime) {

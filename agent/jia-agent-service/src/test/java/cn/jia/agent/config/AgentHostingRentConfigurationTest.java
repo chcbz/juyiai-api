@@ -69,35 +69,6 @@ class AgentHostingRentConfigurationTest {
                 });
     }
 
-    @Test void bindsOpaqueModelKeysAndPricesFromExternalProperties() {
-        RUNNER.withPropertyValues(
-                "agent.hosting-rent.enabled=true", "agent.hosting-rent.amount-wen=500",
-                "agent.hosting-rent.persona-models[fixture-hero]=vendor.future-42",
-                "agent.hosting-rent.model-plans[vendor.future-42].plan-version=17",
-                "agent.hosting-rent.model-plans[vendor.future-42].amount-wen=730")
-                .run(context -> {
-                    assertNull(context.getStartupFailure());
-                    var properties = context.getBean(AgentHostingRentProperties.class);
-                    assertTrue(properties.configured());
-                    assertEquals("vendor.future-42", properties.configuredModel("fixture-hero"));
-                    assertEquals("730", properties.modelPlan("fixture-hero").amountWen());
-                    assertEquals("17", properties.modelPlan("fixture-hero").planVersion());
-                    assertNull(properties.modelPlan("unknown"));
-                });
-    }
-
-    @Test void conflictingVersionsOrUnpricedMappingsRejectConfiguration() {
-        var plan = new AgentHostingRentProperties.ModelPlan("22", "730");
-        assertThrows(IllegalArgumentException.class, () -> new AgentHostingRentProperties(false, "1", "500", null, null, null,
-                java.util.Map.of("hero", "missing"), java.util.Map.of("a", plan)));
-        assertThrows(IllegalArgumentException.class, () -> new AgentHostingRentProperties(false, "1", "500", null, null, null,
-                java.util.Map.of(), java.util.Map.of("a", plan, "b", plan)));
-        assertThrows(IllegalArgumentException.class, () -> new AgentHostingRentProperties(false, "22", "500", null, null, null,
-                java.util.Map.of(), java.util.Map.of("a", plan)));
-        assertThrows(IllegalArgumentException.class, () -> new AgentHostingRentProperties.ModelPlan("22", "0"));
-        assertFalse(new AgentHostingRentProperties(false, null, null, null, null, null).differentiated());
-    }
-
     private static void assertReason(HostingRentAdmissionService service,
             HostingRentAdmissionException.Reason expected) {
         HostingRentAdmissionException failure = assertThrows(
