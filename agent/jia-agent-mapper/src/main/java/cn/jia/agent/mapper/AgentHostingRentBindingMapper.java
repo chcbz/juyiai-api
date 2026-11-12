@@ -16,7 +16,14 @@ public interface AgentHostingRentBindingMapper {
     /** Locked under the persona root. Never choose an arbitrary historical duplicate. */
     @Select("SELECT * FROM agent_runtime WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND persona_code=#{personaCode}"
             + " AND BINARY tenant_id=BINARY #{tenantId} AND BINARY client_id=BINARY #{clientId}"
-            + " AND BINARY persona_code=BINARY #{personaCode} ORDER BY id LIMIT 2 FOR UPDATE")
+            + " AND BINARY persona_code=BINARY #{personaCode}"
+            // A detached self-hosted installation is private operator property, not a reusable public instance.
+            + " AND NOT EXISTS (SELECT 1 FROM economy_hosting_lease old_lease"
+            + " WHERE BINARY old_lease.tenant_id=BINARY agent_runtime.tenant_id"
+            + " AND BINARY old_lease.client_id=BINARY agent_runtime.client_id"
+            + " AND BINARY old_lease.agent_id=BINARY agent_runtime.agent_id"
+            + " AND old_lease.plan_id='agent-self-hosted' AND old_lease.status='CLOSED')"
+            + " ORDER BY id LIMIT 2 FOR UPDATE")
     List<cn.jia.agent.entity.AgentRuntimeEntity> lockPublicInstances(@Param("tenantId") String tenantId,
             @Param("clientId") String clientId, @Param("personaCode") String personaCode);
 

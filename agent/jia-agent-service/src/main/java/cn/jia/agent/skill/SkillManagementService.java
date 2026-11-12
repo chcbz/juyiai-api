@@ -241,6 +241,15 @@ public final class SkillManagementService {
         return row;
     }
 
+    /** Self-hosted detach needs only settled platform changes, never a local stop or private cleanup.
+     * The caller holds the original installation/binding transaction, also used by skill admission/results. */
+    public boolean selfHostedHandoverSettled(cn.jia.economy.service.EconomyScope scope, String owner,
+                                           String agent, String installation) {
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("Self-hosted settlement check requires the original binding transaction");
+        return db.selfHostedPendingCount(scope.tenantId(), scope.clientId(), owner, agent, installation) == 0;
+    }
+
     /** Financial readiness only, after original process stop. Does not prove evidence delivery or private cleanup.
      * Discovery is scoped/keyset-paged; each settlement independently locks/rechecks its original business roots. */
     public boolean settleHandoverChanges(cn.jia.agent.hosting.ManagedHostingProvisioner.CurrentOperation stopped) {

@@ -47,6 +47,7 @@ class HostingRentRenewalMySqlTest {
     private cn.jia.agent.mapper.AgentRuntimeMapper runtimeProjection;
     private cn.jia.agent.mapper.AgentExternalServicePolicyMapper externalIdentities;
     private cn.jia.agent.mapper.AgentHostingRentBindingMapper admissionRoots;
+    private cn.jia.agent.mapper.skill.SkillManagementMapper skillChanges;
     private EconomyHostingRentMapper leases;
     private EconomyHostingRenewalMapper renewals;
     private EconomyLedgerMapper accounts;
@@ -111,6 +112,7 @@ class HostingRentRenewalMySqlTest {
                 new ClassPathResource("db/task-scheduled-work-v1.sql")).execute(source);
         manager = new DataSourceTransactionManager(source);
         var config = new MybatisConfiguration(); config.setMapUnderscoreToCamelCase(true);
+        config.addMapper(cn.jia.agent.mapper.skill.SkillManagementMapper.class);
         config.addMapper(EconomyLedgerMapper.class); config.addMapper(EconomyHostingRentMapper.class);
         config.addMapper(cn.jia.agent.mapper.AgentHostingRentBindingMapper.class);
         config.addMapper(cn.jia.agent.mapper.AgentRuntimeMapper.class);
@@ -118,6 +120,7 @@ class HostingRentRenewalMySqlTest {
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source); factory.setConfiguration(config);
         factory.setPlugins(new TaskTenantConfiguration().taskPlanTenantInterceptor(policy));
         var template = new SqlSessionTemplate(factory.getObject());
+        skillChanges = template.getMapper(cn.jia.agent.mapper.skill.SkillManagementMapper.class);
         admissionRoots = template.getMapper(cn.jia.agent.mapper.AgentHostingRentBindingMapper.class);
         runtimeProjection = template.getMapper(cn.jia.agent.mapper.AgentRuntimeMapper.class);
         accounts = template.getMapper(EconomyLedgerMapper.class); leases = template.getMapper(EconomyHostingRentMapper.class);
@@ -145,7 +148,7 @@ class HostingRentRenewalMySqlTest {
 
     @Test
     @EnabledIfEnvironmentVariable(named = "CYF_GSS_RUNTIME_TEST_SOURCE", matches = ".+")
-    void actualSelfHostedRentHandoverCapturesFiftyWenAndRetainedSkillOnReinvite() throws Exception {
+    void actualSelfHostedDetachPreservesLocalAssetsAndExcludesOldInstance() throws Exception {
         actualRuntimeHandover(true);
     }
 
@@ -298,12 +301,32 @@ class HostingRentRenewalMySqlTest {
             var completionTarget = new HostingRentHandoverCompletion(installations, identityBindings, service, identities,
                     runtimeRows, runtime, template.getMapper(cn.jia.agent.mapper.HostingRentFinishingMapper.class),
                     beans.getBeanProvider(cn.jia.oauth.service.ApiKeyService.class), policy);
+            var skillSettlement = mock(cn.jia.agent.skill.SkillManagementService.class);
+            when(skillSettlement.selfHostedHandoverSettled(any(),anyString(),anyString(),anyString())).thenReturn(true);
+            completionTarget.setSkills(skillSettlement);
             var completionProxy = new org.springframework.aop.framework.ProxyFactory(completionTarget);
             completionProxy.addAdvice(new org.springframework.transaction.interceptor.TransactionInterceptor(manager,
                     new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));
             var completion = (HostingRentHandoverCompletion)completionProxy.getProxy();
             var preparation = new ManagedHostingProvisioner.Preparation("tenant", "client", "owner", first.agentId(),
                     first.intentId(), first.leaseId(), publicRow.getBindingId().toString(), original.getReservedAt());
+            if (selfHosted) {
+                // Simulate a permanently unreachable host before detach. No remote process control is possible.
+                var controlSocket=Path.of((String)endpoint.get("socketPath"));
+                Files.move(controlSocket,controlSocket.resolveSibling("offline.sock"));
+                var detachedBinding = identityBindings.findByIdForUpdate(publicRow.getBindingId());
+                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                assertTrue(Files.isRegularFile(privateSession)); assertTrue(Files.isRegularFile(skill));
+                assertEquals("REVOKED", installations.lock(original.getRuntimeInstallationId()).getStatus());
+                var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
+                assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
+                assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
+                new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(tx ->
+                        assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
+                assertEquals(950,balance()); assertNull(httpFailure.get());
+                return;
+            }
             var stopped = new HostingRentManagedStop(provider, completion).stop(preparation);
             assertNotNull(stopped, () -> read(log));
             assertTrue(provider.flushEvidence(stopped.preparation(), stopped.candidate(), first.leaseId()));
@@ -571,6 +594,43 @@ class HostingRentRenewalMySqlTest {
         return identities.provisionOpaqueIdentity(binding, "authorized invitation fixture");
     }
 
+    @Test void selfHostedPendingFundsAreExactInstallationScopedAndIgnoreLocalOnlySynchronization() throws Exception {
+        var schema=new ClassPathResource("db/economy-skill-management-sm-c1.sql")
+                .getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        int begin=schema.indexOf("CREATE TABLE agent_skill_change (");
+        jdbc.execute(schema.substring(begin,schema.indexOf(";",begin)));
+        var row=new cn.jia.agent.entity.skill.SkillChangeEntity();
+        row.setTenantId("tenant");row.setClientId("client");row.setChangeId("change");row.setAgentId("agent");
+        row.setSkillKey("skill");row.setActorId("user");row.setOwnerJiacn("owner");row.setVersion(1L);
+        row.setDtoJson("{\"fundingStatus\":\"HELD\",\"status\":\"UNKNOWN\"}");row.setPermissionsJson("[]");
+        row.setRuntimeInstallationId("installation");row.setRuntimeHostId("offline-host");row.setCreatedAt(1L);row.setUpdatedAt(1L);
+        assertEquals(1,skillChanges.insertChange(row));
+        assertEquals(1,skillChanges.selfHostedPendingCount("tenant","client","owner","agent","installation"));
+        assertEquals(0,skillChanges.selfHostedPendingCount("tenant","client","owner","agent","new-installation"));
+        assertEquals(0,skillChanges.selfHostedPendingCount("tenant","client","other-owner","agent","installation"));
+        assertEquals(0,skillChanges.selfHostedPendingCount("other-tenant","client","owner","agent","installation"));
+        for (String funding:List.of("NONE","REFUNDED","CAPTURED")) {
+            jdbc.update("UPDATE agent_skill_change SET dto_json=?", "{\"fundingStatus\":\""+funding+"\",\"status\":\"FAILED_RETRYABLE\",\"runtimeSynced\":false}");
+            assertEquals(0,skillChanges.selfHostedPendingCount("tenant","client","owner","agent","installation"));
+        }
+    }
+
+    @Test void closedSelfHostedInstancesAreExcludedBeforePublicLimitAndDoNotHideManagedInstance() {
+        seedRuntimeProjection();
+        seed("self1","CLOSED",50,now(),null);
+        jdbc.update("UPDATE economy_hosting_lease SET plan_id='agent-self-hosted',agent_id='agent' WHERE lease_id='self1'");
+        jdbc.update("INSERT INTO agent_runtime(id,agent_id,tenant_id,client_id,persona_code) VALUES (2,'agent2','tenant','client','wuyong'),(3,'managed','tenant','client','wuyong')");
+        seed("self2","CLOSED",50,now(),null);
+        jdbc.update("UPDATE economy_hosting_lease SET plan_id='agent-self-hosted',agent_id='agent2' WHERE lease_id='self2'");
+        // Other tenants' private history cannot hide this partition's managed instance.
+        seed("other","client","user","other","CLOSED",50,now(),null);
+        jdbc.update("UPDATE economy_hosting_lease SET plan_id='agent-self-hosted',agent_id='managed' WHERE lease_id='other'");
+        new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(tx -> {
+            var rows=admissionRoots.lockPublicInstances("tenant","client","wuyong");
+            assertEquals(1,rows.size()); assertEquals("managed",rows.getFirst().getAgentId());
+        });
+    }
+
     @Test void releasedPublicInstanceIsDiscoveredAndAttachedWithoutReplacingPublicData() {
         seedRuntimeProjection();
         assertEquals(1,runtimeProjection.clearBindingAfterUnbind(1,"agent",7,"client","old-owner",100));
@@ -612,6 +672,9 @@ class HostingRentRenewalMySqlTest {
         assertFalse(service.completedHandover(scope,"agent-finish","original-installation"));
         complete("finish","user","binding-finish","agent-finish");
         assertTrue(service.completedHandover(scope,"agent-finish","original-installation"));
+        jdbc.update("UPDATE economy_hosting_lease SET plan_id='agent-self-hosted' WHERE lease_id='finish'");
+        assertFalse(service.completedHandover(scope,"agent-finish","original-installation"));
+        jdbc.update("UPDATE economy_hosting_lease SET plan_id='hosted' WHERE lease_id='finish'");
         assertFalse(service.completedHandover(scope,"agent-finish","other-installation"));
         assertFalse(service.completedHandover(scope,"other-agent","original-installation"));
         seed("new","ACTIVE",500,now(),null);

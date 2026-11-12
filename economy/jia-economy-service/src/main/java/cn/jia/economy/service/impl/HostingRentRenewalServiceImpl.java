@@ -132,7 +132,8 @@ public final class HostingRentRenewalServiceImpl implements HostingRentRenewalSe
         gate.requireMutationAllowed(scope.tenantId(), scope.clientId());
         if (installationId == null || installationId.isBlank()) return false;
         var lease = leases.selectLatestLease(scope.tenantId(), scope.clientId(), agentId);
-        if (lease == null || !"CLOSED".equals(lease.getStatus()) || !agentId.equals(lease.getAgentId())
+        if (lease == null || "agent-self-hosted".equals(lease.getPlanId())
+                || !"CLOSED".equals(lease.getStatus()) || !agentId.equals(lease.getAgentId())
                 || lease.getExecutorStoppedAt() == null || lease.getHandoverId() == null) return false;
         var initial = leases.selectInitialIntent(scope.tenantId(), scope.clientId(), lease.getLeaseId());
         return initial != null && "ACTIVE".equals(initial.getStatus()) && initial.getRefundTransactionId() == null

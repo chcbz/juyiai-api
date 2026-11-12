@@ -21,6 +21,26 @@ class HostingRentManagedStopTest {
         when(relationships.prepareManagedStop(current)).thenReturn(true);
         when(runtime.quiesce(active,candidate,"lease")).thenReturn(true);
     }
+    @Test void deferredManagedTransitionAssociationIsNotAStopOrReadinessFact() {
+        ready();when(runtime.currentOperation(initial)).thenReturn(null,current);
+        when(relationships.managedTransitionAssociation(initial)).thenReturn(new ManagedHostingProvisioner.CurrentOperation(initial,candidate));
+        when(runtime.adoptExisting(initial,candidate)).thenReturn(true);
+        assertSame(current,service.stop(initial));
+        var order=inOrder(runtime,relationships);
+        order.verify(runtime).currentOperation(initial);
+        order.verify(relationships).managedTransitionAssociation(initial);
+        order.verify(runtime).adoptExisting(initial,candidate);
+        order.verify(runtime).currentOperation(initial);
+        order.verify(relationships).prepareManagedStop(current);
+        order.verify(runtime).quiesce(active,candidate,"lease");
+        order.verify(relationships).recordManagedStop(current);
+    }
+    @Test void unknownDeferredAssociationNeverQuiescesOrRecordsStop() {
+        when(relationships.managedTransitionAssociation(initial)).thenReturn(new ManagedHostingProvisioner.CurrentOperation(initial,candidate));
+        assertNull(service.stop(initial));
+        verify(runtime,never()).quiesce(any(),any(),anyString());
+        verify(relationships,never()).recordManagedStop(any());
+    }
     @Test void recordsStopOnlyAfterRealCurrentGenerationConfirmationWithoutActivationOrCleanup() {
         ready();assertSame(current,service.stop(initial));
         var order=inOrder(runtime,relationships);
@@ -29,7 +49,7 @@ class HostingRentManagedStopTest {
         verifyNoMoreInteractions(runtime,relationships);
     }
     @Test void unknownCurrentOrUnconfirmedStopCannotPublishStopFact() {
-        assertNull(service.stop(initial));verifyNoInteractions(relationships);
+        assertNull(service.stop(initial));verify(relationships).managedTransitionAssociation(initial);
         ready();when(runtime.quiesce(active,candidate,"lease")).thenReturn(false);
         assertNull(service.stop(initial));verify(relationships,never()).recordManagedStop(any());
     }

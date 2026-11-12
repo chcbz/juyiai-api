@@ -5,8 +5,8 @@ import cn.jia.economy.service.EconomyPrincipal;
 
 /** Internal reconciliation, never a caller-controlled HTTP charge. Period identity is the paid-through fact. */
 public interface HostingRentRenewalService {
-    /** Operator cutover only: caller has verified Runtime ADOPTED and holds the exact installation/binding
-     * roots in the current transaction. Registers free terms and first due work; never posts money.
+    /** Operator cutover only: caller verifies the persisted owner/installation/binding and explicit plan,
+     * holding those exact roots in the current transaction. No Runtime ADOPTED or online proof. Registers free terms and first due work; never posts money.
      * Stable lease/intent IDs and cutoverAt come from the fixed migration input, not retry time. */
     String registerTransition(Transition command);
     record Transition(EconomyScope scope, EconomyPrincipal principal, String leaseId, String intentId,
@@ -17,7 +17,7 @@ public interface HostingRentRenewalService {
     Long reconcileUser(EconomyScope scope, String userId);
     Result reconcile(EconomyScope scope, String leaseId, long expectedPaidThrough);
     /** Stop future payments in the caller's removal transaction; retain the instance's live slot
-     * and paid period until the Agent module completes private handover. No current-period refund. */
+     * and paid period until the Agent module completes platform relationship settlement. No current-period refund. */
     Result stopRenewal(EconomyScope scope, EconomyPrincipal owner, String leaseId);
     /** Caller holds task and binding roots in an active transaction. Lock the financial lease
      * until that transaction ends; only an irreversible, expired relationship may force settlement. */
@@ -35,8 +35,9 @@ public interface HostingRentRenewalService {
      * A lease status alone is never stop evidence. Idempotent for the original handover only. */
     void recordExecutorStopped(EconomyScope scope, EconomyPrincipal owner, String leaseId,
                                String bindingId, String agentId, String handoverId);
-    /** Agent handover owner calls only after confirmed cleanup, in its original binding/revocation transaction.
-     * Releases the financial live slot, not the Agent instance; no refund or new payment. */
+    /** Agent lifecycle owner calls in its original binding/revocation transaction after platform settlement.
+     * Managed asset reuse additionally requires cleanup; self-hosted release never asserts local cleanup.
+     * Releases the financial live slot, not local files; no refund or new payment. */
     Result completeHandover(EconomyScope scope, EconomyPrincipal owner, String leaseId, String bindingId, String agentId);
     record Result(String status, Long paidThrough, Long lockedAt, String transactionId) { }
 }

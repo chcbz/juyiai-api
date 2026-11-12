@@ -29,7 +29,6 @@ import org.springframework.beans.factory.config.RuntimeBeanReference;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.ImportAutoConfiguration;
-import org.springframework.boot.autoconfigure.ssl.SslAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.*;
@@ -53,7 +52,7 @@ public final class HostingRentCutover {
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS).build();
-    public record Subject(String actorId, String ownerJiacn, String agentId, String installationId) { }
+    public record Subject(String actorId, String ownerJiacn, String agentId, String installationId, String planId) { }
     public record Batch(long cutoverAt, List<Subject> subjects) { }
 
     static List<HostingRentTransitionApplication.Request> requests(byte[] input, FixedTenantAdmissionPolicy scope) {
@@ -66,8 +65,11 @@ public final class HostingRentCutover {
             Objects.requireNonNull(subject);
             var actor = new HostingRentHttp.Actor(subject.actorId(), scope.businessTenantId(), scope.clientId(), subject.ownerJiacn());
             HostingRentHttp.exact(subject.agentId(), 100); HostingRentHttp.exact(subject.installationId(), 100);
+            if (!AgentHostingRentProperties.SELF_HOSTED_PLAN_ID.equals(subject.planId())
+                    && !AgentHostingRentProperties.MANAGED_PLAN_ID.equals(subject.planId()))
+                throw new IllegalArgumentException("Each cutover subject requires its verified deployment planId");
             if (!seen.add(subject.agentId())) throw new IllegalArgumentException("Duplicate cutover Agent");
-            result.add(new HostingRentTransitionApplication.Request(actor, subject.agentId(), subject.installationId(), batch.cutoverAt()));
+            result.add(new HostingRentTransitionApplication.Request(actor, subject.agentId(), subject.installationId(), subject.planId(), batch.cutoverAt()));
         }
         return List.copyOf(result);
     }
@@ -107,17 +109,15 @@ public final class HostingRentCutover {
     @Configuration(proxyBeanMethods = false)
     @Profile("hosting-rent-cutover")
     @EnableTransactionManagement(proxyTargetClass = true)
-    @ImportAutoConfiguration({DataSourceAutoConfiguration.class, SslAutoConfiguration.class})
-    @EnableConfigurationProperties({AgentHostingRentProperties.class, ManagedHostingAdapterProperties.class,
-            HostingControlRemoteProperties.class, AgentTaskEventsProperties.class, EconomyPreviewProperties.class})
+    @ImportAutoConfiguration({DataSourceAutoConfiguration.class})
+    @EnableConfigurationProperties({AgentHostingRentProperties.class, AgentTaskEventsProperties.class, EconomyPreviewProperties.class})
     @Import({ProcessTenantConfiguration.class, AccountSecurityServiceImpl.class, UserServiceImpl.class,
             UserBusinessMembership.class, PointAccountServiceImpl.class, UserInfoDaoImpl.class,
             UserBusinessMembershipDaoImpl.class, UserRoleRelDaoImpl.class, UserOrgRelDaoImpl.class,
             UserGroupRelDaoImpl.class, PointAccountDaoImpl.class, AgentIdentityRegistryDaoImpl.class,
             AgentIdentityAliasDaoImpl.class, AgentPersonaBindingDaoImpl.class, AgentRuntimeDaoImpl.class,
             AgentRuntimeV1InstallationDaoImpl.class, AgentIdentityServiceImpl.class, AgentRuntimeV1ServiceImpl.class,
-            AgentRuntimeAuthenticationService.class, HostingRentOwnerResolver.class, ManagedHostingCredentials.class,
-            HostingControlChannel.class, UnixManagedHostingProvisioner.class, HostingRentTransitionApplication.class,
+            AgentRuntimeAuthenticationService.class, HostingRentOwnerResolver.class, HostingRentTransitionApplication.class,
             HostingRentRenewalServiceImpl.class, EconomyPostingServiceImpl.class})
     public static class Context {
         // Register exact mapper interfaces, not a wildcard mapper/component scan.

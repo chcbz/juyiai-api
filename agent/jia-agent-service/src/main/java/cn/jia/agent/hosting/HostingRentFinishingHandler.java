@@ -42,6 +42,7 @@ public final class HostingRentFinishingHandler implements ScheduledJobHandler {
         var intent=renewal.initialHandoverIntent(partition,leaseId);
         if(intent==null)throw new IllegalStateException("Original handover intent unavailable");
         tasks.settleExpiredTasks(partition,leaseId);
+        if (completion.completeSelfHostedIfApplicable(partition, binding, intent)) return;
         var initial=new ManagedHostingProvisioner.Preparation(partition.tenantId(),partition.clientId(),binding.getJiacn(),
                 binding.getAgentId(),intent.getIntentId(),leaseId,String.valueOf(binding.getId()),intent.associationStartedAt());
         var current=stop.stop(initial);

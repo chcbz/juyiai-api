@@ -52,6 +52,19 @@ public interface SkillManagementMapper {
     SkillInstallationAuthorizationEntity lockAuthorization(@Param("tenantId") String tenantId,@Param("clientId") String clientId,@Param("installationId") String installationId);
     @Insert("INSERT INTO agent_skill_change_command(tenant_id,client_id,command_id,change_id,request_id,message_id,data_json,state,prepared_sha256) VALUES(#{tenantId},#{clientId},#{commandId},#{changeId},#{requestId},#{messageId},#{dataJson},#{state},#{preparedSha256})")
     int insertCommand(SkillChangeCommandEntity row);
+    /** Only unresolved funds prevent self-hosted detach. Local activation/disable synchronization
+     * is operator-owned and must not make an offline installation impossible to unbind.
+     * Caller holds the original binding lock shared with admission and result writers. */
+    @Select("""
+            SELECT COUNT(*) FROM agent_skill_change c
+            WHERE c.tenant_id=#{tenantId} AND c.client_id=#{clientId} AND c.agent_id=#{agentId}
+              AND c.owner_jiacn=#{ownerJiacn} AND c.runtime_installation_id=#{installationId}
+              AND JSON_UNQUOTE(JSON_EXTRACT(c.dto_json,'$.fundingStatus'))='HELD'
+            """)
+    int selfHostedPendingCount(@Param("tenantId") String tenantId,@Param("clientId") String clientId,
+            @Param("ownerJiacn") String ownerJiacn,@Param("agentId") String agentId,
+            @Param("installationId") String installationId);
+
     /** Original relation only, cursor aligned with idx_skill_changes. Not a global history scan. */
     @Select("""
             SELECT c.* FROM agent_skill_change c

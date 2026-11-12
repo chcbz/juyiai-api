@@ -39,6 +39,20 @@ class HostingRentFinishingHandlerTest {
         when(skills.settleHandoverChanges(current)).thenReturn(true);
         when(runtime.cleanup(initial,candidate,"lease")).thenReturn(true);
     }
+    @Test void selfHostedCompletionNeverCallsRemoteStopEvidenceOrCleanup() {
+        ready();when(completion.completeSelfHostedIfApplicable(eq(scope),any(),any())).thenReturn(true);
+        handler.executeScheduled(invocation);
+        verify(tasks).settleExpiredTasks(scope,"lease");
+        verifyNoInteractions(stop,runtime,skills);
+        verify(completion,never()).completeManaged(any());
+    }
+    @Test void selfHostedUnresolvedSettlementNeverFallsBackToRemoteCleanup() {
+        ready();when(completion.completeSelfHostedIfApplicable(eq(scope),any(),any()))
+                .thenThrow(new IllegalStateException("funds unresolved"));
+        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));
+        verifyNoInteractions(stop,runtime,skills);
+        verify(completion,never()).completeManaged(any());
+    }
     @Test void transitionUsesOriginalAssociationEpochWithoutInventingReservation() {
         ready();
         when(renewal.initialHandoverIntent(scope,"lease")).thenReturn(new EconomyHostingProvisioningIntentEntity()
@@ -81,21 +95,21 @@ class HostingRentFinishingHandlerTest {
     }
     @Test void unknownStopRetainsScheduleAndNeverFlushesOrReleases() {
         ready();when(stop.stop(initial)).thenReturn(null);
-        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(runtime,skills,completion);
+        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(runtime,skills);verify(completion,never()).completeManaged(any());
     }
     @Test void evidenceFailureCannotSettleOrClean() {
         ready();when(runtime.flushEvidence(initial,candidate,"lease")).thenReturn(false);
-        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(skills,completion);
+        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(skills);verify(completion,never()).completeManaged(any());
         verify(runtime,never()).cleanup(any(),any(),any());
     }
     @Test void heldUnknownFeesPreventCleanupAndRelease() {
         ready();when(skills.settleHandoverChanges(current)).thenReturn(false);
-        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(completion);
+        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verify(completion,never()).completeManaged(any());
         verify(runtime,never()).cleanup(any(),any(),any());
     }
     @Test void unconfirmedPrivateCleanupDoesNotReleaseRelationship() {
         ready();when(runtime.cleanup(initial,candidate,"lease")).thenReturn(false);
-        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verifyNoInteractions(completion);
+        assertThrows(IllegalStateException.class,()->handler.executeScheduled(invocation));verify(completion,never()).completeManaged(any());
     }
     @Test void finalDatabaseFailureReconcilesSameOriginalHandoverWithoutNewProvision() {
         ready();doThrow(new IllegalStateException("commit unknown")).doNothing().when(completion).completeManaged(current);

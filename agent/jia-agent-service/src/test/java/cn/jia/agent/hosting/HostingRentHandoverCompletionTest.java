@@ -29,6 +29,7 @@ class HostingRentHandoverCompletionTest {
     final AgentRuntimeDao runtimes=mock(AgentRuntimeDao.class);
     final AgentRuntimeV1Service runtime=mock(AgentRuntimeV1Service.class);
     final HostingRentFinishingMapper tasks=mock(HostingRentFinishingMapper.class);
+    final cn.jia.agent.skill.SkillManagementService skills=mock(cn.jia.agent.skill.SkillManagementService.class);
     final ApiKeyService keys=mock(ApiKeyService.class);
     final ManagedHostingProvisioner.Preparation p=new ManagedHostingProvisioner.Preparation("tenant","client","old-owner","agent","intent","lease","7",1000);
     final ManagedHostingProvisioner.Candidate candidate=new ManagedHostingProvisioner.Candidate("installation","manifest",null,0,1,"host");
@@ -45,6 +46,7 @@ class HostingRentHandoverCompletionTest {
         ObjectProvider<ApiKeyService> provider=mock(ObjectProvider.class); when(provider.getIfAvailable()).thenReturn(keys);
         var target=new HostingRentHandoverCompletion(installations,bindings,renewal,identities,runtimes,runtime,tasks,provider,
                 new FixedTenantAdmissionPolicy("tenant","client"));
+        target.setSkills(skills);
         var proxy=new ProxyFactory(target); proxy.setProxyTargetClass(true);
         proxy.addAdvice(new TransactionInterceptor(new DataSourceTransactionManager(source),new AnnotationTransactionAttributeSource()));
         service=(HostingRentHandoverCompletion)proxy.getProxy();
@@ -54,9 +56,9 @@ class HostingRentHandoverCompletionTest {
         binding=new AgentPersonaBindingEntity().setId(7L).setAgentId("agent").setJiacn("old-owner").setPersonaCode("hero").setStatus(1);
         binding.setTenantId("tenant");binding.setClientId("client");when(bindings.findByIdForUpdate(7L)).thenReturn(binding);
         intent=new EconomyHostingProvisioningIntentEntity().setQuotePurpose("INITIAL").setPrincipalType("USER").setPrincipalId("old-payer")
-                .setStatus("ACTIVE").setAgentId("agent").setLeaseId("lease").setReservedAt(1000L)
+                .setIntentId("intent").setStatus("ACTIVE").setAgentId("agent").setLeaseId("lease").setReservedAt(1000L)
                 .setRuntimeInstallationId("installation").setRuntimeManifestSha256("manifest");
-        lease=new EconomyHostingLeaseEntity().setStatus("FINISHING").setPrincipalType("USER").setPrincipalId("old-payer")
+        lease=new EconomyHostingLeaseEntity().setPlanId("agent-hosting-preview").setStatus("FINISHING").setPrincipalType("USER").setPrincipalId("old-payer")
                 .setBindingId("7").setAgentId("agent").setPersonaCode("hero");
         when(renewal.lockHandover(any(),eq("intent"),eq("lease"))).thenReturn(new HostingRentRenewalService.HandoverSnapshot(intent,lease));
         when(tasks.unfinishedPage("tenant","client","old-owner","agent",0)).thenReturn(List.of());
@@ -73,6 +75,58 @@ class HostingRentHandoverCompletionTest {
     void effect(String name) {assertTrue(TransactionSynchronizationManager.isActualTransactionActive());jdbc.update("INSERT INTO effects VALUES(?)",name);}
     int effects() {return jdbc.queryForObject("SELECT COUNT(*) FROM effects",Integer.class);}
     @AfterEach void close() {jdbc.execute("DROP ALL OBJECTS");}
+    final cn.jia.economy.service.EconomyScope partition = new cn.jia.economy.service.EconomyScope("tenant", "client");
+    void selfHosted() {
+        lease.setPlanId("agent-self-hosted");
+        projection.setRuntimeHostId(null).setStatus("offline");
+        when(skills.selfHostedHandoverSettled(partition,"old-owner","agent","installation")).thenAnswer(i->{
+            assertTrue(TransactionSynchronizationManager.isActualTransactionActive());return true;
+        });
+    }
+    @Test void selfHostedOfflineDetachRevokesOnlyOriginalAuthorizationWithoutStopFact() {
+        selfHosted();
+        assertTrue(service.completeSelfHostedIfApplicable(partition,binding,intent));
+        assertEquals(5,effects());
+        verify(runtime).revoke(eq("tenant"),eq("client"),eq("old-owner"),eq("installation"),anyLong());
+        verifyNoMoreInteractions(runtime);
+        verify(renewal,never()).recordExecutorStopped(any(),any(),anyString(),anyString(),anyString(),anyString());
+    }
+    @Test void selfHostedUnsettledFundsDoNotDisappearOnDetach() {
+        selfHosted();when(skills.selfHostedHandoverSettled(partition,"old-owner","agent","installation")).thenReturn(false);
+        assertThrows(IllegalStateException.class,()->service.completeSelfHostedIfApplicable(partition,binding,intent));
+        assertEquals(0,effects());verifyNoInteractions(runtime,identities,keys);
+    }
+    @Test void selfHostedProjectionFailureRollsBackAllPlatformReleaseEffects() {
+        selfHosted();when(runtimes.clearBindingAfterUnbind(anyLong(),anyString(),anyLong(),anyString(),anyString(),anyLong())).thenReturn(0);
+        assertThrows(IllegalStateException.class,()->service.completeSelfHostedIfApplicable(partition,binding,intent));
+        assertEquals(0,effects());
+    }
+    @Test void selfHostedHistoricalReplayNeverTouchesNewInstallationOrSkills() {
+        selfHosted();lease.setStatus("CLOSED");binding.setStatus(0);
+        projection.setRuntimeInstallationId("new-installation").setBindingId(8L);
+        assertTrue(service.completeSelfHostedIfApplicable(partition,binding,intent));
+        verifyNoInteractions(runtime,identities,runtimes,tasks,keys,skills);assertEquals(0,effects());
+    }
+    @Test void managedRelationshipIsNotReleasedBySelfHostedPath() {
+        assertFalse(service.completeSelfHostedIfApplicable(partition,binding,intent));
+        verifyNoInteractions(runtime,identities,keys,skills);assertEquals(0,effects());
+    }
+    @Test void selfHostedCannotEnterManagedCleanupCompletion() {
+        selfHosted();projection.setRuntimeHostId("host");
+        assertThrows(IllegalStateException.class,()->service.completeManaged(cleaned));
+        assertEquals(0,effects());verifyNoInteractions(runtime,identities,keys);
+    }
+    @Test void managedTransitionAssociationRequiresOriginalTransitionAndHost() {
+        when(renewal.initialHandoverIntent(partition,"lease")).thenReturn(intent);
+        assertNull(service.managedTransitionAssociation(p));
+        intent.setSettlementKind("TRANSITION").setCreateTime(1000L);
+        var association=service.managedTransitionAssociation(p);
+        assertEquals("installation",association.candidate().installationId());
+        assertEquals("host",association.candidate().hostId());
+        verifyNoInteractions(runtime,identities,keys);assertEquals(0,effects());
+        projection.setRuntimeHostId(null);
+        assertThrows(IllegalStateException.class,()->service.managedTransitionAssociation(p));
+    }
     @Test void managedStopUsesOriginalTransactionAndDoesNotRevokeOrReleaseAnything() {
         doAnswer(i->{effect("stopped");return null;}).when(renewal).recordExecutorStopped(any(),any(),eq("lease"),eq("7"),eq("agent"),eq("lease"));
         assertTrue(service.prepareManagedStop(cleaned));assertEquals(0,effects());

@@ -17,6 +17,11 @@ public final class HostingRentManagedStop {
         if (TransactionSynchronizationManager.isActualTransactionActive())
             throw new IllegalStateException("Managed process stop must run outside database transactions");
         var current=runtime.currentOperation(initial);
+        if (current == null) {
+            var transition = relationships.managedTransitionAssociation(initial);
+            if (transition == null || !runtime.adoptExisting(transition.preparation(), transition.candidate())) return null;
+            current = runtime.currentOperation(initial);
+        }
         if (current==null || !relationships.prepareManagedStop(current)) return null;
         var p=current.preparation();
         if (!runtime.quiesce(p,current.candidate(),p.leaseId())) return null;

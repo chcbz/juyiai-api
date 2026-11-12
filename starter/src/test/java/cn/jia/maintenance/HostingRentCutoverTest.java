@@ -13,11 +13,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class HostingRentCutoverTest {
     private static final FixedTenantAdmissionPolicy SCOPE = new FixedTenantAdmissionPolicy("tenant", "client");
     private static String input(String extra) {
-        return "{\"cutoverAt\":1000,\"subjects\":[{\"actorId\":\"login\",\"ownerJiacn\":\"owner\",\"agentId\":\"jyt-fixture-likui\",\"installationId\":\"rti_" + "1".repeat(32) + "\"}]" + extra + "}";
+        return "{\"cutoverAt\":1000,\"subjects\":[{\"actorId\":\"login\",\"ownerJiacn\":\"owner\",\"agentId\":\"jyt-fixture-likui\",\"planId\":\"agent-self-hosted\",\"installationId\":\"rti_" + "1".repeat(32) + "\"}]" + extra + "}";
     }
     @Test void inputCannotChooseItsOwnEnvironmentPartition() {
         var commands = HostingRentCutover.requests(input("").getBytes(StandardCharsets.UTF_8), SCOPE);
-        assertEquals(1, commands.size()); assertEquals("tenant", commands.getFirst().actor().tenantId());
+        assertEquals(1, commands.size()); assertEquals("agent-self-hosted", commands.getFirst().planId()); assertEquals("tenant", commands.getFirst().actor().tenantId());
         assertEquals("client", commands.getFirst().actor().clientId()); assertEquals(1000, commands.getFirst().cutoverAt());
         assertThrows(RuntimeException.class, () -> HostingRentCutover.requests(input(",\"tenantId\":\"other\"").getBytes(StandardCharsets.UTF_8), SCOPE));
     }
@@ -26,6 +26,11 @@ class HostingRentCutoverTest {
                 input(",\"cutoverAt\":1001"), input("").replace(":1000", ":\"1000\""), input("") + " {}"}) {
             assertThrows(RuntimeException.class, () -> HostingRentCutover.requests(input.getBytes(StandardCharsets.UTF_8), SCOPE));
         }
+    }
+    @Test void explicitPlanRequiredInsteadOfNetworkRouteInference() {
+        for (String value : new String[]{input("").replace("agent-self-hosted", "unknown"),
+                input("").replace("\"planId\":\"agent-self-hosted\",", "")})
+            assertThrows(IllegalArgumentException.class, () -> HostingRentCutover.requests(value.getBytes(StandardCharsets.UTF_8), SCOPE));
     }
     @Test void duplicateAgentsCannotReceiveTwoCutoversInOneBatch() {
         String value = input(""); String subject = value.substring(value.indexOf("[{" ) + 1, value.lastIndexOf(']'));
@@ -49,6 +54,8 @@ class HostingRentCutoverTest {
                     assertNull(context.getStartupFailure(), () -> String.valueOf(context.getStartupFailure()));
                     assertNotNull(context.getBean(HostingRentTransitionApplication.class));
                     assertNotNull(context.getBean(ScheduledWorkStore.class));
+                    assertTrue(context.getBeansOfType(cn.jia.agent.hosting.ManagedHostingProvisioner.class).isEmpty());
+                    assertTrue(context.getBeansOfType(cn.jia.agent.hosting.HostingControlChannel.class).isEmpty());
                     assertTrue(context.getBeansOfType(org.springframework.scheduling.TaskScheduler.class).isEmpty());
                     assertTrue(context.getBeansOfType(org.springframework.boot.ApplicationRunner.class).isEmpty());
                     assertTrue(context.getBeansOfType(org.springframework.boot.CommandLineRunner.class).isEmpty());

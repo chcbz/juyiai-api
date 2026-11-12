@@ -1,6 +1,8 @@
 package cn.jia.agent.hosting;
 
 import cn.jia.agent.common.AgentConstants;
+import cn.jia.agent.config.AgentHostingRentProperties;
+import cn.jia.agent.skill.SkillManagementService;
 import cn.jia.agent.dao.AgentPersonaBindingDao;
 import cn.jia.agent.dao.AgentRuntimeDao;
 import cn.jia.agent.dao.AgentRuntimeV1InstallationDao;
@@ -18,8 +20,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.util.Objects;
 
-/** Last DB-only handover step. The lifecycle owner invokes this only after Runtime CLEANED.
- * No public controller, process control, account-login lookup, deletion or standalone financial release. */
+/** DB-only relationship release. Managed reuse requires Runtime cleanup; self-hosted assets never do.
+ * Both paths lock the exact original installation/binding and preserve unresolved platform business facts. */
 @Service
 public class HostingRentHandoverCompletion {
     private final AgentRuntimeV1InstallationDao installations;
@@ -40,32 +42,78 @@ public class HostingRentHandoverCompletion {
         this.identities=identities; this.runtimes=runtimes; this.runtime=runtime; this.tasks=tasks; this.keys=keys; this.scope=scope;
     }
 
+    private SkillManagementService skills;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setSkills(SkillManagementService value) { this.skills = value; }
+
+    /** Returns false for a managed lease; never calls a Runtime or fabricates a stop/cleanup receipt.
+     * The original binding lock fences new skill work while checking pending platform settlements. */
+    @Transactional(rollbackFor = Exception.class)
+    public boolean completeSelfHostedIfApplicable(EconomyScope partition,
+            cn.jia.agent.entity.AgentPersonaBindingEntity binding,
+            cn.jia.economy.entity.EconomyHostingProvisioningIntentEntity intent) {
+        var original = lockOriginal(partition.tenantId(), partition.clientId(), binding.getJiacn(),
+                binding.getAgentId(), String.valueOf(binding.getId()), intent.getIntentId(), intent.getLeaseId(),
+                intent.associationStartedAt(), intent.getRuntimeInstallationId(), intent.getRuntimeManifestSha256(), null);
+        if (!AgentHostingRentProperties.SELF_HOSTED_PLAN_ID.equals(original.lease().getPlanId())) return false;
+        if ("CLOSED".equals(original.lease().getStatus())) return true;
+        require(skills != null && skills.selfHostedHandoverSettled(partition, binding.getJiacn(), binding.getAgentId(),
+                intent.getRuntimeInstallationId()));
+        release(original, partition.tenantId(), partition.clientId(), binding.getJiacn(), binding.getAgentId(),
+                String.valueOf(binding.getId()), intent.getIntentId(), intent.getLeaseId(), intent.getRuntimeInstallationId());
+        return true;
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public void completeManaged(ManagedHostingProvisioner.CurrentOperation cleaned) {
         var original=lockOriginal(cleaned);
+        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
         if ("CLOSED".equals(original.lease().getStatus())) return;
-        var p=cleaned.preparation(); var candidate=cleaned.candidate();
+        var p=cleaned.preparation();
+        release(original, p.tenantId(), p.clientId(), p.ownerJiacn(), p.agentId(), p.bindingId(),
+                p.intentId(), p.leaseId(), cleaned.candidate().installationId());
+    }
+    private void release(Original original, String tenant, String client, String owner, String agent,
+                         String bindingId, String intentId, String leaseId, String installationId) {
         var binding=original.binding(); var intent=original.intent(); var projection=original.projection();
-        long bindingId=binding.getId();
         long now=System.currentTimeMillis();
-        runtime.revoke(p.tenantId(), p.clientId(), p.ownerJiacn(), candidate.installationId(), now);
+        runtime.revoke(tenant, client, owner, installationId, now);
         if (intent.getManagedApiKeyId()!=null) {
             var keyService=keys.getIfAvailable();
-            require(keyService!=null && keyService.disableManagedKey(intent.getManagedApiKeyId(), p.tenantId(),
-                    p.clientId(), p.ownerJiacn(), "hosting:"+p.intentId()));
+            require(keyService!=null && keyService.disableManagedKey(intent.getManagedApiKeyId(), tenant,
+                    client, owner, "hosting:"+intentId));
         }
-        renewal.completeHandover(new EconomyScope(p.tenantId(), p.clientId()),
-                new EconomyPrincipal(EconomyPrincipalType.USER, intent.getPrincipalId()), p.leaseId(), p.bindingId(), p.agentId());
+        renewal.completeHandover(new EconomyScope(tenant, client),
+                new EconomyPrincipal(EconomyPrincipalType.USER, intent.getPrincipalId()), leaseId, bindingId, agent);
         binding.setStatus(AgentConstants.BINDING_STATUS_SUSPENDED);
         require(bindings.updateById(binding)==1);
-        identities.suspendForBinding(p.tenantId(), p.clientId(), p.ownerJiacn(), bindingId);
-        require(runtimes.clearBindingAfterUnbind(projection.getId(), p.agentId(), bindingId,
-                p.clientId(), p.ownerJiacn(), now)==1);
+        identities.suspendForBinding(tenant, client, owner, binding.getId());
+        require(runtimes.clearBindingAfterUnbind(projection.getId(), agent, binding.getId(), client, owner, now)==1);
     }
+    /** A DB-only transition need not contact a host at registration time. Managed asset reclamation
+     * may later attach its original association, but only from the exact locked transition facts. */
+    @Transactional(rollbackFor = Exception.class)
+    public ManagedHostingProvisioner.CurrentOperation managedTransitionAssociation(ManagedHostingProvisioner.Preparation p) {
+        var intent = renewal.initialHandoverIntent(new EconomyScope(p.tenantId(), p.clientId()), p.leaseId());
+        if (intent == null || !"TRANSITION".equals(intent.getSettlementKind())) return null;
+        var original = lockOriginal(p.tenantId(), p.clientId(), p.ownerJiacn(), p.agentId(), p.bindingId(),
+                p.intentId(), p.leaseId(), p.reservedAt(), intent.getRuntimeInstallationId(),
+                intent.getRuntimeManifestSha256(), null);
+        if ("CLOSED".equals(original.lease().getStatus())) return null;
+        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        var host = original.projection().getRuntimeHostId();
+        require(host != null && !host.isBlank());
+        return new ManagedHostingProvisioner.CurrentOperation(p, new ManagedHostingProvisioner.Candidate(
+                original.intent().getRuntimeInstallationId(), original.intent().getRuntimeManifestSha256(),
+                null, 0, 1, host));
+    }
+
     /** Pre-stop business transaction, before external process control. Pending old tasks never permit a stop. */
     @Transactional(rollbackFor = Exception.class)
     public boolean prepareManagedStop(ManagedHostingProvisioner.CurrentOperation current) {
-        return !"CLOSED".equals(lockOriginal(current).lease().getStatus());
+        var original = lockOriginal(current);
+        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        return !"CLOSED".equals(original.lease().getStatus());
     }
 
     /** Called by the stop coordinator only after the exact original Runtime returned QUIESCED.
@@ -73,6 +121,7 @@ public class HostingRentHandoverCompletion {
     @Transactional(rollbackFor = Exception.class)
     public void recordManagedStop(ManagedHostingProvisioner.CurrentOperation current) {
         var original=lockOriginal(current);var p=current.preparation();
+        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
         renewal.recordExecutorStopped(new EconomyScope(p.tenantId(),p.clientId()),
                 new EconomyPrincipal(EconomyPrincipalType.USER,original.intent().getPrincipalId()),
                 p.leaseId(),p.bindingId(),p.agentId(),p.leaseId());
@@ -85,36 +134,42 @@ public class HostingRentHandoverCompletion {
 
     private Original lockOriginal(ManagedHostingProvisioner.CurrentOperation cleaned) {
         var p=cleaned.preparation(); var candidate=cleaned.candidate();
-        scope.requireAdmitted(p.tenantId(), p.clientId());
+        return lockOriginal(p.tenantId(), p.clientId(), p.ownerJiacn(), p.agentId(), p.bindingId(), p.intentId(),
+                p.leaseId(), p.reservedAt(), candidate.installationId(), candidate.manifestSha256(), candidate.hostId());
+    }
+    private Original lockOriginal(String tenant, String client, String owner, String agent, String bindingKey,
+                                  String intentId, String leaseId, long associationAt, String installationId,
+                                  String manifestSha256, String expectedHostId) {
+        scope.requireAdmitted(tenant, client);
         // Same root order as installation authorization: installation -> binding -> intent -> lease.
-        var installation=installations.lock(candidate.installationId());
-        long bindingId=Long.parseLong(p.bindingId());
+        var installation=installations.lock(installationId);
+        long bindingId=Long.parseLong(bindingKey);
         var binding=bindings.findByIdForUpdate(bindingId);
-        var financial=renewal.lockHandover(new EconomyScope(p.tenantId(), p.clientId()), p.intentId(), p.leaseId());
+        var financial=renewal.lockHandover(new EconomyScope(tenant, client), intentId, leaseId);
         var intent=financial.intent(); var lease=financial.lease();
         require(binding!=null && Objects.equals(binding.getId(), bindingId)
-                && p.tenantId().equals(binding.getTenantId()) && p.clientId().equals(binding.getClientId())
-                && p.ownerJiacn().equals(binding.getJiacn()) && p.agentId().equals(binding.getAgentId()));
+                && tenant.equals(binding.getTenantId()) && client.equals(binding.getClientId())
+                && owner.equals(binding.getJiacn()) && agent.equals(binding.getAgentId()));
         require(intent!=null && "INITIAL".equals(intent.getQuotePurpose()) && "USER".equals(intent.getPrincipalType())
                 && "ACTIVE".equals(intent.getStatus()) && intent.getRefundTransactionId()==null
-                && p.agentId().equals(intent.getAgentId()) && p.leaseId().equals(intent.getLeaseId())
-                && Objects.equals(p.reservedAt(), intent.associationStartedAt())
-                && candidate.installationId().equals(intent.getRuntimeInstallationId())
-                && candidate.manifestSha256().equals(intent.getRuntimeManifestSha256()));
+                && agent.equals(intent.getAgentId()) && leaseId.equals(intent.getLeaseId())
+                && Objects.equals(associationAt, intent.associationStartedAt())
+                && installationId.equals(intent.getRuntimeInstallationId())
+                && manifestSha256.equals(intent.getRuntimeManifestSha256()));
         require(lease!=null && "USER".equals(lease.getPrincipalType())
-                && intent.getPrincipalId().equals(lease.getPrincipalId()) && p.agentId().equals(lease.getAgentId())
-                && p.bindingId().equals(lease.getBindingId()) && binding.getPersonaCode().equals(lease.getPersonaCode()));
+                && intent.getPrincipalId().equals(lease.getPrincipalId()) && agent.equals(lease.getAgentId())
+                && bindingKey.equals(lease.getBindingId()) && binding.getPersonaCode().equals(lease.getPersonaCode()));
         // Historical completion replay never revokes a later invitation's authorization or clears its projection.
         if ("CLOSED".equals(lease.getStatus())) return new Original(binding, intent, lease, null);
         require("FINISHING".equals(lease.getStatus()) && Integer.valueOf(AgentConstants.BINDING_STATUS_ACTIVE).equals(binding.getStatus()));
-        require(installation!=null && p.tenantId().equals(installation.getTenantId()) && p.clientId().equals(installation.getClientId())
-                && p.agentId().equals(installation.getCanonicalAgentId()) && candidate.manifestSha256().equals(installation.getManifestSha256()));
-        require(tasks.unfinishedPage(p.tenantId(), p.clientId(), p.ownerJiacn(), p.agentId(), 0).isEmpty());
-        var projection=runtimes.findByAgentIdForUpdate(p.agentId());
+        require(installation!=null && tenant.equals(installation.getTenantId()) && client.equals(installation.getClientId())
+                && agent.equals(installation.getCanonicalAgentId()) && manifestSha256.equals(installation.getManifestSha256()));
+        require(tasks.unfinishedPage(tenant, client, owner, agent, 0).isEmpty());
+        var projection=runtimes.findByAgentIdForUpdate(agent);
         require(projection!=null && projection.getId()!=null && Objects.equals(projection.getBindingId(), bindingId)
-                && p.clientId().equals(projection.getClientId()) && p.ownerJiacn().equals(projection.getOwnerJiacn())
-                && candidate.installationId().equals(projection.getRuntimeInstallationId())
-                && candidate.hostId().equals(projection.getRuntimeHostId()));
+                && client.equals(projection.getClientId()) && owner.equals(projection.getOwnerJiacn())
+                && installationId.equals(projection.getRuntimeInstallationId())
+                && (expectedHostId == null || expectedHostId.equals(projection.getRuntimeHostId())));
         return new Original(binding,intent,lease,projection);
     }
 
