@@ -19,6 +19,13 @@ public class AgentRuntimeDTO implements Serializable {
     private String ownerJiacn;
     private String personaCode;
     private String personaName;
+    /** Builtin persona target configuration; never a claim about the currently executing model. */
+    private String configuredModel;
+    private String modelAssignmentVersion;
+    /** Platform hosting product price, WEN decimal string per period; not an existing lease or a quote. */
+    private String platformHostingAmountWen;
+    private String platformHostingPeriodSeconds;
+    private String platformHostingPriceVersion;
     private String title;
     private String starName;
     private Integer rankNo;

@@ -2025,6 +2025,7 @@ public class AgentServiceImpl implements AgentService {
         if (includeStats) dto.setStats(usesLegacyTaskStats(entity)
                 ? buildLegacyTaskStats(entity, persona)
                 : buildStats(entity, persona, null));
+        applyPersonaModelConfiguration(dto);
         return dto;
     }
 
@@ -2069,7 +2070,19 @@ public class AgentServiceImpl implements AgentService {
         dto.setCanOperate(Boolean.TRUE.equals(dto.getBoundToMe())
                 && !Boolean.TRUE.equals(dto.getSystemAgent()));
         dto.setStats(buildStats(entity, persona, enrichment.taskStats(entity)));
+        applyPersonaModelConfiguration(dto);
         return dto;
+    }
+
+    private static void applyPersonaModelConfiguration(AgentRuntimeDTO dto) {
+        var definition = WaterMarginPersonaCatalog.definition(dto.getPersonaCode());
+        if (definition == null) return;
+        var price = cn.jia.economy.hosting.HostingModelPriceBook.forModel(definition.modelId());
+        dto.setConfiguredModel(definition.modelId());
+        dto.setModelAssignmentVersion(WaterMarginPersonaCatalog.MODEL_ASSIGNMENT_VERSION);
+        dto.setPlatformHostingAmountWen(Long.toString(price.amountWen()));
+        dto.setPlatformHostingPeriodSeconds(Long.toString(cn.jia.economy.hosting.HostingModelPriceBook.PERIOD_SECONDS));
+        dto.setPlatformHostingPriceVersion(cn.jia.economy.hosting.HostingModelPriceBook.PRICE_BOOK_VERSION);
     }
 
     private AgentRuntimeDTO toCatalogDTO(CatalogEntry persona,
@@ -2108,6 +2121,7 @@ public class AgentServiceImpl implements AgentService {
         stats.setCompletedTaskCount(0);
         stats.setFailedTaskCount(0);
         dto.setStats(stats);
+        applyPersonaModelConfiguration(dto);
         return dto;
     }
 
@@ -2148,6 +2162,7 @@ public class AgentServiceImpl implements AgentService {
             dto.setTitle("及时雨");
             dto.setAbilities(List.of("coordination", "dispatch", "planning", "briefing", "task_management"));
         }
+        applyPersonaModelConfiguration(dto);
         return dto;
     }
 

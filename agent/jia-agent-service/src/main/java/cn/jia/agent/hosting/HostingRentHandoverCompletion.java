@@ -67,7 +67,7 @@ public class HostingRentHandoverCompletion {
     @Transactional(rollbackFor = Exception.class)
     public void completeManaged(ManagedHostingProvisioner.CurrentOperation cleaned) {
         var original=lockOriginal(cleaned);
-        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        require(AgentHostingRentProperties.isManagedPlan(original.lease().getPlanId()));
         if ("CLOSED".equals(original.lease().getStatus())) return;
         var p=cleaned.preparation();
         release(original, p.tenantId(), p.clientId(), p.ownerJiacn(), p.agentId(), p.bindingId(),
@@ -100,7 +100,7 @@ public class HostingRentHandoverCompletion {
                 p.intentId(), p.leaseId(), p.reservedAt(), intent.getRuntimeInstallationId(),
                 intent.getRuntimeManifestSha256(), null);
         if ("CLOSED".equals(original.lease().getStatus())) return null;
-        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        require(AgentHostingRentProperties.isManagedPlan(original.lease().getPlanId()));
         var host = original.projection().getRuntimeHostId();
         require(host != null && !host.isBlank());
         return new ManagedHostingProvisioner.CurrentOperation(p, new ManagedHostingProvisioner.Candidate(
@@ -112,7 +112,7 @@ public class HostingRentHandoverCompletion {
     @Transactional(rollbackFor = Exception.class)
     public boolean prepareManagedStop(ManagedHostingProvisioner.CurrentOperation current) {
         var original = lockOriginal(current);
-        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        require(AgentHostingRentProperties.isManagedPlan(original.lease().getPlanId()));
         return !"CLOSED".equals(original.lease().getStatus());
     }
 
@@ -121,7 +121,7 @@ public class HostingRentHandoverCompletion {
     @Transactional(rollbackFor = Exception.class)
     public void recordManagedStop(ManagedHostingProvisioner.CurrentOperation current) {
         var original=lockOriginal(current);var p=current.preparation();
-        require(AgentHostingRentProperties.MANAGED_PLAN_ID.equals(original.lease().getPlanId()));
+        require(AgentHostingRentProperties.isManagedPlan(original.lease().getPlanId()));
         renewal.recordExecutorStopped(new EconomyScope(p.tenantId(),p.clientId()),
                 new EconomyPrincipal(EconomyPrincipalType.USER,original.intent().getPrincipalId()),
                 p.leaseId(),p.bindingId(),p.agentId(),p.leaseId());

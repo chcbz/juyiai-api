@@ -16,8 +16,11 @@ public record AgentHostingRentProperties(
         String periodSeconds, String selfHostedPlanVersion, String selfHostedAmountWen) {
     public static final String MANAGED_PLAN_ID = "agent-hosting-preview";
     public static final String SELF_HOSTED_PLAN_ID = "agent-self-hosted";
+    public static boolean isManagedPlan(String planId) {
+        return MANAGED_PLAN_ID.equals(planId) || cn.jia.economy.hosting.HostingModelPriceBook.forPlan(planId) != null;
+    }
     public static String modeForPlan(String planId) {
-        if (MANAGED_PLAN_ID.equals(planId)) return "server";
+        if (isManagedPlan(planId)) return "server";
         if (SELF_HOSTED_PLAN_ID.equals(planId)) return "local";
         throw new IllegalArgumentException("Unknown hosting plan");
     }

@@ -1,6 +1,7 @@
 package cn.jia.agent.hosting;
 
 import cn.jia.agent.common.AgentConstants;
+import cn.jia.agent.common.WaterMarginPersonaCatalog;
 import cn.jia.agent.config.AgentHostingRentProperties;
 import cn.jia.agent.dao.AgentPersonaBindingDao;
 import cn.jia.agent.dao.AgentRuntimeDao;
@@ -52,6 +53,9 @@ public final class HostingRentApplicationService {
     private final TransactionTemplate transactions;
     private final TransactionTemplate reads;
     private final boolean schemaEnabled;
+    private HostingSetupService setups;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setHostingSetups(HostingSetupService setups) { this.setups = setups; }
 
     public HostingRentApplicationService(AgentHostingRentProperties properties, EconomyPreviewGate preview,
             HostingRentOwnerResolver owners, EconomyHostingRentMapper rent, HostingRentLedgerService ledger,
@@ -70,12 +74,74 @@ public final class HostingRentApplicationService {
         this.schemaEnabled = schemaEnabled;
     }
 
+    /** Pre-payment target authority only. No installation, wallet or binding is created. */
+    public HostingSetupService.View startSetup(Actor actor, String personaCode, String idempotencyKey, Map<String,String> body) {
+        requireEnabled(actor); key(idempotencyKey); exact(personaCode, 100);
+        var service = requireSetups();
+        String mode = required(body, "mode"), hostId = required(body, "hostId"), tokenHash = required(body, "tokenSha256");
+        byte[] hash = hash("SETUP:" + personaCode, body);
+        return transactions.execute(status -> {
+            owners.requireOwner(actor); persona(personaCode);
+            var replay = service.replay(actor, personaCode, idempotencyKey, hash);
+            if (replay != null) return replay;
+            service.mode(actor, mode, hostId);
+            if (currentBinding(actor, actor.ownerJiacn(), personaCode) != null) throw conflict("HOSTING_RENT_LEASE_CONFLICT");
+            // Self-hosted invitations always allocate a new target, never a retained other-user installation.
+            var released = "server".equals(mode) ? releasedInstance(actor, personaCode) : null;
+            String canonical = released == null ? "agt_" + UUID.randomUUID().toString().replace("-", "") : released.getAgentId();
+            return service.create(actor, personaCode, idempotencyKey, hash, canonical, mode, hostId, tokenHash, System.currentTimeMillis());
+        });
+    }
+    public HostingSetupService.View lookupSetup(Actor actor, String personaCode, String setupId) {
+        requireEnabled(actor); var service = requireSetups();
+        return transactions.execute(status -> { owners.requireOwner(actor); return service.lookup(actor, personaCode, setupId); });
+    }
+    public HostingSetupService.View cancelSetup(Actor actor, String personaCode, String setupId) {
+        requireEnabled(actor); var service = requireSetups();
+        return transactions.execute(status -> { owners.requireOwner(actor); return service.revoke(actor, personaCode, setupId, System.currentTimeMillis()); });
+    }
+    private HostingSetupService requireSetups() {
+        if (setups == null) throw new HostingRentApplicationException(503, "HOSTING_SETUP_UNAVAILABLE");
+        return setups;
+    }
+    private QuoteView quoteSetup(Actor actor, String personaCode, String idempotencyKey, Map<String,String> body) {
+        String setupId = required(body, "setupId");
+        byte[] hash = hash("INITIAL:" + personaCode, body);
+        // Immutable target metadata determines the plan; business locks retain plan -> persona -> grant order.
+        var target = transactions.execute(status -> {
+            owners.requireOwner(actor); return setups.find(actor, personaCode, setupId);
+        });
+        return transactions.execute(status -> {
+            String owner = owners.requireOwner(actor);
+            var replay = actorQuote(actor, idempotencyKey);
+            if (replay != null) return initialQuoteReplay(actor, personaCode, idempotencyKey, hash, replay);
+            EconomyHostingRentPlanEntity plan = plan(actor, "local".equals(target.mode())
+                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID);
+            persona(personaCode);
+            if (currentBinding(actor, owner, personaCode) != null) throw conflict("HOSTING_RENT_LEASE_CONFLICT");
+            if (body.get("agentId") != null && !body.get("agentId").equals(target.canonicalAgentId())) throw forbidden();
+            if ("server".equals(target.mode())) {
+                var released = releasedInstance(actor, personaCode);
+                if (released != null && !released.getAgentId().equals(target.canonicalAgentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
+            }
+            var actual = setups.inventory(actor, personaCode, setupId);
+            var inventory = actual.inventory();
+            var receipt = ledger.quote(quoteCommand(actor, idempotencyKey, hash, personaCode,
+                    target.canonicalAgentId(), plan.getPlanId(), plan.getPlanVersion(), HostingRentQuotePurpose.INITIAL, null, null,
+                    new HostingRentInitialSkills(inventory.installedSkillCount(), inventory.inventorySha256(), inventory.hostId(), inventory.snapshotJson())));
+            setups.attachQuote(actual, receipt.quoteId());
+            return quoteView(receipt);
+        });
+    }
+
     private record InitialQuoteSubject(String owner, String agentId, QuoteView replay) { }
 
     public QuoteView quote(Actor actor, String personaCode, String idempotencyKey, Map<String, String> body) {
         requireEnabled(actor);
         key(idempotencyKey); exact(personaCode, 100);
         if (!"INITIAL".equals(body.get("purpose"))) throw badRequest();
+        if (setups != null) return quoteSetup(actor, personaCode, idempotencyKey, body);
+        if (body.get("setupId") != null) throw new HostingRentApplicationException(503, "HOSTING_SETUP_UNAVAILABLE");
         String requestedAgent = body.get("agentId");
         if (requestedAgent != null) requireAgentId(requestedAgent);
         byte[] hash = hash("INITIAL:" + personaCode, body);
@@ -96,7 +162,7 @@ public final class HostingRentApplicationService {
             if (replay != null) return initialQuoteReplay(actor, personaCode, idempotencyKey, hash, replay);
             // Final short transaction keeps plan -> persona/binding -> quote ordering.
             EconomyHostingRentPlanEntity plan = plan(actor, "local".equals(deploymentMode)
-                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID);
+                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : managedPlanId(personaCode));
             String canonical = resolveInitialAgent(actor, owner, personaCode, requestedAgent, subject.agentId());
             if (!canonical.equals(subject.agentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
             return quoteView(ledger.quote(quoteCommand(actor, idempotencyKey, hash, personaCode,
@@ -152,6 +218,10 @@ public final class HostingRentApplicationService {
         byte[] hash = hash("INITIAL-CONFIRM:" + personaCode, body);
         InitialAdmission admission = initialAdmission(actor, personaCode, idempotencyKey, body, hash);
         if (admission.replay() != null) return admission.replay();
+        // This feature remains disabled until the reserved CONTROL/installation producer is integrated.
+        // Never let a setup quote fall through to the legacy inbound adapter and reserve against another target.
+        if (setups != null && transactions.execute(status -> setups.isSetupQuote(actor, admission.quote().getQuoteId())))
+            throw new HostingRentApplicationException(503, "HOSTING_SETUP_ACTIVATION_PENDING");
         ManagedHostingProvisioner.SkillInventory inventory;
         try { inventory = requireInventory(actor, admission.owner(), admission.quote().getAgentId()); }
         catch (HostingRentApplicationException unavailable) {
@@ -465,25 +535,37 @@ public final class HostingRentApplicationService {
         if (!"server".equals(mode) && !"local".equals(mode)) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
         return mode;
     }
+    private String managedPlanId(String personaCode) {
+        var definition = WaterMarginPersonaCatalog.definition(personaCode);
+        var price = definition == null ? null : HostingModelPriceBook.forModel(definition.modelId());
+        if (price == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
+        return price.planId();
+    }
+
     private EconomyHostingRentPlanEntity plan(Actor actor, String planId) {
         String mode;
         try { mode = AgentHostingRentProperties.modeForPlan(planId); }
         catch (IllegalArgumentException unknown) { throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT"); }
-        long version = positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
-        long amount = positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
+        var modelPrice = HostingModelPriceBook.forPlan(planId);
+        long version = modelPrice != null ? HostingModelPriceBook.VERSION
+                : positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
+        long amount = modelPrice != null ? modelPrice.amountWen()
+                : positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
+        long period = modelPrice != null ? HostingModelPriceBook.PERIOD_SECONDS : positive(properties.periodSeconds());
         EconomyHostingRentPlanEntity plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         if (plan == null) {
             EconomyHostingRentPlanEntity proposed = new EconomyHostingRentPlanEntity().setPlanId(planId)
                     .setPlanVersion(version).setAmountWen(amount)
-                    .setPeriodSeconds(positive(properties.periodSeconds())).setQuoteTtlSeconds(300L)
+                    .setPeriodSeconds(period).setQuoteTtlSeconds(300L)
                     .setCurrency("WEN").setStatus("ACTIVE").setTenantId(actor.tenantId()).setClientId(actor.clientId())
                     .setCreateTime(System.currentTimeMillis());
             try { rent.insertPlanVersion(proposed); }
             catch (DataIntegrityViolationException concurrent) { /* Compare immutable winner below, never rewrite it. */ }
             plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         }
-        if (plan == null || plan.getAmountWen() != amount
-                || plan.getPeriodSeconds() != positive(properties.periodSeconds()) || !"ACTIVE".equals(plan.getStatus())) {
+        if (plan == null || !planId.equals(plan.getPlanId()) || !Long.valueOf(version).equals(plan.getPlanVersion())
+                || !Long.valueOf(amount).equals(plan.getAmountWen()) || !Long.valueOf(period).equals(plan.getPeriodSeconds())
+                || !"WEN".equals(plan.getCurrency()) || !"ACTIVE".equals(plan.getStatus())) {
             throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT");
         }
         return plan;
