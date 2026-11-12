@@ -678,7 +678,7 @@ class HostingRentApplicationServiceTest {
             when(rent.selectPlanForUpdate("0", "Client-A", price.planId(), 1L)).thenReturn(
                     new EconomyHostingRentPlanEntity().setPlanId(price.planId()).setPlanVersion(1L)
                             .setAmountWen(price.amountWen()).setPeriodSeconds(2592000L).setCurrency("WEN").setStatus("ACTIVE"));
-            when(ledger.quote(any())).thenAnswer(call -> {
+            doAnswer(call -> {
                 HostingRentQuoteCommand command = call.getArgument(0);
                 assertEquals(price.planId(), command.planId());
                 assertEquals(hero.code(), command.personaCode());
@@ -686,7 +686,7 @@ class HostingRentApplicationServiceTest {
                 return new HostingRentQuoteReceipt("quote", command.purpose(), command.planId(), command.planVersion(),
                         price.amountWen(), 2592000L, hero.code(), command.agentId(), null, null,
                         1800000000000L, price.amountWen(), command.initialSkills());
-            });
+            }).when(ledger).quote(any());
             var view = application.quote(ACTOR, hero.code(), KEY, Map.of("purpose", "INITIAL"));
             assertEquals(Long.toString(price.amountWen()), view.recurringAmountWen());
             assertEquals(price.planId(), view.planId());
