@@ -41,11 +41,16 @@ public final class HostingSetupService {
                 || !persona.equals(setup.personaCode())) throw rejected();
         return setup;
     }
-    private HostingOutboundStore.Grant active(Setup setup) {
+    private HostingOutboundStore.Grant lockGrant(Setup setup) {
         var grant = transport.lock(setup.tenantId(), setup.clientId(), setup.setupId());
-        if (grant == null || !"ACTIVE".equals(grant.status()) || !"SETUP".equals(grant.purpose())
+        if (grant == null || !"SETUP".equals(grant.purpose())
                 || !setup.hostId().equals(grant.hostId()) || !setup.ownerJiacn().equals(grant.ownerJiacn())
                 || !setup.canonicalAgentId().equals(grant.canonicalAgentId())) throw rejected();
+        return grant;
+    }
+    private HostingOutboundStore.Grant active(Setup setup) {
+        var grant = lockGrant(setup);
+        if (!"ACTIVE".equals(grant.status())) throw rejected();
         return grant;
     }
     public String mode(Actor actor, String mode, String hostId) {
@@ -95,7 +100,7 @@ public final class HostingSetupService {
     }
     public View revoke(Actor actor, String persona, String id, long now) {
         var setup = find(actor, persona, id);
-        active(setup);
+        lockGrant(setup); // Repeated cancellation is allowed, but activation always wins once committed.
         if (setups.activation(actor.tenantId(), actor.clientId(), id) != null) throw new HostingRentApplicationException(409, "HOSTING_SETUP_ALREADY_ACTIVATED");
         exchanges.revoke(actor.tenantId(), actor.clientId(), id, now);
         return new View(id, persona, setup.canonicalAgentId(), setup.mode(), "REVOKED", null);

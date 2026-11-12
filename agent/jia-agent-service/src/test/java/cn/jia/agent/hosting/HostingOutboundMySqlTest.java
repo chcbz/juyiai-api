@@ -496,6 +496,41 @@ class HostingOutboundMySqlTest {
         assertNull(adapter.exchange(request, "fixture-host"));
         verifyNoInteractions(f.posting(), f.oldProvider());
     }
+    @Test void cancellationSeesActivationCommittedAfterItsRepeatableReadSnapshot() throws Exception {
+        var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var setups = security.getBean(HostingSetupService.class);
+        var setupStore = security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class);
+        var snapshot = new CountDownLatch(1); var activated = new CountDownLatch(1);
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var cancellation = pool.submit(() -> tx.execute(status -> {
+                assertNotNull(setupStore.find("0", "fixture-client", view.setupId()));
+                snapshot.countDown();
+                try { assertTrue(activated.await(30, TimeUnit.SECONDS)); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+                return assertThrows(HostingRentApplicationException.class,
+                        () -> setups.revoke(ACTOR, "wuyong", view.setupId(), 12)).code();
+            }));
+            try {
+                assertTrue(snapshot.await(30, TimeUnit.SECONDS));
+                tx.executeWithoutResult(status -> setups.activate(ACTOR,
+                        setups.find(ACTOR, "wuyong", view.setupId()), "123", "snapshot-lease", 10));
+            } finally { activated.countDown(); }
+            assertEquals("HOSTING_SETUP_ALREADY_ACTIVATED", cancellation.get(30, TimeUnit.SECONDS));
+        }
+        assertNotNull(setupPoll(view, null).controlAuthorization());
+        assertEquals("ACTIVE", tx.execute(status -> store.lock("0", "fixture-client", view.setupId()).status()));
+    }
+
+    @Test void cancelledSetupCannotActivateOrPublishControlAuthority() throws Exception {
+        var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var setups = security.getBean(HostingSetupService.class);
+        f.app().cancelSetup(ACTOR, "wuyong", view.setupId());
+        assertThrows(HostingRentApplicationException.class, () -> tx.executeWithoutResult(status ->
+                setups.activate(ACTOR, setups.find(ACTOR, "wuyong", view.setupId()), "123", "cancelled-lease", 10)));
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup_activation", Integer.class));
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_authorization WHERE purpose='CONTROL'", Integer.class));
+    }
+
     @Test void rolledBackReserveCannotPublishControlAuthority() throws Exception {
         var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
         var setups = security.getBean(HostingSetupService.class);

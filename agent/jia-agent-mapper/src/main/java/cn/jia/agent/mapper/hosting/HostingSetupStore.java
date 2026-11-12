@@ -42,8 +42,9 @@ public final class HostingSetupStore {
     }
     public record Activation(String setupId, String authorizationId, String bindingId, String leaseId) { }
     private static final RowMapper<Activation> ACTIVATION = (r,n) -> new Activation(r.getString("setup_id"), r.getString("authorization_id"), r.getString("binding_id"), r.getString("lease_id"));
+    /** Current read after locking the SETUP grant; a prior snapshot must not hide activation. */
     public Activation activation(String tenant, String client, String setup) {
-        return one(jdbc.query("SELECT * FROM agent_hosting_setup_activation WHERE tenant_id=? AND client_id=? AND setup_id=?", ACTIVATION, tenant, client, setup));
+        return one(jdbc.query("SELECT * FROM agent_hosting_setup_activation WHERE tenant_id=? AND client_id=? AND setup_id=? FOR UPDATE", ACTIVATION, tenant, client, setup));
     }
     public Activation leaseActivation(String tenant, String client, String lease) {
         return one(jdbc.query("SELECT * FROM agent_hosting_setup_activation WHERE tenant_id=? AND client_id=? AND lease_id=?", ACTIVATION, tenant, client, lease));
