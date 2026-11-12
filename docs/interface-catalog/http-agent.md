@@ -2572,3 +2572,7 @@ TASK概览和事项分页/阶段计数复用同一 `AgentTaskPhaseSql.PHASE`。`
 旧直接解绑路由及其忙碌阻止解绑规则已退役，不恢复 `AgentHostedBindingTransaction` 或旧解绑测试。保留有用的公共异常映射：TOKEN_INVALID→401、AGENT_FORBIDDEN→403、资源不存在→404、忙碌/离线/状态冲突→409、能力不匹配→422、参数错误→400、未知/内部错误→500。错误响应标记 private, no-store，内部细节只记日志；避免 HTTP200 搭非E0导致消费者误报协议错误。业务权限及资金状态由原服务负责，本次不改变移除租约流程。
 
 定向验证入口：`AgentControllerErrorHttpTest`，使用现行 GET `/agent/{agentId}` 验证真实MVC分派、公共信封、请求关联、错误状态与脱敏；服务为模拟，无生产写入。固定源码与本轮验证结果见根仓 git-cleanup-20261112 记录，不以旧未执行测试宣称通过。
+
+### 好汉目标模型与托管参考价（2026-11-13候选）
+
+AgentRuntimeDTO新增可空string字段：configuredModel、platformHostingAmountWen、platformHostingPlanVersion、platformHostingPeriodSeconds；金额/版本/秒为正整数十进制字符串，无角色配置则空。来源为外置配置，仅表示目标模型和新邀请参考价，非实际执行模型或已有租约价格；系统宋江权限不变。消费方可忽略这些无害新增字段。配置入口、错误语义和历史价格保护见[外置配置说明](../hero-model-hosting-configuration.md)。未部署/未下发Runtime模型。

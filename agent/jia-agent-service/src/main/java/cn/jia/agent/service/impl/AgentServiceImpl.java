@@ -142,6 +142,23 @@ public class AgentServiceImpl implements AgentService {
     private static final Set<String> TASK_ASSIGNMENT_SOURCES = Set.of(
             "manual", "auto", "migration", "legacy");
 
+    private cn.jia.agent.config.AgentHostingRentProperties hostingModelConfiguration;
+
+    @Autowired
+    public void setHostingModelConfiguration(cn.jia.agent.config.AgentHostingRentProperties configuration) {
+        this.hostingModelConfiguration = Objects.requireNonNull(configuration);
+    }
+
+    private void applyConfiguredModel(AgentRuntimeDTO dto) {
+        if (hostingModelConfiguration == null) return;
+        dto.setConfiguredModel(hostingModelConfiguration.configuredModel(dto.getPersonaCode()));
+        var tariff = hostingModelConfiguration.modelPlan(dto.getPersonaCode());
+        if (tariff == null) return;
+        dto.setPlatformHostingAmountWen(tariff.amountWen());
+        dto.setPlatformHostingPlanVersion(tariff.planVersion());
+        dto.setPlatformHostingPeriodSeconds(hostingModelConfiguration.periodSeconds());
+    }
+
     private final AgentRuntimeDao agentRuntimeDao;
     private final AgentIdentityService agentIdentityService;
     private final AgentPersonaDao agentPersonaDao;
@@ -2025,6 +2042,7 @@ public class AgentServiceImpl implements AgentService {
         if (includeStats) dto.setStats(usesLegacyTaskStats(entity)
                 ? buildLegacyTaskStats(entity, persona)
                 : buildStats(entity, persona, null));
+        applyConfiguredModel(dto);
         return dto;
     }
 
@@ -2069,6 +2087,7 @@ public class AgentServiceImpl implements AgentService {
         dto.setCanOperate(Boolean.TRUE.equals(dto.getBoundToMe())
                 && !Boolean.TRUE.equals(dto.getSystemAgent()));
         dto.setStats(buildStats(entity, persona, enrichment.taskStats(entity)));
+        applyConfiguredModel(dto);
         return dto;
     }
 
@@ -2108,6 +2127,7 @@ public class AgentServiceImpl implements AgentService {
         stats.setCompletedTaskCount(0);
         stats.setFailedTaskCount(0);
         dto.setStats(stats);
+        applyConfiguredModel(dto);
         return dto;
     }
 
@@ -2148,6 +2168,7 @@ public class AgentServiceImpl implements AgentService {
             dto.setTitle("及时雨");
             dto.setAbilities(List.of("coordination", "dispatch", "planning", "briefing", "task_management"));
         }
+        applyConfiguredModel(dto);
         return dto;
     }
 

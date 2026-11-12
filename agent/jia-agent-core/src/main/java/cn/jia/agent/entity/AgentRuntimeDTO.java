@@ -8,6 +8,12 @@ import java.util.List;
 
 @Data
 public class AgentRuntimeDTO implements Serializable {
+    /** Operator-configured target, not a claim about the model used by an execution. */
+    private String configuredModel;
+    private String platformHostingAmountWen;
+    private String platformHostingPlanVersion;
+    private String platformHostingPeriodSeconds;
+
     @Serial
     private static final long serialVersionUID = 1L;
 

@@ -96,7 +96,7 @@ public final class HostingRentApplicationService {
             if (replay != null) return initialQuoteReplay(actor, personaCode, idempotencyKey, hash, replay);
             // Final short transaction keeps plan -> persona/binding -> quote ordering.
             EconomyHostingRentPlanEntity plan = plan(actor, "local".equals(deploymentMode)
-                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID);
+                    ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID, personaCode);
             String canonical = resolveInitialAgent(actor, owner, personaCode, requestedAgent, subject.agentId());
             if (!canonical.equals(subject.agentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
             return quoteView(ledger.quote(quoteCommand(actor, idempotencyKey, hash, personaCode,
@@ -245,7 +245,11 @@ public final class HostingRentApplicationService {
             var original = rent.selectLease(actor.tenantId(), actor.clientId(), leaseId);
             if (original == null || !agentId.equals(original.getAgentId()) || !actor.actorId().equals(original.getPrincipalId())
                     || !"USER".equals(original.getPrincipalType())) throw forbidden();
-            EconomyHostingRentPlanEntity plan = plan(actor, original.getPlanId());
+            EconomyHostingRentPlanEntity plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(),
+                    original.getPlanId(), original.getPlanVersion());
+            if (plan == null || !Objects.equals(plan.getAmountWen(), original.getAmountWen())
+                    || !Objects.equals(plan.getPeriodSeconds(), original.getPeriodSeconds())
+                    || !"ACTIVE".equals(plan.getStatus())) throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT");
             var binding = requireExisting(actor, owner, agentId, null);
             EconomyHostingLeaseEntity lease = ownedLease(actor, leaseId, agentId);
             if (!binding.getPersonaCode().equals(lease.getPersonaCode())) throw forbidden();
@@ -465,12 +469,18 @@ public final class HostingRentApplicationService {
         if (!"server".equals(mode) && !"local".equals(mode)) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
         return mode;
     }
-    private EconomyHostingRentPlanEntity plan(Actor actor, String planId) {
+    private EconomyHostingRentPlanEntity plan(Actor actor, String planId, String personaCode) {
         String mode;
         try { mode = AgentHostingRentProperties.modeForPlan(planId); }
         catch (IllegalArgumentException unknown) { throw conflict("HOSTING_RENT_PLAN_VERSION_CONFLICT"); }
         long version = positive("local".equals(mode) ? properties.selfHostedPlanVersion() : properties.planVersion());
         long amount = positive("local".equals(mode) ? properties.selfHostedAmountWen() : properties.amountWen());
+        if ("server".equals(mode) && properties.differentiated()) {
+            var tariff = properties.modelPlan(personaCode);
+            if (tariff == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_CONFIGURED");
+            version = positive(tariff.planVersion());
+            amount = positive(tariff.amountWen());
+        }
         EconomyHostingRentPlanEntity plan = rent.selectPlanForUpdate(actor.tenantId(), actor.clientId(), planId, version);
         if (plan == null) {
             EconomyHostingRentPlanEntity proposed = new EconomyHostingRentPlanEntity().setPlanId(planId)

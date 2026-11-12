@@ -71,11 +71,7 @@ class HostingRentApplicationServiceTest {
             return new ManagedHostingProvisioner.SkillInventory(
                     EMPTY_INVENTORY.hostId(), EMPTY_INVENTORY.inventorySha256(), List.of(), EMPTY_INVENTORY.snapshotJson());
         });
-        application = new HostingRentApplicationService(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50"),
-                new EconomyPreviewGate(new EconomyPreviewProperties(true, List.of(
-                        new EconomyPreviewProperties.AllowedScope("0", "Client-A")))), owners, rent,
-                ledger, renewal, roots, bindings, runtimes, identities, providers, reconciler,
-                new DataSourceTransactionManager(dataSource), true);
+        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50"));
         when(owners.requireOwner(ACTOR)).thenReturn("Tenant-A");
         when(roots.lockPersona("wuyong")).thenReturn(new AgentPersonaEntity().setPersonaCode("wuyong").setName("fixture")
                 .setActive(true).setSystemAgent(false));
@@ -116,6 +112,44 @@ class HostingRentApplicationServiceTest {
         });
         when(runtimes.insert(any())).thenAnswer(call -> { jdbc.update("INSERT INTO effects VALUES('runtime')"); return 1; });
         when(rent.attachBinding("0", "Client-A", "hrl-test", "17")).thenReturn(1);
+    }
+
+    private void useProperties(AgentHostingRentProperties properties) {
+        application = new HostingRentApplicationService(properties,
+                new EconomyPreviewGate(new EconomyPreviewProperties(true, List.of(
+                        new EconomyPreviewProperties.AllowedScope("0", "Client-A")))), owners, rent,
+                ledger, renewal, roots, bindings, runtimes, identities, providers, reconciler,
+                new DataSourceTransactionManager(dataSource), true);
+    }
+
+    @Test void externalModelAndTariffChangeNewQuotesWithoutCodeChanges() {
+        for (long amount : new long[]{730L, 890L}) {
+            long version = amount + 100;
+            useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
+                    Map.of("wuyong", "arbitrary-provider.model"),
+                    Map.of("arbitrary-provider.model", new AgentHostingRentProperties.ModelPlan("" + version, "" + amount))));
+            when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", version)).thenReturn(
+                    new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(version)
+                            .setAmountWen(amount).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
+            doAnswer(call -> {
+                HostingRentQuoteCommand command = call.getArgument(0);
+                assertEquals(version, command.planVersion());
+                return new HostingRentQuoteReceipt("quote", command.purpose(), command.planId(), version,
+                        amount, 2592000L, "wuyong", command.agentId(), null, null,
+                        1800000000000L, amount, command.initialSkills());
+            }).when(ledger).quote(any());
+            assertEquals("" + amount, application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL")).recurringAmountWen());
+        }
+        verify(ledger, never()).reserve(any());
+        assertEquals(0, count());
+    }
+
+    @Test void missingPersonaInDifferentiatedConfigurationDoesNotFallBackToUniformPrice() {
+        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
+                Map.of("other", "opaque-model"), Map.of("opaque-model", new AgentHostingRentProperties.ModelPlan("22", "730"))));
+        assertEquals("HOSTING_RENT_NOT_CONFIGURED", assertThrows(HostingRentApplicationException.class,
+                () -> application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL"))).code());
+        verifyNoInteractions(ledger);
     }
 
     private AgentRuntimeEntity releasedInvitation() {
@@ -272,13 +306,15 @@ class HostingRentApplicationServiceTest {
     }
 
     @Test void existingCanonicalLeaseRenewalUsesTheSameLedgerWithoutRenamingIdentity() {
+        useProperties(new AgentHostingRentProperties(true, "2", "900", "86400", "2", "80",
+                Map.of("wuyong", "replacement"), Map.of("replacement", new AgentHostingRentProperties.ModelPlan("33", "1500"))));
         String agent = "jyt-fixture-likui";
         existingInvitation(agent);
         when(rent.selectLeaseForUpdate("0", "Client-A", "hrl-test")).thenReturn(new EconomyHostingLeaseEntity()
                 .setPlanId("agent-hosting-preview").setLeaseId("hrl-test").setAgentId(agent).setPersonaCode("wuyong")
                 .setPrincipalId("login-sub").setPrincipalType("USER"));
         when(rent.selectLease("0", "Client-A", "hrl-test")).thenReturn(new EconomyHostingLeaseEntity()
-                .setPlanId("agent-hosting-preview").setAgentId(agent).setPrincipalId("login-sub").setPrincipalType("USER"));
+                .setPlanId("agent-hosting-preview").setPlanVersion(1L).setAmountWen(1000000000L).setPeriodSeconds(2592000L).setAgentId(agent).setPrincipalId("login-sub").setPrincipalType("USER"));
         when(ledger.quote(any())).thenAnswer(call -> {
             HostingRentQuoteCommand command = call.getArgument(0);
             assertEquals(agent, command.agentId());
@@ -328,7 +364,7 @@ class HostingRentApplicationServiceTest {
                 .setPlanId("agent-hosting-preview").setLeaseId("hrl-test").setAgentId(AGENT).setPersonaCode("wuyong")
                 .setPrincipalId("login-sub").setPrincipalType("USER"));
         when(rent.selectLease("0", "Client-A", "hrl-test")).thenReturn(new EconomyHostingLeaseEntity()
-                .setPlanId("agent-hosting-preview").setAgentId(AGENT).setPrincipalId("login-sub").setPrincipalType("USER"));
+                .setPlanId("agent-hosting-preview").setPlanVersion(1L).setAmountWen(1000000000L).setPeriodSeconds(2592000L).setAgentId(AGENT).setPrincipalId("login-sub").setPrincipalType("USER"));
         when(ledger.quote(any())).thenReturn(new HostingRentQuoteReceipt("hrq-renew", HostingRentQuotePurpose.RENEWAL,
                 "agent-hosting-preview", 1L, 1000000000L, 2592000L, "wuyong", AGENT, "hrl-test", 4L, 1800000000000L, 1000000000L, null));
         application.renewalQuote(ACTOR, "hrl-test", KEY, Map.of("agentId", AGENT, "expectedLeaseVersion", "4"));
@@ -637,7 +673,7 @@ class HostingRentApplicationServiceTest {
 
     @Test void selfHostedRenewalKeepsOriginalPlanWithoutProbingLiveHost() {
         existingInvitation();
-        var lease = new EconomyHostingLeaseEntity().setPlanId("agent-self-hosted").setLeaseId("hrl-test")
+        var lease = new EconomyHostingLeaseEntity().setPlanId("agent-self-hosted").setPlanVersion(1L).setAmountWen(50L).setPeriodSeconds(2592000L).setLeaseId("hrl-test")
                 .setAgentId(AGENT).setPersonaCode("wuyong").setPrincipalId("login-sub").setPrincipalType("USER");
         when(rent.selectLease("0", "Client-A", "hrl-test")).thenReturn(lease);
         when(rent.selectLeaseForUpdate("0", "Client-A", "hrl-test")).thenReturn(lease);

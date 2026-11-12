@@ -62,6 +62,22 @@ class AgentPersonaPublicScopeTest {
         verifyNoMoreInteractions(dao);
     }
 
+    @Test void modelMetadataUsesExternalConfigurationAndDoesNotForgeObservedModel() {
+        var service = service(mock(AgentPersonaDao.class));
+        service.setHostingModelConfiguration(new cn.jia.agent.config.AgentHostingRentProperties(
+                false, "1", "500", "2592000", "1", "50", java.util.Map.of("wuyong", "future.model"),
+                java.util.Map.of("future.model", new cn.jia.agent.config.AgentHostingRentProperties.ModelPlan("91", "730"))));
+        var dto = new cn.jia.agent.entity.AgentRuntimeDTO(); dto.setPersonaCode("wuyong"); dto.setExecutionModel("observed-model");
+        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", dto);
+        assertEquals("future.model", dto.getConfiguredModel());
+        assertEquals("730", dto.getPlatformHostingAmountWen());
+        assertEquals("91", dto.getPlatformHostingPlanVersion());
+        assertEquals("observed-model", dto.getExecutionModel());
+        var unknown = new cn.jia.agent.entity.AgentRuntimeDTO(); unknown.setPersonaCode("missing");
+        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", unknown);
+        assertNull(unknown.getConfiguredModel()); assertNull(unknown.getPlatformHostingAmountWen());
+    }
+
     private AgentServiceImpl service(AgentPersonaDao dao) {
         var service = mock(AgentServiceImpl.class, CALLS_REAL_METHODS);
         ReflectionTestUtils.setField(service, "agentPersonaDao", dao);
