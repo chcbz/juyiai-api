@@ -34,3 +34,33 @@ CREATE TABLE IF NOT EXISTS agent_hosting_exchange (
   CONSTRAINT fk_hosting_exchange_authorization FOREIGN KEY (tenant_id, client_id, authorization_id)
     REFERENCES agent_hosting_authorization (tenant_id, client_id, authorization_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Setup allocates an invitation target, NOT a paid binding, installation or execution session.
+CREATE TABLE IF NOT EXISTS agent_hosting_setup (
+  tenant_id VARCHAR(50) NOT NULL,
+  client_id VARCHAR(50) NOT NULL,
+  setup_id VARCHAR(100) NOT NULL,
+  actor_id VARCHAR(100) NOT NULL,
+  owner_jiacn VARCHAR(50) NOT NULL,
+  persona_code VARCHAR(100) NOT NULL,
+  canonical_agent_id VARCHAR(100) NOT NULL,
+  host_id VARCHAR(100) NOT NULL,
+  deployment_mode VARCHAR(16) NOT NULL,
+  idempotency_key VARCHAR(36) NOT NULL,
+  request_hash BINARY(32) NOT NULL,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (tenant_id, client_id, setup_id),
+  UNIQUE KEY uk_hosting_setup_request (tenant_id, client_id, actor_id, idempotency_key),
+  CONSTRAINT fk_hosting_setup_grant FOREIGN KEY (tenant_id, client_id, setup_id)
+    REFERENCES agent_hosting_authorization (tenant_id, client_id, authorization_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+CREATE TABLE IF NOT EXISTS agent_hosting_setup_quote (
+  tenant_id VARCHAR(50) NOT NULL,
+  client_id VARCHAR(50) NOT NULL,
+  quote_id VARCHAR(100) NOT NULL,
+  setup_id VARCHAR(100) NOT NULL,
+  PRIMARY KEY (tenant_id, client_id, quote_id),
+  CONSTRAINT fk_hosting_setup_quote FOREIGN KEY (tenant_id, client_id, setup_id)
+    REFERENCES agent_hosting_setup (tenant_id, client_id, setup_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
