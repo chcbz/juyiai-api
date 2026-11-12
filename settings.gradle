@@ -1,0 +1,28 @@
+plugins {
+    id 'cn.jia.jia-dependency-management' version '1.1.2-SNAPSHOT'
+}
+
+rootProject.name = 'jia'
+
+include 'common:jia-common-core', 'common:jia-common-api', 'common:jia-common-test', 'common:jia-common-mapper',
+        'common:jia-common-service', 'common:jia-common-starter'
+include 'base:jia-base-core', 'base:jia-base-api', 'base:jia-base-service', 'base:jia-base-mapper',
+        'base:jia-base-starter'
+include 'dwz:jia-dwz-core', 'dwz:jia-dwz-api', 'dwz:jia-dwz-service', 'dwz:jia-dwz-mapper', 'dwz:jia-dwz-starter'
+include 'isp:jia-isp-core', 'isp:jia-isp-api', 'isp:jia-isp-service', 'isp:jia-isp-mapper', 'isp:jia-isp-starter'
+include 'kefu:jia-kefu-core', 'kefu:jia-kefu-api', 'kefu:jia-kefu-service', 'kefu:jia-kefu-mapper'
+include 'material:jia-material-core', 'material:jia-material-api', 'material:jia-material-service',
+        'material:jia-material-mapper', 'material:jia-material-starter'
+include 'oauth:jia-oauth-core', 'oauth:jia-oauth-api', 'oauth:jia-oauth-mapper',
+        'oauth:jia-oauth-service', 'oauth:jia-oauth-resource',
+        'oauth:jia-oauth-server-starter', 'oauth:jia-oauth-client-starter', 'oauth:jia-oauth-resource-starter'
+include 'point:jia-point-core', 'point:jia-point-api', 'point:jia-point-service', 'point:jia-point-mapper'
+include 'economy:jia-economy-core', 'economy:jia-economy-api', 'economy:jia-economy-service', 'economy:jia-economy-mapper'
+include 'sms:jia-sms-core', 'sms:jia-sms-api', 'sms:jia-sms-service', 'sms:jia-sms-mapper', 'sms:jia-sms-starter'
+include 'task:jia-task-core', 'task:jia-task-api', 'task:jia-task-service', 'task:jia-task-mapper', 'task:jia-task-starter'
+include 'user:jia-user-core', 'user:jia-user-api', 'user:jia-user-service', 'user:jia-user-mapper', 'user:jia-user-starter'
+include 'workflow:jia-workflow-core', 'workflow:jia-workflow-api', 'workflow:jia-workflow-service', 'workflow:jia-workflow-starter'
+include 'wx:jia-wx-core', 'wx:jia-wx-api', 'wx:jia-wx-service', 'wx:jia-wx-mapper'
+include 'chat:jia-chat-core', 'chat:jia-chat-api', 'chat:jia-chat-service', 'chat:jia-chat-mapper', 'chat:jia-chat-starter'
+include 'agent:jia-agent-core', 'agent:jia-agent-api', 'agent:jia-agent-service', 'agent:jia-agent-mapper'
+include 'starter'

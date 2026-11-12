@@ -1,0 +1,21 @@
+package cn.jia.mat.mapper;
+
+import cn.jia.mat.entity.MatVoteQuestionEntity;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+
+/**
+ * <p>
+ *  Mapper 接口
+ * </p>
+ *
+ * @author chc
+ * @since 2021-10-29
+ */
+public interface MatVoteQuestionMapper extends BaseMapper<MatVoteQuestionEntity> {
+
+    MatVoteQuestionEntity selectNoTick(String jiacn);
+
+    MatVoteQuestionEntity selectScheduledQuestion(@org.apache.ibatis.annotations.Param("tenantId") String tenantId,
+            @org.apache.ibatis.annotations.Param("clientId") String clientId,
+            @org.apache.ibatis.annotations.Param("jiacn") String jiacn);
+}

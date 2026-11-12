@@ -1,0 +1,116 @@
+package cn.jia.agent.config;
+
+import cn.jia.agent.service.PersonalWorkspaceStorage;
+import cn.jia.agent.service.impl.DisabledPersonalWorkspaceStorage;
+import cn.jia.agent.service.impl.FileSystemPersonalWorkspaceStorage;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import java.nio.file.Path;
+
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties({PersonalWorkspaceStorageProperties.class, PersonalWorkspaceExecutionProperties.class})
+public class PersonalWorkspaceStorageConfiguration {
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public AgentExternalServicePolicySchemaInitializer agentExternalServicePolicySchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new AgentExternalServicePolicySchemaInitializer(jdbcTemplate);
+    }
+
+    @Bean
+    public PersonalWorkspaceStorage personalWorkspaceStorage(PersonalWorkspaceStorageProperties properties) {
+        if (!properties.enabled()) return new DisabledPersonalWorkspaceStorage();
+        if (properties.rootDirectory() == null || properties.rootDirectory().isBlank()
+                || properties.maxContentBytes() == null || properties.maxContentBytes() < 1) {
+            throw new IllegalStateException("Invalid personal workspace storage configuration");
+        }
+        return new FileSystemPersonalWorkspaceStorage(Path.of(properties.rootDirectory()),
+                properties.maxContentBytes());
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public PersonalWorkspaceSchemaInitializer personalWorkspaceSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new PersonalWorkspaceSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public PersonalWorkspaceExecutionSchemaInitializer personalWorkspaceExecutionSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new PersonalWorkspaceExecutionSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public PersonalWorkspaceTaskLinkSchemaInitializer personalWorkspaceTaskLinkSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new PersonalWorkspaceTaskLinkSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public HallRequestDraftSchemaInitializer hallRequestDraftSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new HallRequestDraftSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public HallPrivateCaseSchemaInitializer hallPrivateCaseSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new HallPrivateCaseSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public HallPrivateMarkSchemaInitializer hallPrivateMarkSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new HallPrivateMarkSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public AgentTaskExecutionGrantSchemaInitializer agentTaskExecutionGrantSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new AgentTaskExecutionGrantSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public AgentTaskBountyBootstrapOutboxSchemaInitializer agentTaskBountyBootstrapOutboxSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new AgentTaskBountyBootstrapOutboxSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public AgentTaskRequirementSnapshotSchemaInitializer agentTaskRequirementSnapshotSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new AgentTaskRequirementSnapshotSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public AgentTaskCreationOperationSchemaInitializer agentTaskCreationOperationSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new AgentTaskCreationOperationSchemaInitializer(jdbcTemplate);
+    }
+
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "agent.personal-workspace-storage", name = "enabled", havingValue = "true")
+    public PersonalWorkspaceConversationLinkSchemaInitializer personalWorkspaceConversationLinkSchemaInitializer(
+            JdbcTemplate jdbcTemplate) {
+        return new PersonalWorkspaceConversationLinkSchemaInitializer(jdbcTemplate);
+    }
+}

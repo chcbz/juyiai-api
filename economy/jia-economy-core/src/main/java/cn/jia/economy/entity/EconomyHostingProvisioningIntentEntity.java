@@ -1,0 +1,57 @@
+package cn.jia.economy.entity;
+
+import lombok.Data;
+import lombok.experimental.Accessors;
+
+@Data
+@Accessors(chain = true)
+public class EconomyHostingProvisioningIntentEntity {
+    private Long id;
+    private String intentId;
+    private String leaseId;
+    private String quoteId;
+    private String quotePurpose;
+    private String principalType;
+    private String principalId;
+    private String personaCode;
+    private String agentId;
+    private Long amountWen;
+    private Long periodSeconds;
+    private String status;
+    /** PAID is a payment; RETAINED preserves archived terms; TRANSITION is an explicit free cutover grant. */
+    private String settlementKind = "PAID";
+    private byte[] reserveIdempotencyKey;
+    private byte[] reserveRequestHash;
+    private String reserveTransactionId;
+    private Long reservedAt;
+    private Long escrowVersion;
+    private byte[] captureIdempotencyKey;
+    private byte[] captureRequestHash;
+    private String captureTransactionId;
+    private Long capturedAt;
+    private byte[] refundIdempotencyKey;
+    private byte[] refundRequestHash;
+    private String refundTransactionId;
+    private Long refundedAt;
+    /** Existing OAuth key row reference; never a secret or a fallback identity. */
+    private String managedApiKeyId;
+    private String runtimeInstallationId;
+    private String runtimeManifestSha256;
+    /** Operation generation, independent of financial CAS version and Runtime session generation. */
+    private Long runtimeProvisionGeneration;
+    private String outcomeEvidenceRef;
+    private Long serviceReadyAt;
+    private Long paidFrom;
+    private Long paidThrough;
+    private Long version;
+    private String tenantId;
+    private String clientId;
+    private Long createTime;
+    private Long updateTime;
+
+    /** Runtime association epoch. TRANSITION has no financial reservation timestamp.
+     * The established hosting-v1 wire calls this association field reservedAt. */
+    public Long associationStartedAt() {
+        return "TRANSITION".equals(settlementKind) ? createTime : reservedAt;
+    }
+}

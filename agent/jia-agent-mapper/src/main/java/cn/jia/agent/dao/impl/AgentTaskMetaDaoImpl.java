@@ -1,0 +1,331 @@
+package cn.jia.agent.dao.impl;
+
+import cn.jia.agent.dao.AgentTaskMetaDao;
+import cn.jia.agent.entity.AgentTaskAggregationSnapshotRow;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.entity.AgentTaskMemberEntity;
+import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.mapper.AgentTaskMetaMapper;
+import cn.jia.agent.mapper.AgentTaskSearchRow;
+import cn.jia.agent.mapper.AgentTaskStatsRow;
+import cn.jia.agent.mapper.AgentTaskStatsScope;
+import cn.jia.agent.mapper.AgentTaskStatusCountRow;
+import cn.jia.common.dao.BaseDaoImpl;
+import cn.jia.core.util.DateUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import jakarta.inject.Named;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+
+@Named
+public class AgentTaskMetaDaoImpl extends BaseDaoImpl<AgentTaskMetaMapper, AgentTaskMetaEntity> implements AgentTaskMetaDao {
+    @Override
+    public AgentTaskMetaEntity findByTaskId(String taskId) {
+        return baseMapper.selectOne(new LambdaQueryWrapper<AgentTaskMetaEntity>()
+                .eq(AgentTaskMetaEntity::getTaskId, taskId)
+                .last("limit 1"));
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByTaskId(String tenantId, String clientId, String taskId) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        TaskCollaborationDaoSupport.requireId(taskId, "taskId");
+        return baseMapper.findExactByTaskScope(tenantId, clientId, taskId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByTaskIdInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        requireExactOwnerScope(tenantId, clientId, ownerJiacn);
+        TaskCollaborationDaoSupport.requireId(taskId, "taskId");
+        return baseMapper.findExactByOwnerTaskScope(tenantId, clientId, ownerJiacn, taskId);
+    }
+
+    @Override
+    public int reserveOpenTaskRoot(
+            String tenantId, String clientId, String taskId, long createTime) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(taskId, "taskId", 100);
+        if (createTime <= 0) {
+            throw new IllegalArgumentException("createTime must be positive");
+        }
+        return baseMapper.reserveOpenTaskRoot(tenantId, clientId, taskId, createTime);
+    }
+
+    @Override
+    public int reserveOpenTaskRootInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId, long createTime) {
+        requireExactOwnerScope(tenantId, clientId, ownerJiacn);
+        requireExactId(taskId, "taskId", 100);
+        if (createTime <= 0) {
+            throw new IllegalArgumentException("createTime must be positive");
+        }
+        return baseMapper.reserveOpenTaskRootInOwnerScope(
+                tenantId, clientId, ownerJiacn, taskId, createTime);
+    }
+
+    @Override
+    public int rekeyReservedTaskRoot(
+            String tenantId, String clientId, String reservedTaskId,
+            String finalTaskId, long updateTime) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(reservedTaskId, "reservedTaskId", 100);
+        requireExactId(finalTaskId, "finalTaskId", 100);
+        if (updateTime <= 0) {
+            throw new IllegalArgumentException("updateTime must be positive");
+        }
+        return baseMapper.rekeyReservedTaskRoot(
+                tenantId, clientId, reservedTaskId, finalTaskId, updateTime);
+    }
+
+    @Override
+    public int rekeyReservedTaskRootInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String reservedTaskId,
+            String finalTaskId, long updateTime) {
+        requireExactOwnerScope(tenantId, clientId, ownerJiacn);
+        requireExactId(reservedTaskId, "reservedTaskId", 100);
+        requireExactId(finalTaskId, "finalTaskId", 100);
+        if (updateTime <= 0) {
+            throw new IllegalArgumentException("updateTime must be positive");
+        }
+        return baseMapper.rekeyReservedTaskRootInOwnerScope(
+                tenantId, clientId, ownerJiacn, reservedTaskId, finalTaskId, updateTime);
+    }
+
+    @Override
+    public int deleteReservedTaskRoot(
+            String tenantId, String clientId, String reservedTaskId) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(reservedTaskId, "reservedTaskId", 100);
+        return baseMapper.deleteReservedTaskRoot(tenantId, clientId, reservedTaskId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByTaskIdForUpdate(
+            String tenantId, String clientId, String taskId) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(taskId, "taskId", 100);
+        return baseMapper.findExactByTaskScopeForUpdate(tenantId, clientId, taskId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByTaskIdForUpdateInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        requireExactOwnerScope(tenantId, clientId, ownerJiacn);
+        requireExactId(taskId, "taskId", 100);
+        return baseMapper.findExactByOwnerTaskScopeForUpdate(
+                tenantId, clientId, ownerJiacn, taskId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByWorkItemIdForUpdate(
+            String tenantId, String clientId, String workItemId) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(workItemId, "workItemId", 100);
+        return baseMapper.findTaskRootByWorkItemForUpdate(
+                tenantId, clientId, workItemId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findByWorkItemIdForUpdateInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String workItemId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        requireExactId(workItemId, "workItemId", 100);
+        return baseMapper.findTaskRootByWorkItemForUpdateInOwnerScope(
+                tenantId, clientId, ownerJiacn, workItemId);
+    }
+
+    @Override
+    public AgentTaskMetaEntity findDurableActiveAssignmentByAgentForUpdate(
+            String tenantId, String clientId, String agentId) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(agentId, "agentId", 100);
+        return baseMapper.findDurableActiveAssignmentByAgentForUpdate(
+                tenantId, clientId, agentId);
+    }
+
+    @Override
+    public List<AgentTaskAggregationSnapshotRow> findAggregationSnapshot(
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        TaskCollaborationDaoSupport.requireId(taskId, "taskId");
+        return baseMapper.selectAggregationSnapshot(tenantId, clientId, ownerJiacn, taskId);
+    }
+
+    @Override
+    public int updateAssignmentByVersion(AgentTaskMetaEntity task, long expectedVersion,
+            long resultVersion, long updateTime) {
+        if (task == null) throw new IllegalArgumentException("task is required");
+        TaskCollaborationDaoSupport.requireScope(task.getTenantId(), task.getClientId());
+        requireExactId(task.getTaskId(), "taskId", 100);
+        TaskCollaborationDaoSupport.requireExpectedVersion(expectedVersion);
+        if (resultVersion != expectedVersion + 1 || updateTime <= 0) {
+            throw new IllegalArgumentException("assignment version transition is invalid");
+        }
+        return baseMapper.updateAssignmentByVersion(task.getTenantId(), task.getClientId(),
+                task.getTaskId(), expectedVersion, resultVersion, task.getAssignedAgentId(),
+                task.getRewardStatus(), task.getAssignedAt(), task.getCollaborationMode(),
+                task.getMaxAgents(), task.getCoordinatorAgentId(), updateTime);
+    }
+
+    @Override
+    public int updateStatusByVersion(String tenantId, String clientId, String taskId,
+            long expectedVersion, String rewardStatus, Long startedAt, Long completedAt,
+            String failureReason) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        TaskCollaborationDaoSupport.requireId(taskId, "taskId");
+        TaskCollaborationDaoSupport.requireId(rewardStatus, "rewardStatus");
+        TaskCollaborationDaoSupport.requireExpectedVersion(expectedVersion);
+        return baseMapper.updateStatusByVersion(tenantId, clientId, taskId, expectedVersion,
+                rewardStatus, startedAt, completedAt, failureReason, DateUtil.nowTime());
+    }
+
+    @Override
+    public int updateStatusByVersionInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId,
+            long expectedVersion, String rewardStatus, Long startedAt, Long completedAt,
+            String failureReason) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        TaskCollaborationDaoSupport.requireId(taskId, "taskId");
+        TaskCollaborationDaoSupport.requireId(rewardStatus, "rewardStatus");
+        TaskCollaborationDaoSupport.requireExpectedVersion(expectedVersion);
+        return baseMapper.updateStatusByVersionInOwnerScope(
+                tenantId, clientId, ownerJiacn, taskId, expectedVersion, rewardStatus,
+                startedAt, completedAt, failureReason, DateUtil.nowTime());
+    }
+
+    @Override
+    public List<AgentTaskMetaEntity> findByAgentId(
+            String tenantId, String clientId, String agentId, int limit) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(agentId, "agentId", 100);
+        return baseMapper.selectByAgentInScope(
+                tenantId, clientId, agentId, TaskCollaborationDaoSupport.boundedLimit(limit));
+    }
+
+    @Override
+    public List<AgentTaskMetaEntity> findByAgentInOwnerScope(String tenantId, String clientId,
+            String ownerJiacn, String agentId, int limit) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        requireExactId(agentId, "agentId", 100);
+        return baseMapper.selectByAgentInOwnerScope(tenantId, clientId, ownerJiacn, agentId,
+                TaskCollaborationDaoSupport.boundedLimit(limit));
+    }
+
+    @Override
+    public List<AgentTaskStatsRow> findStatsByAgents(List<AgentTaskStatsScope> scopes) {
+        if (scopes == null || scopes.isEmpty()) {
+            return List.of();
+        }
+        for (AgentTaskStatsScope scope : scopes) {
+            if (scope == null) {
+                throw new IllegalArgumentException("Agent task statistics scope is required");
+            }
+            TaskCollaborationDaoSupport.requireScope(scope.getTenantId(), scope.getClientId());
+            requireExactId(scope.getAgentId(), "agentId", 100);
+        }
+        return baseMapper.selectStatsByAgentScopes(scopes);
+    }
+
+    private void requireExactId(String value, String name, int maxLength) {
+        TaskCollaborationDaoSupport.requireId(value, name);
+        if (value.length() > maxLength || !value.equals(value.strip())
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException(
+                    name + " must be byte-exact, unpadded, and free of control characters");
+        }
+    }
+
+    @Override
+    public long countSearch(String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, String phase, String assignedAgentId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        return baseMapper.countSearchExactInScope(
+                tenantId, clientId, ownerJiacn, status, ability, keyword, phase, assignedAgentId);
+    }
+
+    @Override
+    public List<AgentTaskSearchRow> searchPage(
+            String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, long offset, int limit, String phase, String assignedAgentId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must not be negative");
+        }
+        return baseMapper.searchPageExactInScope(tenantId, clientId, ownerJiacn, status, ability,
+                keyword, offset, TaskCollaborationDaoSupport.boundedLimit(limit), phase, assignedAgentId);
+    }
+
+    @Override
+    public List<AgentTaskSearchRow> searchPageWithFunding(
+            String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, long offset, int limit, String phase, String assignedAgentId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must not be negative");
+        }
+        return baseMapper.searchPageWithFundingExactInScope(
+                tenantId, clientId, ownerJiacn, status, ability, keyword, offset,
+                TaskCollaborationDaoSupport.boundedLimit(limit), phase, assignedAgentId);
+    }
+
+    @Override
+    public List<AgentTaskMemberEntity> findSearchMembers(
+            String tenantId, String clientId, String ownerJiacn, List<String> taskIds) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        List<String> exactTaskIds = exactIds(taskIds, "taskId", 100);
+        return exactTaskIds.isEmpty() ? List.of()
+                : baseMapper.selectSearchMembersExactInScope(
+                        tenantId, clientId, ownerJiacn, exactTaskIds);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findSearchRuntimes(
+            String tenantId, String clientId, String ownerJiacn, List<String> agentIds) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        List<String> exactAgentIds = exactIds(agentIds, "agentId", 100);
+        return exactAgentIds.isEmpty() ? List.of()
+                : baseMapper.selectSearchRuntimesExactInOwnerScope(
+                        tenantId, clientId, ownerJiacn, exactAgentIds);
+    }
+
+    @Override
+    public List<AgentTaskStatusCountRow> countSearchByStatus(
+            String tenantId, String clientId, String ownerJiacn, String ability, String keyword, String assignedAgentId) {
+        requireStrictOwnerScope(tenantId, clientId, ownerJiacn);
+        return baseMapper.countSearchByStatusExactInScope(
+                tenantId, clientId, ownerJiacn, ability, keyword, null, assignedAgentId);
+    }
+
+    private void requireStrictOwnerScope(
+            String tenantId, String clientId, String ownerJiacn) {
+        TaskCollaborationDaoSupport.requireScope(tenantId, clientId);
+        requireExactId(ownerJiacn, "ownerJiacn", 50);
+        if ("0".equals(ownerJiacn)) {
+            throw new IllegalArgumentException("strict task owner scope requires a real owner");
+        }
+    }
+
+    private void requireExactOwnerScope(String tenantId, String clientId, String ownerJiacn) {
+        requireExactId(tenantId, "tenantId", 50);
+        requireExactId(clientId, "clientId", 50);
+        requireExactId(ownerJiacn, "ownerJiacn", 50);
+        if ("0".equals(ownerJiacn)) {
+            throw new IllegalArgumentException("task scope requires a real owner");
+        }
+    }
+
+    private List<String> exactIds(List<String> values, String name, int maxLength) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<String> exact = new LinkedHashSet<>();
+        for (String value : values) {
+            requireExactId(value, name, maxLength);
+            exact.add(value);
+        }
+        return new ArrayList<>(exact);
+    }
+}

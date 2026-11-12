@@ -1,0 +1,388 @@
+package cn.jia.chat.advisor;
+
+import cn.jia.chat.service.ChatConversationService;
+import cn.jia.chat.service.ConversationMetadataPolicy;
+import cn.jia.chat.service.ServerResolvedAgentSender;
+import cn.jia.chat.service.ServerResolvedSender;
+import cn.jia.chat.service.ServerTrustedSender;
+import cn.jia.chat.entity.ChatMessageEntity;
+import cn.jia.core.util.JsonUtil;
+import cn.jia.core.util.StringUtil;
+import org.springframework.ai.chat.client.ChatClientRequest;
+import org.springframework.ai.chat.client.ChatClientResponse;
+import org.springframework.ai.chat.client.advisor.api.Advisor;
+import org.springframework.ai.chat.client.advisor.api.AdvisorChain;
+import org.springframework.ai.chat.client.advisor.api.BaseAdvisor;
+import org.springframework.ai.chat.client.advisor.api.BaseChatMemoryAdvisor;
+import org.springframework.ai.chat.messages.AbstractMessage;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.prompt.PromptTemplate;
+import org.springframework.util.Assert;
+import lombok.extern.slf4j.Slf4j;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.springframework.ai.chat.client.ChatClientMessageAggregator;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+
+/**
+ * 基于数据库的聊天记忆 Advisor
+ * <p>
+ * 参考 CustomerVectorStoreChatMemoryAdvisor 实现，解决 DatabaseChatMemoryRepository#saveAll 导致的重复插入问题。
+ * <p>
+ * 工作原理：
+ * 1. before: 查询历史消息增强上下文，并保存用户消息到数据库
+ * 2. after: 保存 AI 响应消息到数据库
+ * <p>
+ * 与 CustomerVectorStoreChatMemoryAdvisor 的区别：
+ * - 数据存储在数据库而非向量数据库
+ * - 避免了 Spring AI ChatMemory 的 saveAll 重复调用问题
+ * 
+ * @author lingma
+ * @version 2.2
+ */
+@Slf4j
+public class DatabaseChatMemoryAdvisor implements BaseChatMemoryAdvisor {
+
+    public static final String USER_MESSAGE = "user_message";
+    public static final String SKIP_USER_MESSAGE_PERSISTENCE = "skipUserMessagePersistence";
+    public static final String SKIP_ASSISTANT_MESSAGE_PERSISTENCE = "skipAssistantMessagePersistence";
+    public static final String SERVER_RESOLVED_SENDER = "serverResolvedSender";
+
+    private static final String MEMORY_TEMPLATE = """
+        {instructions}
+
+        Use the conversation memory from the MEMORY section to provide accurate answers.
+
+        ---------------------
+        MEMORY:
+        {memory}
+        ---------------------
+        """;
+
+    private final PromptTemplate systemPromptTemplate;
+
+    private final String defaultConversationId;
+
+    private final int order;
+
+    private final ChatConversationService chatConversationService;
+
+    private final int maxMessages;
+
+    private final Scheduler scheduler;
+
+    private DatabaseChatMemoryAdvisor(PromptTemplate systemPromptTemplate, String defaultConversationId,
+                                       int order, ChatConversationService chatConversationService,
+                                       int maxMessages, Scheduler scheduler) {
+        Assert.notNull(systemPromptTemplate, "systemPromptTemplate cannot be null");
+        Assert.hasText(defaultConversationId, "defaultConversationId cannot be null or empty");
+        Assert.notNull(chatConversationService, "chatConversationService cannot be null");
+        Assert.isTrue(maxMessages > 0, "maxMessages must be greater than 0");
+        this.systemPromptTemplate = systemPromptTemplate;
+        this.defaultConversationId = defaultConversationId;
+        this.order = order;
+        this.chatConversationService = chatConversationService;
+        this.maxMessages = maxMessages;
+        this.scheduler = scheduler;
+    }
+
+    public static Builder builder(ChatConversationService chatConversationService) {
+        return new Builder(chatConversationService);
+    }
+
+    @Override
+    public String getName() {
+        return "DatabaseChatMemoryAdvisor";
+    }
+
+    @Override
+    public int getOrder() {
+        return this.order;
+    }
+
+    @Override
+    public Scheduler getScheduler() {
+        return this.scheduler;
+    }
+
+    @Override
+    public ChatClientRequest before(ChatClientRequest request, AdvisorChain advisorChain) {
+        request.context().putIfAbsent(ChatMemory.CONVERSATION_ID, this.defaultConversationId);
+        String conversationId = getConversationId(request.context());
+        
+        // 获取用户消息
+        String userMessageText = Optional.of(request.prompt().getUserMessage())
+                .map(AbstractMessage::getText).orElse("");
+        
+        // 查询最近 maxMessages 条历史消息用于增强上下文
+        String tenantId = requireIdentity(request.context(), "tenantId");
+        String ownerJiacn = requireIdentity(request.context(), "jiacn");
+        String ownerClientId = requireIdentity(request.context(), "clientId");
+        List<ChatMessageEntity> historyMessages = chatConversationService.findOwnedMessages(
+                tenantId, ownerJiacn, ownerClientId, conversationId, maxMessages);
+
+        // 构建内存文本
+        String memory = historyMessages.stream()
+                .sorted(Comparator.comparingLong(msg -> Optional.ofNullable(msg.getCreateTime()).orElse(0L)))
+                .map(msg -> "[" + msg.getMessageType() + "] " + msg.getContent())
+                .reduce("", (a, b) -> a + (a.isEmpty() ? b : "\n" + b));
+        
+        // 增强系统提示词
+        SystemMessage systemMessage = request.prompt().getSystemMessage();
+        String augmentedSystemText = this.systemPromptTemplate
+                .render(Map.of(
+                        "instructions", Optional.ofNullable(systemMessage.getText()).orElse(""),
+                        "memory", memory.isEmpty() ? "(No previous conversation)" : memory
+                ));
+
+        // 保存用户消息到数据库
+        if (!Boolean.TRUE.equals(request.context().get(SKIP_USER_MESSAGE_PERSISTENCE))) {
+            saveMessage(request.prompt().getUserMessage(), request.context());
+        }
+
+        // 更新上下文中的用户消息
+        return request.mutate()
+                .context(Map.of(USER_MESSAGE, userMessageText))
+                .prompt(request.prompt().augmentSystemMessage(augmentedSystemText))
+                .build();
+    }
+
+    @Override
+    public ChatClientResponse after(ChatClientResponse chatClientResponse, AdvisorChain advisorChain) {
+        List<Message> assistantMessages = new ArrayList<>();
+        if (chatClientResponse.chatResponse() != null) {
+            assistantMessages = chatClientResponse.chatResponse()
+                    .getResults()
+                    .stream()
+                    .map(g -> (Message) g.getOutput())
+                    .toList();
+        }
+        
+        if (!Boolean.TRUE.equals(chatClientResponse.context().get(SKIP_ASSISTANT_MESSAGE_PERSISTENCE))) {
+            // 保存 AI 响应消息到数据库
+            for (Message message : assistantMessages) {
+                if (message instanceof AssistantMessage assistantMessage
+                        && StringUtil.isNotBlank(assistantMessage.getText())) {
+                    saveMessage(assistantMessage, chatClientResponse.context());
+                }
+            }
+        }
+        
+        return chatClientResponse;
+    }
+
+    @Override
+    public Flux<ChatClientResponse> adviseStream(ChatClientRequest chatClientRequest,
+                                                 StreamAdvisorChain streamAdvisorChain) {
+        // Get the scheduler from BaseAdvisor
+        Scheduler scheduler = this.getScheduler();
+
+        // Process the request with the before method
+        return Mono.just(chatClientRequest)
+                .publishOn(scheduler)
+                .map(request -> this.before(request, streamAdvisorChain))
+                .flatMapMany(streamAdvisorChain::nextStream)
+                .transform(flux -> new ChatClientMessageAggregator().aggregateChatClientResponse(flux,
+                        response -> this.after(response, streamAdvisorChain)));
+    }
+
+    /**
+     * 保存消息到数据库
+     */
+    private void saveMessage(Message message, Map<String, Object> context) {
+        context.putIfAbsent(ChatMemory.CONVERSATION_ID, defaultConversationId);
+        String conversationId = getConversationId(context);
+        try {
+            String tenantId = requireIdentity(context, "tenantId");
+            String ownerJiacn = requireIdentity(context, "jiacn");
+            String ownerClientId = requireIdentity(context, "clientId");
+            ChatMessageEntity entity = new ChatMessageEntity();
+            entity.setJiacn(ownerJiacn);
+            entity.setClientId(ownerClientId);
+            entity.setConversationId(conversationId);
+            entity.setMessageType(message.getMessageType().name());
+            entity.setContent(message.getText());
+            // 设置同步状态为 PENDING，标记该会话需要同步到向量库
+            entity.setSyncStatus("PENDING");
+            entity.setConversationType(String.valueOf(context.getOrDefault("conversationType", "normal")));
+            PersistedSender sender = persistedSender(message, context, ownerJiacn, ownerClientId);
+            entity.setSenderType(sender == null ? "" : sender.type());
+            entity.setSenderName(sender == null ? "" : sender.displayName());
+
+            Map<String, Object> metadata = Optional.ofNullable(message.getMetadata())
+                    .map(ConversationMetadataPolicy::copyAllowed)
+                    .orElseGet(HashMap::new);
+            // Advisor context contains the captured conversation scope and must win on conflicts.
+            metadata.putAll(ConversationMetadataPolicy.copyAllowed(context));
+            if (sender != null) {
+                // Server-authenticated identity is written last and cannot be supplied by metadata.
+                metadata.put("senderType", sender.type());
+                metadata.put("senderName", sender.displayName());
+                metadata.put("jiacn", sender.jiacn());
+            }
+            entity.setMetadata(JsonUtil.toJson(metadata));
+
+            chatConversationService.appendOwnedMessage(tenantId, ownerJiacn, ownerClientId, entity);
+            log.debug("Saved message to conversation: {}", conversationId);
+        } catch (Exception e) {
+            log.error("Failed to save message for conversation ID: {}", conversationId, e);
+            throw new RuntimeException("Failed to save message for conversation ID: " + conversationId, e);
+        }
+    }
+
+    private PersistedSender persistedSender(
+            Message message, Map<String, Object> context,
+            String ownerJiacn, String ownerClientId) {
+        ServerTrustedSender trusted = resolvedSender(context, ownerJiacn, ownerClientId);
+        if (trusted == null) {
+            return null;
+        }
+        if (trusted instanceof ServerResolvedSender
+                && !"USER".equals(message.getMessageType().name())) {
+            String type = message.getMessageType().name().toLowerCase(java.util.Locale.ROOT);
+            String displayName = "ASSISTANT".equals(message.getMessageType().name()) ? "助手" : "系统";
+            return new PersistedSender(type, displayName, trusted.jiacn());
+        }
+        return new PersistedSender(trusted.type(), trusted.displayName(), trusted.jiacn());
+    }
+
+    private ServerTrustedSender resolvedSender(
+            Map<String, Object> context, String ownerJiacn, String ownerClientId) {
+        Object raw = context.get(SERVER_RESOLVED_SENDER);
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof ServerTrustedSender sender)
+                || !trustedTypeMatches(sender)
+                || sender.displayName() == null
+                || sender.displayName().isBlank()
+                || !sender.displayName().equals(sender.displayName().strip())
+                || sender.displayName().length() > 100
+                || sender.displayName().chars().anyMatch(Character::isISOControl)
+                || !ownerJiacn.equals(sender.jiacn())
+                || !ownerClientId.equals(sender.clientId())) {
+            throw new IllegalStateException("Server-resolved sender scope mismatch");
+        }
+        return sender;
+    }
+
+    private record PersistedSender(String type, String displayName, String jiacn) {
+    }
+
+    private boolean trustedTypeMatches(ServerTrustedSender sender) {
+        return sender instanceof ServerResolvedSender
+                ? ServerResolvedSender.USER_TYPE.equals(sender.type())
+                : sender instanceof ServerResolvedAgentSender agentSender
+                && ServerResolvedAgentSender.AGENT_TYPE.equals(sender.type())
+                && agentSender.agentId() != null
+                && !agentSender.agentId().isBlank()
+                && agentSender.agentId().equals(agentSender.agentId().strip())
+                && agentSender.agentId().chars().noneMatch(Character::isISOControl);
+    }
+
+    private String requireIdentity(Map<String, Object> context, String field) {
+        Object raw = context.get(field);
+        if (!(raw instanceof String value) || value.isBlank() || !value.equals(value.strip())
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalStateException("Missing exact conversation " + field + " scope");
+        }
+        return value;
+    }
+
+    /**
+     * Builder for DatabaseChatMemoryAdvisor
+     */
+    public static class Builder {
+
+        private PromptTemplate systemPromptTemplate = new PromptTemplate(MEMORY_TEMPLATE);
+
+        private String conversationId = "default";
+
+        private int order = Advisor.DEFAULT_CHAT_MEMORY_PRECEDENCE_ORDER;
+
+        private final ChatConversationService chatConversationService;
+
+        private int maxMessages = 20;
+
+        private Scheduler scheduler = BaseAdvisor.DEFAULT_SCHEDULER;
+
+        /**
+         * Creates a new builder instance.
+         * @param chatConversationService the authenticated conversation service
+         */
+        protected Builder(ChatConversationService chatConversationService) {
+            this.chatConversationService = chatConversationService;
+        }
+
+        /**
+         * Set the system prompt template.
+         * @param systemPromptTemplate the system prompt template
+         * @return this builder
+         */
+        public Builder systemPromptTemplate(PromptTemplate systemPromptTemplate) {
+            this.systemPromptTemplate = systemPromptTemplate;
+            return this;
+        }
+
+        /**
+         * Set the max messages to retrieve.
+         * @param maxMessages the max messages
+         * @return this builder
+         */
+        public Builder maxMessages(int maxMessages) {
+            this.maxMessages = maxMessages;
+            return this;
+        }
+
+        /**
+         * Set the conversation id.
+         * @param conversationId the conversation id
+         * @return the builder
+         */
+        public Builder conversationId(String conversationId) {
+            this.conversationId = conversationId;
+            return this;
+        }
+
+        /**
+         * Set the order.
+         * @param order the order
+         * @return the builder
+         */
+        public Builder order(int order) {
+            this.order = order;
+            return this;
+        }
+
+        /**
+         * Set the scheduler.
+         * @param scheduler the scheduler
+         * @return this builder
+         */
+        public Builder scheduler(Scheduler scheduler) {
+            this.scheduler = scheduler;
+            return this;
+        }
+
+        /**
+         * Build the advisor.
+         * @return the advisor
+         */
+        public DatabaseChatMemoryAdvisor build() {
+            return new DatabaseChatMemoryAdvisor(this.systemPromptTemplate, this.conversationId,
+                    this.order, this.chatConversationService, this.maxMessages, this.scheduler);
+        }
+    }
+}

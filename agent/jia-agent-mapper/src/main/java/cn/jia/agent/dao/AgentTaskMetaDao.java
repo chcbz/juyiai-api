@@ -1,0 +1,100 @@
+package cn.jia.agent.dao;
+
+import cn.jia.agent.entity.AgentTaskAggregationSnapshotRow;
+import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.mapper.AgentTaskSearchRow;
+import cn.jia.agent.mapper.AgentTaskStatsRow;
+import cn.jia.agent.mapper.AgentTaskStatusCountRow;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.entity.AgentTaskMemberEntity;
+import cn.jia.agent.mapper.AgentTaskStatsScope;
+import cn.jia.core.dao.IBaseDao;
+
+import java.util.List;
+
+public interface AgentTaskMetaDao extends IBaseDao<AgentTaskMetaEntity> {
+    AgentTaskMetaEntity findByTaskId(String taskId);
+
+    AgentTaskMetaEntity findByTaskId(String tenantId, String clientId, String taskId);
+
+    /** Strict task access: tenant is fixed to 0 and the authenticated owner is explicit. */
+    AgentTaskMetaEntity findByTaskIdInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId);
+
+    int reserveOpenTaskRoot(
+            String tenantId, String clientId, String taskId, long createTime);
+
+    int reserveOpenTaskRootInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId, long createTime);
+
+    int rekeyReservedTaskRoot(
+            String tenantId, String clientId, String reservedTaskId,
+            String finalTaskId, long updateTime);
+
+    int rekeyReservedTaskRootInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String reservedTaskId,
+            String finalTaskId, long updateTime);
+
+    int deleteReservedTaskRoot(
+            String tenantId, String clientId, String reservedTaskId);
+
+    AgentTaskMetaEntity findByTaskIdForUpdate(
+            String tenantId, String clientId, String taskId);
+
+    /** Strict task mutation lock: owner is part of the SQL predicate, never a post-filter. */
+    AgentTaskMetaEntity findByTaskIdForUpdateInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId);
+
+    AgentTaskMetaEntity findByWorkItemIdForUpdate(
+            String tenantId, String clientId, String workItemId);
+
+    /** Strict work-item-to-root lock: owner is part of both parent and child predicates. */
+    AgentTaskMetaEntity findByWorkItemIdForUpdateInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String workItemId);
+
+    AgentTaskMetaEntity findDurableActiveAssignmentByAgentForUpdate(
+            String tenantId, String clientId, String agentId);
+
+    List<AgentTaskAggregationSnapshotRow> findAggregationSnapshot(
+            String tenantId, String clientId, String ownerJiacn, String taskId);
+
+    int updateAssignmentByVersion(AgentTaskMetaEntity task, long expectedVersion,
+            long resultVersion, long updateTime);
+
+    int updateStatusByVersion(String tenantId, String clientId, String taskId,
+            long expectedVersion, String rewardStatus, Long startedAt, Long completedAt,
+            String failureReason);
+
+    /** Strict task status update: owner is part of the optimistic-lock predicate. */
+    int updateStatusByVersionInOwnerScope(
+            String tenantId, String clientId, String ownerJiacn, String taskId,
+            long expectedVersion, String rewardStatus, Long startedAt, Long completedAt,
+            String failureReason);
+
+    List<AgentTaskMetaEntity> findByAgentId(
+            String tenantId, String clientId, String agentId, int limit);
+
+    List<AgentTaskMetaEntity> findByAgentInOwnerScope(String tenantId, String clientId, String ownerJiacn, String agentId, int limit);
+
+    List<AgentTaskStatsRow> findStatsByAgents(List<AgentTaskStatsScope> scopes);
+
+    long countSearch(String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, String phase, String assignedAgentId);
+
+    List<AgentTaskSearchRow> searchPage(
+            String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, long offset, int limit, String phase, String assignedAgentId);
+
+    List<AgentTaskSearchRow> searchPageWithFunding(
+            String tenantId, String clientId, String ownerJiacn, String status,
+            String ability, String keyword, long offset, int limit, String phase, String assignedAgentId);
+
+    List<AgentTaskMemberEntity> findSearchMembers(
+            String tenantId, String clientId, String ownerJiacn, List<String> taskIds);
+
+    List<AgentRuntimeEntity> findSearchRuntimes(
+            String tenantId, String clientId, String ownerJiacn, List<String> agentIds);
+
+    List<AgentTaskStatusCountRow> countSearchByStatus(
+            String tenantId, String clientId, String ownerJiacn, String ability, String keyword, String assignedAgentId);
+}

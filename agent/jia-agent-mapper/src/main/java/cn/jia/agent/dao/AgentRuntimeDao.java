@@ -1,0 +1,44 @@
+package cn.jia.agent.dao;
+
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.core.dao.IBaseDao;
+
+import java.util.List;
+
+public interface AgentRuntimeDao extends IBaseDao<AgentRuntimeEntity> {
+    /** Registration alone owns model updates; presence must not overwrite a newer report. */
+    int updateRegistration(AgentRuntimeEntity entity);
+
+    AgentRuntimeEntity findByAgentId(String agentId);
+
+    AgentRuntimeEntity findInScope(String tenantId, String clientId, String agentId);
+
+    AgentRuntimeEntity lockInScope(String tenantId, String clientId, String agentId);
+
+    AgentRuntimeEntity findByAgentIdForUpdate(String agentId);
+
+    List<AgentRuntimeEntity> findByAgentIds(java.util.Set<String> agentIds);
+
+    List<AgentRuntimeEntity> findByStatusAndAbility(String status, String ability);
+
+    default List<AgentRuntimeEntity> findRosterByOwner(String clientId, String jiacn, String status, String ability) {
+        return findRosterByOwner("0", clientId, jiacn, status, ability);
+    }
+    List<AgentRuntimeEntity> findRosterByOwner(String tenantId, String clientId, String jiacn, String status, String ability);
+
+    default List<AgentRuntimeEntity> findCandidateRosterByOwner(String clientId, String jiacn) {
+        return findCandidateRosterByOwner("0", clientId, jiacn);
+    }
+    List<AgentRuntimeEntity> findCandidateRosterByOwner(String tenantId, String clientId, String jiacn);
+
+    /** Caller has locked and authorized the released public instance. */
+    int attachReleasedBinding(long runtimeId, long bindingId, String ownerJiacn, long attachedAt);
+
+    int clearBindingAfterUnbind(long runtimeId, String agentId, long bindingId,
+            String clientId, String ownerJiacn, long detachedAt);
+
+    default List<AgentRuntimeEntity> findMapVisible(String clientId) { return findMapVisible("0", clientId); }
+    List<AgentRuntimeEntity> findMapVisible(String tenantId, String clientId);
+
+    List<AgentRuntimeEntity> findHeartbeatTimedOut(long cutoffTime);
+}

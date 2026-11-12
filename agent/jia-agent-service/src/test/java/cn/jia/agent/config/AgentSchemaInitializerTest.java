@@ -1,0 +1,2438 @@
+package cn.jia.agent.config;
+
+import cn.jia.test.BaseMockTest;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
+import org.springframework.jdbc.core.RowMapper;
+
+import javax.sql.DataSource;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class AgentSchemaInitializerTest extends BaseMockTest {
+    @Mock
+    JdbcTemplate jdbcTemplate;
+
+    @Test
+    void hostedProfileInitializerAndFullBaselineDoNotDeclareChecks() throws Exception {
+        // Source parity only; real MySQL execution remains the separate acceptance lane.
+        JdbcTemplate template = schemaCaptureTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        String created = captor.getAllValues().stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_hosted_profile ("))
+                .findFirst().orElseThrow();
+        assertFalse(created.toLowerCase().contains("check ("));
+        assertFalse(tableDefinition(readResource("db/schema.sql"), "agent_hosted_profile").toLowerCase().contains("check ("));
+
+        // Statement extraction must preserve quoted SQL and comments, not truncate a CHECK oracle.
+        String prefix = "create table if not exists statement_probe (";
+        for (String body : List.of(
+                "value varchar(100) comment 'before; after', id bigint)",
+                "value varchar(100) comment 'doubled ''; still quoted', id bigint)",
+                "value varchar(100) comment 'escaped \\'; still quoted', id bigint)",
+                "value varchar(100) comment \"double; quote\", id bigint)",
+                "value varchar(100) comment \"escaped \\\"; still quoted\", id bigint)",
+                "value varchar(100) comment \"doubled \"\"; still quoted\", id bigint)",
+                "`semi;colon``name` bigint, id bigint)",
+                "id bigint /* block; ' quote */ , value bigint)",
+                "id bigint -- line; ' quote\n, value bigint)",
+                "id bigint # line; \" quote\r\n, value bigint)",
+                "id bigint comment '-- # /* ; */', value bigint)")) {
+            String statement = prefix + body;
+            assertEquals(statement, tableDefinition(statement + "; select 1;", "statement_probe"));
+        }
+        for (String unfinished : List.of(
+                "value varchar(100) comment 'unterminated;", "`unterminated;",
+                "id bigint /* unterminated;", "id bigint) -- no terminator;")) {
+            assertThrows(AssertionError.class,
+                    () -> tableDefinition(prefix + unfinished, "statement_probe"));
+        }
+    }
+
+    @Test
+    void hostedProfileStrictCatalogAcceptsWithoutChecksOnRepeat() {
+        JdbcTemplate catalog = withHostedProfileCatalog(new JdbcTemplate(), hostedProfileChecks());
+        AgentSchemaInitializer initializer = new AgentSchemaInitializer(catalog);
+        initializer.validateHostedProfileSchema();
+        initializer.validateHostedProfileSchema();
+    }
+
+    @Test
+    void bindingTenantStrictCatalogAcceptsColumnsWithoutChecksOnRepeat() throws Exception {
+        for (String dialect : List.of("MySQL", "H2")) {
+            List<String> statements = new java.util.ArrayList<>();
+            JdbcTemplate catalog = bindingContractTemplate(dialect,
+                    List.of(bindingTenantColumn(dialect)), bindingTenantChecks(dialect), statements);
+            AgentSchemaInitializer initializer = new AgentSchemaInitializer(catalog);
+            initializer.validateBindingTenantContract();
+            initializer.validateBindingTenantContract();
+            assertTrue(statements.isEmpty(), "Binding validation must not repair DDL or convert data");
+        }
+    }
+
+    @Test
+    void migratedIdentityChecksAndTenantAliasIndexAreAcceptedAlongsideLegacyProduction() {
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                new AgentSchemaInitializer(identityCatalogTemplate("business-tenant")), "ensureIdentitySchema");
+    }
+
+    @Test
+    void bindingTenantStrictCatalogRejectsMissingDuplicateNullableTypeLengthAndDefaultDrift()
+            throws Exception {
+        Map<String, Object> required = bindingTenantColumn("MySQL");
+        List<List<Map<String, Object>>> variants = new java.util.ArrayList<>();
+        variants.add(List.of());
+        variants.add(List.of(required, required));
+        for (Map.Entry<String, Object> wrong : Map.<String, Object>of(
+                "DATA_TYPE", "char", "CHARACTER_MAXIMUM_LENGTH", 49L,
+                "IS_NULLABLE", "YES", "COLUMN_DEFAULT", "1").entrySet()) {
+            Map<String, Object> drifted = new LinkedHashMap<>(required);
+            drifted.put(wrong.getKey(), wrong.getValue());
+            variants.add(List.of(drifted));
+        }
+        for (String missing : required.keySet()) {
+            Map<String, Object> drifted = new LinkedHashMap<>(required);
+            drifted.put(missing, null);
+            variants.add(List.of(drifted));
+        }
+        Map<String, Object> numericDefault = new LinkedHashMap<>(required);
+        numericDefault.put("COLUMN_DEFAULT", 0);
+        variants.add(List.of(numericDefault));
+        Map<String, Object> quotedMysqlDefault = new LinkedHashMap<>(required);
+        quotedMysqlDefault.put("COLUMN_DEFAULT", "'0'");
+        variants.add(List.of(quotedMysqlDefault));
+        for (List<Map<String, Object>> columns : variants) {
+            List<String> statements = new java.util.ArrayList<>();
+            JdbcTemplate catalog = bindingContractTemplate("MySQL", columns,
+                    bindingTenantChecks("MySQL"), statements);
+            IllegalStateException rejected = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(catalog).validateBindingTenantContract());
+            assertTrue(rejected.getMessage().startsWith("Agent binding tenant"));
+            assertTrue(statements.isEmpty());
+        }
+    }
+
+    @Test
+    void bindingContractFailsBeforeGeneratedColumnIndexOrAutomaticCheckRepair() throws Exception {
+        Map<String, Object> nullable = new LinkedHashMap<>(bindingTenantColumn("MySQL"));
+        nullable.put("IS_NULLABLE", "YES");
+        for (boolean badColumn : List.of(true)) {
+            List<String> statements = new java.util.ArrayList<>();
+            JdbcTemplate catalog = bindingContractTemplate("MySQL",
+                    List.of(badColumn ? nullable : bindingTenantColumn("MySQL")),
+                    badColumn ? bindingTenantChecks("MySQL") : List.of(), statements);
+            assertThrows(IllegalStateException.class,
+                    () -> invokeEnsureBindingTable(new AgentSchemaInitializer(catalog)));
+            assertEquals(1, statements.size());
+            assertTrue(statements.getFirst().startsWith("CREATE TABLE IF NOT EXISTS agent_persona_binding"));
+            assertTrue(statements.stream().noneMatch(sql -> sql.startsWith("ALTER TABLE")
+                    || sql.startsWith("CREATE INDEX") || sql.startsWith("CREATE UNIQUE INDEX")));
+        }
+    }
+
+    @Test
+    void bindingInitializerBaselineAndMigrationDeclareSingleCanonicalTenantContract() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        String created = executedStatements(template).stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_persona_binding ("))
+                .findFirst().orElseThrow();
+        String baseline = tableDefinition(readResource("db/schema.sql"), "agent_persona_binding");
+        for (String definition : List.of(created, baseline)) {
+            String normalized = normalizeCatalogSql(definition);
+            assertTrue(normalized.contains("tenant_id varchar(50) not null default '0'"));
+            assertTrue(normalized.contains("unique key uk_agent_binding_active_persona "
+                    + "(tenant_id, client_id, active_persona_code)"));
+            assertFalse(normalized.contains("chk_agent_binding_tenant_owner"));
+        }
+        String migration = normalizeCatalogSql(readResource("db/agent-identity-schema.sql"));
+        assertTrue(migration.contains("modify column tenant_id varchar(50) not null default '0'"));
+        assertTrue(migration.contains("drop check chk_agent_binding_tenant_owner"));
+        assertTrue(migration.contains("drop check chk_agent_binding_single_tenant"));
+        assertFalse(migration.contains("add constraint chk_agent_binding_tenant_owner"));
+    }
+
+    @Test
+    void taskEventStorageEngineValidationAcceptsOnlyInnoDb() {
+        JdbcTemplate valid = engineTemplate(Map.of(
+                "agent_task_meta", "InnoDB",
+                "agent_task_event", "innodb"));
+        AgentSchemaInitializer initializer = new AgentSchemaInitializer(valid);
+        initializer.validateInnoDbTable("agent_task_meta");
+        initializer.validateInnoDbTable("agent_task_event");
+
+        for (String table : List.of("agent_task_meta", "agent_task_event")) {
+            JdbcTemplate invalid = engineTemplate(Map.of(table, "MyISAM"));
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(invalid).validateInnoDbTable(table));
+            assertTrue(error.getMessage().contains(table), error.getMessage());
+            assertTrue(error.getMessage().contains("InnoDB"), error.getMessage());
+            assertTrue(error.getMessage().contains("MyISAM"), error.getMessage());
+        }
+    }
+
+    @Test
+    void taskEventUniqueIndexesMustBeExactlyScopedRequiredSet() {
+        List<AgentSchemaInitializer.TaskEventIndexColumn> required = requiredTaskEventUniqueIndexes();
+        new AgentSchemaInitializer(taskEventUniqueIndexTemplate(required))
+                .validateTaskEventUniqueIndexes();
+
+        for (String ownerlessIndex : List.of("uk_task_event_id", "uk_task_event_version")) {
+            java.util.ArrayList<AgentSchemaInitializer.TaskEventIndexColumn> ownerless =
+                    new java.util.ArrayList<>();
+            for (AgentSchemaInitializer.TaskEventIndexColumn part : required) {
+                if (!ownerlessIndex.equals(part.indexName())) {
+                    ownerless.add(part);
+                } else if (!"owner_jiacn".equals(part.columnName())) {
+                    ownerless.add(new AgentSchemaInitializer.TaskEventIndexColumn(
+                            part.indexName(), part.columnName(),
+                            part.sequence() > 3 ? part.sequence() - 1 : part.sequence(),
+                            part.subPart()));
+                }
+            }
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(taskEventUniqueIndexTemplate(ownerless))
+                            .validateTaskEventUniqueIndexes());
+            assertTrue(error.getMessage().contains("dangerous scoped-uniqueness drift"),
+                    error.getMessage());
+        }
+
+        for (AgentSchemaInitializer.TaskEventIndexColumn dangerous : List.of(
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_global_event_id", "event_id", 1, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_unscoped_task_version", "task_id", 1, null))) {
+            java.util.ArrayList<AgentSchemaInitializer.TaskEventIndexColumn> drift =
+                    new java.util.ArrayList<>(required);
+            drift.add(dangerous);
+            if ("uk_unscoped_task_version".equals(dangerous.indexName())) {
+                drift.add(new AgentSchemaInitializer.TaskEventIndexColumn(
+                        dangerous.indexName(), "event_version", 2, null));
+            }
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(taskEventUniqueIndexTemplate(drift))
+                            .validateTaskEventUniqueIndexes());
+            assertTrue(error.getMessage().contains("dangerous scoped-uniqueness drift"),
+                    error.getMessage());
+        }
+    }
+
+    @Test
+    void taskEventUniqueValidationAllowsHarmlessOrdinaryIndexes() {
+        AtomicBoolean uniqueOnlyFilter = new AtomicBoolean();
+        JdbcTemplate template = new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                uniqueOnlyFilter.set(sql.toLowerCase(Locale.ROOT).contains("non_unique = 0"));
+                return (List<T>) requiredTaskEventUniqueIndexes();
+            }
+        };
+
+        new AgentSchemaInitializer(template).validateTaskEventUniqueIndexes();
+        assertTrue(uniqueOnlyFilter.get(),
+                "ordinary NON_UNIQUE indexes must remain outside the exact UNIQUE-set policy");
+    }
+
+    @Test
+    void freshTaskEventCreatePerformsPostCreateExistenceValidation() throws Exception {
+        AtomicBoolean created = new AtomicBoolean();
+        AtomicInteger eventExistenceChecks = new AtomicInteger();
+        JdbcTemplate template = new JdbcTemplate(dialectDataSource("H2")) {
+            @Override
+            public void execute(String sql) {
+                if (sql.contains("CREATE TABLE IF NOT EXISTS agent_task_event")) {
+                    created.set(true);
+                }
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (sql.toLowerCase(Locale.ROOT).contains("information_schema.tables")
+                        && args.length > 0 && "agent_task_event".equals(args[0])) {
+                    eventExistenceChecks.incrementAndGet();
+                    return (List<T>) List.of(created.get() ? 1 : 0);
+                }
+                return List.of();
+            }
+        };
+
+        new AgentSchemaInitializer(template).ensureTaskEventSchema();
+
+        assertTrue(created.get());
+        assertEquals(2, eventExistenceChecks.get(),
+                "fresh create must re-check table existence after CREATE IF NOT EXISTS");
+    }
+
+    @Test
+    void postCreateMissingTaskEventTableFailsClosed() throws Exception {
+        JdbcTemplate template = new JdbcTemplate(dialectDataSource("H2")) {
+            @Override
+            public void execute(String sql) {
+                // Simulate CREATE failing to materialize a table without throwing.
+            }
+
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(template).ensureTaskEventSchema());
+        assertTrue(error.getMessage().contains("missing after CREATE TABLE IF NOT EXISTS"),
+                error.getMessage());
+    }
+
+    @Test
+    void concurrentIncompatibleCreateNoOpFailsClosed() throws Exception {
+        AtomicInteger eventChecks = new AtomicInteger();
+        JdbcTemplate template = new JdbcTemplate(dialectDataSource("MySQL")) {
+            @Override
+            public void execute(String sql) {
+                // Simulate another initializer winning CREATE IF NOT EXISTS with incompatible DDL.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    String table = String.valueOf(args[0]);
+                    if ("agent_task_event".equals(table)) {
+                        return (List<T>) List.of(eventChecks.getAndIncrement() == 0 ? 0 : 1);
+                    }
+                    if ("agent_task_meta".equals(table)) {
+                        return (List<T>) List.of(1);
+                    }
+                }
+                return List.of();
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                if (sql.contains("SELECT ENGINE")) {
+                    return (T) ("agent_task_event".equals(args[0]) ? "MyISAM" : "InnoDB");
+                }
+                return null;
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(template).ensureTaskEventSchema());
+        assertTrue(error.getMessage().contains("agent_task_event"), error.getMessage());
+        assertTrue(error.getMessage().contains("MyISAM"), error.getMessage());
+        assertEquals(2, eventChecks.get(),
+                "the post-create catalog state must be inspected after a lost CREATE race");
+    }
+
+    @Test
+    void schemaDeclaresScopedSemanticSceneTablesWithoutRuntimeGeometryOrSecrets() throws IOException {
+        String schema;
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream("db/schema.sql")) {
+            assertNotNull(input);
+            schema = new String(input.readAllBytes(), StandardCharsets.UTF_8).toLowerCase(Locale.ROOT);
+        }
+
+        assertTrue(schema.contains("create table if not exists agent_scene_state"));
+        assertTrue(schema.contains("unique key uk_agent_scene_state_scope_agent (tenant_id, client_id, owner_jiacn, scene_id, agent_id)"));
+        assertTrue(schema.contains("key idx_agent_scene_state_scope_version (tenant_id, client_id, owner_jiacn, scene_id, state_version)"));
+        assertTrue(schema.contains("create table if not exists agent_scene_event"));
+        assertTrue(schema.contains("unique key uk_agent_scene_event_scope_version (tenant_id, client_id, owner_jiacn, scene_id, scene_version)"));
+        assertTrue(schema.contains("create table if not exists agent_scene_phase_report"));
+        assertTrue(schema.contains("unique key uk_agent_scene_phase_report_scope_report (tenant_id, client_id, owner_jiacn, scene_id, report_id)"));
+        assertTrue(schema.contains("create table if not exists agent_scene_version"));
+        assertTrue(schema.contains("primary key (tenant_id, client_id, owner_jiacn, scene_id)"));
+
+        for (String table : Set.of(
+                "agent_scene_state", "agent_scene_event", "agent_scene_phase_report", "agent_scene_version")) {
+            String definition = tableDefinition(schema, table);
+            String compact = definition.replaceAll("\\s+", " ");
+            assertTrue(compact.contains("tenant_id varchar(50) not null"), table);
+            assertTrue(compact.contains("client_id varchar(50) not null"), table);
+            assertTrue(compact.contains("owner_jiacn varchar(50) not null"), table);
+            assertTrue(compact.contains("scene_id varchar(100) not null"), table);
+            assertFalse(definition.matches("(?s).*\\b(x|y|path|coordinates?|frame|frame_index|token|credential|model_response)\\b.*"), table);
+        }
+        assertEquals(Set.of(
+                        "tenant_id", "client_id", "owner_jiacn", "scene_id", "current_version", "create_time", "update_time"),
+                tableStructure(tableDefinition(schema, "agent_scene_version")).columns().keySet());
+    }
+
+    @Test
+    void runCreatesTaskNoteTableIfMissing() throws Exception {
+        configureTaskEventCatalog(jdbcTemplate, "MySQL");
+        AgentSchemaInitializer initializer = new AgentSchemaInitializer(jdbcTemplate);
+
+        initializer.afterPropertiesSet();
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        verify(jdbcTemplate, atLeastOnce()).execute(sqlCaptor.capture());
+        String sql = String.join("\n", sqlCaptor.getAllValues());
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_note"));
+        assertTrue(sql.contains("idx_agent_task_note_task_id"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_persona_binding"));
+        assertTrue(sql.contains("uk_agent_binding_active_persona"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_identity_registry"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_identity_alias"));
+        assertTrue(sql.contains("uk_identity_alias_active"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_scene_state"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_scene_event"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_scene_phase_report"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_scene_version"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_member"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_work_item"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_request"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_artifact"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_backfill_issue"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_backfill_manifest_batch"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_backfill_manifest"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_backfill_run"));
+        assertTrue(sql.contains("CREATE TABLE IF NOT EXISTS agent_task_event"));
+        assertTrue(sql.contains("uk_task_event_version"));
+        assertTrue(sql.contains("uk_task_event_id"));
+        assertTrue(sql.contains("uk_task_backfill_issue_key"));
+        assertTrue(sql.contains("uk_task_backfill_manifest_row"));
+        assertTrue(sql.contains("uk_task_backfill_run_id"));
+        verify(jdbcTemplate, org.mockito.Mockito.never()).update(any(String.class), any(Object[].class));
+    }
+
+    @Test
+    void initializerAddsAllRequiredTaskMetaCollaborationColumns() throws Exception {
+        configureTaskEventCatalog(jdbcTemplate, "MySQL");
+        AgentSchemaInitializer initializer = new AgentSchemaInitializer(jdbcTemplate);
+
+        initializer.afterPropertiesSet();
+
+        ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+        verify(jdbcTemplate, atLeastOnce()).execute(sqlCaptor.capture());
+        Set<String> taskMetaAlterColumns = sqlCaptor.getAllValues().stream()
+                .filter(sql -> sql.startsWith("ALTER TABLE agent_task_meta ADD COLUMN "))
+                .map(sql -> sql.substring("ALTER TABLE agent_task_meta ADD COLUMN ".length()))
+                .map(sql -> sql.substring(0, sql.indexOf(' ')))
+                .collect(java.util.stream.Collectors.toSet());
+        assertEquals(Set.of(
+                "collaboration_mode", "risk_level", "max_agents", "coordinator_agent_id",
+                "review_required", "task_version", "current_event_version"), taskMetaAlterColumns);
+    }
+
+    @Test
+    void initializerAndSqlResourcesKeepCollaborationTableStructureInParity() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("H2");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        List<String> initializerSql = captor.getAllValues().stream()
+                .map(sql -> sql.toLowerCase(Locale.ROOT))
+                .toList();
+        String schema = readResource("db/schema.sql");
+        String migration = readResource("db/task-collaboration-schema.sql");
+
+        for (String table : Set.of(
+                "agent_task_member", "agent_task_work_item", "agent_task_request", "agent_task_artifact")) {
+            String initializerDefinition = initializerSql.stream()
+                    .filter(sql -> sql.contains("create table if not exists " + table + " ("))
+                    .findFirst().orElseThrow();
+            TableStructure expected = tableStructure(tableDefinition(schema, table));
+            assertEquals(expected, tableStructure(tableDefinition(migration, table)), table + " migration");
+            assertEquals(expected, tableStructure(initializerDefinition), table + " initializer");
+        }
+    }
+
+    @Test
+    void initializerSchemaAndBackfillMigrationKeepAuditTablesInParity() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("H2");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        List<String> initializerSql = captor.getAllValues().stream()
+                .map(sql -> sql.toLowerCase(Locale.ROOT))
+                .toList();
+        String schema = readResource("db/schema.sql");
+        String auditMigration = readResource("db/task-collaboration-backfill-audit-schema.sql");
+
+        for (String table : Set.of(
+                "agent_task_backfill_issue", "agent_task_backfill_manifest_batch",
+                "agent_task_backfill_manifest", "agent_task_backfill_run")) {
+            String initializerDefinition = initializerSql.stream()
+                    .filter(sql -> sql.contains("create table if not exists " + table + " ("))
+                    .findFirst().orElseThrow();
+            TableStructure expected = tableStructure(tableDefinition(schema, table));
+            assertEquals(expected, tableStructure(tableDefinition(auditMigration, table)), table + " migration");
+            assertEquals(expected, tableStructure(initializerDefinition), table + " initializer");
+        }
+    }
+
+    @Test
+    void initializerSchemaAndHistoricalBaselineAuditKeepTablesInParity() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("H2");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        List<String> initializerSql = executedStatements(template).stream()
+                .map(sql -> sql.toLowerCase(Locale.ROOT))
+                .toList();
+        String schema = readResource("db/schema.sql");
+        String auditMigration = readResource("db/historical-task-event-baseline-audit-schema.sql");
+
+        for (String table : historicalEventAuditTables()) {
+            String initializerDefinition = initializerSql.stream()
+                    .filter(sql -> sql.contains("create table if not exists " + table + " ("))
+                    .findFirst().orElseThrow();
+            TableStructure expected = tableStructure(tableDefinition(schema, table));
+            assertEquals(expected, tableStructure(tableDefinition(auditMigration, table)),
+                    table + " migration");
+            assertEquals(expected, tableStructure(initializerDefinition), table + " initializer");
+        }
+    }
+
+    @Test
+    void initializerAndMigrationKeepHistoricalEventAuditTriggerDefinitionsInParity() throws Exception {
+        JdbcTemplate template = dialectTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        List<String> statements = executedStatements(template);
+        String migration = readResource("db/historical-task-event-baseline-audit-schema.sql");
+
+        for (AgentSchemaInitializer.TriggerDefinition expected : historicalEventAuditTriggers(migration)) {
+            String initializerTrigger = statements.stream()
+                    .filter(sql -> sql.toLowerCase(Locale.ROOT)
+                            .startsWith("create trigger " + expected.name()))
+                    .findFirst().orElseThrow();
+            assertEquals(migrationTriggerDefinition(migration, expected.name()),
+                    normalizeDefinition(initializerTrigger), expected.name());
+            assertTrue(normalizeDefinition(initializerTrigger).contains(
+                    " on " + expected.table() + " "), expected.name());
+        }
+    }
+
+    @Test
+    void initializerHistoricalBaselineBootstrapIsDdlOnlyWithoutRoutinesOrPrivileges() throws Exception {
+        JdbcTemplate template = dialectTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        List<String> historicalStatements = executedStatements(template).stream()
+                .map(sql -> sql.replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT))
+                .filter(sql -> sql.contains("historical_event") || sql.contains("c01h"))
+                .toList();
+
+        assertEquals(12, historicalStatements.size(), historicalStatements.toString());
+        assertTrue(historicalStatements.stream().allMatch(sql ->
+                sql.startsWith("create table if not exists agent_task_historical_event_")
+                        || sql.startsWith("create trigger trg_historical_event_")),
+                historicalStatements.toString());
+        String allStatements = String.join("\n", executedStatements(template))
+                .toLowerCase(Locale.ROOT);
+        for (String forbidden : List.of(
+                "create procedure", "drop procedure", "create definer", "create user",
+                "grant ", "revoke ", "call c01h_", "insert into agent_task_historical_event_",
+                "update agent_task_historical_event_", "delete from agent_task_historical_event_",
+                "insert into agent_task_event", "update agent_task_meta")) {
+            assertFalse(allStatements.contains(forbidden), forbidden);
+        }
+    }
+
+    @Test
+    void partialHistoricalEventAuditSchemaFailsBeforeCreateCanMaskIt() throws Exception {
+        DataSource dataSource = dialectDataSource("MySQL");
+        JdbcTemplate partial = new JdbcTemplate(dataSource) {
+            @Override
+            public void execute(String sql) {
+                throw new AssertionError("partial schema must fail before C01H CREATE");
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (sql.toLowerCase(Locale.ROOT).contains("information_schema.tables")) {
+                    return (List<T>) List.of("agent_task_historical_event_manifest_batch"
+                            .equals(String.valueOf(args[0])) ? 1 : 0);
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(partial)
+                        .ensureHistoricalEventBaselineAuditSchema());
+        assertTrue(error.getMessage().contains("C01H audit schema is partial"), error.getMessage());
+    }
+
+    @Test
+    void missingOrDriftedHistoricalEventAuditTriggerFailsClosed() throws IOException {
+        String migration = readResource("db/historical-task-event-baseline-audit-schema.sql");
+        List<AgentSchemaInitializer.TriggerDefinition> exact =
+                new java.util.ArrayList<>(historicalEventAuditTriggers(migration));
+        List<List<AgentSchemaInitializer.TriggerDefinition>> invalid = new java.util.ArrayList<>();
+        invalid.add(exact.subList(1, exact.size()));
+        List<AgentSchemaInitializer.TriggerDefinition> drifted = new java.util.ArrayList<>(exact);
+        AgentSchemaInitializer.TriggerDefinition original = drifted.get(0);
+        drifted.set(0, new AgentSchemaInitializer.TriggerDefinition(
+                original.name(), original.table(), original.timing(), original.event(),
+                "BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'weakened'; END"));
+        invalid.add(drifted);
+        List<AgentSchemaInitializer.TriggerDefinition> extra = new java.util.ArrayList<>(exact);
+        extra.add(new AgentSchemaInitializer.TriggerDefinition(
+                "unexpected_c01h_trigger", "agent_task_historical_event_manifest",
+                "BEFORE", "DELETE",
+                "BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'unexpected'; END"));
+        invalid.add(extra);
+
+        for (List<AgentSchemaInitializer.TriggerDefinition> definitions : invalid) {
+            JdbcTemplate template = new JdbcTemplate() {
+                @Override
+                @SuppressWarnings("unchecked")
+                public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                    return sql.contains("information_schema.triggers")
+                            ? (List<T>) definitions : List.of();
+                }
+
+                @Override
+                public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                    return query(sql, rowMapper);
+                }
+            };
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(template)
+                            .validateHistoricalEventAuditTriggers());
+            assertTrue(error.getMessage().contains("C01H"), error.getMessage());
+        }
+    }
+
+    @Test
+    void initializerAndSchemaResourceKeepIdentityTablesInParity() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        List<String> initializerSql = captor.getAllValues().stream()
+                .map(sql -> sql.toLowerCase(Locale.ROOT))
+                .toList();
+        String schema = readResource("db/schema.sql");
+
+        for (String table : Set.of("agent_identity_registry", "agent_identity_alias")) {
+            String initializerDefinition = initializerSql.stream()
+                    .filter(sql -> sql.contains("create table if not exists " + table + " ("))
+                    .findFirst().orElseThrow();
+            assertEquals(normalizeSqlStructure(tableDefinition(schema, table)),
+                    normalizeSqlStructure(initializerDefinition), table);
+            String legacy = tableDefinition(readResource("db/agent-identity-schema.sql"), table);
+            assertEquals(normalizeSqlStructure(tableDefinition(schema, table)),
+                    normalizeSqlStructure(legacy), table + " explicit tenant delta");
+            if (table.equals("agent_identity_alias")) {
+                assertTrue(readResource("db/agent-identity-business-tenant-20261030.sql")
+                        .contains("alter table " + table));
+            }
+        }
+    }
+
+    @Test
+    void incompatibleBackfillAuditColumnTypeLengthNullDefaultOrCollationFailsStartup() {
+        List<AgentSchemaInitializer.BackfillColumnDefinition> incompatible = List.of(
+                new AgentSchemaInitializer.BackfillColumnDefinition(
+                        "varchar", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new AgentSchemaInitializer.BackfillColumnDefinition(
+                        "char", "char(63)", false, null, "utf8mb4_0900_bin"),
+                new AgentSchemaInitializer.BackfillColumnDefinition(
+                        "char", "char(64)", true, null, "utf8mb4_0900_bin"),
+                new AgentSchemaInitializer.BackfillColumnDefinition(
+                        "char", "char(64)", false, "unexpected", "utf8mb4_0900_bin"),
+                new AgentSchemaInitializer.BackfillColumnDefinition(
+                        "char", "char(64)", false, null, "utf8mb4_0900_ai_ci"));
+
+        for (AgentSchemaInitializer.BackfillColumnDefinition definition : incompatible) {
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(backfillColumnMismatchTemplate(definition))
+                            .afterPropertiesSet());
+            assertTrue(error.getMessage().contains("agent_task_backfill_issue.issue_key"),
+                    error.getMessage());
+            assertTrue(error.getMessage().contains("type/null/default/collation/auto_increment"),
+                    error.getMessage());
+        }
+    }
+
+    @Test
+    void missingOrWrongBackfillPrimaryKeyFailsClosed() {
+        List<List<AgentSchemaInitializer.IndexColumn>> incompatible = List.of(
+                List.of(),
+                List.of(new AgentSchemaInitializer.IndexColumn(0, "other_id", 1, null)),
+                List.of(
+                        new AgentSchemaInitializer.IndexColumn(0, "id", 1, null),
+                        new AgentSchemaInitializer.IndexColumn(0, "other_id", 2, null)));
+
+        for (List<AgentSchemaInitializer.IndexColumn> primary : incompatible) {
+            JdbcTemplate template = new JdbcTemplate() {
+                @Override
+                @SuppressWarnings("unchecked")
+                public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                    return sql.contains("information_schema.statistics")
+                            ? (List<T>) primary : List.of();
+                }
+            };
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> new AgentSchemaInitializer(template)
+                            .validateBackfillPrimaryKey("agent_task_backfill_issue"));
+            assertTrue(error.getMessage().contains("PRIMARY KEY (id)"), error.getMessage());
+        }
+    }
+
+    @Test
+    void missingBackfillIdAutoIncrementFailsClosed() {
+        JdbcTemplate template = new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (sql.contains("information_schema.columns")) {
+                    return (List<T>) List.of(new AgentSchemaInitializer.BackfillColumnDefinition(
+                            "bigint", "bigint", false, null, null, ""));
+                }
+                return List.of();
+            }
+        };
+        AgentSchemaInitializer.BackfillColumnExpectation id =
+                new AgentSchemaInitializer.BackfillColumnExpectation(
+                        "agent_task_backfill_issue", "id", "bigint", "bigint",
+                        false, null, null);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(template).validateBackfillColumn(id));
+        assertTrue(error.getMessage().contains("agent_task_backfill_issue.id"), error.getMessage());
+        assertTrue(error.getMessage().contains("auto_increment"), error.getMessage());
+    }
+
+    @Test
+    void sqlNormalizationPreservesParenthesisLogicAndNormalizesOnlyItsWhitespace() {
+        AgentSchemaInitializer initializer = new AgentSchemaInitializer(mock(JdbcTemplate.class));
+        String left = initializer.normalizeSql("IF (a AND b) OR c THEN SIGNAL SQLSTATE '45000'; END IF");
+        String right = initializer.normalizeSql("IF a AND (b OR c) THEN SIGNAL SQLSTATE '45000'; END IF");
+        assertNotEquals(left, right);
+        assertEquals(left, initializer.normalizeSql(
+                " IF  (  a AND b  )  OR c THEN SIGNAL SQLSTATE '45000'; END IF "));
+    }
+
+    @Test
+    void parenthesisLogicCollisionInTriggerFailsClosed() throws IOException {
+        List<AgentSchemaInitializer.TriggerDefinition> definitions =
+                new java.util.ArrayList<>(backfillAuditTriggers(
+                        readResource("db/task-collaboration-backfill-audit-schema.sql")));
+        int index = java.util.stream.IntStream.range(0, definitions.size())
+                .filter(i -> "trg_task_backfill_manifest_batch_update_guard"
+                        .equals(definitions.get(i).name()))
+                .findFirst().orElseThrow();
+        AgentSchemaInitializer.TriggerDefinition original = definitions.get(index);
+        String altered = original.statement().replace(
+                "if not (\n        binary old.seal_status",
+                "if (not\n        binary old.seal_status");
+        assertNotEquals(original.statement(), altered);
+        definitions.set(index, new AgentSchemaInitializer.TriggerDefinition(
+                original.name(), original.table(), original.timing(), original.event(), altered));
+        JdbcTemplate template = new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                return sql.contains("information_schema.triggers")
+                        ? (List<T>) definitions : List.of();
+            }
+
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                return query(sql, rowMapper);
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(template).validateBackfillAuditTriggers());
+        assertTrue(error.getMessage().contains(original.name()), error.getMessage());
+    }
+
+    @Test
+    void initializerAndMigrationKeepBackfillAuditTriggerDefinitionsInParity() throws Exception {
+        JdbcTemplate template = dialectTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        List<String> statements = executedStatements(template);
+        String migration = readResource("db/task-collaboration-backfill-audit-schema.sql");
+
+        for (AgentSchemaInitializer.TriggerDefinition expected : backfillAuditTriggers(migration)) {
+            String initializerTrigger = statements.stream()
+                    .filter(sql -> sql.toLowerCase(Locale.ROOT)
+                            .startsWith("create trigger " + expected.name()))
+                    .findFirst().orElseThrow();
+            assertEquals(migrationTriggerDefinition(migration, expected.name()),
+                    normalizeDefinition(initializerTrigger), expected.name());
+            assertTrue(normalizeDefinition(initializerTrigger).contains(
+                    " on " + expected.table() + " "), expected.name());
+        }
+    }
+
+    @Test
+    void backfillAuditTriggerOnWrongTableFailsClosed() throws IOException {
+        List<AgentSchemaInitializer.TriggerDefinition> definitions =
+                new java.util.ArrayList<>(backfillAuditTriggers(
+                        readResource("db/task-collaboration-backfill-audit-schema.sql")));
+        AgentSchemaInitializer.TriggerDefinition original = definitions.get(0);
+        definitions.set(0, new AgentSchemaInitializer.TriggerDefinition(
+                original.name(), "agent_task_backfill_issue", original.timing(),
+                original.event(), original.statement()));
+        JdbcTemplate template = new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                return sql.contains("information_schema.triggers")
+                        ? (List<T>) definitions : List.of();
+            }
+
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                return query(sql, rowMapper);
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(template).validateBackfillAuditTriggers());
+        assertTrue(error.getMessage().contains(original.name()), error.getMessage());
+        assertTrue(error.getMessage().contains("incompatible table"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleBackfillManifestIndexFailsClosed() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (sql.contains("information_schema.statistics")) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "report_sha256", 1, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> invokeEnsureRequiredIndex(new AgentSchemaInitializer(failingTemplate),
+                        "agent_task_backfill_manifest", "uk_task_backfill_manifest_row", true,
+                        List.of("report_sha256", "manifest_row_key"), ""));
+        assertTrue(error.getMessage().contains("uk_task_backfill_manifest_row"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleArtifactVersionUniqueIndexFailsStartup() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises collaboration-index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if ("agent_task_artifact".equals(args[0]) && "uk_artifact_version".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "tenant_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "client_id", 2, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "artifact_id", 3, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_artifact_version"), error.getMessage());
+        // Regression: exact hosted validation must not replace the legacy target drift.
+        assertFalse(error.getMessage().contains("PWA-HOSTED-P0"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleLegacyActivePersonaIndexFailsStartupUntilMigrationRuns() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises A02 index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if ("agent_persona_binding".equals(args[0])
+                        && "uk_agent_binding_active_persona".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "client_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "active_persona_code", 2, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_agent_binding_active_persona"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleActiveAliasIndexFailsStartup() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises A02 index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (args.length > 1 && "agent_identity_alias".equals(args[0])
+                        && "uk_identity_alias_active".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "client_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "owner_jiacn", 2, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "alias_type", 3, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "alias_value", 4, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "valid_to", 5, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_identity_alias_active"), error.getMessage());
+    }
+
+    @Test
+    void h2DialectOmitsUnsupportedStoredKeywordFromGeneratedBindingColumns() throws Exception {
+        JdbcTemplate template = dialectTemplate("H2");
+
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+
+        List<String> statements = executedStatements(template);
+        String createBinding = statements.stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_persona_binding"))
+                .findFirst().orElseThrow();
+        assertTrue(createBinding.contains(
+                "active_persona_code VARCHAR(50) GENERATED ALWAYS AS (CASE WHEN status = 1 THEN persona_code ELSE NULL END)"));
+        assertTrue(createBinding.contains(
+                "active_agent_id     VARCHAR(100) GENERATED ALWAYS AS (CASE WHEN status = 1 THEN agent_id ELSE NULL END)"));
+        assertTrue(createBinding.contains("owner_jiacn VARCHAR(50) GENERATED ALWAYS AS (jiacn)"));
+        assertTrue(createBinding.contains("lifecycle_status VARCHAR(20) GENERATED ALWAYS AS"));
+        String createAlias = statements.stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_identity_alias"))
+                .findFirst().orElseThrow();
+        assertTrue(createAlias.contains("active_key TINYINT GENERATED ALWAYS AS"));
+        assertFalse(createBinding.contains(" STORED"));
+        assertFalse(createAlias.contains(" STORED"));
+        assertTrue(statements.stream()
+                .filter(sql -> sql.startsWith("ALTER TABLE agent_persona_binding ADD COLUMN active_"))
+                .noneMatch(sql -> sql.contains(" STORED")));
+    }
+
+    @Test
+    void mysqlDialectRetainsStoredGeneratedBindingColumns() throws Exception {
+        JdbcTemplate template = dialectTemplate("MySQL");
+
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+
+        List<String> statements = executedStatements(template);
+        String createBinding = statements.stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_persona_binding"))
+                .findFirst().orElseThrow();
+        assertTrue(createBinding.contains(
+                "active_persona_code VARCHAR(50) GENERATED ALWAYS AS (CASE WHEN status = 1 THEN persona_code ELSE NULL END) STORED"));
+        assertTrue(createBinding.contains(
+                "active_agent_id     VARCHAR(100) GENERATED ALWAYS AS (CASE WHEN status = 1 THEN agent_id ELSE NULL END) STORED"));
+        assertTrue(createBinding.contains("owner_jiacn VARCHAR(50) GENERATED ALWAYS AS (jiacn) STORED"));
+        assertTrue(createBinding.contains("lifecycle_status VARCHAR(20) GENERATED ALWAYS AS"));
+        String createAlias = statements.stream()
+                .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS agent_identity_alias"))
+                .findFirst().orElseThrow();
+        assertTrue(createAlias.contains("active_key TINYINT GENERATED ALWAYS AS"));
+        assertTrue(createAlias.contains(" STORED"));
+        assertTrue(statements.stream()
+                .filter(sql -> sql.startsWith("ALTER TABLE agent_persona_binding ADD COLUMN active_"))
+                .allMatch(sql -> sql.endsWith(" STORED")));
+    }
+
+    @Test
+    void initializerAndMigrationKeepIdentityTriggerDefinitionsInParity() throws Exception {
+        JdbcTemplate template = dialectTemplate("MySQL");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        List<String> statements = executedStatements(template);
+        String migration = readResource("db/agent-identity-schema.sql");
+
+        for (String trigger : List.of(
+                "trg_identity_registry_immutable_update", "trg_identity_registry_no_delete",
+                "trg_identity_alias_immutable_update", "trg_identity_alias_no_delete")) {
+            String initializerTrigger = statements.stream()
+                    .filter(sql -> sql.toLowerCase(Locale.ROOT).startsWith("create trigger " + trigger))
+                    .findFirst().orElseThrow();
+            assertEquals(migrationTriggerDefinition(migration, trigger),
+                    normalizeDefinition(initializerTrigger), trigger);
+            assertTrue(statements.contains("DROP TRIGGER IF EXISTS " + trigger));
+        }
+    }
+
+    @Test
+    void h2DialectUsesNativeIndexCatalogAndStillRejectsIncompatibleRequiredIndex() throws Exception {
+        DataSource dataSource = dialectDataSource("H2");
+        JdbcTemplate failingTemplate = new JdbcTemplate(dataSource) {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises H2 required-index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    return List.of();
+                }
+                assertTrue(normalized.contains("from information_schema.index_columns"), normalized);
+                if ("agent_scene_state".equals(args[0])
+                        && "uk_agent_scene_state_scope_agent".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(1, "tenant_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "client_id", 2, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "owner_jiacn", 3, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "scene_id", 4, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "agent_id", 5, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_agent_scene_state_scope_agent"), error.getMessage());
+    }
+
+    @Test
+    void h2WithoutOptionalBaseAgentTablesStillInitializesAndValidatesSceneSchema() throws Exception {
+        DataSource dataSource = dialectDataSource("H2");
+        AtomicBoolean sceneTableCreated = new AtomicBoolean();
+        AtomicBoolean eventTableCreated = new AtomicBoolean();
+        JdbcTemplate template = new JdbcTemplate(dataSource) {
+            @Override
+            public void execute(String sql) {
+                if (sql.contains("CREATE TABLE IF NOT EXISTS agent_scene_state")) {
+                    sceneTableCreated.set(true);
+                }
+                if (sql.contains("CREATE TABLE IF NOT EXISTS agent_task_event")) {
+                    eventTableCreated.set(true);
+                }
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")
+                        && args.length > 0 && "agent_task_event".equals(args[0])) {
+                    return (T) Integer.valueOf(eventTableCreated.get() ? 1 : 0);
+                }
+                return (T) Integer.valueOf(normalized.contains("from information_schema.tables") ? 0 : 1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")
+                        && args.length > 0 && "agent_task_event".equals(args[0])) {
+                    return (List<T>) List.of(eventTableCreated.get() ? 1 : 0);
+                }
+                return List.of();
+            }
+
+            @Override
+            public int update(String sql, Object... args) {
+                throw new AssertionError("persona seeds must not run without the optional agent_persona table");
+            }
+        };
+
+        new AgentSchemaInitializer(withHostedProfileCatalog(template)).afterPropertiesSet();
+
+        assertTrue(sceneTableCreated.get());
+    }
+
+    @Test
+    void requiredSceneIndexWithWrongUniquenessFailsStartup() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises required-index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    return List.of();
+                }
+                assertTrue(normalized.contains("select non_unique, column_name, seq_in_index, sub_part"), normalized);
+                assertTrue(normalized.contains("order by seq_in_index"), normalized);
+                if ("agent_scene_state".equals(args[0])
+                        && "uk_agent_scene_state_scope_agent".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(1, "tenant_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "client_id", 2, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "owner_jiacn", 3, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "scene_id", 4, null),
+                            new AgentSchemaInitializer.IndexColumn(1, "agent_id", 5, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_agent_scene_state_scope_agent"), error.getMessage());
+    }
+
+    @Test
+    void requiredSceneIndexWithWrongOrderedColumnsFailsStartup() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises required-index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if ("agent_scene_state".equals(args[0])
+                        && "uk_agent_scene_state_scope_agent".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "client_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "tenant_id", 2, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "owner_jiacn", 3, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "scene_id", 4, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "agent_id", 5, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_agent_scene_state_scope_agent"), error.getMessage());
+    }
+
+    @Test
+    void requiredSceneIndexWithPrefixComponentFailsStartup() {
+        JdbcTemplate failingTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is intentionally inert; this test exercises required-index introspection.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if ("agent_scene_state".equals(args[0])
+                        && "uk_agent_scene_state_scope_agent".equals(args[1])) {
+                    return (List<T>) List.of(
+                            new AgentSchemaInitializer.IndexColumn(0, "tenant_id", 1, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "client_id", 2, 12),
+                            new AgentSchemaInitializer.IndexColumn(0, "owner_jiacn", 3, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "scene_id", 4, null),
+                            new AgentSchemaInitializer.IndexColumn(0, "agent_id", 5, null));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(failingTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("uk_agent_scene_state_scope_agent"), error.getMessage());
+    }
+
+    @Test
+    void initializerAndSchemaResourceKeepSceneTableStructureInParity() throws Exception {
+        JdbcTemplate template = schemaCaptureTemplate("H2");
+        new AgentSchemaInitializer(template).afterPropertiesSet();
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        List<String> initializerSql = captor.getAllValues().stream()
+                .map(sql -> sql.toLowerCase(Locale.ROOT))
+                .toList();
+        String schema = readSchema();
+
+        for (String table : Set.of(
+                "agent_scene_state", "agent_scene_event", "agent_scene_phase_report", "agent_scene_version")) {
+            String resourceDefinition = tableDefinition(schema, table);
+            String initializerDefinition = initializerSql.stream()
+                    .filter(sql -> sql.contains("create table if not exists " + table + " ("))
+                    .findFirst().orElseThrow();
+            assertEquals(tableStructure(resourceDefinition), tableStructure(initializerDefinition), table);
+        }
+    }
+
+    @Test
+    void b0IdentityTablesWithAiCiCollationFailClosedBeforeStartup() {
+        JdbcTemplate b0Template = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is inert; this fixture models an existing b0 catalog.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                if (requiredType == String.class && sql.contains("TABLE_COLLATION")) {
+                    return (T) "utf8mb4_0900_ai_ci";
+                }
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    String table = String.valueOf(args[0]);
+                    return (List<T>) List.of(table.startsWith("agent_identity_") ? 1 : 0);
+                }
+                if (normalized.contains("from information_schema.columns")) {
+                    return (List<T>) List.of(identityColumn(String.valueOf(args[0]), String.valueOf(args[1])));
+                }
+                if (normalized.contains("from information_schema.statistics")) {
+                    return (List<T>) identityIndex(String.valueOf(args[0]), String.valueOf(args[1]));
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(b0Template))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("binary collation"), error.getMessage());
+        assertTrue(error.getMessage().contains("utf8mb4_0900_ai_ci"), error.getMessage());
+    }
+
+    @Test
+    void partialIdentityTableFailsClosedBeforeCreateCanMaskIt() {
+        JdbcTemplate partialTemplate = new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is inert so the pre-create catalog state remains observable.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    return (List<T>) List.of("agent_identity_registry".equals(args[0]) ? 1 : 0);
+                }
+                return List.of();
+            }
+        };
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(withHostedProfileCatalog(partialTemplate))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("identity schema is partial"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleGeneratedColumnFailsClosed() {
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(identityCatalogTemplate("generated")).afterPropertiesSet());
+        assertTrue(error.getMessage().contains("agent_identity_alias.active_key"), error.getMessage());
+        assertTrue(error.getMessage().contains("generated expression"), error.getMessage());
+    }
+
+    @Test
+    void incompatibleAliasForeignKeyRuleFailsClosed() {
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(identityCatalogTemplate("fk")).afterPropertiesSet());
+        assertTrue(error.getMessage().contains("composite FK"), error.getMessage());
+    }
+
+    @Test
+    void weakenedIdentityTriggerDefinitionFailsClosed() {
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(identityCatalogTemplate("trigger")).afterPropertiesSet());
+        assertTrue(error.getMessage().contains("trg_identity_registry_immutable_update"), error.getMessage());
+        assertTrue(error.getMessage().contains("incompatible definition"), error.getMessage());
+    }
+
+    @Test
+    void identityTriggerOnWrongTableFailsClosed() {
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> new AgentSchemaInitializer(identityCatalogTemplate("trigger-table"))
+                        .afterPropertiesSet());
+        assertTrue(error.getMessage().contains("trg_identity_registry_immutable_update"), error.getMessage());
+        assertTrue(error.getMessage().contains("incompatible definition"), error.getMessage());
+    }
+
+    private JdbcTemplate engineTemplate(Map<String, String> engines) {
+        return new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                return (T) engines.get(String.valueOf(args[0]));
+            }
+        };
+    }
+
+    private JdbcTemplate taskEventUniqueIndexTemplate(
+            List<AgentSchemaInitializer.TaskEventIndexColumn> indexes) {
+        return new JdbcTemplate() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                return (List<T>) indexes;
+            }
+        };
+    }
+
+    private List<AgentSchemaInitializer.TaskEventIndexColumn> requiredTaskEventUniqueIndexes() {
+        return List.of(
+                new AgentSchemaInitializer.TaskEventIndexColumn("PRIMARY", "id", 1, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_id", "tenant_id", 1, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_id", "client_id", 2, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_id", "owner_jiacn", 3, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_id", "event_id", 4, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_version", "tenant_id", 1, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_version", "client_id", 2, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_version", "owner_jiacn", 3, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_version", "task_id", 4, null),
+                new AgentSchemaInitializer.TaskEventIndexColumn(
+                        "uk_task_event_version", "event_version", 5, null));
+    }
+
+    private JdbcTemplate identityCatalogTemplate(String fault) {
+        return withHostedProfileCatalog(new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL is inert; this fixture exposes a complete existing MySQL identity catalog.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                if (requiredType == String.class && sql.contains("TABLE_COLLATION")) {
+                    return (T) "utf8mb4_0900_bin";
+                }
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                return query(sql, rowMapper, new Object[0]);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+                if (normalized.contains("from information_schema.tables")) {
+                    String table = String.valueOf(args[0]);
+                    return (List<T>) List.of(table.startsWith("agent_identity_") ? 1 : 0);
+                }
+                if (normalized.contains("from information_schema.columns")) {
+                    AgentSchemaInitializer.ColumnDefinition definition =
+                            identityColumn(String.valueOf(args[0]), String.valueOf(args[1]));
+                    if ("generated".equals(fault) && "active_key".equals(args[1])) {
+                        definition = new AgentSchemaInitializer.ColumnDefinition(
+                                "tinyint", "tinyint", true, null,
+                                "case when alias_status = 'ACTIVE' then 1 else null end");
+                    }
+                    return (List<T>) List.of(definition);
+                }
+                if (normalized.contains("from information_schema.statistics")) {
+                    if ("business-tenant".equals(fault) && "uk_identity_alias_active".equals(args[1])) {
+                        var columns = List.of("tenant_id","client_id","owner_jiacn","alias_type","alias_value","active_key");
+                        var parts = new java.util.ArrayList<AgentSchemaInitializer.IndexColumn>();
+                        for (int i=0;i<columns.size();i++) parts.add(new AgentSchemaInitializer.IndexColumn(0,columns.get(i),i+1,null));
+                        return (List<T>) parts;
+                    }
+                    return (List<T>) identityIndex(String.valueOf(args[0]), String.valueOf(args[1]));
+                }
+                if (normalized.contains("join information_schema.referential_constraints")) {
+                    return (List<T>) identityForeignKey("fk".equals(fault));
+                }
+                if (normalized.contains("from information_schema.triggers")) {
+                    List<AgentSchemaInitializer.TriggerDefinition> triggers =
+                            new java.util.ArrayList<>(identityTriggers("trigger".equals(fault)));
+                    if ("trigger-table".equals(fault)) {
+                        AgentSchemaInitializer.TriggerDefinition original = triggers.get(0);
+                        triggers.set(0, new AgentSchemaInitializer.TriggerDefinition(
+                                original.name(), "agent_identity_alias", original.timing(),
+                                original.event(), original.statement()));
+                    }
+                    return (List<T>) triggers;
+                }
+                return List.of();
+            }
+        });
+    }
+
+    private List<AgentSchemaInitializer.ForeignKeyColumn> identityForeignKey(boolean cascadeDelete) {
+        List<String> columns = List.of(
+                "registry_id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id");
+        List<String> referencedColumns = List.of(
+                "id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id");
+        java.util.ArrayList<AgentSchemaInitializer.ForeignKeyColumn> result = new java.util.ArrayList<>();
+        for (int i = 0; i < columns.size(); i++) {
+            result.add(new AgentSchemaInitializer.ForeignKeyColumn(
+                    columns.get(i), "agent_identity_registry", referencedColumns.get(i), i + 1,
+                    "RESTRICT", cascadeDelete ? "CASCADE" : "RESTRICT"));
+        }
+        return result;
+    }
+
+    private List<AgentSchemaInitializer.TriggerDefinition> identityTriggers(boolean weakenedRegistry) {
+        String registryUpdate = weakenedRegistry ? """
+                BEGIN
+                    IF NOT (NEW.canonical_agent_id <=> OLD.canonical_agent_id) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'immutable';
+                    END IF;
+                END
+                """ : """
+                BEGIN
+                    IF NOT (NEW.canonical_agent_id <=> OLD.canonical_agent_id) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: canonical_agent_id is immutable after insert';
+                    END IF;
+                    IF NOT (NEW.canonical_type <=> OLD.canonical_type) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: canonical_type is immutable after insert';
+                    END IF;
+                    IF NOT (NEW.client_id <=> OLD.client_id) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: client_id is immutable after insert';
+                    END IF;
+                    IF NOT (NEW.owner_jiacn <=> OLD.owner_jiacn) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: owner_jiacn is immutable after insert';
+                    END IF;
+                    IF NOT (NEW.tenant_id <=> OLD.tenant_id) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: tenant_id is immutable after insert';
+                    END IF;
+                    IF NOT (NEW.binding_id <=> OLD.binding_id) THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: binding_id is immutable after insert';
+                    END IF;
+                    IF OLD.lifecycle_status = 'RETIRED' AND NEW.lifecycle_status <> 'RETIRED' THEN
+                        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: RETIRED identity cannot be resurrected';
+                    END IF;
+                END
+                """;
+        return List.of(
+                new AgentSchemaInitializer.TriggerDefinition(
+                        "trg_identity_registry_immutable_update", "agent_identity_registry",
+                        "BEFORE", "UPDATE", registryUpdate),
+                new AgentSchemaInitializer.TriggerDefinition(
+                        "trg_identity_registry_no_delete", "agent_identity_registry",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: physical delete of identity registry is forbidden';
+                        END
+                        """),
+                new AgentSchemaInitializer.TriggerDefinition(
+                        "trg_identity_alias_immutable_update", "agent_identity_alias",
+                        "BEFORE", "UPDATE", """
+                        BEGIN
+                            IF NOT (NEW.registry_id <=> OLD.registry_id)
+                               OR NOT (NEW.canonical_agent_id <=> OLD.canonical_agent_id)
+                               OR NOT (NEW.alias_type <=> OLD.alias_type)
+                               OR NOT (NEW.alias_value <=> OLD.alias_value)
+                               OR NOT (NEW.client_id <=> OLD.client_id)
+                               OR NOT (NEW.owner_jiacn <=> OLD.owner_jiacn)
+                               OR NOT (NEW.tenant_id <=> OLD.tenant_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: alias identity and owner scope are immutable';
+                            END IF;
+                            IF OLD.alias_status = 'REVOKED' AND NEW.alias_status = 'ACTIVE' THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: REVOKED alias cannot be reactivated';
+                            END IF;
+                        END
+                        """),
+                new AgentSchemaInitializer.TriggerDefinition(
+                        "trg_identity_alias_no_delete", "agent_identity_alias",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: physical delete of identity alias is forbidden';
+                        END
+                        """));
+    }
+
+    private AgentSchemaInitializer.ColumnDefinition identityColumn(String table, String column) {
+        boolean alias = "agent_identity_alias".equals(table);
+        return switch (column) {
+            case "registry_id" -> new AgentSchemaInitializer.ColumnDefinition("bigint", "bigint", false, null, "");
+            case "binding_id" -> new AgentSchemaInitializer.ColumnDefinition("bigint", "bigint", true, null, "");
+            case "active_key" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "tinyint", "tinyint", true, null,
+                    "case when alias_status = 'ACTIVE' and valid_to is null then 1 else null end");
+            case "live_agent_id" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(100)", true, "utf8mb4_0900_bin",
+                    "case when lifecycle_status in ('PROVISIONED','ACTIVE') then canonical_agent_id else null end");
+            case "canonical_agent_id", "alias_value" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(100)", false, "utf8mb4_0900_bin", "");
+            case "canonical_type", "alias_type" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(32)", false, "utf8mb4_0900_bin", "");
+            case "lifecycle_status", "alias_status" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(20)", false, "utf8mb4_0900_bin", "");
+            case "client_id", "owner_jiacn", "tenant_id" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(50)", alias ? false : true, "utf8mb4_0900_bin", "");
+            case "audit_reason" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(1000)", false, "utf8mb4_0900_bin", "");
+            default -> throw new AssertionError(table + "." + column);
+        };
+    }
+
+    private List<AgentSchemaInitializer.IndexColumn> identityIndex(String table, String index) {
+        List<String> columns = switch (index) {
+            case "uk_identity_registry_live_agent" -> List.of("live_agent_id");
+            case "idx_identity_registry_agent" -> List.of("canonical_agent_id");
+            case "uk_identity_registry_binding" -> List.of("binding_id");
+            case "uk_identity_registry_alias_target" ->
+                    List.of("id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id");
+            case "idx_identity_registry_scope_status" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "lifecycle_status");
+            case "uk_identity_alias_active" ->
+                    List.of("client_id", "owner_jiacn", "alias_type", "alias_value", "active_key");
+            case "idx_identity_alias_registry" -> List.of("registry_id", "alias_status");
+            case "idx_identity_alias_canonical" -> List.of("canonical_agent_id", "alias_status");
+            default -> List.of();
+        };
+        boolean unique = index.startsWith("uk_");
+        java.util.ArrayList<AgentSchemaInitializer.IndexColumn> result = new java.util.ArrayList<>();
+        for (int i = 0; i < columns.size(); i++) {
+            result.add(new AgentSchemaInitializer.IndexColumn(unique ? 0 : 1, columns.get(i), i + 1, null));
+        }
+        return result;
+    }
+
+    private List<AgentSchemaInitializer.TriggerDefinition> historicalEventAuditTriggers(
+            String migration) {
+        return List.of(
+                backfillAuditTrigger(migration, "trg_historical_event_batch_insert_guard",
+                        "agent_task_historical_event_manifest_batch", "INSERT"),
+                backfillAuditTrigger(migration, "trg_historical_event_batch_update_guard",
+                        "agent_task_historical_event_manifest_batch", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_historical_event_batch_no_delete",
+                        "agent_task_historical_event_manifest_batch", "DELETE"),
+                backfillAuditTrigger(migration, "trg_historical_event_manifest_insert_guard",
+                        "agent_task_historical_event_manifest", "INSERT"),
+                backfillAuditTrigger(migration, "trg_historical_event_manifest_no_update",
+                        "agent_task_historical_event_manifest", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_historical_event_manifest_no_delete",
+                        "agent_task_historical_event_manifest", "DELETE"),
+                backfillAuditTrigger(migration, "trg_historical_event_run_insert_guard",
+                        "agent_task_historical_event_run", "INSERT"),
+                backfillAuditTrigger(migration, "trg_historical_event_run_no_update",
+                        "agent_task_historical_event_run", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_historical_event_run_no_delete",
+                        "agent_task_historical_event_run", "DELETE"));
+    }
+
+    private List<AgentSchemaInitializer.TriggerDefinition> backfillAuditTriggers(String migration) {
+        return List.of(
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_batch_insert_guard",
+                        "agent_task_backfill_manifest_batch", "INSERT"),
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_batch_update_guard",
+                        "agent_task_backfill_manifest_batch", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_batch_no_delete",
+                        "agent_task_backfill_manifest_batch", "DELETE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_insert_guard",
+                        "agent_task_backfill_manifest", "INSERT"),
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_no_update",
+                        "agent_task_backfill_manifest", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_manifest_no_delete",
+                        "agent_task_backfill_manifest", "DELETE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_issue_insert_guard",
+                        "agent_task_backfill_issue", "INSERT"),
+                backfillAuditTrigger(migration, "trg_task_backfill_issue_update_guard",
+                        "agent_task_backfill_issue", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_issue_no_delete",
+                        "agent_task_backfill_issue", "DELETE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_run_insert_guard",
+                        "agent_task_backfill_run", "INSERT"),
+                backfillAuditTrigger(migration, "trg_task_backfill_run_no_update",
+                        "agent_task_backfill_run", "UPDATE"),
+                backfillAuditTrigger(migration, "trg_task_backfill_run_no_delete",
+                        "agent_task_backfill_run", "DELETE"));
+    }
+
+    private AgentSchemaInitializer.TriggerDefinition backfillAuditTrigger(
+            String migration, String name, String table, String event) {
+        int start = migration.indexOf("create trigger " + name);
+        assertTrue(start >= 0, name);
+        int bodyStart = migration.indexOf("for each row", start);
+        assertTrue(bodyStart > start, name);
+        bodyStart += "for each row".length();
+        int end = migration.indexOf("end$$", bodyStart);
+        assertTrue(end > bodyStart, name);
+        String statement = migration.substring(bodyStart, end + "end".length()).trim();
+        return new AgentSchemaInitializer.TriggerDefinition(
+                name, table, "BEFORE", event, statement);
+    }
+
+    private String migrationTriggerDefinition(String migration, String trigger) {
+        int start = migration.indexOf("create trigger " + trigger);
+        assertTrue(start >= 0, trigger);
+        int end = migration.indexOf("end$$", start);
+        assertTrue(end > start, trigger);
+        return normalizeDefinition(migration.substring(start, end + "end".length()));
+    }
+
+    private String tableDefinition(String schema, String table) {
+        int start = schema.indexOf("create table if not exists " + table + " (");
+        assertTrue(start >= 0, table);
+        char quote = 0;
+        boolean lineComment = false;
+        boolean blockComment = false;
+        for (int i = start; i < schema.length(); i++) {
+            char current = schema.charAt(i);
+            char next = i + 1 < schema.length() ? schema.charAt(i + 1) : 0;
+            if (lineComment) {
+                if (current == '\n' || current == '\r') {
+                    lineComment = false;
+                }
+                continue;
+            }
+            if (blockComment) {
+                if (current == '*' && next == '/') {
+                    blockComment = false;
+                    i++;
+                }
+                continue;
+            }
+            if (quote != 0) {
+                if (quote != '`' && current == '\\' && next != 0) {
+                    i++; // MySQL string backslash escape: the next character cannot close the quote.
+                } else if (current == quote) {
+                    if (next == quote) {
+                        i++; // Doubled string/identifier quote remains inside the quoted value.
+                    } else {
+                        quote = 0;
+                    }
+                }
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+            } else if (current == '/' && next == '*') {
+                blockComment = true;
+                i++;
+            } else if (current == '#' || (current == '-' && next == '-'
+                    && (i + 2 == schema.length() || Character.isWhitespace(schema.charAt(i + 2))))) {
+                lineComment = true;
+            } else if (current == ';') {
+                return schema.substring(start, i);
+            }
+        }
+        throw new AssertionError("Missing unquoted SQL statement terminator for " + table);
+    }
+
+    private JdbcTemplate dialectTemplate(String productName) throws Exception {
+        return schemaCaptureTemplate(productName);
+    }
+
+    private JdbcTemplate schemaCaptureTemplate(String productName) throws Exception {
+        JdbcTemplate template = mock(JdbcTemplate.class);
+        configureTaskEventCatalog(template, productName);
+        return template;
+    }
+
+    private void configureTaskEventCatalog(JdbcTemplate template, String productName) throws Exception {
+        DataSource dataSource = dialectDataSource(productName);
+        lenient().when(template.getDataSource()).thenReturn(dataSource);
+        lenient().doAnswer(invocation -> {
+            List<Map<String, Object>> rows = bindingTenantCatalogRows(invocation.getArgument(0));
+            return rows == null ? List.of() : rows;
+        }).when(template).queryForList(anyString());
+        AtomicBoolean eventCreated = new AtomicBoolean();
+        Set<String> historicalTables = new java.util.LinkedHashSet<>();
+        List<AgentSchemaInitializer.TriggerDefinition> historicalTriggers =
+                new java.util.ArrayList<>();
+        String historicalAudit = readResource("db/historical-task-event-baseline-audit-schema.sql");
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            String normalized = sql.replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
+            if (sql.contains("CREATE TABLE IF NOT EXISTS agent_task_event")) {
+                eventCreated.set(true);
+            }
+            for (String table : historicalEventAuditTables()) {
+                if (normalized.startsWith("create table if not exists " + table + " ")) {
+                    historicalTables.add(table);
+                }
+            }
+            if (normalized.startsWith("create trigger trg_historical_event_")) {
+                historicalTriggers.add(triggerDefinitionFromCreate(sql));
+            }
+            return null;
+        }).when(template).execute(anyString());
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            Object[] invocationArgs = invocation.getArguments();
+            Object[] args = java.util.Arrays.copyOfRange(invocationArgs, 2, invocationArgs.length);
+            String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+            if (normalized.contains("from information_schema.tables") && args.length > 0) {
+                String table = String.valueOf(args[0]);
+                if ("agent_task_event".equals(table)) {
+                    return List.of(eventCreated.get() ? 1 : 0);
+                }
+                if ("agent_task_meta".equals(table)) {
+                    return List.of(1);
+                }
+                if (historicalEventAuditTables().contains(table)) {
+                    return List.of(historicalTables.contains(table) ? 1 : 0);
+                }
+            }
+            if (normalized.contains("from information_schema.columns") && args.length > 1) {
+                if ("agent_hosted_profile".equals(args[0])) {
+                    return List.of();
+                }
+                if ("agent_task_event".equals(args[0])) {
+                    return List.of(taskEventColumn(String.valueOf(args[1])));
+                }
+                if (historicalEventAuditTables().contains(String.valueOf(args[0]))) {
+                    return List.of(historicalEventColumn(
+                            historicalAudit, String.valueOf(args[0]), String.valueOf(args[1])));
+                }
+            }
+            if (isHostedProfileIndexQuery(normalized, args)) {
+                return hostedProfileIndex(args.length > 1 ? String.valueOf(args[1]) : "PRIMARY");
+            }
+            if (normalized.contains("from information_schema.statistics") && args.length > 1) {
+                if ("agent_task_event".equals(args[0])) {
+                    return taskEventIndex(String.valueOf(args[1]));
+                }
+                if (historicalEventAuditTables().contains(String.valueOf(args[0]))) {
+                    return historicalEventIndex(
+                            historicalAudit, String.valueOf(args[0]), String.valueOf(args[1]));
+                }
+            }
+            if (normalized.contains("from information_schema.triggers")
+                    && normalized.contains("agent_task_historical_event_manifest_batch")) {
+                return new java.util.ArrayList<>(historicalTriggers);
+            }
+            return List.of();
+        }).when(template).query(anyString(), any(RowMapper.class), any(Object[].class));
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+            if (normalized.contains("from information_schema.statistics")
+                    && normalized.contains("table_name = 'agent_task_event'")
+                    && normalized.contains("non_unique = 0")) {
+                return requiredTaskEventUniqueIndexes();
+            }
+            if (normalized.contains("from information_schema.triggers")
+                    && normalized.contains("agent_task_historical_event_manifest_batch")) {
+                return new java.util.ArrayList<>(historicalTriggers);
+            }
+            return List.of();
+        }).when(template).query(anyString(), any(RowMapper.class));
+        lenient().doAnswer(invocation -> {
+            emitHostedProfileRows(invocation.getArgument(0), invocation.getArgument(1));
+            return null;
+        }).when(template).query(anyString(), any(RowCallbackHandler.class));
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            Object[] invocationArgs = invocation.getArguments();
+            Object[] args = java.util.Arrays.copyOfRange(invocationArgs, 2, invocationArgs.length);
+            String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+            if (normalized.contains("from information_schema.statistics") && args.length > 0
+                    && historicalEventAuditTables().contains(String.valueOf(args[0]))) {
+                return historicalUniqueIndexes(historicalAudit, String.valueOf(args[0]));
+            }
+            return List.of();
+        }).when(template).queryForList(anyString(), any(Class.class), any(Object[].class));
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (isHostedProfileIndexSetQuery(sql)) {
+                return hostedProfileIndexNames();
+            }
+            return List.of();
+        }).when(template).queryForList(anyString(), any(Class.class));
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            Class<?> requiredType = invocation.getArgument(1);
+            Object[] invocationArgs = invocation.getArguments();
+            Object[] args = java.util.Arrays.copyOfRange(invocationArgs, 2, invocationArgs.length);
+            String normalized = sql.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+            if (requiredType == String.class && sql.contains("SELECT ENGINE")) {
+                return "InnoDB";
+            }
+            if (requiredType == String.class && sql.contains("TABLE_COLLATION")
+                    && args.length > 0 && ("agent_hosted_profile".equals(args[0])
+                    || "agent_task_event".equals(args[0])
+                    || historicalEventAuditTables().contains(String.valueOf(args[0])))) {
+                return "utf8mb4_0900_bin";
+            }
+            if (requiredType == String.class && sql.contains("SELECT EXTRA")
+                    && sql.contains("agent_task_event")) {
+                return "auto_increment";
+            }
+            if (requiredType == Long.class && normalized.startsWith("select count(*) from ")
+                    && historicalEventAuditTables().stream()
+                    .anyMatch(table -> normalized.equals("select count(*) from " + table))) {
+                return 0L;
+            }
+            if (requiredType == Integer.class
+                    && normalized.contains("from information_schema.triggers")) {
+                Set<String> names = java.util.Arrays.stream(args)
+                        .map(String::valueOf).collect(java.util.stream.Collectors.toSet());
+                return (int) historicalTriggers.stream()
+                        .filter(trigger -> names.contains(trigger.name())).count();
+            }
+            return null;
+        }).when(template).queryForObject(anyString(), any(Class.class), any(Object[].class));
+        lenient().doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            Class<?> requiredType = invocation.getArgument(1);
+            if (requiredType == String.class && isHostedProfileEngineQuery(sql)) {
+                return "InnoDB";
+            }
+            if (requiredType == Integer.class && isHostedProfileCountQuery(sql)) {
+                return 0;
+            }
+            if (requiredType == String.class && sql.contains("SELECT EXTRA")
+                    && sql.contains("agent_task_event")) {
+                return "auto_increment";
+            }
+            return null;
+        }).when(template).queryForObject(anyString(), any(Class.class));
+    }
+
+    private Map<String, Object> bindingTenantColumn(String dialect) {
+        return Map.of("DATA_TYPE", "H2".equals(dialect) ? "CHARACTER VARYING" : "varchar",
+                "CHARACTER_MAXIMUM_LENGTH", 50L, "IS_NULLABLE", "NO",
+                "COLUMN_DEFAULT", "H2".equals(dialect) ? "'0'" : "0");
+    }
+
+    private List<Map<String, Object>> bindingTenantChecks(String dialect) {
+        return List.of();
+    }
+
+    private List<Map<String, Object>> bindingTenantCatalogRows(String sql) {
+        String normalized = normalizeCatalogSql(sql);
+        if (!normalized.contains("'agent_persona_binding'")) return null;
+        String dialect = normalized.contains("schema()") ? "H2" : "MySQL";
+        if (normalized.contains("from information_schema.columns")) {
+            return List.of(bindingTenantColumn(dialect));
+        }
+        if (normalized.contains("join information_schema.check_constraints")) {
+            return bindingTenantChecks(dialect);
+        }
+        return null;
+    }
+
+    private JdbcTemplate bindingContractTemplate(String dialect, List<Map<String, Object>> columns,
+            List<Map<String, Object>> checks, List<String> statements) throws Exception {
+        return new JdbcTemplate(dialectDataSource(dialect)) {
+            @Override
+            public List<Map<String, Object>> queryForList(String sql) {
+                String normalized = normalizeCatalogSql(sql);
+                assertTrue(normalized.contains("'agent_persona_binding'"));
+                if (normalized.contains("from information_schema.columns")) return columns;
+                assertTrue(normalized.contains("join information_schema.check_constraints"));
+                assertTrue(normalized.contains("tc.enforced"));
+                return checks;
+            }
+
+            @Override
+            public void execute(String sql) {
+                statements.add(sql);
+            }
+
+            @Override
+            public int update(String sql, Object... args) {
+                throw new AssertionError("Binding contract validation must not convert tenant data");
+            }
+        };
+    }
+
+    private void invokeEnsureBindingTable(AgentSchemaInitializer initializer) {
+        try {
+            var method = AgentSchemaInitializer.class.getDeclaredMethod("ensureBindingTable");
+            method.setAccessible(true);
+            method.invoke(initializer);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            if (e.getCause() instanceof RuntimeException runtime) throw runtime;
+            throw new AssertionError(e.getCause());
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private JdbcTemplate withHostedProfileCatalog(JdbcTemplate delegate) {
+        return withHostedProfileCatalog(delegate, hostedProfileChecks());
+    }
+
+    private JdbcTemplate withHostedProfileCatalog(JdbcTemplate delegate, Map<String, String> checks) {
+        return new JdbcTemplate() {
+            @Override
+            public DataSource getDataSource() {
+                return delegate.getDataSource();
+            }
+
+            @Override
+            public List<Map<String, Object>> queryForList(String sql) {
+                List<Map<String, Object>> rows = bindingTenantCatalogRows(sql);
+                return rows == null ? delegate.queryForList(sql) : rows;
+            }
+
+            @Override
+            public void execute(String sql) {
+                delegate.execute(sql);
+            }
+
+            @Override
+            public int update(String sql, Object... args) {
+                return delegate.update(sql, args);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType) {
+                if (requiredType == String.class && isHostedProfileEngineQuery(sql)) {
+                    return (T) "InnoDB";
+                }
+                if (requiredType == Integer.class && isHostedProfileCountQuery(sql)) {
+                    return (T) Integer.valueOf(0);
+                }
+                return delegate.queryForObject(sql, requiredType);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(
+                    String sql, Class<T> requiredType, Object... args) {
+                if (requiredType == String.class && sql.contains("TABLE_COLLATION")
+                        && args.length > 0 && "agent_hosted_profile".equals(args[0])) {
+                    return (T) "utf8mb4_0900_bin";
+                }
+                return delegate.queryForObject(sql, requiredType, args);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> queryForList(String sql, Class<T> elementType) {
+                if (isHostedProfileIndexSetQuery(sql)) {
+                    return (List<T>) hostedProfileIndexNames();
+                }
+                return delegate.queryForList(sql, elementType);
+            }
+
+            @Override
+            public <T> List<T> queryForList(
+                    String sql, Class<T> elementType, Object... args) {
+                return delegate.queryForList(sql, elementType, args);
+            }
+
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper) {
+                return delegate.query(sql, rowMapper);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(
+                    String sql, RowMapper<T> rowMapper, Object... args) {
+                String normalized = normalizeCatalogSql(sql);
+                if (normalized.contains("from information_schema.columns")
+                        && args.length > 1 && "agent_hosted_profile".equals(args[0])) {
+                    return List.of();
+                }
+                if (isHostedProfileIndexQuery(normalized, args)) {
+                    return (List<T>) hostedProfileIndex(
+                            args.length > 1 ? String.valueOf(args[1]) : "PRIMARY");
+                }
+                return delegate.query(sql, rowMapper, args);
+            }
+
+            @Override
+            public void query(String sql, RowCallbackHandler rowCallbackHandler) {
+                if (!emitHostedProfileRows(sql, rowCallbackHandler, checks)) {
+                    delegate.query(sql, rowCallbackHandler);
+                }
+            }
+        };
+    }
+
+    private boolean emitHostedProfileRows(String sql, RowCallbackHandler rowCallbackHandler) {
+        return emitHostedProfileRows(sql, rowCallbackHandler, hostedProfileChecks());
+    }
+
+    private boolean emitHostedProfileRows(String sql, RowCallbackHandler rowCallbackHandler,
+            Map<String, String> checks) {
+        String normalized = normalizeCatalogSql(sql);
+        try {
+            if (normalized.contains("from information_schema.columns")
+                    && normalized.contains("table_name = 'agent_hosted_profile'")) {
+                for (Map.Entry<String, AgentSchemaInitializer.BackfillColumnDefinition> entry
+                        : hostedProfileColumns().entrySet()) {
+                    java.sql.ResultSet row = mock(java.sql.ResultSet.class);
+                    AgentSchemaInitializer.BackfillColumnDefinition definition = entry.getValue();
+                    when(row.getString("COLUMN_NAME")).thenReturn(entry.getKey());
+                    when(row.getString("DATA_TYPE")).thenReturn(definition.dataType());
+                    when(row.getString("COLUMN_TYPE")).thenReturn(definition.columnType());
+                    when(row.getString("IS_NULLABLE"))
+                            .thenReturn(definition.nullable() ? "YES" : "NO");
+                    when(row.getString("COLUMN_DEFAULT")).thenReturn(definition.defaultValue());
+                    when(row.getString("COLLATION_NAME")).thenReturn(definition.collation());
+                    when(row.getString("EXTRA")).thenReturn(definition.extra());
+                    rowCallbackHandler.processRow(row);
+                }
+                return true;
+            }
+            if (normalized.contains("join information_schema.check_constraints")
+                    && normalized.contains("table_name='agent_hosted_profile'")) {
+                for (Map.Entry<String, String> entry : checks.entrySet()) {
+                    java.sql.ResultSet row = mock(java.sql.ResultSet.class);
+                    when(row.getString("CONSTRAINT_NAME")).thenReturn(entry.getKey());
+                    when(row.getString("CHECK_CLAUSE")).thenReturn(entry.getValue());
+                    rowCallbackHandler.processRow(row);
+                }
+                return true;
+            }
+            return false;
+        } catch (java.sql.SQLException e) {
+            throw new AssertionError("Unable to emit hosted profile catalog row", e);
+        }
+    }
+
+    private Map<String, AgentSchemaInitializer.BackfillColumnDefinition> hostedProfileColumns() {
+        Map<String, AgentSchemaInitializer.BackfillColumnDefinition> columns = new LinkedHashMap<>();
+        columns.put("id", hostedColumn("bigint", "bigint", false, null, null, "auto_increment"));
+        columns.put("binding_id", hostedColumn("bigint", "bigint", false, null, null, ""));
+        columns.put("owner_jiacn", hostedColumn(
+                "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("canonical_agent_id", hostedColumn(
+                "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("persona_code", hostedColumn(
+                "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("profile_key", hostedColumn(
+                "varchar", "varchar(160)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("api_key_id", hostedColumn(
+                "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("lifecycle_state", hostedColumn(
+                "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("resume_state", hostedColumn(
+                "varchar", "varchar(32)", true, null, "utf8mb4_0900_bin", ""));
+        columns.put("generation", hostedColumn("bigint", "bigint", false, "0", null, ""));
+        columns.put("desired_enabled", hostedColumn(
+                "tinyint", "tinyint(1)", false, "1", null, ""));
+        columns.put("last_error", hostedColumn(
+                "varchar", "varchar(1000)", true, null, "utf8mb4_0900_bin", ""));
+        columns.put("create_time", hostedColumn("bigint", "bigint", true, null, null, ""));
+        columns.put("update_time", hostedColumn("bigint", "bigint", true, null, null, ""));
+        columns.put("tenant_id", hostedColumn(
+                "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin", ""));
+        columns.put("client_id", hostedColumn(
+                "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin", ""));
+        return columns;
+    }
+
+    private AgentSchemaInitializer.BackfillColumnDefinition hostedColumn(
+            String dataType, String columnType, boolean nullable, String defaultValue,
+            String collation, String extra) {
+        return new AgentSchemaInitializer.BackfillColumnDefinition(
+                dataType, columnType, nullable, defaultValue, collation, extra);
+    }
+
+    private List<AgentSchemaInitializer.IndexColumn> hostedProfileIndex(String index) {
+        List<String> columns = switch (index) {
+            case "PRIMARY" -> List.of("id");
+            case "uk_hosted_binding" -> List.of("binding_id");
+            case "uk_hosted_profile_key" -> List.of("profile_key");
+            case "uk_hosted_api_key" -> List.of("api_key_id");
+            case "idx_hosted_scope_state" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "lifecycle_state");
+            default -> List.of();
+        };
+        boolean unique = "PRIMARY".equals(index) || index.startsWith("uk_");
+        java.util.ArrayList<AgentSchemaInitializer.IndexColumn> result =
+                new java.util.ArrayList<>();
+        for (int i = 0; i < columns.size(); i++) {
+            result.add(new AgentSchemaInitializer.IndexColumn(
+                    unique ? 0 : 1, columns.get(i), i + 1, null));
+        }
+        return result;
+    }
+
+    private List<String> hostedProfileIndexNames() {
+        return List.of("PRIMARY", "idx_hosted_scope_state", "uk_hosted_api_key",
+                "uk_hosted_binding", "uk_hosted_profile_key");
+    }
+
+    private Map<String, String> hostedProfileChecks() {
+        return Map.of();
+    }
+
+    private boolean isHostedProfileIndexQuery(String normalizedSql, Object[] args) {
+        return args.length > 0 && "agent_hosted_profile".equals(args[0])
+                && (normalizedSql.contains("from information_schema.statistics")
+                || normalizedSql.contains("from information_schema.index_columns")
+                || normalizedSql.contains("join information_schema.key_column_usage"));
+    }
+
+    private boolean isHostedProfileEngineQuery(String sql) {
+        String normalized = normalizeCatalogSql(sql);
+        return normalized.contains("select engine from information_schema.tables")
+                && normalized.contains("table_name = 'agent_hosted_profile'");
+    }
+
+    private boolean isHostedProfileIndexSetQuery(String sql) {
+        String normalized = normalizeCatalogSql(sql);
+        return normalized.contains("select distinct index_name from information_schema.statistics")
+                && normalized.contains("table_name = 'agent_hosted_profile'");
+    }
+
+    private boolean isHostedProfileCountQuery(String sql) {
+        String normalized = normalizeCatalogSql(sql);
+        return normalized.contains("select count(*)")
+                && (normalized.contains("table_name='agent_hosted_profile'")
+                || normalized.contains("event_object_table='agent_hosted_profile'"));
+    }
+
+    private String normalizeCatalogSql(String sql) {
+        return sql.replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
+    }
+
+    private Set<String> historicalEventAuditTables() {
+        return Set.of(
+                "agent_task_historical_event_manifest_batch",
+                "agent_task_historical_event_manifest",
+                "agent_task_historical_event_run");
+    }
+
+    private AgentSchemaInitializer.BackfillColumnDefinition historicalEventColumn(
+            String migration, String table, String column) {
+        String definition = tableDefinition(migration, table);
+        Matcher matcher = Pattern.compile("(?m)^\\s*" + Pattern.quote(column)
+                + "\\s+((?:bigint|char\\(\\d+\\)|varchar\\(\\d+\\)))"
+                + "(?:\\s+(not null))?(?:\\s+default\\s+([^\\s]+))?")
+                .matcher(definition);
+        assertTrue(matcher.find(), table + "." + column);
+        String columnType = matcher.group(1);
+        String dataType = columnType.substring(0,
+                columnType.contains("(") ? columnType.indexOf('(') : columnType.length());
+        boolean nullable = matcher.group(2) == null;
+        String defaultValue = matcher.group(3);
+        if ("null".equals(defaultValue)) {
+            defaultValue = null;
+        }
+        String collation = dataType.equals("char") || dataType.equals("varchar")
+                ? "utf8mb4_0900_bin" : null;
+        String extra = "id".equals(column) ? "auto_increment" : "";
+        return new AgentSchemaInitializer.BackfillColumnDefinition(
+                dataType, columnType, nullable, defaultValue, collation, extra);
+    }
+
+    private List<AgentSchemaInitializer.IndexColumn> historicalEventIndex(
+            String migration, String table, String index) {
+        String compact = tableDefinition(migration, table).replaceAll("\\s+", " ");
+        String expression = "PRIMARY".equals(index)
+                ? "primary key\\s*\\(([^)]*)\\)"
+                : "(unique key|key)\\s+" + Pattern.quote(index) + "\\s*\\(([^)]*)\\)";
+        Matcher matcher = Pattern.compile(expression).matcher(compact);
+        assertTrue(matcher.find(), table + "." + index);
+        boolean unique = "PRIMARY".equals(index) || "unique key".equals(matcher.group(1));
+        String columns = "PRIMARY".equals(index) ? matcher.group(1) : matcher.group(2);
+        String[] names = columns.split("\\s*,\\s*");
+        List<AgentSchemaInitializer.IndexColumn> result = new java.util.ArrayList<>();
+        for (int i = 0; i < names.length; i++) {
+            result.add(new AgentSchemaInitializer.IndexColumn(
+                    unique ? 0 : 1, names[i].trim(), i + 1, null));
+        }
+        return result;
+    }
+
+    private List<String> historicalUniqueIndexes(String migration, String table) {
+        String compact = tableDefinition(migration, table).replaceAll("\\s+", " ");
+        List<String> result = new java.util.ArrayList<>();
+        if (compact.contains("primary key")) {
+            result.add("PRIMARY");
+        }
+        Matcher matcher = Pattern.compile("unique key\\s+([a-z][a-z0-9_]*)\\s*\\(")
+                .matcher(compact);
+        while (matcher.find()) {
+            result.add(matcher.group(1));
+        }
+        return result.stream().sorted().toList();
+    }
+
+    private AgentSchemaInitializer.TriggerDefinition triggerDefinitionFromCreate(String sql) {
+        Matcher matcher = Pattern.compile(
+                "(?is)^\\s*create trigger\\s+([a-z0-9_]+)\\s+"
+                        + "(before|after)\\s+(insert|update|delete)\\s+on\\s+"
+                        + "([a-z0-9_]+)\\s+for each row\\s+(.*)\\s*$")
+                .matcher(sql);
+        assertTrue(matcher.matches(), sql);
+        return new AgentSchemaInitializer.TriggerDefinition(
+                matcher.group(1).toLowerCase(Locale.ROOT),
+                matcher.group(4).toLowerCase(Locale.ROOT),
+                matcher.group(2).toUpperCase(Locale.ROOT),
+                matcher.group(3).toUpperCase(Locale.ROOT), matcher.group(5).trim());
+    }
+
+    private AgentSchemaInitializer.ColumnDefinition taskEventColumn(String column) {
+        return switch (column) {
+            case "id", "event_version", "occurred_at" ->
+                    new AgentSchemaInitializer.ColumnDefinition("bigint", "bigint", false, null, "");
+            case "create_time", "update_time" ->
+                    new AgentSchemaInitializer.ColumnDefinition("bigint", "bigint", true, null, "");
+            case "task_id", "event_id", "actor_id", "aggregate_id" ->
+                    new AgentSchemaInitializer.ColumnDefinition(
+                            "varchar", "varchar(100)", "actor_id".equals(column),
+                            "utf8mb4_0900_bin", "");
+            case "event_type" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(64)", false, "utf8mb4_0900_bin", "");
+            case "actor_type" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(20)", false, "utf8mb4_0900_bin", "");
+            case "aggregate_type" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(30)", false, "utf8mb4_0900_bin", "");
+            case "tenant_id", "client_id", "owner_jiacn" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "varchar", "varchar(50)", false, "utf8mb4_0900_bin", "");
+            case "event_json" -> new AgentSchemaInitializer.ColumnDefinition(
+                    "mediumtext", "mediumtext", false, null, "");
+            default -> throw new AssertionError("unknown task event column " + column);
+        };
+    }
+
+    private List<AgentSchemaInitializer.IndexColumn> taskEventIndex(String index) {
+        List<String> columns = switch (index) {
+            case "PRIMARY" -> List.of("id");
+            case "uk_task_event_version" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "event_version");
+            case "uk_task_event_id" -> List.of("tenant_id", "client_id", "owner_jiacn", "event_id");
+            case "idx_task_event_occurred" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "occurred_at");
+            case "idx_event_actor_time" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "actor_type", "actor_id", "occurred_at");
+            case "idx_event_type_time" ->
+                    List.of("tenant_id", "client_id", "owner_jiacn", "event_type", "occurred_at");
+            default -> List.of();
+        };
+        boolean unique = "PRIMARY".equals(index) || index.startsWith("uk_");
+        java.util.ArrayList<AgentSchemaInitializer.IndexColumn> result = new java.util.ArrayList<>();
+        for (int i = 0; i < columns.size(); i++) {
+            result.add(new AgentSchemaInitializer.IndexColumn(
+                    unique ? 0 : 1, columns.get(i), i + 1, null));
+        }
+        return result;
+    }
+
+    private void invokeEnsureRequiredIndex(
+            AgentSchemaInitializer initializer, String table, String indexName,
+            boolean unique, List<String> columns, String createSql) {
+        try {
+            var method = AgentSchemaInitializer.class.getDeclaredMethod(
+                    "ensureRequiredIndex", String.class, String.class,
+                    boolean.class, List.class, String.class);
+            method.setAccessible(true);
+            method.invoke(initializer, table, indexName, unique, columns, createSql);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            if (e.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new AssertionError(e.getCause());
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private DataSource dialectDataSource(String productName) throws Exception {
+        DataSource dataSource = mock(DataSource.class);
+        Connection connection = mock(Connection.class);
+        DatabaseMetaData metadata = mock(DatabaseMetaData.class);
+        when(dataSource.getConnection()).thenReturn(connection);
+        when(connection.getMetaData()).thenReturn(metadata);
+        when(metadata.getDatabaseProductName()).thenReturn(productName);
+        return dataSource;
+    }
+
+    private List<String> executedStatements(JdbcTemplate template) {
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(template, atLeastOnce()).execute(captor.capture());
+        return captor.getAllValues();
+    }
+
+    private String readSchema() throws IOException {
+        return readResource("db/schema.sql");
+    }
+
+    private JdbcTemplate backfillColumnMismatchTemplate(
+            AgentSchemaInitializer.BackfillColumnDefinition issueKeyDefinition) {
+        return withHostedProfileCatalog(new JdbcTemplate() {
+            @Override
+            public void execute(String sql) {
+                // DDL intentionally inert so catalog evidence controls the result.
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+                if (sql.contains("TABLE_COLLATION")) {
+                    return (T) "utf8mb4_0900_bin";
+                }
+                return (T) Integer.valueOf(1);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                if (sql.contains("information_schema.tables")) {
+                    return (List<T>) List.of(Integer.valueOf(
+                            args.length > 0 && String.valueOf(args[0]).startsWith("agent_task_backfill_") ? 1 : 0));
+                }
+                if (sql.contains("information_schema.statistics")
+                        && args.length > 1 && "PRIMARY".equals(args[1])) {
+                    return (List<T>) List.of(new AgentSchemaInitializer.IndexColumn(
+                            0, "id", 1, null));
+                }
+                if (sql.contains("SELECT DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT")) {
+                    if ("agent_task_backfill_issue".equals(args[0]) && "id".equals(args[1])) {
+                        return (List<T>) List.of(new AgentSchemaInitializer.BackfillColumnDefinition(
+                                "bigint", "bigint", false, null, null, "auto_increment"));
+                    }
+                    if ("agent_task_backfill_issue".equals(args[0]) && "issue_key".equals(args[1])) {
+                        return (List<T>) List.of(issueKeyDefinition);
+                    }
+                }
+                return List.of();
+            }
+        });
+    }
+
+    private String readResource(String resource) throws IOException {
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(resource)) {
+            assertNotNull(input, resource);
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8).toLowerCase(Locale.ROOT);
+        }
+    }
+
+    private TableStructure tableStructure(String definition) {
+        Map<String, String> columns = new LinkedHashMap<>();
+        Matcher columnMatcher = Pattern.compile(
+                "(?m)^\\s*([a-z][a-z0-9_]*)\\s+"
+                        + "((?:(?:bigint|int|mediumtext|text)\\b|tinyint\\(1\\)|char\\(\\d+\\)|varchar\\(\\d+\\))[^,\\n]*)")
+                .matcher(definition);
+        while (columnMatcher.find()) {
+            columns.put(columnMatcher.group(1), normalizeDefinition(columnMatcher.group(2)));
+        }
+
+        Map<String, String> indexes = new LinkedHashMap<>();
+        String compact = definition.replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+        Matcher primary = Pattern.compile("primary key \\(([^)]*)\\)").matcher(compact);
+        if (primary.find()) {
+            indexes.put("primary", "unique|" + normalizeColumns(primary.group(1)));
+        }
+        Matcher namedIndexes = Pattern.compile("(unique key|key) ([a-z][a-z0-9_]*) \\(([^)]*)\\)")
+                .matcher(compact);
+        while (namedIndexes.find()) {
+            String uniqueness = namedIndexes.group(1).startsWith("unique") ? "unique" : "nonunique";
+            indexes.put(namedIndexes.group(2), uniqueness + "|" + normalizeColumns(namedIndexes.group(3)));
+        }
+        return new TableStructure(columns, indexes);
+    }
+
+    private String normalizeSqlStructure(String definition) {
+        return normalizeDefinition(definition)
+                .replace("( ", "(")
+                .replace(" )", ")");
+    }
+
+    private String normalizeDefinition(String definition) {
+        return definition.replaceAll("\\s+", " ").trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizeColumns(String columns) {
+        return columns.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+    }
+
+    private record TableStructure(Map<String, String> columns, Map<String, String> indexes) {}
+}

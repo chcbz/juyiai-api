@@ -1,0 +1,897 @@
+package cn.jia.chat.api;
+
+import cn.jia.agent.service.AgentService;
+import cn.jia.agent.service.PersonalWorkspaceTaskLinkService;
+import cn.jia.chat.entity.AgentTaskThreadConstants;
+import cn.jia.chat.entity.ChatConversationEntity;
+import cn.jia.chat.entity.ChatMessageEntity;
+import cn.jia.chat.exception.AgentTaskThreadException;
+import cn.jia.chat.handler.AgentWebSocketHandler;
+import cn.jia.chat.handler.dto.ChatMessageDTO;
+import cn.jia.core.entity.JsonResult;
+import cn.jia.chat.memory.MemoryDocument;
+import cn.jia.chat.memory.MemoryRepository;
+import cn.jia.chat.service.ChatConversationEventBroker;
+import cn.jia.chat.service.ChatConversationService;
+import cn.jia.chat.service.ChatDeliberationService;
+import cn.jia.chat.service.BuiltinHallAgentSupport;
+import cn.jia.chat.service.JuyitingAgentRelayService;
+import cn.jia.chat.service.JuyitingAgentRelayResult;
+import cn.jia.chat.service.JuyitingConversationScopeService;
+import cn.jia.chat.service.HumanSenderIdentityResolver;
+import cn.jia.chat.service.ServerResolvedSender;
+import cn.jia.chat.service.impl.AgentTaskThreadMemoryGuard;
+import cn.jia.core.context.EsContext;
+import cn.jia.core.context.EsContextHolder;
+import cn.jia.core.redis.RedisService;
+import cn.jia.core.security.SensitiveResponseBodyAdvice;
+import cn.jia.core.security.SensitiveResponseProperties;
+import cn.jia.user.service.UserService;
+import cn.jia.test.BaseMockTest;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.core.MethodParameter;
+import org.springframework.http.MediaType;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class ChatControllerTest extends BaseMockTest {
+    @Mock
+    ChatClient chatClient;
+    @Mock
+    ChatConversationService chatConversationService;
+    @Mock
+    RedisService redisService;
+    @Mock
+    ChatClient.Builder chatClientBuilder;
+    @Mock
+    AgentWebSocketHandler agentWebSocketHandler;
+    @Mock
+    ChatConversationEventBroker chatConversationEventBroker;
+    @Mock
+    BuiltinHallAgentSupport builtinHallAgentSupport;
+    @Mock
+    MemoryRepository memoryRepository;
+    @Mock
+    AgentTaskThreadMemoryGuard taskThreadMemoryGuard;
+    @Mock
+    AgentService agentService;
+    @Mock
+    PersonalWorkspaceTaskLinkService taskLinkService;
+    @Mock
+    UserService userService;
+    @Mock
+    ChatDeliberationService chatDeliberationService;
+
+    @AfterEach
+    void tearDown() {
+        EsContextHolder.setContext(new EsContext());
+    }
+
+    @Test
+    void builtinPromptCarriesTrustedTaskReferencesWithoutClaimingFileContents() {
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setContent("请结合关联资料说明下一步");
+        Map<String, Object> materials = Map.of(
+                "status", "AVAILABLE",
+                "complete", true,
+                "items", List.of(
+                        Map.of("fileId", "file-input", "version", 3, "role", "INPUT"),
+                        Map.of("fileId", "file-reference", "version", 2, "role", "REFERENCE")));
+
+        Prompt prompt = newController().buildBuiltinSongJiangPrompt(request, materials);
+
+        assertEquals("请结合关联资料说明下一步", prompt.getUserMessage().getText());
+        String system = prompt.getSystemMessage().getText();
+        String normalizedSystem = system.replaceAll("\\s+", " ");
+        assertTrue(system.contains("resolved and authorized by the server"));
+        assertTrue(system.contains("file-input"));
+        assertTrue(system.contains("\"version\":3"));
+        assertTrue(system.contains("\"role\":\"REFERENCE\""));
+        assertTrue(normalizedSystem.contains("do not grant permission to read files"));
+        assertTrue(normalizedSystem.contains("Do not claim knowledge"));
+        assertFalse(system.contains("downloadUrl"));
+        assertFalse(system.contains("file contents here"));
+    }
+
+    @Test
+    void savesUserMessageBeforeRelayingToJuyitingAgent() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatConversationEntity conversation = new ChatConversationEntity();
+        conversation.setId(1001L);
+        conversation.setTitle("聚义厅议事");
+        conversation.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+
+        when(chatConversationService.create(any(ChatConversationEntity.class))).thenReturn(conversation);
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        when(chatConversationEventBroker.stream(
+                org.mockito.ArgumentMatchers.eq("1001"),
+                org.mockito.ArgumentMatchers.eq(1L), any())).thenReturn(Flux.just("""
+                {"type":"agent_message","conversationId":"1001","conversationType":"juyiting","agentId":"agent-wuyong","senderType":"agent","senderName":"Wu Yong","content":"ok"}
+                """).delayElements(Duration.ofMillis(10)));
+
+        ChatController controller = newController();
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setContent("请吴用回报当前进度");
+        request.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        request.setSenderType("user");
+        request.setSenderName("测试用户");
+        request.setMetadata(Map.of(
+                "selectedAgentId", "agent-wuyong",
+                "senderType", "agent",
+                "senderName", "宋江"));
+
+        List<String> chunks = controller.handleChat(request).collectList().block();
+
+        ArgumentCaptor<ServerResolvedSender> senderCaptor =
+                ArgumentCaptor.forClass(ServerResolvedSender.class);
+        verify(chatDeliberationService).admit(eq("0"), senderCaptor.capture(),
+                eq("1001"), eq(1L), any(), any(), eq(request), any());
+        assertEquals("user", senderCaptor.getValue().type());
+        assertEquals("tester", senderCaptor.getValue().displayName());
+        assertEquals("tester", senderCaptor.getValue().jiacn());
+        assertEquals("web-client", senderCaptor.getValue().clientId());
+        verify(agentWebSocketHandler, never()).sendDirectMessageToAgent(
+                anyString(), anyString(), anyString(), any(Map.class));
+        verify(chatConversationService, never()).appendOwnedMessage(
+                anyString(), anyString(), any(ChatMessageEntity.class),
+                org.mockito.ArgumentMatchers.anyLong());
+        assertTrue(chunks.getFirst().contains("\"conversationId\":\"1001\""));
+        assertFalse(chunks.getFirst().contains("agentDelivery"));
+        assertTrue(chunks.stream().anyMatch(item -> item.contains("\"agentDelivery\"")));
+        assertTrue(chunks.stream().anyMatch(item -> item.contains("\"conversationId\": \"1001\"")));
+    }
+
+
+    @Test
+    void clientCancellationStillCancelsSlowChatBackendWithoutSyntheticTimeout() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatConversationEntity conversation = new ChatConversationEntity()
+                .setId(1001L)
+                .setTitle("聚义厅议事")
+                .setConversationType(ChatController.CONVERSATION_TYPE_JUYITING)
+                .setLifecycleGeneration(1L);
+        when(chatConversationService.get("1001")).thenReturn(conversation);
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        when(chatConversationEventBroker.deletionSignal(eq("1001"), eq(1L), any()))
+                .thenReturn(Flux.never());
+        org.mockito.Mockito.doAnswer(inv -> {
+            inv.getArgument(3, Runnable.class).run();
+            return true;
+        }).when(chatConversationEventBroker).runIfLive(eq("1001"), eq(1L), any(), any(Runnable.class));
+        java.util.concurrent.CountDownLatch subscribed = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch cancelled = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+        JuyitingAgentRelayService relay = org.mockito.Mockito.mock(JuyitingAgentRelayService.class);
+        when(relay.relay(any(), eq("1001"), any(ServerResolvedSender.class), any())).thenReturn(new JuyitingAgentRelayResult(
+                true, Mono.just(true), Flux.<String>never()
+                        .doOnSubscribe(ignored -> subscribed.countDown())
+                        .doOnCancel(cancelled::countDown)));
+
+        ChatController controller = new ChatController(
+                chatClient, chatConversationService, redisService, chatClientBuilder,
+                chatConversationEventBroker, builtinHallAgentSupport,
+                new JuyitingConversationScopeService(builtinHallAgentSupport, agentService),
+                relay, memoryRepository, taskThreadMemoryGuard,
+                new HumanSenderIdentityResolver(userService));
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationId("1001");
+        request.setContent("请回报");
+
+        reactor.core.Disposable subscription = controller.handleChat(request)
+                .subscribe(ignored -> { }, failure::set);
+        assertTrue(subscribed.await(1, java.util.concurrent.TimeUnit.SECONDS));
+        subscription.dispose();
+
+        assertTrue(cancelled.await(1, java.util.concurrent.TimeUnit.SECONDS));
+        org.junit.jupiter.api.Assertions.assertNull(failure.get());
+        // The current stream emits startup frames; cancellation still reaches the live backend.
+        verify(chatConversationEventBroker, org.mockito.Mockito.atLeastOnce()).runIfLive(
+                eq("1001"), eq(1L), any(), any(Runnable.class));
+    }
+
+    @Test
+    void genericChatCannotCreateReservedTaskThreadScope() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setContent("spoof task thread");
+        request.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        request.setConversationScopeType(AgentTaskThreadConstants.CONVERSATION_SCOPE_TYPE);
+        request.setConversationScopeKey("task-thread:task-1");
+        request.setTaskId("task-1");
+
+        AgentTaskThreadException denied = assertThrows(AgentTaskThreadException.class,
+                () -> newController().handleChat(request));
+        assertEquals(AgentTaskThreadException.Reason.NOT_FOUND_OR_FORBIDDEN, denied.getReason());
+
+        ChatMessageDTO metadataSpoof = new ChatMessageDTO();
+        metadataSpoof.setContent("spoof task thread through metadata");
+        metadataSpoof.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        metadataSpoof.setMetadata(Map.of("mode",
+                AgentTaskThreadConstants.CONVERSATION_SCOPE_TYPE));
+        assertThrows(AgentTaskThreadException.class,
+                () -> newController().handleChat(metadataSpoof));
+
+        verify(chatConversationService, never()).create(any());
+    }
+
+    @Test
+    void genericStopAndEventRoutesCannotUseTaskThreadConversation() {
+        when(chatConversationService.get("77")).thenThrow(new AgentTaskThreadException(
+                AgentTaskThreadException.Reason.NOT_FOUND_OR_FORBIDDEN,
+                "protected task thread"));
+        ChatController controller = newController();
+        ChatMessageDTO stop = new ChatMessageDTO();
+        stop.setConversationId("77");
+
+        assertThrows(AgentTaskThreadException.class, () -> controller.stopStream(new cn.jia.core.entity.JsonRequest<>(1, "test-request", stop)));
+        assertThrows(AgentTaskThreadException.class, () -> controller.conversationEvents("77"));
+
+        verify(redisService, never()).publishSignal("77");
+        verify(chatConversationEventBroker, never()).stream(
+                eq("77"), org.mockito.ArgumentMatchers.anyLong(), any());
+        verify(chatConversationEventBroker, never()).stream(
+                eq("77"), org.mockito.ArgumentMatchers.anyLong(), any(), anyString());
+    }
+
+    @Test
+    void conversationContentKeepsExactMessageIdsAfterSensitiveResponseAdvice() throws Exception {
+        long userMessageId = 9_007_199_254_740_993L;
+        long agentMessageId = 9_007_199_254_740_995L;
+        String userMetadata = "{\"scene\":\"juyiting\",\"selectedAgentId\":\"agent-wuyong\"}";
+        String agentMetadata = "{\"messageId\":\"9007199254740995\",\"agentId\":\"agent-wuyong\"}";
+        ChatMessageEntity userMessage = new ChatMessageEntity()
+                .setId(userMessageId)
+                .setConversationId("1001")
+                .setMessageType("USER")
+                .setContent("请回报 password=hunter2")
+                .setMetadata(userMetadata)
+                .setJiacn("tester")
+                .setSyncStatus("SYNCED")
+                .setConversationType("juyiting")
+                .setSenderType("user")
+                .setSenderName("测试用户");
+        userMessage.setCreateTime(100L);
+        userMessage.setUpdateTime(101L);
+        userMessage.setTenantId("0");
+        userMessage.setClientId("web-client");
+        ChatMessageEntity agentMessage = new ChatMessageEntity()
+                .setId(agentMessageId)
+                .setConversationId("1001")
+                .setMessageType("ASSISTANT")
+                .setContent("已收到")
+                .setMetadata(agentMetadata)
+                .setJiacn("tester")
+                .setSyncStatus("SYNCED")
+                .setConversationType("juyiting")
+                .setSenderType("agent")
+                .setSenderName("吴用");
+        when(chatConversationService.findByConversationId("1001"))
+                .thenReturn(List.of(userMessage, agentMessage));
+
+        var assets = org.mockito.Mockito.mock(cn.jia.chat.service.ChatBountyAssetProjector.class);
+        var trustedPart = new cn.jia.chat.service.ChatBountyAssetProjector.Part(
+                "part_1", "image", "ready", "ast_1", "image/png", "bird.png", "1", "a".repeat(64), 20);
+        when(assets.partsFor(new cn.jia.agent.service.PersonalWorkspaceExecutionService.OwnerScope(
+                "0", "web-client", "tester"), "1001"))
+                .thenReturn(Map.of(Long.toString(agentMessageId), List.of(trustedPart)));
+        ChatController controller = newController();
+        controller.setBountyAssets(assets);
+        Object controllerBody = controller.getConversationContent("1001");
+        SensitiveResponseBodyAdvice advice =
+                new SensitiveResponseBodyAdvice(new SensitiveResponseProperties());
+        Method method = ChatController.class.getDeclaredMethod("getConversationContent", String.class);
+        Object sanitizedBody = advice.beforeBodyWrite(
+                controllerBody, new MethodParameter(method, -1), MediaType.APPLICATION_JSON,
+                null, null, null);
+        String json = new ObjectMapper().writeValueAsString(sanitizedBody);
+        Map<String, Object> wire = new ObjectMapper().readValue(json, new TypeReference<>() { });
+        List<Map<String, Object>> messages = (List<Map<String, Object>>) wire.get("data");
+
+        assertEquals(2, messages.size());
+        assertEquals("9007199254740993", messages.get(0).get("id"));
+        assertEquals("9007199254740995", messages.get(1).get("id"));
+        assertEquals(userMetadata, messages.get(0).get("metadata"));
+        assertEquals(agentMetadata, messages.get(1).get("metadata"));
+        assertEquals("user", messages.get(0).get("senderType"));
+        assertEquals("agent", messages.get(1).get("senderType"));
+        assertTrue(((List<?>) messages.get(0).get("parts")).isEmpty());
+        var projected = (List<Map<String, Object>>) messages.get(1).get("parts");
+        assertEquals("ast_1", projected.getFirst().get("assetId"));
+        assertEquals("ready", projected.getFirst().get("state"));
+        assertEquals("image/png", projected.getFirst().get("mime"));
+        verify(assets).partsFor(new cn.jia.agent.service.PersonalWorkspaceExecutionService.OwnerScope(
+                "0", "web-client", "tester"), "1001");
+        assertTrue(String.valueOf(messages.get(0).get("content")).contains("password=******"));
+        assertTrue(!json.contains("hunter2"));
+        verify(chatConversationService).findByConversationId("1001");
+    }
+
+    @Test
+    void createsScopedJuyitingConversationFromRequestFields() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatController controller = newController();
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        request.setContent("  请同步\n悬赏进度\u0007  ");
+        setObjectField(request, "conversationScopeType", "bounty");
+        setObjectField(request, "conversationScopeKey", "task:372");
+        setObjectField(request, "taskId", "372");
+        setObjectField(request, "targetAgentIds", List.of("agent-wuyong", "agent-linchong"));
+        when(agentService.listTaskWritableMemberAgentIds("0", "web-client", "372"))
+                .thenReturn(List.of("agent-wuyong", "agent-linchong"));
+        when(chatConversationService.create(any(ChatConversationEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        ChatConversationEntity created = invokeGetOrCreateConversation(controller, request);
+
+        ArgumentCaptor<ChatConversationEntity> conversationCaptor = ArgumentCaptor.forClass(ChatConversationEntity.class);
+        verify(chatConversationService).create(conversationCaptor.capture());
+        ChatConversationEntity captured = conversationCaptor.getValue();
+
+        assertEquals(ChatController.CONVERSATION_TYPE_JUYITING, captured.getConversationType());
+        assertEquals("请同步 悬赏进度", captured.getTitle());
+        assertEquals("bounty", getObjectField(captured, "conversationScopeType"));
+        assertEquals("task:372", getObjectField(captured, "conversationScopeKey"));
+        assertEquals("372", getObjectField(captured, "taskId"));
+        assertEquals(null, getObjectField(captured, "targetAgentId"));
+        assertEquals("[\"agent-wuyong\",\"agent-linchong\"]",
+                getObjectField(captured, "targetAgentIds"));
+        assertEquals(1L, getObjectField(captured, "lifecycleGeneration"));
+        assertEquals(created, captured);
+    }
+
+    @Test
+    void listConversationsPassesScopeFiltersToService() throws Exception {
+        ChatController controller = newController();
+        var emptyPage = new com.github.pagehelper.PageInfo<ChatConversationEntity>(List.of());
+        emptyPage.setPageNum(1);
+        emptyPage.setPageSize(1);
+        when(chatConversationService.findPage(any(), eq(1), eq(1), eq("update_time desc")))
+                .thenReturn(emptyPage);
+
+        ChatConversationEntity search = new ChatConversationEntity();
+        search.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        setObjectField(search, "conversationScopeType", "private");
+        setObjectField(search, "conversationScopeKey", "task:372:agent:agent-wuyong");
+
+        cn.jia.core.entity.JsonRequestPage<ChatConversationEntity> page = new cn.jia.core.entity.JsonRequestPage<>();
+        page.setPageNum(1);
+        page.setPageSize(1);
+        page.setOrderBy("update_time desc");
+        page.setSearch(search);
+
+        controller.listConversations(new cn.jia.core.entity.JsonRequest<>(1, "test-request", page));
+
+        ArgumentCaptor<ChatConversationEntity> searchCaptor = ArgumentCaptor.forClass(ChatConversationEntity.class);
+        verify(chatConversationService).findPage(searchCaptor.capture(), eq(1), eq(1), eq("update_time desc"));
+        ChatConversationEntity captured = searchCaptor.getValue();
+        assertEquals(ChatController.CONVERSATION_TYPE_JUYITING, captured.getConversationType());
+        assertEquals("private", getObjectField(captured, "conversationScopeType"));
+        assertEquals("task:372:agent:agent-wuyong", getObjectField(captured, "conversationScopeKey"));
+    }
+
+    @Test
+    void publicHallConversationWithoutTargetResolvesToSongJiang() throws Exception {
+        when(builtinHallAgentSupport.defaultAgentId()).thenReturn("songjiang");
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        setObjectField(request, "conversationScopeType", "public");
+        setObjectField(request, "conversationScopeKey", "public");
+
+        JuyitingConversationScopeService scopeService = new JuyitingConversationScopeService(builtinHallAgentSupport, agentService);
+        assertEquals(List.of("songjiang"), scopeService.resolve(request).targetAgentIds());
+    }
+
+    @Test
+    void bountyConversationRejectsTargetOutsideParticipantScope() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatController controller = newController();
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setContent("请同步悬赏进度");
+        request.setConversationType(ChatController.CONVERSATION_TYPE_JUYITING);
+        setObjectField(request, "conversationScopeType", "bounty");
+        setObjectField(request, "conversationScopeKey", "task:372");
+        setObjectField(request, "taskId", "372");
+        setObjectField(request, "targetAgentIds", List.of("agent-linchong"));
+        request.setMetadata(Map.of("participantAgentIds", List.of("agent-wuyong")));
+
+        when(agentService.listTaskWritableMemberAgentIds("0", "web-client", "372"))
+                .thenReturn(List.of("agent-wuyong"));
+
+        assertThrows(AgentTaskThreadException.class,
+                () -> controller.handleChat(request).collectList().block());
+        verify(chatConversationService, org.mockito.Mockito.never()).create(any());
+        verify(chatConversationService, org.mockito.Mockito.never()).appendOwnedMessage(
+                any(), any(), any(ChatMessageEntity.class),
+                org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void createsTwoTargetBountyAndRelaysBothThroughControllerChain() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+        List<String> members = List.of("agent-wuyong", "agent-linchong");
+        ChatController controller = newController();
+        when(agentService.listTaskWritableMemberAgentIds("0", "web-client", "task-7"))
+                .thenReturn(members);
+        when(chatConversationService.create(any(ChatConversationEntity.class)))
+                .thenAnswer(invocation -> ((ChatConversationEntity) invocation.getArgument(0))
+                        .setId(1001L));
+        when(chatConversationService.getOwned("0", "tester", "web-client", "1001"))
+                .thenAnswer(invocation -> {
+                    ChatConversationEntity value = new ChatConversationEntity()
+                            .setId(1001L).setJiacn("tester").setConversationType("juyiting")
+                            .setConversationScopeType("bounty")
+                            .setConversationScopeKey("task:task-7")
+                            .setTaskId("task-7")
+                            .setTargetAgentIds("[\"agent-wuyong\",\"agent-linchong\"]")
+                            .setLifecycleGeneration(1L);
+                    value.setClientId("web-client");
+                    value.setTenantId("0");
+                    return value;
+                });
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        when(chatConversationEventBroker.stream(eq("1001"), eq(1L), any())).thenReturn(Flux.empty());
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setContent("两位都回报");
+        request.setConversationType("juyiting");
+        request.setConversationScopeType("bounty");
+        request.setConversationScopeKey("task:task-7");
+        request.setTaskId("task-7");
+        request.setTargetAgentIds(members);
+
+        List<String> chunks = controller.handleChat(request).collectList().block();
+
+        ArgumentCaptor<ChatConversationEntity> created =
+                ArgumentCaptor.forClass(ChatConversationEntity.class);
+        verify(chatConversationService).create(created.capture());
+        assertEquals(null, created.getValue().getTargetAgentId());
+        assertEquals("[\"agent-wuyong\",\"agent-linchong\"]",
+                created.getValue().getTargetAgentIds());
+        verify(chatDeliberationService).admit(eq("0"), any(ServerResolvedSender.class),
+                eq("1001"), eq(1L), any(), any(), eq(request), any());
+        verify(agentWebSocketHandler, never()).sendDirectMessageToAgent(
+                anyString(), anyString(), anyString(), any(Map.class));
+        assertEquals(2, chunks.stream().filter(value -> value.contains("agentDelivery")).count());
+    }
+
+    @Test
+    void deletingConversationCompletesExistingSseSubscriberWithoutEvent() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester");
+        context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+        ChatConversationEventBroker broker = new ChatConversationEventBroker();
+        ChatConversationEntity conversation = new ChatConversationEntity()
+                .setId(5001L).setLifecycleGeneration(1L);
+        when(chatConversationService.get("5001")).thenReturn(conversation);
+        when(chatConversationService.isLiveGeneration(
+                "0", "tester", "web-client", "5001", 1L)).thenReturn(true);
+        JuyitingConversationScopeService scopeService =
+                new JuyitingConversationScopeService(builtinHallAgentSupport, agentService);
+        ChatController controller = new ChatController(
+                chatClient, chatConversationService, redisService, chatClientBuilder,
+                broker, builtinHallAgentSupport, scopeService,
+                new JuyitingAgentRelayService(
+                        agentWebSocketHandler, broker, builtinHallAgentSupport,
+                        chatConversationService, agentService, scopeService,
+                        taskLinkService, chatDeliberationService),
+                memoryRepository, taskThreadMemoryGuard,
+                new HumanSenderIdentityResolver(userService));
+        java.util.List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch completed =
+                new java.util.concurrent.CountDownLatch(1);
+        controller.conversationEvents("5001").subscribe(
+                event -> { events.add(event); ready.countDown(); },
+                ignored -> { }, completed::countDown);
+        assertTrue(ready.await(2, java.util.concurrent.TimeUnit.SECONDS));
+
+        try (ChatConversationEventBroker.DeletionFence fence = broker.beginDeletion("5001")) {
+            fence.commitDeleted(1L);
+        }
+
+        assertTrue(completed.await(2, java.util.concurrent.TimeUnit.SECONDS));
+        assertEquals(List.of("data: {\"type\":\"stream_ready\"}\n\n"), events);
+        assertTrue(!broker.publishIfLive("5001", 1L, () -> false,
+                Map.of("type", "agent_message")));
+    }
+
+    @Test
+    void searchLibraryReturnsExplicitFailureWhenMemorySearchFails() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester"); context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        when(memoryRepository.searchWithConversationBoost(eq("web-client"), eq("tester"), anyString(), any(), anyInt(), anyDouble()))
+                .thenThrow(new IllegalStateException("memory index unavailable"));
+
+        ChatController controller = newController();
+
+        JsonResult<?> result = invokeSearchLibrary(controller, "宋江");
+
+        assertEquals("LIBRARY_SEARCH_UNAVAILABLE", result.getCode());
+        assertEquals(null, result.getData());
+    }
+
+    @Test
+    void seedLibraryDocumentStoresProjectMemory() throws Exception {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester"); context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+
+        ChatController controller = newController();
+
+        JsonResult<?> result = invokeSeedLibraryDocument(
+                controller,
+                "聚义厅本地启动说明",
+                "后端灰度启动命令包含 jasypt.encryptor.password=cyf0519",
+                "local-startup",
+                List.of("project", "juyiting", "public-beta")
+        );
+
+        ArgumentCaptor<MemoryDocument> documentCaptor = ArgumentCaptor.forClass(MemoryDocument.class);
+        verify(memoryRepository).save(documentCaptor.capture());
+        MemoryDocument document = documentCaptor.getValue();
+        assertEquals("tester", document.getJiacn());
+        assertEquals("web-client", document.getClientId());
+        assertEquals("project", document.getSummaryType());
+        assertEquals("local-startup", document.getTopic());
+        assertEquals(List.of("project", "juyiting", "public-beta"), document.getCategories());
+        assertTrue(document.getContent().contains("聚义厅本地启动说明"));
+        assertTrue(document.getContent().contains("cyf0519"));
+        assertEquals("E0", result.getCode());
+    }
+
+    @Test
+    void libraryWithoutClientCannotReadOrWritePrivateMemory() throws Exception {
+        EsContext context = new EsContext(); context.setJiacn("tester");
+        EsContextHolder.setContext(context);
+        var controller = newController();
+        assertThrows(java.lang.reflect.InvocationTargetException.class, () -> invokeSearchLibrary(controller, "query"));
+        assertThrows(java.lang.reflect.InvocationTargetException.class,
+                () -> invokeSeedLibraryDocument(controller, "title", "content", "topic", List.of()));
+        org.mockito.Mockito.verifyNoInteractions(memoryRepository);
+    }
+
+    private JsonResult<?> invokeSearchLibrary(ChatController controller, String keyword) throws Exception {
+        Class<?> requestClass = Class.forName("cn.jia.chat.api.ChatController$LibrarySearchRequest");
+        Constructor<?> constructor = requestClass.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object request = constructor.newInstance();
+        setField(requestClass, request, "keyword", keyword);
+        setField(requestClass, request, "topK", 8);
+
+        Method method = ChatController.class.getDeclaredMethod("searchLibrary", cn.jia.core.entity.JsonRequest.class);
+        return (JsonResult<?>) method.invoke(controller, new cn.jia.core.entity.JsonRequest<>(1, "test-request", request));
+    }
+
+    @Test
+    void durablePostForwardsFinalFrameCompletesAndAdmitsSecondRequestInSameConversation() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester"); context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+        ChatConversationEventBroker broker = new ChatConversationEventBroker();
+        ChatController controller = newController(broker);
+        when(chatConversationService.get("1001"))
+                .thenAnswer(ignored -> chatConversationService.getOwned("0", "tester", "web-client", "1001"));
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> reads =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        when(chatDeliberationService.getRequest(eq("0"), eq("tester"), eq("web-client"), anyString()))
+                .thenAnswer(invocation -> {
+                    String id = invocation.getArgument(3);
+                    int read = reads.computeIfAbsent(id, ignored -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet();
+                    if (read == 1) {
+                        // Real broker buffer registration precedes this read. No delayed mock event.
+                        assertTrue(broker.publishIfSubscribed("1001", 1L, () -> true, Map.of(
+                                "requestId", id, "conversationId", "1001", "type", "agent_message", "content", "final-" + id)));
+                    }
+                    ChatDeliberationService.TurnView turn = new ChatDeliberationService.TurnView(
+                            "turn-agent-wuyong", id, "1", "1001", "1", "agent-wuyong", "snapshot-agent-wuyong",
+                            "dispatch-agent-wuyong", "CHAT", read == 1 ? "STREAMING" : "FINAL_PERSISTED", "1", "0", null,
+                            read == 1 ? null : "12", "1", "1");
+                    return new ChatDeliberationService.RequestView(id, "1", "1001", "1", "11",
+                            read == 1 ? "RUNNING" : "COMPLETED", "1", List.of(turn), List.of());
+                });
+        for (String id : List.of("round-1", "round-2")) {
+            ChatMessageDTO request = new ChatMessageDTO();
+            request.setConversationId("1001"); request.setRequestId(id); request.setContent("question-" + id);
+            request.setConversationType("juyiting"); request.setConversationScopeType("public");
+            request.setConversationScopeKey("public"); request.setTargetAgentIds(List.of("agent-wuyong"));
+            List<String> frames = controller.handleChat(request).collectList().block(Duration.ofSeconds(2));
+            assertTrue(frames.getFirst().contains("\"conversationId\":\"1001\""));
+            assertEquals(1, frames.stream().filter(frame -> frame.contains("final-" + id)).count());
+            assertTrue(frames.get(frames.size() - 3).contains("final-" + id));
+            assertEquals(2, reads.get(id).get());
+        }
+        verify(chatDeliberationService, org.mockito.Mockito.times(2)).admit(eq("0"), any(), eq("1001"), eq(1L), any(), any(), any(), any());
+        verify(chatClientBuilder, never()).build(); // Durable relay has no summary/model tail.
+        verify(agentWebSocketHandler, never()).sendDirectMessageToAgent(any(), any(), any(), any(Map.class));
+    }
+
+    @Test
+    void ordinaryModelStreamKeepsCapturedTenantAfterRequestContextIsCleared() {
+        EsContext context = new EsContext();
+        context.setTenantId("1"); context.setJiacn("owner-a"); context.setClientId("cyf-local");
+        EsContextHolder.setContext(context);
+
+        ChatClient.ChatClientRequestSpec requestSpec =
+                org.mockito.Mockito.mock(ChatClient.ChatClientRequestSpec.class);
+        ChatClient.StreamResponseSpec streamSpec =
+                org.mockito.Mockito.mock(ChatClient.StreamResponseSpec.class);
+        java.util.Map<String, Object> advisorParams = new java.util.concurrent.ConcurrentHashMap<>();
+        when(chatClient.prompt(any(Prompt.class))).thenReturn(requestSpec);
+        when(requestSpec.advisors(any(java.util.function.Consumer.class))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            java.util.function.Consumer<ChatClient.AdvisorSpec> customizer = invocation.getArgument(0);
+            ChatClient.AdvisorSpec advisorSpec = org.mockito.Mockito.mock(ChatClient.AdvisorSpec.class);
+            when(advisorSpec.param(anyString(), any())).thenAnswer(parameter -> {
+                advisorParams.put(parameter.getArgument(0), parameter.getArgument(1));
+                return advisorSpec;
+            });
+            customizer.accept(advisorSpec);
+            return requestSpec;
+        });
+        var toolParams = new java.util.concurrent.ConcurrentHashMap<String, Object>();
+        when(requestSpec.toolContext(any(Map.class))).thenAnswer(invocation -> {
+            toolParams.putAll(invocation.<Map<String, Object>>getArgument(0));
+            return requestSpec;
+        });
+        when(requestSpec.messages()).thenReturn(requestSpec);
+        when(requestSpec.stream()).thenReturn(streamSpec);
+        when(streamSpec.content()).thenReturn(Flux.just("tenant-one-response"));
+
+        ChatConversationEntity normal = new ChatConversationEntity()
+                .setId(1001L).setJiacn("owner-a").setTitle("existing")
+                .setConversationType("normal").setLifecycleGeneration(1L);
+        normal.setTenantId("1"); normal.setClientId("cyf-local");
+        when(chatConversationService.get("1001")).thenReturn(normal);
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationId("1001"); request.setContent("ordinary chat");
+        request.setConversationType("normal");
+        Flux<String> response = newController().handleChat(request);
+
+        EsContextHolder.clearContext();
+        List<String> frames = response.collectList().block(Duration.ofSeconds(2));
+
+        assertTrue(frames.stream().anyMatch(frame -> frame.contains("tenant-one-response")));
+        assertEquals("1", advisorParams.get("tenantId"));
+        assertEquals("owner-a", advisorParams.get("jiacn"));
+        assertEquals("cyf-local", advisorParams.get("clientId"));
+        assertFalse(advisorParams.containsValue("0"));
+        assertEquals(new cn.jia.agent.service.AgentService.TaskOwnerScope("1", "cyf-local", "owner-a"),
+                toolParams.get(cn.jia.chat.tool.AgentTools.TASK_OWNER_SCOPE));
+    }
+
+    @Test
+    void ordinaryNonHallModelStreamStillCompletesWithAllContent() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester"); context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+        chatClient = org.mockito.Mockito.mock(ChatClient.class, org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        when(chatClient.prompt(any(Prompt.class)).advisors(any(java.util.function.Consumer.class))
+                .toolContext(any(Map.class)).messages().stream().content()).thenReturn(Flux.just("第一块", "第二块"));
+        ChatController controller = newController(new ChatConversationEventBroker());
+        ChatConversationEntity normal = new ChatConversationEntity()
+                .setId(1001L).setJiacn("tester").setTitle("已有标题").setConversationType("normal").setLifecycleGeneration(1L);
+        normal.setTenantId("0"); normal.setClientId("web-client");
+        when(chatConversationService.get("1001")).thenReturn(normal);
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationId("1001"); request.setContent("普通聊天"); request.setConversationType("normal");
+        List<String> frames = controller.handleChat(request).collectList().block(Duration.ofSeconds(2));
+        assertEquals(5, frames.size());
+        assertTrue(frames.get(1).contains("第一块"));
+        assertTrue(frames.get(2).contains("第二块"));
+        assertTrue(frames.getLast().contains("normal"));
+        verify(chatDeliberationService, never()).getRequest(anyString(), anyString(), anyString(), anyString());
+        verify(chatDeliberationService, never()).admit(anyString(), any(), anyString(), org.mockito.ArgumentMatchers.anyLong(), any(), any(), any(), any());
+        verify(chatClientBuilder, never()).build();
+    }
+
+    @Test
+    void durableSnapshotReadErrorRetainsExplicitRecoveryErrorFrame() {
+        EsContext context = new EsContext();
+        context.setTenantId("0"); context.setJiacn("tester"); context.setClientId("web-client");
+        EsContextHolder.setContext(context);
+        ChatController controller = newController(new ChatConversationEventBroker());
+        when(chatConversationService.get("1001"))
+                .thenAnswer(ignored -> chatConversationService.getOwned("0", "tester", "web-client", "1001"));
+        when(redisService.subscribeToChannel("1001")).thenReturn(Flux.never());
+        when(chatDeliberationService.getRequest(eq("0"), eq("tester"), eq("web-client"), eq("round-failed-read")))
+                .thenThrow(new IllegalStateException("unavailable"));
+        ChatMessageDTO request = new ChatMessageDTO();
+        request.setConversationId("1001"); request.setRequestId("round-failed-read"); request.setContent("议事");
+        request.setConversationType("juyiting"); request.setConversationScopeType("public");
+        request.setConversationScopeKey("public"); request.setTargetAgentIds(List.of("agent-wuyong"));
+        List<String> frames = controller.handleChat(request).collectList().block(Duration.ofSeconds(2));
+        assertEquals(4, frames.size());
+        assertTrue(frames.getLast().contains("error"));
+        assertTrue(frames.getFirst().contains("1001"));
+        verify(chatDeliberationService, org.mockito.Mockito.times(1)).admit(eq("0"), any(), eq("1001"), eq(1L), any(), any(), any(), any());
+    }
+
+    private ChatController newController() {
+        ChatConversationEventBroker.LiveSubscription subscription =
+                org.mockito.Mockito.mock(ChatConversationEventBroker.LiveSubscription.class);
+        org.mockito.Mockito.lenient().when(chatConversationEventBroker.subscribeBuffered(anyString(),
+                org.mockito.ArgumentMatchers.anyLong(), any())).thenReturn(subscription);
+        org.mockito.Mockito.lenient().when(subscription.previews()).thenReturn(reactor.core.publisher.Flux.empty());
+        org.mockito.Mockito.lenient().when(subscription.flux()).thenAnswer(ignored -> {
+            Flux<String> legacyFixture = chatConversationEventBroker.stream("1001", 1L, () -> true);
+            return legacyFixture == null ? Flux.empty() : legacyFixture;
+        });
+        org.mockito.Mockito.lenient().when(chatDeliberationService.getRequest(anyString(), anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> new ChatDeliberationService.RequestView(invocation.getArgument(3),
+                        "1", "1001", "1", "11", "RUNNING", "1", List.of(), List.of()));
+        return newController(chatConversationEventBroker);
+    }
+
+    private ChatController newController(ChatConversationEventBroker eventBroker) {
+        if (EsContextHolder.getContext().getTenantId() == null) {
+            EsContextHolder.getContext().setTenantId("0");
+        }
+        org.mockito.Mockito.lenient().when(taskThreadMemoryGuard.excludeProtected(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        ChatConversationEntity publicConversation = new ChatConversationEntity()
+                .setId(1001L).setJiacn("tester").setConversationType("juyiting")
+                .setConversationScopeType("public").setConversationScopeKey("public")
+                .setTargetAgentIds("[\"agent-wuyong\"]");
+        publicConversation.setTenantId("0"); publicConversation.setClientId("web-client");
+        org.mockito.Mockito.lenient().when(chatConversationService.getOwned(
+                "0", "tester", "web-client", "1001")).thenReturn(publicConversation);
+        org.mockito.Mockito.lenient().when(chatConversationService.appendOwnedMessage(
+                anyString(), anyString(), any(ChatMessageEntity.class),
+                org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(invocation -> invocation.getArgument(2));
+        org.mockito.Mockito.lenient().when(chatConversationService.isLiveGeneration(
+                anyString(), anyString(), anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(true);
+        org.mockito.Mockito.lenient().when(chatConversationEventBroker.deletionSignal(
+                anyString(), org.mockito.ArgumentMatchers.anyLong(), any())).thenReturn(Flux.never());
+        org.mockito.Mockito.lenient().when(chatConversationEventBroker.runIfLive(
+                anyString(), org.mockito.ArgumentMatchers.anyLong(), any(), any(Runnable.class)))
+                .thenAnswer(invocation -> {
+                    ((Runnable) invocation.getArgument(3)).run();
+                    return true;
+                });
+        org.mockito.Mockito.lenient().doAnswer(invocation -> {
+                    cn.jia.chat.service.JuyitingConversationScope scope = invocation.getArgument(4);
+                    cn.jia.chat.deliberation.InteractionRoute route = invocation.getArgument(5);
+                    ChatMessageDTO input = invocation.getArgument(6);
+                    String requestId = input.getRequestId() == null ? "req-test" : input.getRequestId();
+                    java.util.List<ChatDeliberationService.Dispatch> dispatches = scope.targetAgentIds().stream()
+                            .map(agent -> new ChatDeliberationService.Dispatch(requestId, "turn-" + agent,
+                                    "dispatch-" + agent, "event-" + agent, agent, route.name(), "RECEIVED",
+                                    "snapshot-" + agent, "sha256:ctx", Map.of(), Map.of()))
+                            .toList();
+                    return new ChatDeliberationService.Admission(requestId, 1L, "9007199254740993",
+                            invocation.getArgument(2), invocation.getArgument(3), route, dispatches, false);
+                }).when(chatDeliberationService).admit(
+                        anyString(), any(ServerResolvedSender.class), anyString(),
+                        org.mockito.ArgumentMatchers.anyLong(), any(), any(), any(), any());
+        JuyitingConversationScopeService scopeService = new JuyitingConversationScopeService(builtinHallAgentSupport, agentService);
+        JuyitingAgentRelayService relayService = new JuyitingAgentRelayService(
+                agentWebSocketHandler,
+                eventBroker,
+                builtinHallAgentSupport,
+                chatConversationService,
+                agentService,
+                scopeService,
+                taskLinkService,
+                chatDeliberationService
+        );
+        return new ChatController(
+                chatClient,
+                chatConversationService,
+                redisService,
+                chatClientBuilder,
+                eventBroker,
+                builtinHallAgentSupport,
+                scopeService,
+                relayService,
+                memoryRepository,
+                taskThreadMemoryGuard,
+                new HumanSenderIdentityResolver(userService)
+        );
+    }
+
+    private ChatConversationEntity invokeGetOrCreateConversation(ChatController controller, ChatMessageDTO request)
+            throws Exception {
+        Method method = ChatController.class.getDeclaredMethod(
+                "getOrCreateConversation", ChatMessageDTO.class, ServerResolvedSender.class);
+        method.setAccessible(true);
+        ServerResolvedSender sender = new HumanSenderIdentityResolver(userService)
+                .resolve(EsContextHolder.getContext());
+        return (ChatConversationEntity) method.invoke(controller, request, sender);
+    }
+
+    private Object getObjectField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    private void setObjectField(Object target, String fieldName, Object value) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private JsonResult<?> invokeSeedLibraryDocument(ChatController controller, String title, String content,
+                                                    String topic, List<String> categories) throws Exception {
+        Class<?> requestClass = Class.forName("cn.jia.chat.api.ChatController$LibraryDocumentRequest");
+        Constructor<?> constructor = requestClass.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object request = constructor.newInstance();
+        setField(requestClass, request, "title", title);
+        setField(requestClass, request, "content", content);
+        setField(requestClass, request, "topic", topic);
+        setField(requestClass, request, "categories", categories);
+
+        Method method = ChatController.class.getDeclaredMethod("saveLibraryDocument", cn.jia.core.entity.JsonRequest.class);
+        return (JsonResult<?>) method.invoke(controller, new cn.jia.core.entity.JsonRequest<>(1, "test-request", request));
+    }
+
+    private void setField(Class<?> targetClass, Object target, String fieldName, Object value) throws Exception {
+        Field field = targetClass.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+}

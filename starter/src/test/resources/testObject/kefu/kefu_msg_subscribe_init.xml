@@ -1,0 +1,6 @@
+<dataset>
+    <kefu_msg_subscribe ID="1" CLIENT_ID="fixture-client_id-1" TYPE_CODE="gift_usage" JIACN="fixture-jiacn-2"
+                        WX_RX_FLAG="1" SMS_RX_FLAG="0" STATUS="1" CREATE_TIME="1584175547" UPDATE_TIME="1584177170"/>
+    <kefu_msg_subscribe ID="2" CLIENT_ID="fixture-client_id-1" TYPE_CODE="task" JIACN="fixture-jiacn-2"
+                        WX_RX_FLAG="1" SMS_RX_FLAG="0" STATUS="1" CREATE_TIME="1584175547" UPDATE_TIME="1584177170"/>
+</dataset>

@@ -1,0 +1,1233 @@
+package cn.jia.agent.service.impl;
+
+import cn.jia.agent.config.PersonalWorkspaceExecutionProperties;
+import cn.jia.agent.dao.AgentRuntimeDao;
+import cn.jia.agent.dao.AgentTaskWorkItemDao;
+import cn.jia.agent.dao.PersonalWorkspaceDao;
+import cn.jia.agent.dao.PersonalWorkspaceExecutionDao;
+import cn.jia.agent.dao.PersonalWorkspaceTaskLinkDao;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.entity.AgentTaskWorkItemEntity;
+import cn.jia.agent.entity.AgentTaskArtifactPublishDTO;
+import cn.jia.agent.entity.AgentTaskArtifactViewDTO;
+import cn.jia.agent.entity.AgentTaskFormalDeliveryViewDTO;
+import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.entity.AgentWorkItemLeaseDTO;
+import cn.jia.agent.entity.PersonalWorkspaceExecutionEntity;
+import cn.jia.agent.entity.PersonalWorkspaceExecutionInputEntity;
+import cn.jia.agent.entity.PersonalWorkspaceExecutionOutputEntity;
+import cn.jia.agent.entity.PersonalWorkspaceFileEntity;
+import cn.jia.agent.entity.PersonalWorkspaceVersionEntity;
+import cn.jia.agent.service.PersonalWorkspaceExecutionService;
+import cn.jia.agent.service.AgentWorkItemLeaseService;
+import cn.jia.agent.service.AgentTaskArtifactService;
+import cn.jia.agent.service.AgentTaskFormalDeliveryService;
+import cn.jia.agent.service.AgentTaskMutationTransaction;
+import cn.jia.agent.service.AgentTaskStateService;
+import cn.jia.agent.entity.AgentTaskStateTransitionDTO;
+import cn.jia.chat.service.WorkspaceConversationAccessService;
+import cn.jia.agent.service.PersonalWorkspaceStorage;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.clearInvocations;
+
+/** Focused owner/runtime queue contract; database mapper tests retain SQL exactness coverage. */
+class PersonalWorkspaceExecutionServiceImplTest {
+    private static final String PDF = "application/pdf";
+    private static final String XLSX =
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    private static final String PPTX =
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    private static final List<String> INPUT_MIME_TYPES = List.of(
+            PersonalWorkspaceExecutionProperties.DOCX, XLSX, PDF, PPTX, "image/png", "image/jpeg",
+            "text/plain", "text/markdown", "text/html", "application/json");
+    private static final PersonalWorkspaceExecutionService.RuntimeScope RUNTIME =
+            new PersonalWorkspaceExecutionService.RuntimeScope("0", "client-a", "owner-a", "agent-a", "runtime-a");
+    private PersonalWorkspaceExecutionDao executions;
+    private PersonalWorkspaceDao workspace;
+    private PersonalWorkspaceTaskLinkDao taskLinks;
+    private AgentRuntimeDao runtimes;
+    private PersonalWorkspaceStorage storage;
+    private PersonalWorkspaceWriteService writes;
+    private PersonalWorkspaceExecutionServiceImpl service;
+
+    @org.junit.jupiter.api.AfterEach
+    void clearRuntimePrincipal() { org.springframework.security.core.context.SecurityContextHolder.clearContext(); }
+
+    @Test
+    void grayExecutionReadUsesExactOwnerPartitionWithoutProductionFallback() {
+        var gray = new PersonalWorkspaceExecutionService.OwnerScope("1", "client-a", "owner-a");
+        var missing = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.get(gray, "execution-gray"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, missing.getReason());
+        verify(executions).find("1", "client-a", "owner-a", "execution-gray");
+        verify(executions, never()).find("0", "client-a", "owner-a", "execution-gray");
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> service.get(
+                new PersonalWorkspaceExecutionService.OwnerScope("1 ", "client-a", "owner-a"), "execution-gray"));
+    }
+
+    @BeforeEach
+    void setUp() throws Exception {
+        executions = mock(PersonalWorkspaceExecutionDao.class);
+        workspace = mock(PersonalWorkspaceDao.class);
+        taskLinks = mock(PersonalWorkspaceTaskLinkDao.class);
+        runtimes = mock(AgentRuntimeDao.class);
+        storage = mock(PersonalWorkspaceStorage.class);
+        when(storage.maxContentBytes()).thenReturn(4096L);
+        writes = mock(PersonalWorkspaceWriteService.class);
+        service = new PersonalWorkspaceExecutionServiceImpl(executions, workspace,
+                taskLinks, runtimes, storage, writes,
+                new PersonalWorkspaceExecutionProperties(List.of(PersonalWorkspaceExecutionProperties.DOCX)));
+        wireAssigneeFixture(service,executions);
+        var principal=org.springframework.beans.BeanUtils.instantiateClass(
+                cn.jia.agent.security.AgentRuntimeAuthentication.class.getDeclaredConstructor(cn.jia.agent.security.AgentRuntimeAuthentication.Scope.class),
+                new cn.jia.agent.security.AgentRuntimeAuthentication.Scope("0","client-a","owner-a","agent-a","runtime-a"));
+        principal.setDetails(new cn.jia.agent.security.AgentRuntimeAuthenticationService.Proof(principal.getPrincipal(),
+                "rti_"+"1".repeat(32),"host",1,"b".repeat(64),7,2));
+        org.springframework.security.core.context.SecurityContextHolder.getContext().setAuthentication(principal);
+        var auth=mock(cn.jia.agent.security.AgentRuntimeAuthenticationService.class);
+        when(auth.withNativeFence(any(),any())).thenAnswer(call->((java.util.function.Supplier<?>)call.getArgument(1)).get());
+        service.setRuntimeAuthentication(auth);
+    }
+
+    @Test
+    void grayExecutionRequiresAnOwnedRuntimeBeforeCreatingBusinessState() {
+        var gray=new PersonalWorkspaceExecutionService.OwnerScope("1","client-a","owner-a");
+        var failure=assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                ()->service.create(gray,new PersonalWorkspaceExecutionService.CreateCommand(
+                        null,"agent-a",null,"instruction",PersonalWorkspaceExecutionProperties.DOCX,List.of()),"gray-key"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND,failure.getReason());
+        org.mockito.Mockito.verify(executions).findByIdempotency("1","client-a","owner-a","gray-key");
+        org.mockito.Mockito.verifyNoMoreInteractions(executions);
+        org.mockito.Mockito.verifyNoInteractions(workspace,taskLinks,writes);
+    }
+
+    @Test
+    void ownerHistoryUsesLimitPlusOneAndByteExactTieCursorWithoutDuplicates() {
+        PersonalWorkspaceExecutionEntity upper = historyExecution("pwe_A", 1_790_000_000_000L);
+        PersonalWorkspaceExecutionEntity lower = historyExecution("pwe_a", 1_790_000_000_000L);
+        PersonalWorkspaceExecutionEntity later = historyExecution("pwe_b", 1_790_000_000_000L);
+        when(executions.listHistory("0", "client-a", "owner-a", null, null, 3))
+                .thenReturn(List.of(upper, later, lower));
+
+        var first = service.list(new PersonalWorkspaceExecutionService.OwnerScope(
+                "0", "client-a", "owner-a"), 2, null, null);
+
+        assertEquals(List.of("pwe_b", "pwe_a"), first.items().stream()
+                .map(PersonalWorkspaceExecutionService.ExecutionSummary::executionId).toList());
+        assertEquals(new PersonalWorkspaceExecutionService.ExecutionCursor(
+                1_790_000_000_000L, "pwe_a"), first.nextCursor());
+        assertTrue(first.items().stream().noneMatch(item -> item.toString().contains("secret")));
+        verify(executions, never()).listInputs(any(), any(), any(), any());
+
+        when(executions.listHistory("0", "client-a", "owner-a",
+                1_790_000_000_000L, "pwe_a", 3)).thenReturn(List.of(upper));
+        var second = service.list(new PersonalWorkspaceExecutionService.OwnerScope(
+                        "0", "client-a", "owner-a"), 2,
+                1_790_000_000_000L, "pwe_a");
+
+        assertEquals(List.of("pwe_A"), second.items().stream()
+                .map(PersonalWorkspaceExecutionService.ExecutionSummary::executionId).toList());
+        assertEquals(null, second.nextCursor());
+        assertTrue(first.items().stream().noneMatch(second.items()::contains));
+    }
+
+    @Test
+    void ownerHistoryRejectsDuplicateOrNonAdvancingDaoRows() {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        PersonalWorkspaceExecutionEntity duplicate = historyExecution("pwe_b", 1000L);
+        when(executions.listHistory("0", "client-a", "owner-a", null, null, 3))
+                .thenReturn(List.of(duplicate, duplicate));
+        var duplicated = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.list(owner, 2, null, null));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE,
+                duplicated.getReason());
+
+        when(executions.listHistory("0", "client-a", "owner-a", 1000L, "pwe_b", 3))
+                .thenReturn(List.of(historyExecution("pwe_b", 1000L)));
+        var nonAdvancing = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.list(owner, 2, 1000L, "pwe_b"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE,
+                nonAdvancing.getReason());
+    }
+
+    @Test
+    void ownerHistoryRejectsMalformedBoundsBeforeDao() {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        for (Object[] input : List.of(
+                new Object[] {0, null, null},
+                new Object[] {101, null, null},
+                new Object[] {20, 10L, null},
+                new Object[] {20, null, "pwe_a"},
+                new Object[] {20, -1L, "pwe_a"},
+                new Object[] {20, 10L, " pwe_a"})) {
+            var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> service.list(owner, (Integer) input[0], (Long) input[1], (String) input[2]));
+            assertEquals(PersonalWorkspaceExecutionService.Reason.BAD_REQUEST, failure.getReason());
+        }
+        verify(executions, never()).listHistory(any(), any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyInt());
+    }
+
+    @Test
+    void ownerHistoryFailsClosedOnOtherTenantOwnerClientCaseOrSpaceDaoRows() {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        List<PersonalWorkspaceExecutionEntity> contaminated = List.of(
+                historyExecution("pwe_other_tenant", 7L),
+                historyExecution("pwe_tenant_space", 6L),
+                historyExecution("pwe_other_owner", 5L).setOwnerJiacn("owner-b"),
+                historyExecution("pwe_other_client", 6L),
+                historyExecution("pwe_owner_case", 5L).setOwnerJiacn("Owner-a"),
+                historyExecution("pwe_owner_space", 4L).setOwnerJiacn("owner-a "),
+                historyExecution("pwe_client_case", 3L),
+                historyExecution("pwe_client_space", 2L));
+        contaminated.get(0).setTenantId("1");
+        contaminated.get(1).setTenantId("0 ");
+        contaminated.get(3).setClientId("client-b");
+        contaminated.get(6).setClientId("Client-a");
+        contaminated.get(7).setClientId("client-a ");
+        for (PersonalWorkspaceExecutionEntity leaked : contaminated) {
+            when(executions.listHistory("0", "client-a", "owner-a", null, null, 21))
+                    .thenReturn(List.of(leaked));
+            var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> service.list(owner, 20, null, null));
+            assertEquals(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE,
+                    failure.getReason());
+        }
+    }
+
+    @Test
+    void idempotencyRecoveryIsReadOnlyAndRequiresExactPersistedScopeAndKey() throws Exception {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        PersonalWorkspaceExecutionEntity existing = historyExecution("pwe_existing", 10L)
+                .setTaskId("pwe_task_1").setRunId("pwe_run_1").setConversationId(null)
+                .setGrantRevision(1L).setIdempotencyKey("paid-create-key")
+                .setExecutionMode("PRIVATE");
+        when(executions.findRequestByIdempotency(
+                "0", "client-a", "owner-a", "paid-create-key")).thenReturn(existing);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_existing"))
+                .thenReturn(List.of());
+
+        var recovered = service.getByIdempotencyKey(owner, "paid-create-key");
+
+        assertEquals("pwe_existing", recovered.executionId());
+        verify(executions, never()).insert(any(PersonalWorkspaceExecutionEntity.class));
+        verify(executions, never()).insertInput(any(PersonalWorkspaceExecutionInputEntity.class));
+        verify(runtimes, never()).findCandidateRosterByOwner(any(), any());
+        var method = PersonalWorkspaceExecutionServiceImpl.class.getMethod(
+                "getByIdempotencyKey", PersonalWorkspaceExecutionService.OwnerScope.class, String.class);
+        assertTrue(method.getAnnotation(org.springframework.transaction.annotation.Transactional.class).readOnly());
+    }
+
+    @Test
+    void idempotencyRecoveryTreatsContaminatedDaoRowsAsNotFoundWithoutViewExpansion() {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        List<PersonalWorkspaceExecutionEntity> contaminated = List.of(
+                historyExecution("pwe_other_tenant", 8L).setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_tenant_space", 7L).setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_other_owner", 5L).setOwnerJiacn("owner-b")
+                        .setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_other_client", 7L).setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_owner_case", 6L).setOwnerJiacn("Owner-a")
+                        .setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_owner_space", 5L).setOwnerJiacn("owner-a ")
+                        .setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_client_case", 4L).setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_client_space", 3L).setIdempotencyKey("paid-create-key"),
+                historyExecution("pwe_other_key", 1L).setIdempotencyKey("Paid-create-key"));
+        contaminated.get(0).setTenantId("1");
+        contaminated.get(1).setTenantId("0 ");
+        contaminated.get(3).setClientId("client-b");
+        contaminated.get(6).setClientId("Client-a");
+        contaminated.get(7).setClientId("client-a ");
+        for (PersonalWorkspaceExecutionEntity leaked : contaminated) {
+            when(executions.findRequestByIdempotency(
+                    "0", "client-a", "owner-a", "paid-create-key")).thenReturn(leaked);
+            var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> service.getByIdempotencyKey(owner, "paid-create-key"));
+            assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, failure.getReason());
+        }
+        verify(executions, never()).listInputs(any(), any(), any(), any());
+    }
+
+    @Test
+    void idempotencyRecoveryRejectsInputRowsOutsideExactExecutionScope() {
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        PersonalWorkspaceExecutionEntity existing = historyExecution("pwe_existing", 10L)
+                .setTaskId("pwe_task_1").setRunId("pwe_run_1").setConversationId(null)
+                .setGrantRevision(1L).setIdempotencyKey("paid-create-key")
+                .setExecutionMode("PRIVATE");
+        when(executions.findRequestByIdempotency(
+                "0", "client-a", "owner-a", "paid-create-key")).thenReturn(existing);
+        List<PersonalWorkspaceExecutionInputEntity> contaminated = List.of(
+                input("pwe_existing").setExecutionId("pwe_other"),
+                input("pwe_existing").setOwnerJiacn("owner-b"),
+                input("pwe_existing"),
+                input("pwe_existing"));
+        contaminated.get(2).setClientId("Client-a");
+        contaminated.get(3).setTenantId("0 ");
+        for (PersonalWorkspaceExecutionInputEntity leaked : contaminated) {
+            when(executions.listInputs("0", "client-a", "owner-a", "pwe_existing"))
+                    .thenReturn(List.of(leaked));
+            var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> service.getByIdempotencyKey(owner, "paid-create-key"));
+            assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, failure.getReason());
+        }
+    }
+
+    @Test
+    void ineligibleFullPagesDoNotHideLaterAuthorizedFileCommands() {
+        var items=mock(AgentTaskWorkItemDao.class);
+        service.setTaskExecutionDependencies(mock(WorkspaceConversationAccessService.class),items,mock(AgentWorkItemLeaseService.class));
+        when(items.findByTaskAndWorkItemId("0","client-a","owner-a","pwe_task_1","work-1"))
+                .thenReturn(taskWorkItem("running",9L,"agent-a","lease",1L));
+        var expired=new java.util.ArrayList<PersonalWorkspaceExecutionEntity>();
+        for(int i=0;i<16;i++) expired.add(execution("expired-"+i,"agent-a","QUEUED")
+                .setExecutionMode("TASK").setCreatedAt(100L).setWorkItemId("work-1")
+                .setLeaseToken("lease").setLeaseWorkItemVersion(9L).setLeaseExpiresAt(1L));
+        when(executions.listQueuedByTarget("0","client-a","owner-a","agent-a",16)).thenReturn(expired);
+        var unsupported=new java.util.ArrayList<PersonalWorkspaceExecutionEntity>();
+        for(int i=0;i<16;i++) unsupported.add(execution("unsupported-"+i,"agent-a","QUEUED")
+                .setOutputContentMimeType("application/unsupported").setCreatedAt(200L));
+        when(executions.listQueuedByTargetAfter("0","client-a","owner-a","agent-a",100L,"expired-15",16)).thenReturn(unsupported);
+        var valid=execution("valid","agent-a","QUEUED").setCreatedAt(300L);
+        when(executions.listQueuedByTargetAfter("0","client-a","owner-a","agent-a",200L,"unsupported-15",16)).thenReturn(List.of(valid));
+        assertEquals(1,service.runtimeQueuedCommands(RUNTIME,16).size());
+        verify(executions,never()).update(any());
+    }
+
+    @Test
+    void completelyIneligibleQueueStopsAtExhaustionWithoutReplayingOrClaiming() {
+        var expired=execution("expired","agent-a","QUEUED").setExecutionMode("TASK").setCreatedAt(100L);
+        when(executions.listQueuedByTarget("0","client-a","owner-a","agent-a",1)).thenReturn(List.of(expired));
+        when(executions.listQueuedByTargetAfter("0","client-a","owner-a","agent-a",100L,"expired",1)).thenReturn(List.of());
+        assertEquals(List.of(),service.runtimeQueuedCommands(RUNTIME,1));
+        verify(executions).listQueuedByTargetAfter("0","client-a","owner-a","agent-a",100L,"expired",1);
+        verify(executions,never()).update(any());
+    }
+
+    @Test
+    void durableQueueReturnsOnlyExactQueuedAgentItemsWithStrictRuntimePayload() throws Exception {
+        PersonalWorkspaceExecutionEntity accepted = execution("pwe_1", "agent-a", "QUEUED");
+        PersonalWorkspaceExecutionEntity wrongAgent = execution("pwe_2", "agent-b", "QUEUED");
+        PersonalWorkspaceExecutionEntity revoked = execution("pwe_3", "agent-a", "INPUTS_REVOKED");
+        when(executions.listQueuedByTarget("0", "client-a", "owner-a", "agent-a", 16))
+                .thenReturn(List.of(accepted, wrongAgent, revoked));
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_1"))
+                .thenReturn(List.of(input("pwe_1")));
+
+        List<PersonalWorkspaceExecutionService.RuntimeQueuedCommand> items = service.runtimeQueuedCommands(RUNTIME, 16);
+
+        assertEquals(1, items.size());
+        var item = items.getFirst();
+        assertEquals(1, item.schemaVersion());
+        assertEquals("command.dispatch", item.messageType());
+        assertEquals("WORKSPACE_FILE_EXECUTE", item.commandType());
+        assertEquals("agent-a", item.targetAgentId());
+        assertEquals("pwe_task_1", item.taskId());
+        assertEquals("pwe_run_1", item.runId());
+        assertEquals("请保留标题并改正文", item.instruction());
+        assertTrue(item.messageId().matches("pwe_msg_[0-9a-f]{64}"));
+        assertTrue(item.commandId().matches("pwe_cmd_[0-9a-f]{64}"));
+        assertEquals(List.of(new PersonalWorkspaceExecutionService.RuntimeInputCommand("input_1",
+                "inputs/input_1.docx", "/internal/agent/tasks/pwe_task_1/runs/pwe_run_1/inputs/input_1/content",
+                7L, sha("content"))), item.payload().inputManifest());
+        assertEquals(List.of(new PersonalWorkspaceExecutionService.RuntimeOutput("output_1", "outputs/result.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 4096L,
+                "/internal/agent/tasks/pwe_task_1/runs/pwe_run_1/outputs/output_1/content")), item.payload().outputManifest());
+        assertFalse(item.toString().contains("AgentRuntime"));
+    }
+
+    @Test
+    void durableQueuePinsMultipleCrossFormatMaterialsForOneExplicitOutput() throws Exception {
+        service = new PersonalWorkspaceExecutionServiceImpl(executions, mock(PersonalWorkspaceDao.class),
+                mock(PersonalWorkspaceTaskLinkDao.class), mock(AgentRuntimeDao.class), storage, writes,
+                new PersonalWorkspaceExecutionProperties(List.of(PPTX)));
+        wireAssigneeFixture(service,executions);
+        PersonalWorkspaceExecutionEntity accepted = execution("pwe_multi", "agent-a", "QUEUED");
+        accepted.setOutputContentMimeType(PPTX);
+        when(executions.listQueuedByTarget("0", "client-a", "owner-a", "agent-a", 16)).thenReturn(List.of(accepted));
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_multi")).thenReturn(List.of(
+                input("pwe_multi", "input_1", "pws_sheet", 3, "source.xlsx",
+                        XLSX),
+                input("pwe_multi", "input_2", "pws_pdf", 1, "brief.pdf", PDF)));
+
+        var items = service.runtimeQueuedCommands(RUNTIME, 16);
+
+        assertEquals(1, items.size());
+        assertEquals(List.of(
+                new PersonalWorkspaceExecutionService.RuntimeInputCommand("input_1", "inputs/input_1.xlsx",
+                        "/internal/agent/tasks/pwe_task_1/runs/pwe_run_1/inputs/input_1/content", 7L, sha("content")),
+                new PersonalWorkspaceExecutionService.RuntimeInputCommand("input_2", "inputs/input_2.pdf",
+                        "/internal/agent/tasks/pwe_task_1/runs/pwe_run_1/inputs/input_2/content", 7L, sha("content"))),
+                items.getFirst().payload().inputManifest());
+        assertEquals(PPTX, items.getFirst().payload().outputManifest().getFirst().contentType());
+        assertEquals("outputs/result.pptx", items.getFirst().payload().outputManifest().getFirst().relativePath());
+    }
+
+    @Test
+    void configuredCapabilitiesExposeOnlyEnabledFormatsAndFailClosedWhenStorageIsUnavailable() {
+        assertEquals(List.of(PersonalWorkspaceExecutionProperties.DOCX), service.capabilities().allowedMimeTypes());
+        assertEquals(INPUT_MIME_TYPES.stream().sorted().toList(), service.capabilities().inputMimeTypes());
+        assertTrue(service.capabilities().generationEnabled());
+
+        PersonalWorkspaceStorage unavailableStorage = mock(PersonalWorkspaceStorage.class);
+        PersonalWorkspaceExecutionService unavailable = new PersonalWorkspaceExecutionServiceImpl(executions,
+                mock(PersonalWorkspaceDao.class), mock(PersonalWorkspaceTaskLinkDao.class),
+                mock(AgentRuntimeDao.class), unavailableStorage, writes,
+                new PersonalWorkspaceExecutionProperties(List.of(PersonalWorkspaceExecutionProperties.DOCX)));
+        wireAssigneeFixture(unavailable,executions);
+        assertEquals(List.of(), unavailable.capabilities().allowedMimeTypes());
+        assertEquals(List.of(), unavailable.capabilities().inputMimeTypes());
+        assertFalse(unavailable.capabilities().generationEnabled());
+        var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> unavailable.create(
+                new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand(null, "agent-a", null, "生成提纲",
+                        PersonalWorkspaceExecutionProperties.DOCX, List.of()), "create-key"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE, failure.getReason());
+    }
+
+    @Test
+    void createAcceptsCurrentNativeInputFormatsWhileKeepingConfiguredOutputRestricted() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-a"); runtime.setClientId("client-a"); runtime.setOwnerJiacn("owner-a");
+        when(runtimes.findCandidateRosterByOwner("client-a", "owner-a")).thenReturn(List.of(runtime));
+        List<PersonalWorkspaceExecutionService.InputSelection> selections = new java.util.ArrayList<>();
+        for (int index = 0; index < INPUT_MIME_TYPES.size(); index++) {
+            String fileId = "file-" + index;
+            String mime = INPUT_MIME_TYPES.get(index);
+            selections.add(new PersonalWorkspaceExecutionService.InputSelection(fileId, 1));
+            when(workspace.lockFile("0", "client-a", "owner-a", fileId))
+                    .thenReturn(workspaceFile(fileId));
+            when(workspace.findVersion("0", "client-a", "owner-a", fileId, 1))
+                    .thenReturn(workspaceVersion(fileId, 1, "source" + extension(mime), mime));
+        }
+        when(executions.findByIdempotency("0", "client-a", "owner-a", "native-inputs-key"))
+                .thenReturn(null);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_created")).thenReturn(List.of());
+        doAnswer(invocation -> {
+            invocation.<PersonalWorkspaceExecutionEntity>getArgument(0).setExecutionId("pwe_created");
+            return null;
+        }).when(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+
+        var hints=mock(cn.jia.agent.service.NativeConversationWorkDiscovery.class);
+        service.setNativeWorkDiscovery(hints);
+        var created = service.create(new PersonalWorkspaceExecutionService.OwnerScope(
+                        "0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand(null, "agent-a", null,
+                        "用全部资料生成 Word", PersonalWorkspaceExecutionProperties.DOCX, selections),
+                "native-inputs-key");
+
+        var order=org.mockito.Mockito.inOrder(executions,hints);
+        order.verify(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+        order.verify(executions,times(INPUT_MIME_TYPES.size())).insertInput(any(PersonalWorkspaceExecutionInputEntity.class));
+        order.verify(hints).afterCommit(new cn.jia.agent.entity.NativeConversationWorkAvailable("0","client-a","agent-a","WORKSPACE_FILE"));
+        assertEquals(PersonalWorkspaceExecutionProperties.DOCX, created.outputContentMimeType());
+        var captured = ArgumentCaptor.forClass(PersonalWorkspaceExecutionInputEntity.class);
+        verify(executions, times(INPUT_MIME_TYPES.size())).insertInput(captured.capture());
+        assertEquals(INPUT_MIME_TYPES.stream().sorted().toList(), captured.getAllValues().stream()
+                .map(PersonalWorkspaceExecutionInputEntity::getContentMimeType).sorted().toList());
+        assertEquals(List.of(PersonalWorkspaceExecutionProperties.DOCX),
+                service.capabilities().allowedMimeTypes());
+    }
+
+    @Test
+    void uploadedPlainTextInputIsQueuedWithItsFixedVersion() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-a"); runtime.setClientId("client-a"); runtime.setOwnerJiacn("owner-a");
+        when(runtimes.findCandidateRosterByOwner("client-a", "owner-a")).thenReturn(List.of(runtime));
+        when(workspace.lockFile("0", "client-a", "owner-a", "file-text"))
+                .thenReturn(workspaceFile("file-text"));
+        when(workspace.findVersion("0", "client-a", "owner-a", "file-text", 1))
+                .thenReturn(workspaceVersion("file-text", 1, "source.txt", "text/plain"));
+        when(executions.findByIdempotency("0", "client-a", "owner-a", "plain-text-input-key"))
+                .thenReturn(null);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_text")).thenReturn(List.of());
+        doAnswer(invocation -> {
+            invocation.<PersonalWorkspaceExecutionEntity>getArgument(0).setExecutionId("pwe_text");
+            return null;
+        }).when(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+
+        var created = service.create(new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand(null, "agent-a", null, "处理资料",
+                        PersonalWorkspaceExecutionProperties.DOCX,
+                        List.of(new PersonalWorkspaceExecutionService.InputSelection("file-text", 1))),
+                "plain-text-input-key");
+
+        assertEquals("pwe_text", created.executionId());
+        var captured = ArgumentCaptor.forClass(PersonalWorkspaceExecutionInputEntity.class);
+        verify(executions).insertInput(captured.capture());
+        assertEquals("text/plain", captured.getValue().getContentMimeType());
+        assertEquals("source.txt", captured.getValue().getOriginalFilename());
+    }
+
+    @Test
+    void supportedInputMimeDoesNotEnableTheSameMimeAsOutput() {
+        var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> service.create(
+                new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand(null, "agent-a", null, "生成 PDF",
+                        PDF, List.of()), "disabled-output-key"));
+
+        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE, failure.getReason());
+        verify(runtimes, never()).findCandidateRosterByOwner(any(), any());
+        verify(executions, never()).insert(any(PersonalWorkspaceExecutionEntity.class));
+    }
+
+    @Test
+    void persistedUnsupportedInputCannotBeDispatchedOrDownloaded() {
+        PersonalWorkspaceExecutionEntity accepted = execution("pwe_legacy", "agent-a", "QUEUED");
+        PersonalWorkspaceExecutionInputEntity unsupported = input(
+                "pwe_legacy", "input_1", "pws_binary", 1, "source.bin", "application/octet-stream");
+        unsupported.setGrantState("ACTIVE");
+        when(executions.listQueuedByTarget("0", "client-a", "owner-a", "agent-a", 16))
+                .thenReturn(List.of(accepted));
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_legacy"))
+                .thenReturn(List.of(unsupported));
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(accepted);
+        when(executions.lockInput("0", "client-a", "owner-a", "pwe_legacy", "input_1"))
+                .thenReturn(unsupported);
+
+        assertEquals(List.of(), service.runtimeQueuedCommands(RUNTIME, 16));
+        var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.runtimeInputContent(RUNTIME, "pwe_task_1", "pwe_run_1", "input_1"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, failure.getReason());
+        verify(storage, never()).read(any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyLong(), any());
+    }
+
+    @Test
+    void queuedGenerationUsesEmptyInputManifestAndConfiguredOutputFormat() throws Exception {
+        PersonalWorkspaceExecutionEntity generated = execution("pwe_generate", "agent-a", "QUEUED");
+        generated.setInstruction("生成项目介绍文档");
+        when(executions.listQueuedByTarget("0", "client-a", "owner-a", "agent-a", 16))
+                .thenReturn(List.of(generated));
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_generate")).thenReturn(List.of());
+
+        var items = service.runtimeQueuedCommands(RUNTIME, 16);
+
+        assertEquals(1, items.size());
+        assertEquals(List.of(), items.getFirst().payload().inputManifest());
+        assertEquals(List.of(new PersonalWorkspaceExecutionService.RuntimeOutput("output_1", "outputs/result.docx",
+                PersonalWorkspaceExecutionProperties.DOCX, 4096L,
+                "/internal/agent/tasks/pwe_task_1/runs/pwe_run_1/outputs/output_1/content")),
+                items.getFirst().payload().outputManifest());
+    }
+
+    @Test
+    void taskExecutionStartsExistingRequiredWorkItemWithoutExposingLeaseToBrowser() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-a"); runtime.setClientId("client-a"); runtime.setOwnerJiacn("owner-a");
+        when(runtimes.findCandidateRosterByOwner("client-a", "owner-a")).thenReturn(List.of(runtime));
+        WorkspaceConversationAccessService access = mock(WorkspaceConversationAccessService.class);
+        AgentTaskWorkItemDao workItems = mock(AgentTaskWorkItemDao.class);
+        AgentWorkItemLeaseService leases = mock(AgentWorkItemLeaseService.class);
+        service.setTaskExecutionDependencies(access, workItems, leases);
+        when(access.requireAccessible(any(), any())).thenReturn(new WorkspaceConversationAccessService.ConversationView(
+                "conversation-1", "TASK", "task-1", "task-1", List.of("agent-a"), 1L, 1L));
+        AgentTaskWorkItemEntity ready = taskWorkItem("ready", 7L, null, null, null);
+        AgentTaskWorkItemEntity running = taskWorkItem("running", 9L, "agent-a", "lease-secret", 9_999_999_999_999L);
+        when(workItems.listByTask("0", "client-a", "owner-a", "task-1", "ready", 32)).thenReturn(List.of(ready));
+        when(workItems.findByTaskAndWorkItemId("0", "client-a", "owner-a", "task-1", "work-1")).thenReturn(running);
+        when(leases.claim(any(), any(), any(), any(), any(), any())).thenReturn(lease("claimed", 8L));
+        when(leases.start(any(), any(), any(), any(), any(), any())).thenReturn(lease("running", 9L));
+        when(executions.findByIdempotency("0", "client-a", "owner-a", "task-key")).thenReturn(null);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_created")).thenReturn(List.of());
+        org.mockito.Mockito.doAnswer(invocation -> {
+            invocation.<PersonalWorkspaceExecutionEntity>getArgument(0).setExecutionId("pwe_created");
+            return null;
+        }).when(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+        var captured = ArgumentCaptor.forClass(PersonalWorkspaceExecutionEntity.class);
+
+        var view = service.create(new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand("conversation-1", "agent-a", "task-1",
+                        "生成交付", PersonalWorkspaceExecutionProperties.DOCX, List.of()), "task-key");
+
+        verify(executions).insert(captured.capture());
+        assertEquals("TASK", captured.getValue().getExecutionMode());
+        assertEquals("work-1", captured.getValue().getWorkItemId());
+        assertEquals("TASK", view.executionMode());
+        assertEquals("task-1", view.businessTaskId());
+        assertEquals("work-1", view.workItemId());
+        assertEquals("running", view.workItemState());
+        assertFalse(view.toString().contains("lease-secret"));
+        assertFalse(view.toString().contains("storageUri"));
+        verify(leases, times(1)).claim(any(), any(), any(), any(), any(), any());
+        verify(leases, times(1)).start(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void taskExecutionRejectsSelectedVersionWithoutActiveInputOrReferenceAfterTaskLease() {
+        WorkspaceConversationAccessService access = mock(WorkspaceConversationAccessService.class);
+        AgentTaskWorkItemDao workItems = mock(AgentTaskWorkItemDao.class);
+        AgentWorkItemLeaseService leases = mock(AgentWorkItemLeaseService.class);
+        configureTaskCreate(access, workItems, leases);
+        PersonalWorkspaceFileEntity file = workspaceFile("file-1");
+        when(workspace.lockFile("0", "client-a", "owner-a", "file-1")).thenReturn(file);
+        when(taskLinks.hasActiveExecutionInputLink(
+                "0", "client-a", "owner-a", "task-1", "file-1", 3)).thenReturn(false);
+
+        var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.create(new PersonalWorkspaceExecutionService.OwnerScope(
+                                "0", "client-a", "owner-a"),
+                        new PersonalWorkspaceExecutionService.CreateCommand(
+                                "conversation-1", "agent-a", "task-1", "按意见返工",
+                                PersonalWorkspaceExecutionProperties.DOCX,
+                                List.of(new PersonalWorkspaceExecutionService.InputSelection("file-1", 3))),
+                        "task-input-key"));
+
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, failure.getReason());
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(leases, workspace, taskLinks);
+        order.verify(leases).claim(any(), any(), any(), any(), any(), any());
+        order.verify(leases).start(any(), any(), any(), any(), any(), any());
+        order.verify(workspace).lockFile("0", "client-a", "owner-a", "file-1");
+        order.verify(taskLinks).hasActiveExecutionInputLink(
+                "0", "client-a", "owner-a", "task-1", "file-1", 3);
+        verify(workspace, never()).findVersion(any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyInt());
+        verify(executions, never()).insert(any(PersonalWorkspaceExecutionEntity.class));
+    }
+
+    @Test
+    void taskExecutionAcceptsOnlyExactActiveTaskInputVersion() {
+        WorkspaceConversationAccessService access = mock(WorkspaceConversationAccessService.class);
+        AgentTaskWorkItemDao workItems = mock(AgentTaskWorkItemDao.class);
+        AgentWorkItemLeaseService leases = mock(AgentWorkItemLeaseService.class);
+        configureTaskCreate(access, workItems, leases);
+        PersonalWorkspaceFileEntity file = workspaceFile("file-1");
+        PersonalWorkspaceVersionEntity version = new PersonalWorkspaceVersionEntity()
+                .setFileId("file-1").setVersion(3).setOriginalFilename("source.docx")
+                .setContentMimeType(PersonalWorkspaceExecutionProperties.DOCX).setByteLength(7L)
+                .setContentHash(sha("content")).setStorageUri("memory://source");
+        when(workspace.lockFile("0", "client-a", "owner-a", "file-1")).thenReturn(file);
+        when(taskLinks.hasActiveExecutionInputLink(
+                "0", "client-a", "owner-a", "task-1", "file-1", 3)).thenReturn(true);
+        when(workspace.findVersion("0", "client-a", "owner-a", "file-1", 3)).thenReturn(version);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_created")).thenReturn(List.of());
+        doAnswer(invocation -> {
+            invocation.<PersonalWorkspaceExecutionEntity>getArgument(0).setExecutionId("pwe_created");
+            return null;
+        }).when(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+
+        var result = service.create(new PersonalWorkspaceExecutionService.OwnerScope(
+                        "0", "client-a", "owner-a"),
+                new PersonalWorkspaceExecutionService.CreateCommand(
+                        "conversation-1", "agent-a", "task-1", "按意见返工",
+                        PersonalWorkspaceExecutionProperties.DOCX,
+                        List.of(new PersonalWorkspaceExecutionService.InputSelection("file-1", 3))),
+                "task-input-key");
+
+        assertEquals("TASK", result.executionMode());
+        ArgumentCaptor<PersonalWorkspaceExecutionInputEntity> input =
+                ArgumentCaptor.forClass(PersonalWorkspaceExecutionInputEntity.class);
+        verify(executions).insertInput(input.capture());
+        assertEquals("file-1", input.getValue().getFileId());
+        assertEquals(3, input.getValue().getFileVersion());
+    }
+
+    @Test
+    void reworkSourceIdentityParticipatesInIdempotencyBeforeAnotherTaskLease() {
+        WorkspaceConversationAccessService access = mock(WorkspaceConversationAccessService.class);
+        AgentTaskWorkItemDao workItems = mock(AgentTaskWorkItemDao.class);
+        AgentWorkItemLeaseService leases = mock(AgentWorkItemLeaseService.class);
+        configureTaskCreate(access, workItems, leases);
+        PersonalWorkspaceVersionEntity version = new PersonalWorkspaceVersionEntity()
+                .setFileId("file-1").setVersion(3).setOriginalFilename("source.docx")
+                .setContentMimeType(PersonalWorkspaceExecutionProperties.DOCX).setByteLength(7L)
+                .setContentHash(sha("content")).setStorageUri("memory://source");
+        when(workspace.lockFile("0", "client-a", "owner-a", "file-1"))
+                .thenReturn(workspaceFile("file-1"));
+        when(taskLinks.hasActiveExecutionInputLink(
+                "0", "client-a", "owner-a", "task-1", "file-1", 3)).thenReturn(true);
+        when(workspace.findVersion("0", "client-a", "owner-a", "file-1", 3)).thenReturn(version);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_created")).thenReturn(List.of());
+        doAnswer(invocation -> {
+            invocation.<PersonalWorkspaceExecutionEntity>getArgument(0).setExecutionId("pwe_created");
+            return null;
+        }).when(executions).insert(any(PersonalWorkspaceExecutionEntity.class));
+        var persisted = ArgumentCaptor.forClass(PersonalWorkspaceExecutionEntity.class);
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        var selection = List.of(new PersonalWorkspaceExecutionService.InputSelection("file-1", 3));
+
+        service.create(owner, new PersonalWorkspaceExecutionService.CreateCommand(
+                "conversation-1", "agent-a", "task-1", "按意见返工",
+                PersonalWorkspaceExecutionProperties.DOCX, selection,
+                new PersonalWorkspaceExecutionService.SourceOutputRef(
+                        "delivery-1", 1L, "output-1", "file-1", 3)), "task-input-key");
+        verify(executions).insert(persisted.capture());
+        when(executions.findByIdempotency("0", "client-a", "owner-a", "task-input-key"))
+                .thenReturn(persisted.getValue());
+
+        var conflict = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.create(owner, new PersonalWorkspaceExecutionService.CreateCommand(
+                        "conversation-1", "agent-a", "task-1", "按意见返工",
+                        PersonalWorkspaceExecutionProperties.DOCX, selection,
+                        new PersonalWorkspaceExecutionService.SourceOutputRef(
+                                "delivery-2", 1L, "output-1", "file-1", 3)), "task-input-key"));
+
+        assertEquals(PersonalWorkspaceExecutionService.Reason.IDEMPOTENCY_CONFLICT,
+                conflict.getReason());
+        verify(leases, times(1)).claim(any(), any(), any(), any(), any(), any());
+        verify(leases, times(1)).start(any(), any(), any(), any(), any(), any());
+        verify(executions, times(1)).insert(any(PersonalWorkspaceExecutionEntity.class));
+    }
+
+    @Test
+    void stageOutputRejectsMislabeledRuntimeBytesBeforeDurableStorage() {
+        PersonalWorkspaceExecutionEntity execution = execution("pwe_1", "agent-a", "QUEUED");
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+        var failure = assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> service.stageOutput(
+                RUNTIME, "pwe_task_1", "pwe_run_1", "output_1", "result.docx",
+                PersonalWorkspaceExecutionProperties.DOCX, "not an OOXML package".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(PersonalWorkspaceExecutionService.Reason.BAD_REQUEST, failure.getReason());
+        verify(storage, never()).store(any(), any(), any());
+    }
+
+    @Test
+    void exactRuntimeFailureMovesQueuedExecutionToTerminalStateAndPreventsQueueReplay() {
+        PersonalWorkspaceExecutionEntity execution = execution("pwe_1", "agent-a", "QUEUED");
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.listInputs("0", "client-a", "owner-a", "pwe_1")).thenReturn(List.of());
+
+        var failed = service.fail(RUNTIME, "pwe_task_1", "pwe_run_1", "OUTPUT_MISSING");
+
+        assertEquals("FAILED", failed.state());
+        assertEquals("AGENT_DELIVERY_FAILED", failed.failureCode());
+        assertEquals("Agent 未能完成本次交付，请调整需求后重新创建执行。", failed.failureMessage());
+        assertEquals("FAILED", execution.getExecutionState());
+        assertTrue(execution.getFailedAt() > 0);
+        verify(executions).update(execution);
+        when(executions.listQueuedByTarget("0", "client-a", "owner-a", "agent-a", 16))
+                .thenReturn(List.of(execution));
+        assertEquals(List.of(), service.runtimeQueuedCommands(RUNTIME, 16));
+    }
+
+    @Test
+    void runtimeFailureCannotAffectAnotherAgentOrACompletedExecution() {
+        PersonalWorkspaceExecutionEntity other = execution("pwe_1", "agent-b", "QUEUED");
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(other);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(other);
+        var denied = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.fail(RUNTIME, "pwe_task_1", "pwe_run_1", "OUTPUT_MISSING"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, denied.getReason());
+        verify(executions, never()).update(other);
+
+        PersonalWorkspaceExecutionEntity committed = execution("pwe_1", "agent-a", "OUTPUT_COMMITTED");
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(committed);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(committed);
+        var completed = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.fail(RUNTIME, "pwe_task_1", "pwe_run_1", "OUTPUT_MISSING"));
+        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND, completed.getReason());
+        verify(executions, never()).update(committed);
+    }
+
+    @Test
+    void committedRuntimeOutputKeepsLegacySourceAndMarksAgentDeliveryOrigin() throws Exception {
+        PersonalWorkspaceExecutionEntity execution = execution("pwe_1", "agent-a", "QUEUED");
+        String contentHash = sha("agent result");
+        PersonalWorkspaceExecutionOutputEntity output = new PersonalWorkspaceExecutionOutputEntity()
+                .setOutputId("output_1").setExecutionId("pwe_1").setOwnerJiacn("owner-a")
+                .setOriginalFilename("result.docx")
+                .setContentMimeType("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                .setByteLength(12L).setContentHash(contentHash).setStorageUri("memory://result")
+                .setOutputState("STAGED");
+        output.setTenantId("0"); output.setClientId("client-a");
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "pwe_task_1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.lockOutputs("0", "client-a", "owner-a", "pwe_1"))
+                .thenReturn(List.of(output));
+        String manifestId = "pwe_m_" + sha("pwe_task_1\npwe_run_1\noutput_1\n"
+                + contentHash + "\n12\n");
+
+        var committed = service.commitOutputs(RUNTIME, "pwe_task_1", "pwe_run_1", manifestId,
+                List.of(new PersonalWorkspaceExecutionService.OutputDeclaration(
+                        "output_1", contentHash, 12L)));
+
+        ArgumentCaptor<PersonalWorkspaceFileEntity> file = ArgumentCaptor.forClass(
+                PersonalWorkspaceFileEntity.class);
+        ArgumentCaptor<PersonalWorkspaceVersionEntity> version = ArgumentCaptor.forClass(
+                PersonalWorkspaceVersionEntity.class);
+        verify(writes).archiveRuntimeOutput(any(PersonalWorkspaceWriteService.Scope.class),
+                file.capture(), version.capture());
+        assertEquals("UPLOAD", file.getValue().getSourceKind());
+        assertEquals("AGENT_DELIVERY", file.getValue().getOriginKind());
+        assertEquals(file.getValue().getFileId(), version.getValue().getFileId());
+        assertEquals("COMMITTED", committed.state());
+    }
+
+    @Test
+    void nativeStartLeavesTaskMutationAsTheOnlyTransactionBoundary() throws Exception {
+        var method = PersonalWorkspaceExecutionServiceImpl.class.getMethod(
+                "start", PersonalWorkspaceExecutionService.RuntimeScope.class,
+                String.class, String.class, String.class, String.class);
+
+        assertNull(method.getAnnotation(org.springframework.transaction.annotation.Transactional.class));
+    }
+
+    @Test
+    void privateNativeStartIsReadOnlyAndDoesNotTakeExecutionOrTaskRootLocks() throws Exception {
+        var execution = execution("pwe_start", "agent-a", "QUEUED")
+                .setTaskId("task-1").setExecutionMode("PRIVATE");
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1"))
+                .thenReturn(execution);
+
+        // Separate mapper lookup: do not model authorization by invoking the data DAO.
+        doReturn(execution).when(executions).findForRuntime("0", "client-a", "owner-a", "agent-a", "task-1", "pwe_run_1");
+        var receipt = service.start(
+                RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage());
+
+        assertEquals("STARTED", receipt.state());
+        verify(executions, times(2)).findByTaskRun(
+                "0", "client-a", "owner-a", "task-1", "pwe_run_1");
+        verify(executions, never()).lockByTaskRun(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nativeStartLocksTaskBeforeExecutionAndTransitionsOnlyTheExactAssignedTask() throws Exception {
+        var f = startFixture("assigned");
+        var authorized = executions.findByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1");
+        doReturn(authorized).when(executions).findForRuntime("0", "client-a", "owner-a", "agent-a", "task-1", "pwe_run_1");
+        clearInvocations(executions);
+        var receipt = service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage());
+        assertEquals("STARTED", receipt.state());
+        ArgumentCaptor<AgentTaskStateTransitionDTO> change = ArgumentCaptor.forClass(AgentTaskStateTransitionDTO.class);
+        verify(f.states()).transitionTask(org.mockito.ArgumentMatchers.eq("0"), org.mockito.ArgumentMatchers.eq("client-a"),
+                org.mockito.ArgumentMatchers.eq("owner-a"), org.mockito.ArgumentMatchers.eq("task-1"), change.capture());
+        assertEquals("running", change.getValue().getTargetStatus());
+        assertEquals(4L, change.getValue().getExpectedVersion());
+        var order = org.mockito.Mockito.inOrder(executions, f.mutations(), f.states());
+        order.verify(executions).findByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1");
+        order.verify(f.mutations()).executeWithLockedTaskRootInOwnerScope(any(), any(), any(), any(), any());
+        order.verify(executions).lockByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1");
+        order.verify(f.states()).transitionTask(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nativeStartReplayDoesNotDuplicateTaskTransition() throws Exception {
+        var f = startFixture("running");
+        assertEquals("STARTED", service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()).state());
+        verify(f.states(), never()).transitionTask(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nativeStartRejectsWrongCommandMessageAgentRevokedAndExpiredLease() throws Exception {
+        var f = startFixture("assigned");
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", "wrong", startMessage()));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), "wrong"));
+        f.execution().setTargetAgentId("agent-b");
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        f.execution().setTargetAgentId("agent-a").setExecutionState("INPUTS_REVOKED");
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        f.execution().setExecutionState("QUEUED").setLeaseExpiresAt(1L);
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        verify(f.states(), never()).transitionTask(any(), any(), any(), any(), any());
+        verify(executions, never()).lockByTaskRun(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nativeStartRejectsReassignmentAndNonRunningLifecycleStates() throws Exception {
+        var f = startFixture("assigned");
+        f.root().setAssignedAgentId("agent-b");
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        f.root().setAssignedAgentId("agent-a");
+        for (String status : List.of("blocked", "reviewing", "completed", "failed", "cancelled", "archived")) {
+            f.root().setRewardStatus(status);
+            assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        }
+        verify(f.states(), never()).transitionTask(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nativeStartRechecksRevocationAfterAcquiringRootAndDoesNotTransition() throws Exception {
+        var f = startFixture("assigned");
+        var revoked = execution("pwe_start", "agent-a", "INPUTS_REVOKED").setTaskId("task-1").setExecutionMode("TASK");
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1")).thenReturn(revoked);
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.start(RUNTIME, "task-1", "pwe_run_1", startCommand(), startMessage()));
+        verify(f.states(), never()).transitionTask(any(), any(), any(), any(), any());
+    }
+
+    private record StartFixture(AgentTaskStateService states, AgentTaskMutationTransaction mutations,
+            PersonalWorkspaceExecutionEntity execution, AgentTaskMetaEntity root) { }
+    private String startCommand() throws Exception { return "pwe_cmd_" + sha("command\npwe_start"); }
+    private String startMessage() throws Exception { return "pwe_msg_" + sha("message\npwe_start"); }
+    private StartFixture startFixture(String status) {
+        var items = mock(AgentTaskWorkItemDao.class);
+        service.setTaskExecutionDependencies(mock(WorkspaceConversationAccessService.class), items, mock(AgentWorkItemLeaseService.class));
+        var mutations = mock(AgentTaskMutationTransaction.class);
+        service.setTaskPublicationDependencies(mock(AgentTaskArtifactService.class), mock(AgentTaskFormalDeliveryService.class), mutations);
+        var states = mock(AgentTaskStateService.class);
+        service.setTaskStateService(states);
+        var execution = execution("pwe_start", "agent-a", "QUEUED").setTaskId("task-1").setExecutionMode("TASK")
+                .setWorkItemId("work-1").setLeaseToken("lease-secret").setLeaseWorkItemVersion(9L).setLeaseExpiresAt(9_999_999_999_999L);
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1")).thenReturn(execution);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1")).thenReturn(execution);
+        when(items.findByTaskAndWorkItemId("0", "client-a", "owner-a", "task-1", "work-1"))
+                .thenReturn(taskWorkItem("running", 9L, "agent-a", "lease-secret", 9_999_999_999_999L));
+        var root = new AgentTaskMetaEntity().setTaskId("task-1").setTaskVersion(4L).setRewardStatus(status).setAssignedAgentId("agent-a");
+        doAnswer(invocation -> ((AgentTaskMutationTransaction.LockedTaskMutation<?>) invocation.getArgument(4)).apply(root))
+                .when(mutations).executeWithLockedTaskRootInOwnerScope(any(), any(), any(), any(), any());
+        return new StartFixture(states, mutations, execution, root);
+    }
+
+    @Test
+    void taskOutputPublishesTrustedWorkspaceArtifactAndFormalDeliveryInOneRootMutation() throws Exception {
+        AgentTaskWorkItemDao workItems = mock(AgentTaskWorkItemDao.class);
+        AgentWorkItemLeaseService leases = mock(AgentWorkItemLeaseService.class);
+        service.setTaskExecutionDependencies(mock(WorkspaceConversationAccessService.class), workItems, leases);
+        AgentTaskArtifactService artifacts = mock(AgentTaskArtifactService.class);
+        AgentTaskFormalDeliveryService formalDeliveries = mock(AgentTaskFormalDeliveryService.class);
+        AgentTaskMutationTransaction mutations = mock(AgentTaskMutationTransaction.class);
+        service.setTaskPublicationDependencies(artifacts, formalDeliveries, mutations);
+
+        PersonalWorkspaceExecutionEntity execution = execution("pwe_task_execution", "agent-a", "QUEUED")
+                .setTaskId("task-1").setExecutionMode("TASK").setWorkItemId("work-1")
+                .setLeaseToken("lease-secret").setLeaseWorkItemVersion(9L)
+                .setLeaseExpiresAt(9_999_999_999_999L);
+        String contentHash = sha("agent result");
+        PersonalWorkspaceExecutionOutputEntity output = new PersonalWorkspaceExecutionOutputEntity()
+                .setOutputId("output_1").setExecutionId("pwe_task_execution").setOwnerJiacn("owner-a")
+                .setOriginalFilename("result.docx")
+                .setContentMimeType(PersonalWorkspaceExecutionProperties.DOCX)
+                .setByteLength(12L).setContentHash(contentHash).setStorageUri("memory://result")
+                .setOutputState("STAGED").setPublicationState("PENDING").setPublicationRevision(0L);
+        output.setTenantId("0"); output.setClientId("client-a");
+        AgentTaskMetaEntity root = new AgentTaskMetaEntity().setTaskId("task-1")
+                .setTaskVersion(4L).setRewardStatus("running").setAssignedAgentId("agent-a");
+        root.setTenantId("0"); root.setClientId("client-a"); root.setOwnerJiacn("owner-a");
+        AgentTaskWorkItemEntity running = taskWorkItem("running", 9L, "agent-a", "lease-secret", 9_999_999_999_999L);
+        when(executions.findByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.lockByTaskRun("0", "client-a", "owner-a", "task-1", "pwe_run_1"))
+                .thenReturn(execution);
+        when(executions.lockOutputs("0", "client-a", "owner-a", "pwe_task_execution"))
+                .thenReturn(List.of(output));
+        when(workItems.findByTaskAndWorkItemId("0", "client-a", "owner-a", "task-1", "work-1"))
+                .thenReturn(running);
+        when(storage.read(any(), org.mockito.ArgumentMatchers.eq("memory://result"),
+                org.mockito.ArgumentMatchers.eq(contentHash), org.mockito.ArgumentMatchers.eq(12L),
+                org.mockito.ArgumentMatchers.eq(PersonalWorkspaceExecutionProperties.DOCX)))
+                .thenReturn(new PersonalWorkspaceStorage.StoredContent("agent result".getBytes(StandardCharsets.UTF_8),
+                        contentHash, 12L, PersonalWorkspaceExecutionProperties.DOCX));
+        var publications = new java.util.IdentityHashMap<AgentTaskArtifactService.PreparedPublication, AgentTaskArtifactPublishDTO>();
+        when(artifacts.preparePublication(any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+            var prepared = mock(AgentTaskArtifactService.PreparedPublication.class);
+            publications.put(prepared, invocation.getArgument(5));return prepared;
+        });
+        when(artifacts.publishPrepared(any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+            var publish = publications.get(invocation.getArgument(5));
+            return artifact(publish.getArtifactId(), publish.getContentHash(), publish.getContentMimeType());
+        });
+        AgentTaskFormalDeliveryViewDTO formal = new AgentTaskFormalDeliveryViewDTO();
+        formal.setTaskId("task-1"); formal.setWorkItemId("work-1");
+        formal.setDeliveryId("pwe_delivery_" + sha("pwe_task_execution\npwe_run_1"));
+        formal.setState("submitted");
+        when(formalDeliveries.submit(any(), any(), any(), any(), any(), any())).thenReturn(formal);
+        doAnswer(invocation -> {
+            AgentTaskMutationTransaction.LockedTaskMutation<?> callback = invocation.getArgument(4);
+            return callback.apply(root);
+        }).when(mutations).executeWithLockedTaskRootInOwnerScope(any(), any(), any(), any(), any());
+        String manifestId = "pwe_m_" + sha("task-1\npwe_run_1\noutput_1\n" + contentHash + "\n12\n");
+
+        var committed = service.commitOutputs(RUNTIME, "task-1", "pwe_run_1", manifestId,
+                List.of(new PersonalWorkspaceExecutionService.OutputDeclaration("output_1", contentHash, 12L)));
+
+        assertEquals("COMMITTED", committed.state());
+        assertEquals("PUBLISHED", output.getPublicationState());
+        assertEquals("pwe_art_pwe_task_execution", output.getArtifactId());
+        assertEquals(1, output.getArtifactVersion());
+        assertEquals(formal.getDeliveryId(), output.getFormalDeliveryId());
+        assertEquals("OUTPUT_COMMITTED", execution.getExecutionState());
+        verify(writes).archiveRuntimeOutput(any(), any(), any());
+        verify(artifacts, times(2)).publishPrepared(any(), any(), any(), org.mockito.ArgumentMatchers.eq("task-1"),
+                org.mockito.ArgumentMatchers.eq("agent-a"), any());
+        verify(formalDeliveries).submit(any(), any(), any(), org.mockito.ArgumentMatchers.eq("task-1"),
+                org.mockito.ArgumentMatchers.eq("agent-a"), any());
+    }
+
+    @Test
+    void formalReworkWithoutPreexistingInputRelationUsesRealTaskQueueAfterExplicitLink() {
+        service = new PersonalWorkspaceExecutionServiceImpl(executions, workspace,
+                taskLinks, runtimes, storage, writes,
+                new PersonalWorkspaceExecutionProperties(List.of(PDF)));
+        wireAssigneeFixture(service,executions);
+        configureTaskCreate(mock(WorkspaceConversationAccessService.class),
+                mock(AgentTaskWorkItemDao.class), mock(AgentWorkItemLeaseService.class));
+        var formalDao = mock(cn.jia.agent.dao.AgentTaskFormalDeliveryDao.class);
+        var mutations = mock(AgentTaskMutationTransaction.class);
+        var linkService = mock(cn.jia.agent.service.PersonalWorkspaceTaskLinkService.class);
+        var root = new AgentTaskMetaEntity().setTaskId("task-1");
+        root.setOwnerJiacn("owner-a"); root.setTenantId("0"); root.setClientId("client-a");
+        doAnswer(inv -> {
+            AgentTaskMutationTransaction.LockedTaskMutation<?> callback = inv.getArgument(4);
+            return callback.apply(root);
+        }).when(mutations).executeWithLockedTaskRootInOwnerScope(any(), any(), any(), any(), any());
+        var delivery = new cn.jia.agent.entity.AgentTaskFormalDeliveryEntity()
+                .setTaskId("task-1").setDeliveryId("delivery-1").setState("changes_requested")
+                .setVersion(1L).setReviewedAt(2000L).setReviewedByJiacn("owner-a");
+        delivery.setTenantId("0"); delivery.setClientId("client-a");
+        when(formalDao.findForUpdate("0", "client-a", "delivery-1")).thenReturn(delivery);
+        var source = new PersonalWorkspaceExecutionOutputEntity().setOutputId("output-1")
+                .setFormalDeliveryId("delivery-1").setWorkspaceFileId("file-1")
+                .setWorkspaceFileVersion(3).setOutputState("COMMITTED").setPublicationState("PUBLISHED");
+        source.setTenantId("0"); source.setClientId("client-a"); source.setOwnerJiacn("owner-a");
+        when(executions.findPublishedReworkSource("0", "client-a", "owner-a", "task-1",
+                "delivery-1", "output-1", "file-1", 3)).thenReturn(source);
+        var linked = new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(taskLinks.hasActiveExecutionInputLink("0", "client-a", "owner-a", "task-1", "file-1", 3))
+                .thenAnswer(inv -> linked.get());
+        when(linkService.create(any(), any(), any())).thenAnswer(inv -> {
+            assertEquals(new cn.jia.agent.service.PersonalWorkspaceTaskLinkService.Scope(
+                    "0", "client-a", "owner-a"), inv.getArgument(0));
+            assertEquals("task-1", inv.getArgument(1));
+            cn.jia.agent.service.PersonalWorkspaceTaskLinkService.CreateCommand link = inv.getArgument(2);
+            assertEquals("file-1", link.fileId()); assertEquals(3, link.version());
+            assertEquals("INPUT", link.role()); linked.set(true);
+            return null;
+        });
+        when(workspace.lockFile("0", "client-a", "owner-a", "file-1"))
+                .thenReturn(workspaceFile("file-1"));
+        when(workspace.findVersion("0", "client-a", "owner-a", "file-1", 3))
+                .thenReturn(workspaceVersion("file-1", 3, "original.pdf", PDF));
+        var rework = new AgentTaskReworkExecutionServiceImpl(formalDao, executions,
+                service, mutations, linkService);
+        var result = rework.create(new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"),
+                new cn.jia.agent.service.AgentTaskReworkExecutionService.ReworkCommand("task-1", "delivery-1",
+                        1L, "conversation-1", "agent-a", "output-1", "file-1", 3, "追加应急方案", PDF),
+                "rework-real-queue");
+        assertTrue(linked.get()); assertEquals("QUEUED", result.state());
+        assertEquals("TASK", result.executionMode()); assertEquals("task-1", result.taskId());
+        var input = ArgumentCaptor.forClass(PersonalWorkspaceExecutionInputEntity.class);
+        verify(executions).insertInput(input.capture());
+        assertEquals("file-1", input.getValue().getFileId());
+        assertEquals(3, input.getValue().getFileVersion());
+        assertEquals(PDF, input.getValue().getContentMimeType());
+    }
+
+    private void configureTaskCreate(WorkspaceConversationAccessService access,
+            AgentTaskWorkItemDao workItems, AgentWorkItemLeaseService leases) {
+        service.setTaskExecutionDependencies(access, workItems, leases);
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-a"); runtime.setClientId("client-a"); runtime.setOwnerJiacn("owner-a");
+        when(runtimes.findCandidateRosterByOwner("client-a", "owner-a")).thenReturn(List.of(runtime));
+        when(access.requireAccessible(any(), any())).thenReturn(new WorkspaceConversationAccessService.ConversationView(
+                "conversation-1", "TASK", "task-1", "task-1", List.of("agent-a"), 1L, 1L));
+        AgentTaskWorkItemEntity ready = taskWorkItem("ready", 7L, null, null, null);
+        AgentTaskWorkItemEntity running = taskWorkItem(
+                "running", 9L, "agent-a", "lease-secret", 9_999_999_999_999L);
+        when(workItems.listByTask("0", "client-a", "owner-a", "task-1", "ready", 32))
+                .thenReturn(List.of(ready));
+        when(workItems.findByTaskAndWorkItemId(
+                "0", "client-a", "owner-a", "task-1", "work-1")).thenReturn(running);
+        when(leases.claim(any(), any(), any(), any(), any(), any())).thenReturn(lease("claimed", 8L));
+        when(leases.start(any(), any(), any(), any(), any(), any())).thenReturn(lease("running", 9L));
+        when(executions.findByIdempotency("0", "client-a", "owner-a", "task-input-key"))
+                .thenReturn(null);
+    }
+
+    private static PersonalWorkspaceVersionEntity workspaceVersion(String fileId, int version,
+            String filename, String mime) {
+        return new PersonalWorkspaceVersionEntity().setFileId(fileId).setVersion(version)
+                .setOriginalFilename(filename).setContentMimeType(mime).setByteLength(7L)
+                .setContentHash(sha("content-" + fileId)).setStorageUri("memory://" + fileId);
+    }
+
+    private static String extension(String mime) {
+        return switch (mime) {
+            case PersonalWorkspaceExecutionProperties.DOCX -> ".docx";
+            case XLSX -> ".xlsx";
+            case PDF -> ".pdf";
+            case PPTX -> ".pptx";
+            case "image/png" -> ".png";
+            case "image/jpeg" -> ".jpg";
+            case "text/plain" -> ".txt";
+            case "text/markdown" -> ".md";
+            case "text/html" -> ".html";
+            case "application/json" -> ".json";
+            default -> throw new IllegalArgumentException(mime);
+        };
+    }
+
+    private static PersonalWorkspaceFileEntity workspaceFile(String fileId) {
+        PersonalWorkspaceFileEntity file = new PersonalWorkspaceFileEntity()
+                .setFileId(fileId).setOwnerJiacn("owner-a").setState("ACTIVE")
+                .setMetadataRevision(1L).setLatestVersion(3);
+        file.setTenantId("0"); file.setClientId("client-a");
+        return file;
+    }
+
+    private static AgentTaskArtifactViewDTO artifact(String id, String contentHash, String mime) {
+        AgentTaskArtifactViewDTO value = new AgentTaskArtifactViewDTO();
+        value.setArtifactId(id);
+        value.setArtifactVersion(1);
+        value.setTaskId("task-1");
+        value.setWorkItemId("work-1");
+        value.setProducerAgentId("agent-a");
+        value.setContentHash(contentHash == null ? sha("manifest") : contentHash);
+        value.setContentMimeType(mime);
+        return value;
+    }
+
+    private static AgentTaskWorkItemEntity taskWorkItem(String state, long version, String assignee,
+            String token, Long until) {
+        AgentTaskWorkItemEntity item = new AgentTaskWorkItemEntity();
+        item.setTaskId("task-1"); item.setWorkItemId("work-1"); item.setRequiredItem(true);
+        item.setStatus(state); item.setVersion(version); item.setAssigneeAgentId(assignee);
+        item.setLeaseToken(token); item.setLeaseUntil(until);
+        item.setTenantId("0"); item.setClientId("client-a"); item.setOwnerJiacn("owner-a");
+        return item;
+    }
+
+    private static AgentWorkItemLeaseDTO lease(String state, long version) {
+        AgentWorkItemLeaseDTO value = new AgentWorkItemLeaseDTO();
+        value.setTaskId("task-1"); value.setWorkItemId("work-1"); value.setAgentId("agent-a");
+        value.setStatus(state); value.setLeaseToken("lease-secret"); value.setVersion(version);
+        value.setLeaseUntil(9_999_999_999_999L);
+        return value;
+    }
+
+    private static PersonalWorkspaceExecutionEntity historyExecution(String id, long createdAt) {
+        PersonalWorkspaceExecutionEntity item = execution(id, "agent-a", "QUEUED")
+                .setCreatedAt(createdAt).setInstruction("secret instruction")
+                .setLeaseToken("secret runtime credential");
+        return item;
+    }
+
+    @Test
+    void ownerRevokeOfExpiredTaskUsesExactExpiryThenRevokesWithoutCreatingAnotherExecution() {
+        var workItems = mock(AgentTaskWorkItemDao.class);
+        var leases = mock(AgentWorkItemLeaseService.class);
+        service.setTaskExecutionDependencies(mock(WorkspaceConversationAccessService.class), workItems, leases);
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        var value = execution("pwe_expired", "agent-a", "QUEUED").setExecutionMode("TASK")
+                .setTaskId("task-1").setWorkItemId("work-1").setLeaseToken("lease-secret")
+                .setLeaseWorkItemVersion(9L).setLeaseExpiresAt(1L);
+        when(executions.find("0", "client-a", "owner-a", "pwe_expired")).thenReturn(value);
+        when(executions.lock("0", "client-a", "owner-a", "pwe_expired")).thenReturn(value);
+        var result = service.revokeInputs(owner, "pwe_expired", 1L, "revoke-expired-1");
+        assertEquals("INPUTS_REVOKED", result.state());
+        assertEquals(2L, result.grantRevision());
+        var command = ArgumentCaptor.forClass(cn.jia.agent.entity.AgentWorkItemLeaseCommandDTO.class);
+        verify(leases).expireExactLease(org.mockito.ArgumentMatchers.eq("0"), org.mockito.ArgumentMatchers.eq("client-a"),
+                org.mockito.ArgumentMatchers.eq("owner-a"), org.mockito.ArgumentMatchers.eq("task-1"),
+                org.mockito.ArgumentMatchers.eq("work-1"), command.capture());
+        assertEquals("lease-secret", command.getValue().getLeaseToken());
+        assertEquals(9L, command.getValue().getExpectedVersion());
+        assertEquals("agent-a", command.getValue().getAgentId());
+        verify(leases, never()).release(any(), any(), any(), any(), any(), any());
+        verify(executions, never()).insert(any());
+        var order = org.mockito.Mockito.inOrder(leases, executions);
+        order.verify(leases).expireExactLease(any(), any(), any(), any(), any(), any());
+        order.verify(executions).lock("0", "client-a", "owner-a", "pwe_expired");
+        // Same idempotent owner request does not expire or charge a second time.
+        assertEquals("INPUTS_REVOKED", service.revokeInputs(owner, "pwe_expired", 1L, "revoke-expired-1").state());
+        verify(leases, times(1)).expireExactLease(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void expiredTaskRevokeLeaseConflictLeavesExecutionAndGrantsUntouched() {
+        var workItems = mock(AgentTaskWorkItemDao.class);
+        var leases = mock(AgentWorkItemLeaseService.class);
+        service.setTaskExecutionDependencies(mock(WorkspaceConversationAccessService.class), workItems, leases);
+        var owner = new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a");
+        var value = execution("pwe_expired", "agent-a", "QUEUED").setExecutionMode("TASK")
+                .setTaskId("task-1").setWorkItemId("work-1").setLeaseToken("lease-secret")
+                .setLeaseWorkItemVersion(9L).setLeaseExpiresAt(1L);
+        when(executions.find("0", "client-a", "owner-a", "pwe_expired")).thenReturn(value);
+        org.mockito.Mockito.doThrow(new cn.jia.agent.exception.AgentTaskStateException(
+                cn.jia.agent.exception.AgentTaskStateException.Reason.VERSION_CONFLICT, "changed"))
+                .when(leases).expireExactLease(any(), any(), any(), any(), any(), any());
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                () -> service.revokeInputs(owner, "pwe_expired", 1L, "revoke-expired-1"));
+        assertEquals("QUEUED", value.getExecutionState());
+        verify(executions, never()).update(any());
+        verify(executions, never()).updateInput(any());
+    }
+
+    private static PersonalWorkspaceExecutionEntity execution(String id, String agent, String state) {
+        PersonalWorkspaceExecutionEntity item = new PersonalWorkspaceExecutionEntity()
+                .setExecutionId(id).setOwnerJiacn("owner-a").setTaskId("pwe_task_1").setRunId("pwe_run_1")
+                .setTargetAgentId(agent).setInstruction("请保留标题并改正文")
+                .setOutputContentMimeType(PersonalWorkspaceExecutionProperties.DOCX).setExecutionState(state).setGrantRevision(1L);
+        item.setTenantId("0"); item.setClientId("client-a");
+        return item;
+    }
+
+    private static PersonalWorkspaceExecutionInputEntity input(String executionId) {
+        return input(executionId, "input_1", "pws_1", 1, "source.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    }
+
+    private static PersonalWorkspaceExecutionInputEntity input(String executionId, String inputRef, String fileId,
+            int version, String filename, String contentMimeType) {
+        PersonalWorkspaceExecutionInputEntity input = new PersonalWorkspaceExecutionInputEntity()
+                .setExecutionId(executionId).setInputRef(inputRef).setFileId(fileId).setFileVersion(version)
+                .setOriginalFilename(filename).setContentMimeType(contentMimeType)
+                .setByteLength(7L).setContentHash(sha("content"));
+        input.setTenantId("0"); input.setClientId("client-a"); input.setOwnerJiacn("owner-a");
+        return input;
+    }
+
+    private static String sha(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("SHA-256 is required for workspace fixture hashes", unavailable);
+        }
+    }
+
+    /** Existing fixture has one authenticated owner. Cross-owner fixtures supply explicit grant authority separately. */
+    private static void wireAssigneeFixture(cn.jia.agent.service.PersonalWorkspaceExecutionService instance,
+            cn.jia.agent.dao.PersonalWorkspaceExecutionDao rows) {
+        var service=(cn.jia.agent.service.impl.PersonalWorkspaceExecutionServiceImpl)instance;
+        var authority=org.mockito.Mockito.mock(cn.jia.agent.service.TaskAssigneeAuthorityService.class);
+        org.mockito.Mockito.when(authority.resolveForAssignment(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
+            .thenAnswer(i->new cn.jia.agent.service.TaskAssigneeAuthorityService.Target(i.getArgument(0),i.getArgument(1),i.getArgument(2),i.getArgument(3),1L,null));
+        org.mockito.Mockito.when(authority.requireGrantTarget(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyLong()))
+            .thenAnswer(i->new cn.jia.agent.service.TaskAssigneeAuthorityService.Target(i.getArgument(0),i.getArgument(1),i.getArgument(2),"agent",1L,null));
+        service.setAssigneeAuthority(authority);
+        org.mockito.Mockito.when(rows.findForRuntime(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
+            .thenAnswer(i->rows.findByTaskRun(i.getArgument(0),i.getArgument(1),i.getArgument(2),i.getArgument(4),i.getArgument(5)));
+    }
+}

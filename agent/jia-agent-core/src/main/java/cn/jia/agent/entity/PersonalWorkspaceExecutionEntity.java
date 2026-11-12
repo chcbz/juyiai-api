@@ -1,0 +1,67 @@
+package cn.jia.agent.entity;
+
+import cn.jia.core.entity.BaseEntity;
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.experimental.Accessors;
+
+import java.io.Serial;
+
+/** Private owner-to-agent execution; intentionally not a public bounty task projection. */
+@Data
+@EqualsAndHashCode(callSuper = true)
+@Accessors(chain = true)
+@TableName("agent_personal_workspace_execution")
+public class PersonalWorkspaceExecutionEntity extends BaseEntity {
+    @Serial private static final long serialVersionUID = 1L;
+    @TableId(value = "id", type = IdType.AUTO) private Long id;
+    private String executionId;
+    private String ownerJiacn;
+    /** Runtime bridge namespace. In TASK mode it is the authoritative business task ID. */
+    private String taskId;
+    private String runId;
+    /** PRIVATE bridge and TASK work-item execution are distinct domains; this field never implies delivery. */
+    private String executionMode;
+    /** CONVERSATION-only immutable admission fence; never from a browser authorization flag. */
+    private String taskGrantId;
+    private Long taskGrantVersion;
+    private Long assignmentRevision;
+    private String permittedOperation;
+    /** Controlled-image authority identity; null preserves native-v1 conversation semantics. */
+    private String controlledConsentId;
+    /** Protocol 1/2 remain legacy; protocol 3 requires the independent per-intent grant. */
+    private Integer executionProtocolVersion;
+    private String operationGrantId;
+    private String runtimeInputSnapshotDigest;
+    /** CONVERSATION-only native claim. Token and runtime instance stay server-side. */
+    private String conversationLeaseToken;
+    private String conversationLeaseRuntimeId;
+    private Long conversationLeaseVersion;
+    private Long conversationLeaseExpiresAt;
+    /** Permanently records the first authorized paid Provider START; never reset on failure. */
+    private Long conversationProviderStartedAt;
+    private Long conversationProviderLeaseVersion;
+    private String workItemId;
+    /** Runtime-only lease material; never exposed by browser views or queue payloads. */
+    private String leaseToken;
+    private Long leaseWorkItemVersion;
+    private Long leaseExpiresAt;
+    private String conversationId;
+    private String targetAgentId;
+    private String instruction;
+    private String outputContentMimeType;
+    private String executionState;
+    private String failureCode;
+    private String failureMessage;
+    private Long grantRevision;
+    private String idempotencyKey;
+    private String requestHash;
+    private String revokeIdempotencyKey;
+    private String revokeRequestHash;
+    private Long createdAt;
+    private Long revokedAt;
+    private Long failedAt;
+}

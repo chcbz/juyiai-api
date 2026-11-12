@@ -1,0 +1,166 @@
+package cn.jia.chat.handler;
+
+import cn.jia.agent.common.AgentConstants;
+import cn.jia.agent.entity.AgentRegisterDTO;
+import cn.jia.agent.entity.AgentRegisterResultDTO;
+import cn.jia.agent.security.AgentRuntimeAuthenticationService;
+import cn.jia.agent.service.AgentService;
+import cn.jia.chat.dao.ChatMessageDao;
+import cn.jia.chat.service.ChatConversationEventBroker;
+import cn.jia.core.context.EsContext;
+import cn.jia.core.context.EsContextHolder;
+import cn.jia.core.util.JsonUtil;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.http.HttpHeaders;
+import org.springframework.web.socket.*;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class AgentWebSocketRuntimeAuthenticationTest {
+    static final String TENANT = "1", CLIENT = "cyf-local", OWNER = "owner-a";
+    static final String AGENT = "agt_" + "a".repeat(32), TOKEN = "1".repeat(32);
+
+    @AfterEach void clearContext() {
+        EsContextHolder.clearContext();
+    }
+
+    @Test void canonicalTenantOneRegistrationIgnoresPayloadAndThreadLocalScopeSpoofing() throws Exception {
+        Fixture f = new Fixture(false);
+        EsContext attacker = new EsContext();
+        attacker.setTenantId("0"); attacker.setClientId("evil-client"); attacker.setJiacn("evil-owner");
+        EsContextHolder.setContext(attacker);
+        when(f.service.register(any(AgentRegisterDTO.class))).thenAnswer(invocation -> {
+            EsContext effective = EsContextHolder.getContext();
+            assertEquals(TENANT, effective.getTenantId());
+            assertEquals(CLIENT, effective.getClientId());
+            assertEquals(OWNER, effective.getJiacn());
+            return new AgentRegisterResultDTO(AGENT, TOKEN, AgentConstants.STATUS_ONLINE);
+        });
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))
+                .thenReturn(new AgentRuntimeAuthenticationService.Receipt(
+                        "native-runtime-v1", TENANT, CLIENT, OWNER, AGENT, "runtime-a",
+                        UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+
+        f.register();
+
+        var receipt = f.frames.stream().map(text -> JsonUtil.getMapper().readTree(text))
+                .filter(node -> "agent.registered".equals(node.path("messageType").asText()))
+                .findFirst().orElseThrow();
+        assertEquals(TENANT, receipt.path("data").path("runtimeAuth").path("tenantId").textValue());
+        assertEquals(CLIENT, receipt.path("data").path("runtimeAuth").path("clientId").textValue());
+        assertEquals(OWNER, receipt.path("data").path("runtimeAuth").path("ownerJiacn").textValue());
+        assertNull(EsContextHolder.getContext().getTenantId());
+        assertNull(EsContextHolder.getContext().getClientId());
+        assertNull(EsContextHolder.getContext().getJiacn());
+    }
+
+    @Test void realRegistrationWireCarriesOnlyServerBoundScopeAndCloseRevokes() throws Exception {
+        Fixture f = new Fixture(false);
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any())).thenReturn(new AgentRuntimeAuthenticationService.Receipt(
+                "native-runtime-v1", TENANT, CLIENT, OWNER, AGENT, "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+        f.register();
+        var receipt = f.frames.stream().map(text -> JsonUtil.getMapper().readTree(text))
+                .filter(node -> "agent.registered".equals(node.path("messageType").asText())).findFirst().orElseThrow();
+        assertFalse(receipt.has("token"));
+        assertFalse(receipt.has("sessionToken"));
+        assertEquals("reg-a", receipt.path("correlationId").textValue());
+        assertNotEquals("reg-a", receipt.path("messageId").textValue());
+        assertEquals("runtime-a", receipt.path("data").path("runtimeInstanceId").textValue());
+        assertEquals(TENANT, receipt.path("data").path("runtimeAuth").path("tenantId").textValue());
+        assertEquals(CLIENT, receipt.path("data").path("runtimeAuth").path("clientId").textValue());
+        assertEquals(OWNER, receipt.path("data").path("runtimeAuth").path("ownerJiacn").textValue());
+        assertEquals(AGENT, receipt.path("data").path("runtimeAuth").path("agentId").textValue());
+        assertFalse(receipt.toString().contains("key-a"));
+        verify(f.auth).bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any());
+        f.handler.afterConnectionClosed(f.session, CloseStatus.NORMAL);
+        verify(f.auth, atLeastOnce()).disconnect("socket-a");
+    }
+
+    @Test void failedBindingCannotEmitCredentialsOrSuccessfulReconnect() throws Exception {
+        Fixture f = new Fixture(false);
+        when(f.auth.bind(anyString(),any(AgentRuntimeAuthenticationService.Proof.class),any()))
+                .thenThrow(new IllegalArgumentException("secret-raw-auth-detail"));
+        f.register();
+        assertFalse(String.join("", f.frames).contains(TOKEN));
+        assertFalse(String.join("", f.frames).contains("secret-raw-auth-detail"));
+        assertFalse(String.join("", f.frames).contains("agent.registered"));
+        assertTrue(String.join("", f.frames).contains("AGENT_REGISTRATION_UNAVAILABLE"));
+        verify(f.auth, atLeastOnce()).disconnect("socket-a");
+    }
+
+    @Test void failedReceiptDeliveryRevokesTheNewBinding() throws Exception {
+        Fixture f = new Fixture(false);
+        when(f.auth.bind(anyString(),any(AgentRuntimeAuthenticationService.Proof.class),any()))
+                .thenReturn(new AgentRuntimeAuthenticationService.Receipt(
+                        "native-runtime-v1", TENANT, CLIENT, OWNER, AGENT, "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+        doThrow(new java.io.IOException("untrusted transport detail")).when(f.session).sendMessage(any());
+        f.register();
+        verify(f.auth).disconnect("socket-a"); // failed receipt revokes; a declaration is not a disconnect
+        assertTrue(f.frames.isEmpty());
+    }
+
+    @Test void registrationUsesAlreadyVerifiedNonSecretProof() throws Exception {
+        Fixture f = new Fixture(true);
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any())).thenReturn(new AgentRuntimeAuthenticationService.Receipt(
+                "native-runtime-v1", TENANT, CLIENT, OWNER, AGENT, "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+
+        f.register();
+
+        verify(f.service).register(any(AgentRegisterDTO.class));
+        verify(f.auth).bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any());
+        assertTrue(String.join("", f.frames).contains("agent.registered"));
+        assertTrue(String.join("", f.frames).contains("runtimeAuth"));
+    }
+
+    @Test void confirmedOfflinePresenceRevokesWithoutWaitingForSocketClose() throws Exception {
+        Fixture f = new Fixture(false);
+        var runtime = new cn.jia.agent.entity.AgentRuntimeDTO(); runtime.setAgentId(AGENT); runtime.setStatus("offline");
+        when(f.service.updateStatus(eq(AGENT), any())).thenReturn(runtime);
+        UnifiedRuntimeTestSupport.deliver(f.handler, f.session, new TextMessage("{\"schemaVersion\":1,\"messageType\":\"agent.presence\","
+                + "\"messageId\":\"offline-a\",\"agentId\":\"" + AGENT
+                + "\",\"runtimeInstanceId\":\"runtime-a\",\"status\":\"offline\"}"));
+        verify(f.auth).disconnect("socket-a");
+        assertTrue(String.join("", f.frames).contains("agent.status.updated"));
+    }
+
+    @Test void wrongRuntimeIdentityInvalidatesSessionAndNeverRegisters() throws Exception {
+        Fixture f = new Fixture(false);
+        f.handler.handleTextMessage(f.session,new TextMessage(f.command().replace("runtime-a","runtime-foreign")));
+        verify(f.service, never()).register(any());
+        assertFalse(String.join("", f.frames).contains(TOKEN));
+    }
+
+    static class Fixture {
+        final AgentService service = mock(AgentService.class);
+        final AgentRuntimeAuthenticationService auth = mock(AgentRuntimeAuthenticationService.class);
+        final WebSocketSession session = mock(WebSocketSession.class);
+        final List<String> frames = new ArrayList<>();
+        final AgentWebSocketHandler handler;
+        @SuppressWarnings("unchecked") Fixture(boolean browser) throws Exception {
+            ObjectProvider<AgentService> provider = mock(ObjectProvider.class);
+            when(provider.getIfAvailable()).thenReturn(service);
+            when(service.register(any(AgentRegisterDTO.class))).thenReturn(new AgentRegisterResultDTO(AGENT,TOKEN,AgentConstants.STATUS_ONLINE));
+            var attributes = new HashMap<String,Object>(); attributes.put("agentId",AGENT);
+            attributes.put("jiacn",OWNER); attributes.put("clientId",CLIENT);
+            attributes.put("runtimeInstanceId","runtime-a"); attributes.put("tenantId",TENANT);
+            when(session.getAttributes()).thenReturn(attributes); when(session.getId()).thenReturn("socket-a");
+            when(session.isOpen()).thenReturn(true);
+            var headers = new HttpHeaders(); if (browser) headers.setOrigin("https://browser.invalid");
+            when(session.getHandshakeHeaders()).thenReturn(headers);
+            doAnswer(inv -> { frames.add(((TextMessage)inv.getArgument(0)).getPayload()); return null; }).when(session).sendMessage(any());
+            handler = new AgentWebSocketHandler(mock(ChatClient.class),provider,mock(ChatMessageDao.class),mock(ChatConversationEventBroker.class));
+            UnifiedRuntimeTestSupport.stub(auth);
+            when(auth.isCurrentBinding(any(), any(), any(), any(), any(), any())).thenReturn(true);
+            UnifiedRuntimeTestSupport.install(session);
+            handler.setRuntimeAuthentication(auth);
+        }
+        String command() { return "{\"schemaVersion\":1,\"messageType\":\"agent.register\",\"messageId\":\"reg-a\",\"agentId\":\""
+                + AGENT + "\",\"runtimeInstanceId\":\"runtime-a\",\"name\":\"Native\"}"; }
+        void register() throws Exception { UnifiedRuntimeTestSupport.deliver(handler,session,new TextMessage(command())); }
+    }
+}

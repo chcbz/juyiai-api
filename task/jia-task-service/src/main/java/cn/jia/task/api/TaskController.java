@@ -1,0 +1,136 @@
+package cn.jia.task.api;
+
+import cn.jia.core.entity.JsonRequest;
+import cn.jia.core.security.FixedTenantAdmissionPolicy;
+
+import cn.jia.core.context.EsContextHolder;
+import cn.jia.core.entity.JsonRequestPage;
+import cn.jia.core.entity.JsonResult;
+import cn.jia.core.entity.JsonResultPage;
+import cn.jia.task.entity.TaskDetailEntity;
+import cn.jia.task.entity.TaskDetailVO;
+import cn.jia.task.entity.TaskPlanEntity;
+import cn.jia.task.entity.TaskPlanVO;
+import cn.jia.task.service.TaskService;
+import com.github.pagehelper.PageInfo;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Optional;
+
+/**
+ * 任务计划接口
+ */
+@RestController
+@RequestMapping("/task")
+public class TaskController {
+
+    @Autowired
+    private TaskService taskService;
+
+    @Autowired
+    private FixedTenantAdmissionPolicy tenantPolicy;
+
+    /**
+     * 获取任务信息
+     *
+     * @param id 任务ID
+     * @return JsonResult
+     */
+    @PreAuthorize("hasAuthority('task-get')")
+    @RequestMapping(value = "/get", method = RequestMethod.GET)
+    public Object findById(@RequestParam(name = "id") Long id) throws Exception {
+        TaskPlanEntity task = taskService.get(id);
+        return JsonResult.success(task);
+    }
+
+    /**
+     * 创建任务
+     *
+     * @param task 任务信息
+     * @return JsonResult
+     */
+    @PreAuthorize("hasAuthority('task-create')")
+    @RequestMapping(value = "/create", method = RequestMethod.POST)
+    public Object create(@RequestBody JsonRequest<TaskPlanEntity> protocolRequest) {
+        TaskPlanEntity task = protocolRequest == null ? null : protocolRequest.data();
+        task.setTenantId(tenantPolicy.businessTenantId());
+        task.setClientId(EsContextHolder.getContext().getClientId());
+        taskService.create(task);
+        return JsonResult.success();
+    }
+
+    /**
+     * 更新任务信息
+     *
+     * @param task 任务信息
+     * @return JsonResult
+     */
+    @PreAuthorize("hasAuthority('task-update')")
+    @RequestMapping(value = "/update", method = RequestMethod.POST)
+    public Object update(@RequestBody JsonRequest<TaskPlanEntity> protocolRequest) {
+        TaskPlanEntity task = protocolRequest == null ? null : protocolRequest.data();
+        task.setTenantId(tenantPolicy.businessTenantId());
+        taskService.update(task);
+        return JsonResult.success();
+    }
+
+    /**
+     * 删除任务
+     *
+     * @param id 任务ID
+     * @return JsonResult
+     */
+    @PreAuthorize("hasAuthority('task-delete')")
+    @RequestMapping(value = "/delete", method = RequestMethod.DELETE)
+    public Object delete(@RequestParam(name = "id") Long id) {
+        taskService.delete(id);
+        return JsonResult.success();
+    }
+
+    /**
+     * 取消任务
+     *
+     * @param id 任务ID
+     * @return JsonResult
+     */
+    @PreAuthorize("hasAuthority('task-cancel')")
+    @RequestMapping(value = "/cancel", method = RequestMethod.DELETE)
+    public Object cancel(@RequestParam(name = "id") Long id) {
+        taskService.cancel(id);
+        return JsonResult.success();
+    }
+
+    /**
+     * 获取所有任务信息
+     *
+     * @return 任务列表
+     */
+    @PreAuthorize("hasAuthority('task-search')")
+    @RequestMapping(value = "/search", method = RequestMethod.POST)
+    public Object search(@RequestBody JsonRequest<JsonRequestPage<TaskPlanVO>> protocolRequest) {
+        JsonRequestPage<TaskPlanVO> page = protocolRequest == null ? null : protocolRequest.data();
+        TaskPlanVO plan = Optional.ofNullable(page.getSearch()).orElse(new TaskPlanVO());
+        plan.setTenantId(tenantPolicy.businessTenantId());
+        plan.setClientId(EsContextHolder.getContext().getClientId());
+        PageInfo<TaskPlanEntity> taskList = taskService.findPage(plan, page.getPageNum(), page.getPageSize(), page.getOrderBy());
+        JsonResultPage<TaskPlanEntity> result = JsonResultPage.page(taskList.getList(), taskList.getPageNum(), taskList.getPageSize(), taskList.getTotal());
+        return result;
+    }
+
+    /**
+     * 获取所有任务信息
+     *
+     * @return 任务明细列表
+     */
+    @RequestMapping(value = "/item/search", method = RequestMethod.POST)
+    public Object searchItem(@RequestBody JsonRequest<JsonRequestPage<TaskDetailVO>> protocolRequest) {
+        JsonRequestPage<TaskDetailVO> page = protocolRequest == null ? null : protocolRequest.data();
+        TaskDetailVO item = Optional.ofNullable(page.getSearch()).orElse(new TaskDetailVO());
+        item.setTenantId(tenantPolicy.businessTenantId());
+        PageInfo<TaskDetailEntity> taskList = taskService.findItems(item, page.getPageNum(), page.getPageSize(), page.getOrderBy());
+        JsonResultPage<TaskDetailEntity> result = JsonResultPage.page(taskList.getList(), taskList.getPageNum(), taskList.getPageSize(), taskList.getTotal());
+        return result;
+    }
+}

@@ -1,0 +1,462 @@
+package cn.jia.agent.service.impl;
+
+import cn.jia.agent.common.TaskEventPayload;
+import cn.jia.agent.common.TaskEventType;
+import cn.jia.agent.dao.AgentTaskMetaDao;
+import cn.jia.agent.entity.AgentTaskAggregationCommandDTO;
+import cn.jia.agent.entity.AgentTaskAggregationDTO;
+import cn.jia.agent.entity.AgentTaskAggregationSnapshotRow;
+import cn.jia.agent.entity.AgentTaskMemberEntity;
+import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.entity.AgentTaskWorkItemEntity;
+import cn.jia.agent.exception.AgentTaskStateException;
+import cn.jia.agent.exception.AgentTaskStateException.Reason;
+import cn.jia.agent.service.TaskAssigneeAuthorityService;
+import cn.jia.agent.service.AgentTaskAggregationService;
+import cn.jia.agent.service.AgentTaskEventWriter;
+import cn.jia.agent.service.AgentTaskMutationTransaction;
+import cn.jia.agent.state.AgentTaskMemberStatus;
+import cn.jia.agent.state.AgentTaskStatus;
+import cn.jia.agent.state.AgentTaskWorkItemStatus;
+import cn.jia.core.util.StringUtil;
+import jakarta.inject.Inject;
+import jakarta.inject.Named;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.function.LongSupplier;
+
+@Named
+public class AgentTaskAggregationServiceImpl implements AgentTaskAggregationService {
+    private static final int MAX_LEASE_TOKEN_LENGTH = 100;
+    private final AgentTaskMetaDao taskMetaDao;
+    private final TaskAssigneeAuthorityService assigneeAuthority;
+    private final AgentTaskAggregationCalculator calculator;
+    private final AgentTaskMutationTransaction mutationTransaction;
+    private final AgentTaskEventWriter eventWriter;
+    private final LongSupplier clock;
+
+    @Inject
+    public AgentTaskAggregationServiceImpl(
+            AgentTaskMetaDao taskMetaDao, TaskAssigneeAuthorityService assigneeAuthority,
+            AgentTaskMutationTransaction mutationTransaction, AgentTaskEventWriter eventWriter) {
+        this(taskMetaDao, assigneeAuthority, mutationTransaction, eventWriter,
+                new AgentTaskAggregationCalculator(), System::currentTimeMillis);
+    }
+
+    AgentTaskAggregationServiceImpl(
+            AgentTaskMetaDao taskMetaDao,
+            TaskAssigneeAuthorityService assigneeAuthority,
+            AgentTaskAggregationCalculator calculator,
+            LongSupplier clock) {
+        this(taskMetaDao, assigneeAuthority, directTransaction(taskMetaDao), command -> null,
+                calculator, clock);
+    }
+
+    AgentTaskAggregationServiceImpl(
+            AgentTaskMetaDao taskMetaDao, TaskAssigneeAuthorityService assigneeAuthority,
+            AgentTaskMutationTransaction mutationTransaction, AgentTaskEventWriter eventWriter,
+            AgentTaskAggregationCalculator calculator, LongSupplier clock) {
+        this.taskMetaDao = Objects.requireNonNull(taskMetaDao, "taskMetaDao");
+        this.assigneeAuthority = Objects.requireNonNull(assigneeAuthority, "assigneeAuthority");
+        this.mutationTransaction = Objects.requireNonNull(mutationTransaction, "mutationTransaction");
+        this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
+        this.calculator = Objects.requireNonNull(calculator, "calculator");
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    @Override
+    @Transactional(isolation = Isolation.REPEATABLE_READ, rollbackFor = Exception.class)
+    public AgentTaskAggregationDTO aggregate(
+            String tenantId, String clientId, String ownerJiacn, String taskId,
+            AgentTaskAggregationCommandDTO command) {
+        requireScopeAndTask(tenantId, clientId, ownerJiacn, taskId);
+        long expectedVersion = requireCommand(command);
+        try {
+            return mutationTransaction.executeWithLockedTaskRootInOwnerScope(
+                    tenantId, clientId, ownerJiacn, taskId, task -> aggregateLocked(
+                            tenantId, clientId, ownerJiacn, taskId, expectedVersion, task));
+        } catch (cn.jia.agent.exception.AgentTaskCollaborationException e) {
+            throw switch (e.getReason()) {
+                case NOT_FOUND -> notFound();
+                case INVALID_PERSISTED_STATE -> invalidPersisted(e.getMessage());
+                default -> e;
+            };
+        }
+    }
+
+    private AgentTaskAggregationDTO aggregateLocked(
+            String tenantId, String clientId, String ownerJiacn, String taskId, long expectedVersion,
+            AgentTaskMetaEntity task) {
+        long calculatedAt = now();
+        validateTask(task, tenantId, clientId, ownerJiacn, taskId);
+        if (task.getTaskVersion() != expectedVersion) throw conflict();
+
+        List<AgentTaskAggregationSnapshotRow> snapshot = taskMetaDao.findAggregationSnapshot(
+                tenantId, clientId, ownerJiacn, taskId);
+        if (snapshot == null) throw invalidPersisted("Aggregate snapshot is incomplete");
+        List<AgentTaskMemberEntity> members = snapshot.stream()
+                .filter(row -> "member".equals(row.getRowType()))
+                .map(row -> memberFromSnapshot(row, tenantId, clientId, ownerJiacn, taskId)).toList();
+        List<AgentTaskWorkItemEntity> workItems = snapshot.stream()
+                .filter(row -> "work_item".equals(row.getRowType()))
+                .map(row -> workItemFromSnapshot(row, tenantId, clientId, ownerJiacn, taskId)).toList();
+        if (members.size() + workItems.size() != snapshot.size()) {
+            throw invalidPersisted("Aggregate snapshot contains an unknown row type");
+        }
+
+        AgentTaskStatus currentStatus = persistedTaskStatus(task.getRewardStatus());
+        AgentTaskAggregationCalculator.Decision decision = calculator.calculate(
+                currentStatus, members, workItems);
+        boolean changed = decision.status() != currentStatus;
+        long resultVersion = expectedVersion;
+        if (changed) {
+            Long startedAt = task.getStartedAt();
+            if (startedAt == null && startsTaskClock(decision.status())) startedAt = calculatedAt;
+            Long completedAt = decision.status() == AgentTaskStatus.COMPLETED
+                    ? firstNonNull(task.getCompletedAt(), calculatedAt) : null;
+            int updated = taskMetaDao.updateStatusByVersionInOwnerScope(tenantId, clientId, ownerJiacn, taskId,
+                    expectedVersion, decision.status().value(), startedAt, completedAt,
+                    aggregateFailureReason(decision));
+            if (updated == 0) throw conflict();
+            if (updated != 1) throw invalidPersisted(
+                    "Scoped task CAS updated an unexpected row count");
+            resultVersion++;
+            appendAggregateEvent(tenantId, clientId, ownerJiacn, taskId, currentStatus, decision,
+                    expectedVersion, resultVersion, calculatedAt);
+        }
+        return result(taskId, currentStatus, decision, changed, resultVersion, calculatedAt);
+    }
+
+    private void appendAggregateEvent(String tenantId, String clientId, String ownerJiacn, String taskId,
+            AgentTaskStatus currentStatus, AgentTaskAggregationCalculator.Decision decision,
+            long expectedVersion, long resultVersion, long occurredAt) {
+        AgentTaskAggregationCalculator.Counts counts = decision.counts();
+        TaskEventPayload.Builder payload = TaskEventPayload.builder()
+                .put(TaskEventPayload.Key.FROM_STATUS, currentStatus.value())
+                .put(TaskEventPayload.Key.TO_STATUS, decision.status().value())
+                .put(TaskEventPayload.Key.EXPECTED_VERSION, expectedVersion)
+                .put(TaskEventPayload.Key.RESULT_VERSION, resultVersion)
+                .put(TaskEventPayload.Key.DECISION_CODE, decision.reason())
+                .put(TaskEventPayload.Key.MEMBER_COUNT, counts.memberCount())
+                .put(TaskEventPayload.Key.WORK_ITEM_COUNT, counts.workItemCount())
+                .put(TaskEventPayload.Key.COMPLETED_WORK_ITEM_COUNT,
+                        counts.requiredCompletedCount())
+                .put(TaskEventPayload.Key.FAILED_WORK_ITEM_COUNT, counts.requiredFailedCount());
+        eventWriter.append(AgentTaskMutationEventSupport.command(
+                tenantId, clientId, ownerJiacn, taskId,
+                AgentTaskMutationEventSupport.taskEvent(decision.status().value()),
+                TaskEventType.ActorType.SYSTEM, null, TaskEventType.Aggregate.TASK, taskId,
+                payload, occurredAt, resultVersion));
+    }
+
+    private long requireCommand(AgentTaskAggregationCommandDTO command) {
+        if (command == null || command.getExpectedVersion() == null
+                || command.getExpectedVersion() < 0
+                || command.getExpectedVersion() == Long.MAX_VALUE) {
+            throw invalidRequest("A nonnegative incrementable expectedVersion is required");
+        }
+        return command.getExpectedVersion();
+    }
+
+    private void validateTask(
+            AgentTaskMetaEntity task, String tenantId, String clientId, String ownerJiacn, String taskId) {
+        if (!tenantId.equals(task.getTenantId()) || !clientId.equals(task.getClientId())
+                || !ownerJiacn.equals(task.getOwnerJiacn()) || !taskId.equals(task.getTaskId())) {
+            throw invalidPersisted("Persisted task identity does not match its scoped lookup");
+        }
+        persistedTaskStatus(task.getRewardStatus());
+        if (task.getTaskVersion() == null || task.getTaskVersion() < 0
+                || task.getTaskVersion() == Long.MAX_VALUE) {
+            throw invalidPersisted("Persisted task version is invalid");
+        }
+        if (task.getStartedAt() != null && task.getStartedAt() < 0
+                || task.getCompletedAt() != null && task.getCompletedAt() < 0) {
+            throw invalidPersisted("Persisted task timestamps are invalid");
+        }
+    }
+
+    private AgentTaskMemberEntity memberFromSnapshot(
+            AgentTaskAggregationSnapshotRow row,
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        AgentTaskMemberEntity member = new AgentTaskMemberEntity()
+                .setTaskId(row.getTaskId())
+                .setAgentId(row.getEntityId())
+                .setMemberRole(row.getRole())
+                .setMemberStatus(row.getStatus())
+                .setCompletedAt(row.getCompletedAt())
+                .setVersion(row.getVersion());
+        member.setTenantId(row.getTenantId());
+        member.setClientId(row.getClientId());
+        validateMember(member, tenantId, clientId, ownerJiacn, taskId);
+        return member;
+    }
+
+    private AgentTaskWorkItemEntity workItemFromSnapshot(
+            AgentTaskAggregationSnapshotRow row,
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        AgentTaskWorkItemEntity item = new AgentTaskWorkItemEntity()
+                .setWorkItemId(row.getEntityId())
+                .setTaskId(row.getTaskId())
+                .setTitle(row.getTitle())
+                .setWorkType(row.getWorkType())
+                .setAssigneeAgentId(row.getAssigneeAgentId())
+                .setStatus(row.getStatus())
+                .setRequiredItem(row.getRequiredItem())
+                .setLeaseToken(row.getLeaseToken())
+                .setLeaseUntil(row.getLeaseUntil())
+                .setAttemptCount(row.getAttemptCount())
+                .setMaxAttempts(row.getMaxAttempts())
+                .setResultArtifactId(row.getResultArtifactId())
+                .setCompletedAt(row.getCompletedAt())
+                .setVersion(row.getVersion());
+        item.setTenantId(row.getTenantId());
+        item.setClientId(row.getClientId());
+        validateWorkItem(item, tenantId, clientId, ownerJiacn, taskId);
+        return item;
+    }
+
+    private void validateMember(
+            AgentTaskMemberEntity member, String tenantId, String clientId, String ownerJiacn, String taskId) {
+        if (member == null || !tenantId.equals(member.getTenantId())
+                || !clientId.equals(member.getClientId())
+                || !taskId.equals(member.getTaskId())
+                || !isCanonicalStoredAgentId(tenantId, clientId, ownerJiacn, taskId, member.getAgentId())) {
+            throw invalidPersisted("Persisted member identity does not match the aggregate scope");
+        }
+        try {
+            AgentTaskMemberStatus.fromPersistedValue(member.getMemberStatus());
+        } catch (IllegalArgumentException e) {
+            throw invalidPersisted("Persisted member status is non-canonical or unknown");
+        }
+        if (member.getVersion() == null || member.getVersion() < 0
+                || member.getVersion() == Long.MAX_VALUE) {
+            throw invalidPersisted("Persisted member version is invalid");
+        }
+    }
+
+    private void validateWorkItem(
+            AgentTaskWorkItemEntity item, String tenantId, String clientId, String ownerJiacn, String taskId) {
+        if (item == null || !tenantId.equals(item.getTenantId())
+                || !clientId.equals(item.getClientId())
+                || !taskId.equals(item.getTaskId())
+                || !isExactStoredText(item.getWorkItemId(), 100)
+                || StringUtil.isBlank(item.getTitle())
+                || !isExactStoredText(item.getWorkType(), 30)) {
+            throw invalidPersisted("Persisted work item identity is incomplete or out of scope");
+        }
+        AgentTaskWorkItemStatus status;
+        try {
+            status = AgentTaskWorkItemStatus.fromPersistedValue(item.getStatus());
+        } catch (IllegalArgumentException e) {
+            throw invalidPersisted("Persisted work item status is non-canonical or unknown");
+        }
+        if (item.getRequiredItem() == null || item.getAttemptCount() == null
+                || item.getMaxAttempts() == null || item.getAttemptCount() < 0
+                || item.getMaxAttempts() <= 0
+                || item.getAttemptCount() > item.getMaxAttempts()
+                || item.getVersion() == null || item.getVersion() < 0
+                || item.getVersion() == Long.MAX_VALUE) {
+            throw invalidPersisted("Persisted work item flags, attempts or version are invalid");
+        }
+        if (status == AgentTaskWorkItemStatus.READY
+                && item.getAttemptCount() >= item.getMaxAttempts()) {
+            throw invalidPersisted("READY work item has exhausted maxAttempts");
+        }
+        boolean activeLeaseStatus = status == AgentTaskWorkItemStatus.CLAIMED
+                || status == AgentTaskWorkItemStatus.RUNNING;
+        boolean hasAssignee = item.getAssigneeAgentId() != null;
+        boolean canonicalAssignee = !hasAssignee || isCanonicalStoredAgentId(
+                tenantId, clientId, ownerJiacn, taskId, item.getAssigneeAgentId());
+        if (activeLeaseStatus) {
+            if (!hasAssignee || !canonicalAssignee
+                    || !isExactStoredText(item.getLeaseToken(), MAX_LEASE_TOKEN_LENGTH)
+                    || item.getLeaseUntil() == null || item.getLeaseUntil() <= 0) {
+                throw invalidPersisted("Persisted active lease is incomplete or non-canonical");
+            }
+        } else if (item.getLeaseToken() != null || item.getLeaseUntil() != null) {
+            throw invalidPersisted("Non-active work item status retains active lease state");
+        }
+        if (hasAssignee && !canonicalAssignee) {
+            throw invalidPersisted("Persisted work item assignee is blank or non-canonical");
+        }
+        if (item.getResultArtifactId() != null
+                && !isExactStoredText(item.getResultArtifactId(), 100)) {
+            throw invalidPersisted("Persisted result artifact identity is non-canonical");
+        }
+    }
+
+    private boolean isExactStoredText(String value, int maxLength) {
+        return value != null && !value.isEmpty() && value.length() <= maxLength
+                && value.equals(value.strip())
+                && value.chars().noneMatch(Character::isISOControl);
+    }
+
+    private boolean isCanonicalStoredAgentId(
+            String tenantId, String clientId, String ownerJiacn, String taskId, String agentId) {
+        if (agentId == null || agentId.isEmpty() || agentId.length() > 100
+                || !agentId.equals(agentId.strip())
+                || agentId.chars().anyMatch(Character::isISOControl)) {
+            return false;
+        }
+        try {
+            return agentId.equals(assigneeAuthority.requireTaskAgent(
+                    tenantId, clientId, ownerJiacn, taskId, agentId, false));
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private AgentTaskStatus persistedTaskStatus(String status) {
+        try {
+            return AgentTaskStatus.fromPersistedValue(status);
+        } catch (IllegalArgumentException e) {
+            throw invalidPersisted("Persisted task status is non-canonical or unknown");
+        }
+    }
+
+    private boolean startsTaskClock(AgentTaskStatus status) {
+        return status == AgentTaskStatus.RUNNING || status == AgentTaskStatus.BLOCKED
+                || status == AgentTaskStatus.REVIEWING || status == AgentTaskStatus.COMPLETED
+                || status == AgentTaskStatus.FAILED;
+    }
+
+    private String aggregateFailureReason(AgentTaskAggregationCalculator.Decision decision) {
+        if (decision.status() == AgentTaskStatus.FAILED) {
+            return "Required work item failed without a recorded replacement: "
+                    + decision.relatedWorkItemId();
+        }
+        if (decision.status() == AgentTaskStatus.BLOCKED) {
+            return "Required work item is recoverably blocked: "
+                    + decision.relatedWorkItemId();
+        }
+        return null;
+    }
+
+    private AgentTaskAggregationDTO result(
+            String taskId,
+            AgentTaskStatus currentStatus,
+            AgentTaskAggregationCalculator.Decision decision,
+            boolean changed,
+            long version,
+            long calculatedAt) {
+        AgentTaskAggregationCalculator.Counts counts = decision.counts();
+        AgentTaskAggregationDTO result = new AgentTaskAggregationDTO();
+        result.setTaskId(taskId);
+        result.setPreviousStatus(currentStatus.value());
+        result.setStatus(decision.status().value());
+        result.setDecision(decision.reason());
+        result.setChanged(changed);
+        result.setTaskVersion(version);
+        result.setMemberCount(counts.memberCount());
+        result.setWorkItemCount(counts.workItemCount());
+        result.setRequiredWorkItemCount(counts.requiredWorkItemCount());
+        result.setOptionalWorkItemCount(counts.optionalWorkItemCount());
+        result.setRequiredSubmittedCount(counts.requiredSubmittedCount());
+        result.setRequiredCompletedCount(counts.requiredCompletedCount());
+        result.setRequiredBlockedCount(counts.requiredBlockedCount());
+        result.setRequiredFailedCount(counts.requiredFailedCount());
+        result.setCalculatedAt(calculatedAt);
+        return result;
+    }
+
+    private Long firstNonNull(Long value, long fallback) {
+        return value == null ? fallback : value;
+    }
+
+    private long now() {
+        long now = clock.getAsLong();
+        if (now < 0) {
+            throw invalidPersisted("Clock returned a negative timestamp");
+        }
+        return now;
+    }
+
+    private void requireScopeAndTask(
+            String tenantId, String clientId, String ownerJiacn, String taskId) {
+        try {
+            cn.jia.core.security.TenantClaimPolicy.exact(tenantId);
+        } catch (IllegalArgumentException malformed) {
+            throw invalidRequest("tenantId is invalid");
+        }
+        if (StringUtil.isBlank(clientId)
+                || StringUtil.isBlank(ownerJiacn) || "0".equals(ownerJiacn) || StringUtil.isBlank(taskId)) {
+            throw invalidRequest("tenantId, clientId, ownerJiacn and taskId are required");
+        }
+    }
+
+    private static AgentTaskMutationTransaction directTransaction(AgentTaskMetaDao taskMetaDao) {
+        return new AgentTaskMutationTransaction() {
+            @Override
+            public <T> T executeWithLockedTaskRoot(String tenantId, String clientId, String taskId,
+                    LockedTaskMutation<T> mutation) {
+                AgentTaskMetaEntity root = taskMetaDao.findByTaskIdForUpdate(
+                        tenantId, clientId, taskId);
+                if (root == null) {
+                    throw new cn.jia.agent.exception.AgentTaskCollaborationException(
+                            cn.jia.agent.exception.AgentTaskCollaborationException.Reason.NOT_FOUND,
+                            "Task not found in requested scope");
+                }
+                return mutation.apply(root);
+            }
+            @Override
+            public <T> T executeWithLockedTaskRootInOwnerScope(
+                    String tenantId, String clientId, String ownerJiacn, String taskId,
+                    LockedTaskMutation<T> mutation) {
+                return mutation.apply(taskMetaDao.findByTaskIdForUpdateInOwnerScope(
+                        tenantId, clientId, ownerJiacn, taskId));
+            }
+
+            @Override
+            public <T> T executeWithLockedTaskRootForWorkItemInOwnerScope(
+                    String tenantId, String clientId, String ownerJiacn, String workItemId,
+                    LockedTaskMutation<T> mutation) {
+                return mutation.apply(taskMetaDao.findByWorkItemIdForUpdateInOwnerScope(
+                        tenantId, clientId, ownerJiacn, workItemId));
+            }
+
+            @Override
+            public <T> T executeWithLockedTaskRootForWorkItem(String tenantId, String clientId,
+                    String workItemId, LockedTaskMutation<T> mutation) {
+                throw new UnsupportedOperationException();
+            }
+            @Override
+            public <T> T executeAfterTaskRootReservationInOwnerScope(
+                    String tenantId, String clientId, String ownerJiacn, String taskId,
+                    TaskRootReservation reservation, ReservedTaskMutation<T> mutation) {
+                int reserved = reservation.reserve();
+                if (reserved != 0 && reserved != 1) {
+                    throw new IllegalStateException("Task root reservation returned an unexpected row count");
+                }
+                return mutation.apply(taskMetaDao.findByTaskIdForUpdateInOwnerScope(
+                        tenantId, clientId, ownerJiacn, taskId), reserved == 1);
+            }
+
+            @Override
+            public <T> T executeAfterTaskRootReservation(String tenantId, String clientId,
+                    String taskId, TaskRootReservation reservation, ReservedTaskMutation<T> mutation) {
+                throw new UnsupportedOperationException();
+            }
+        };
+    }
+
+    private AgentTaskStateException invalidRequest(String message) {
+        return new AgentTaskStateException(Reason.INVALID_REQUEST, message);
+    }
+
+    private AgentTaskStateException invalidPersisted(String message) {
+        return new AgentTaskStateException(Reason.INVALID_PERSISTED_STATE, message);
+    }
+
+    private AgentTaskStateException notFound() {
+        return new AgentTaskStateException(Reason.NOT_FOUND,
+                "Task aggregate was not found in the requested scope");
+    }
+
+    private AgentTaskStateException conflict() {
+        return new AgentTaskStateException(Reason.VERSION_CONFLICT,
+                "Task aggregate version changed before the CAS could commit");
+    }
+}

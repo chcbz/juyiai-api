@@ -1,0 +1,141 @@
+package cn.jia.chat.voice.state;
+
+import cn.jia.chat.voice.VoiceIdentity;
+import cn.jia.chat.voice.api.VoiceErrorCode;
+import cn.jia.chat.voice.api.VoiceException;
+import cn.jia.chat.voice.config.VoiceSpeechProperties;
+import cn.jia.chat.voice.validation.VoiceUnicode;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+
+public final class VoiceDigests {
+    private static final String CLIPROXY_REALTIME_PROVIDER = "cliproxy-realtime";
+    private static final byte[] CLIPROXY_REALTIME_TRANSCRIPTION_SEMANTIC_VERSION =
+            "cyf-cliproxy-realtime-semantics-v2".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] CLIPROXY_REALTIME_SYNTHESIS_SEMANTIC_VERSION =
+            "cyf-cliproxy-realtime-semantics-v3".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] CLIPROXY_REALTIME_NATIVE_TRANSCRIPTION_VERSION =
+            "cyf-cliproxy-realtime-native-transcription-v1"
+                    .getBytes(StandardCharsets.UTF_8);
+
+    private final byte[] identityHmacSecret;
+
+    public VoiceDigests(VoiceSpeechProperties properties) {
+        String secret = properties.getIdentityHmacSecret();
+        this.identityHmacSecret = secret == null ? null : secret.getBytes(StandardCharsets.UTF_8);
+    }
+
+    public boolean available() {
+        return identityHmacSecret != null && identityHmacSecret.length >= 32;
+    }
+
+    public String identityScope(VoiceIdentity identity) {
+        if (!available()) {
+            throw VoiceException.of(VoiceErrorCode.UNAVAILABLE, null);
+        }
+        if (identity == null
+                || !VoiceUnicode.isWellFormedUtf16(identity.jiacn())
+                || !VoiceUnicode.isWellFormedUtf16(identity.clientId())
+                || !VoiceUnicode.isWellFormedUtf16(identity.subject())) {
+            throw VoiceException.of(VoiceErrorCode.UNAUTHORIZED, null);
+        }
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(identityHmacSecret, "HmacSHA256"));
+            updateLengthPrefixed(mac, identity.jiacn());
+            updateLengthPrefixed(mac, identity.clientId());
+            updateLengthPrefixed(mac, identity.subject());
+            return HexFormat.of().formatHex(mac.doFinal());
+        } catch (GeneralSecurityException exception) {
+            throw VoiceException.of(VoiceErrorCode.UNAVAILABLE, null);
+        }
+    }
+
+    public String transcription(String language, String mediaType, byte[] audioDigest) {
+        return transcription("openai-compatible", "whisper-1",
+                language, mediaType, audioDigest);
+    }
+
+    public String transcription(
+            String provider, String model, String language,
+            String mediaType, byte[] audioDigest) {
+        MessageDigest digest = sha256();
+        updateLengthPrefixed(digest, VoiceContract.versionBytes());
+        updateLengthPrefixed(digest, VoiceOperation.TRANSCRIPTION.namespace()
+                .getBytes(StandardCharsets.UTF_8));
+        updateProviderDomain(digest, provider,
+                CLIPROXY_REALTIME_TRANSCRIPTION_SEMANTIC_VERSION);
+        if (CLIPROXY_REALTIME_PROVIDER.equals(provider)) {
+            updateLengthPrefixed(digest, CLIPROXY_REALTIME_NATIVE_TRANSCRIPTION_VERSION);
+        }
+        updateLengthPrefixed(digest, model.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, language.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, mediaType.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, audioDigest);
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    public String synthesis(String text, String voice, String format) {
+        return synthesis("openai-compatible", "gpt-4o-mini-tts", "alloy",
+                text, voice, format);
+    }
+
+    public String synthesis(
+            String provider, String model, String providerVoice,
+            String text, String voice, String format) {
+        if (!VoiceUnicode.isWellFormedUtf16(provider)
+                || !VoiceUnicode.isWellFormedUtf16(model)
+                || !VoiceUnicode.isWellFormedUtf16(providerVoice)
+                || !VoiceUnicode.isWellFormedUtf16(text)
+                || !VoiceUnicode.isWellFormedUtf16(voice)
+                || !VoiceUnicode.isWellFormedUtf16(format)) {
+            throw VoiceException.of(VoiceErrorCode.INVALID_REQUEST, null);
+        }
+        MessageDigest digest = sha256();
+        updateLengthPrefixed(digest, VoiceContract.versionBytes());
+        updateLengthPrefixed(digest, VoiceOperation.SYNTHESIS.namespace()
+                .getBytes(StandardCharsets.UTF_8));
+        updateProviderDomain(digest, provider,
+                CLIPROXY_REALTIME_SYNTHESIS_SEMANTIC_VERSION);
+        updateLengthPrefixed(digest, model.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, providerVoice.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, voice.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, format.getBytes(StandardCharsets.UTF_8));
+        updateLengthPrefixed(digest, text.getBytes(StandardCharsets.UTF_8));
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void updateProviderDomain(
+            MessageDigest digest, String provider, byte[] cliproxySemanticVersion) {
+        updateLengthPrefixed(digest, provider.getBytes(StandardCharsets.UTF_8));
+        if (CLIPROXY_REALTIME_PROVIDER.equals(provider)) {
+            updateLengthPrefixed(digest, cliproxySemanticVersion);
+        }
+    }
+
+    private static MessageDigest sha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private static void updateLengthPrefixed(Mac mac, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        mac.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+        mac.update(bytes);
+    }
+
+    private static void updateLengthPrefixed(MessageDigest digest, byte[] value) {
+        digest.update(ByteBuffer.allocate(4).putInt(value.length).array());
+        digest.update(value);
+    }
+}

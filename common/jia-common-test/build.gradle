@@ -1,0 +1,60 @@
+dependencies {
+    api project(':common:jia-common-core')
+    api libs.h2
+    api libs.spring.boot.starter.mybatis
+    api (libs.mybatis.plus.boot.starter) {
+        exclude module: 'mybatis-spring'
+        exclude group: 'org.springframework.boot'
+    }
+    api(libs.spring.boot.starter.web)
+    api libs.spring.boot.starter.data.jdbc
+    api libs.spring.boot.starter.data.redis
+    api libs.spring.boot.starter.elasticsearch
+    api libs.spring.boot.starter.redisson
+    api (libs.pagehelper.spring.boot.starter) {
+        exclude group: 'org.mybatis.spring.boot', module: 'mybatis-spring-boot-starter'
+        exclude group: 'org.springframework.boot'
+    }
+    api(libs.spring.boot.starter.test) {
+        exclude module: 'android-json'
+    }
+    // Spring Boot 4 resolves Jupiter/Platform 6.0.1; keep the launcher on that
+    // platform generation rather than letting the older DBUnit BOM pin 1.10.1.
+    api("org.junit.platform:junit-platform-launcher:6.0.1")
+    api(libs.dbunit) {
+        exclude module: 'junit'
+    }
+    api libs.mockito.core
+    api libs.testcontainers.junit
+    api libs.testcontainers.rabbitmq
+    api libs.redis.server
+    api libs.testable.all
+    annotationProcessor libs.testable.processor
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-common-test'
+
+compileJava {
+    options.fork = true
+    options.encoding = 'UTF-8'
+    options.compilerArgs.addAll(['-Xlint:-options', '-Xlint:-deprecation', '-Xlint:-unchecked', '-Xlint:-rawtypes', '-Xlint:-serial'])
+    options.forkOptions.jvmArgs = ['--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED',
+                                   '--add-opens=jdk.compiler/com.sun.tools.javac.jvm=ALL-UNNAMED']
+}
+
+test {
+    jvmArgs "-javaagent:${classpath.find { it.name.contains("testable-agent") }.absolutePath}"
+    useJUnitPlatform()
+}

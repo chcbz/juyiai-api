@@ -1,0 +1,33 @@
+dependencies {
+    api project(':common:jia-common-api')
+    api(libs.jakarta.servlet.api)
+    api(libs.json)
+    api(libs.jackson.databind)
+    api(libs.spring.webmvc)
+    api(libs.spring.tx)
+    api(libs.spring.jdbc)
+    api(libs.spring.aspects)
+    api(libs.spring.boot.autoconfigure)
+    implementation(libs.mybatis.plus.annotation)
+    api(libs.jackson.annotations)
+    compileOnly(libs.spring.redis)
+    compileOnly(libs.spring.ldap)
+    compileOnly(libs.elasticsearch)
+    compileOnly(libs.spring.boot.starter.redisson)
+//    compileOnly(libs.spring.boot.starter.cache)
+    compileOnly(libs.spring.websocket)
+    api(libs.spring.security.core)
+    compileOnly(libs.spring.security.oauth2.client)
+    compileOnly(libs.spring.security.oauth2.resource.server)
+    compileOnly(libs.mybatis.core)
+    compileOnly(libs.pagehelper.core)
+    compileOnly(libs.druid)
+    annotationProcessor project(':common:jia-common-core')
+    testImplementation project(':common:jia-common-test')
+    testImplementation(libs.spring.boot.starter.elasticsearch)
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-common-service'

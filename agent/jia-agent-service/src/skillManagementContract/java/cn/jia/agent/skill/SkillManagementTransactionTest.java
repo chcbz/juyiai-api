@@ -1,0 +1,1349 @@
+package cn.jia.agent.skill;
+
+import cn.jia.core.security.FixedTenantAdmissionPolicy;
+import cn.jia.task.scheduling.*;
+import cn.jia.task.mapper.ScheduledWorkMapper;
+import cn.jia.agent.dao.*;
+import cn.jia.agent.dao.impl.*;
+import cn.jia.agent.entity.*;
+import cn.jia.agent.hosting.*;
+import cn.jia.agent.mapper.*;
+import cn.jia.agent.security.*;
+import cn.jia.agent.service.*;
+import cn.jia.economy.config.*;
+import cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog;
+import cn.jia.economy.entity.*;
+import cn.jia.agent.entity.skill.*;
+import cn.jia.economy.service.skill.*;
+import cn.jia.economy.service.impl.SkillTradeServiceImpl;
+import cn.jia.economy.mapper.*;
+import cn.jia.agent.mapper.skill.*;
+import cn.jia.economy.service.impl.EconomyPostingServiceImpl;
+import org.junit.jupiter.api.*;
+import org.mybatis.spring.*;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.*;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.transaction.support.TransactionTemplate;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+import static cn.jia.agent.skill.SkillManagementCodec.*;
+
+/** SQL, escrow, ledger, immutable authorizations and command outbox are real MySQL.
+ * The default trusted identity/session fixture can be replaced by persistent proof validation
+ * for targeted consumer tests. No paid IO. */
+public class SkillManagementTransactionTest extends SkillManagementMySqlFixture {
+    cn.jia.agent.position.PositionSkillService positionService;
+    protected static final HostingRentHttp.Actor ACTOR=new HostingRentHttp.Actor("buyer","0","sm-client","owner");
+    protected static final String AGENT="agt_sm";
+    private String database;
+    protected JdbcTemplate jdbc;
+    protected SkillManagementService service;
+    protected SkillCatalogMapper market;
+    protected SkillManagementMapper db;
+    protected SkillInstallCommandWriter writer;
+    protected SkillInstallRecoveryService recovery;
+    protected AgentRuntimeAuthenticationService authentication;
+    protected AgentRuntimeEntity runtime;
+    private AgentIdentityService identityLocks;
+    private HostingRentOwnerResolver ownerResolver;
+    private AgentRuntimeDao runtimeLocks;
+    protected AgentManagedSessionLookup sessions;
+    protected SkillCapabilityLookup capabilities;
+    protected SkillAgentVersions versions;
+    private cn.jia.economy.mapper.EconomyHostingRentMapper rentalMapper;
+    private HostingRentWorkAdmission rentalAdmission;
+    protected TransactionTemplate tx;
+    private SkillExecutionDao taskAttachments;
+    private SkillInstallationMapper app;
+    protected SkillTradeService trade;
+    private SkillMarketplaceService marketplace;
+    private SkillPackages packages;
+    private org.springframework.transaction.PlatformTransactionManager manager;
+    protected SqlSessionTemplate sql;
+    private AgentSkillInstallRecoveryMapper recoveryMapper;
+    private AgentCommandRecoveryDao recoveryDao;
+    private SkillInstallDispatchService dispatch;
+    private ScheduledWorkStore schedules;
+
+    @BeforeEach protected void setup() throws Exception {
+        database="cyf_sm_"+UUID.randomUUID().toString().replace("-","");
+        admin.execute("CREATE DATABASE `"+database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
+        var ds=source(database);jdbc=new JdbcTemplate(ds);manager=new DataSourceTransactionManager(ds);tx=new TransactionTemplate(manager);
+        for(String resource:List.of("db/economy-v0-foundation.sql","db/economy-v0-skill-marketplace.sql","db/economy-v0-skill-application.sql",
+                "db/task-scheduled-work-v1.sql","db/agent-command-transport-schema.sql","db/economy-skill-management-sm-c1.sql","db/agent-skill-execution-v1.sql"))
+            new ResourceDatabasePopulator(new ClassPathResource(resource)).execute(ds);
+        var config=new org.apache.ibatis.session.Configuration();config.setMapUnderscoreToCamelCase(true);
+        for(Class<?> type:List.of(ScheduledWorkMapper.class,SkillCatalogMapper.class,SkillInstallationMapper.class,SkillTradeMapper.class,EconomyLedgerMapper.class,
+                SkillManagementMapper.class,SkillExecutionMapper.class,AgentCommandTransportMapper.class,AgentCommandRecoveryMapper.class,AgentSkillInstallRecoveryMapper.class,AgentOutboxRelayMapper.class))config.addMapper(type);
+        var factory=new SqlSessionFactoryBean();factory.setDataSource(ds);factory.setConfiguration(config);
+        sql=new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
+        schedules=new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),new FixedTenantAdmissionPolicy("0",null),manager);
+        taskAttachments=new SkillExecutionDaoImpl(sql.getMapper(SkillExecutionMapper.class));
+        market=sql.getMapper(SkillCatalogMapper.class);app=sql.getMapper(SkillInstallationMapper.class);
+        db=sql.getMapper(SkillManagementMapper.class);var ledger=sql.getMapper(EconomyLedgerMapper.class);
+        var gate=new EconomyPreviewGate(new EconomyPreviewProperties(true,List.of(new EconomyPreviewProperties.AllowedScope("0",ACTOR.clientId()))));
+        var posting=new EconomyPostingServiceImpl(ledger,manager,gate);
+        trade=new SkillTradeServiceImpl(sql.getMapper(SkillTradeMapper.class),ledger,posting,gate);
+        var agents=mock(AgentService.class);var owner=mock(HostingRentOwnerResolver.class);ownerResolver=owner;var runtimes=mock(AgentRuntimeDao.class);runtimeLocks=runtimes;identityLocks=mock(AgentIdentityService.class);
+        runtime=new AgentRuntimeEntity().setAgentId(AGENT).setOwnerJiacn(ACTOR.ownerJiacn()).setBindingId(7L).setTokenHash("registered").setStatus("online")
+                .setRuntimeInstallationId("rti_"+"a".repeat(32)).setRuntimeHostId("host-1").setRuntimeInstanceId("runtime-1").setRuntimeSessionGeneration(1L);
+        runtime.setTenantId("0");runtime.setClientId(ACTOR.clientId());
+        when(runtimes.findByAgentIdForUpdate(AGENT)).thenReturn(runtime);when(runtimes.findInScope("0",ACTOR.clientId(),AGENT)).thenReturn(runtime);
+        when(runtimes.lockInScope("0",ACTOR.clientId(),AGENT)).thenReturn(runtime);
+        var installations=mock(AgentRuntimeV1InstallationDao.class);
+        var installation=new AgentRuntimeV1InstallationEntity().setInstallationId(runtime.getRuntimeInstallationId()).setCanonicalAgentId(AGENT).setStatus("ACTIVE");
+        installation.setTenantId("0");installation.setClientId(ACTOR.clientId());
+        when(installations.lock(runtime.getRuntimeInstallationId())).thenReturn(installation);
+        authentication=mock(AgentRuntimeAuthenticationService.class);
+        when(authentication.currentRegisteredProof("0",ACTOR.clientId(),AGENT)).thenAnswer(i->proof());
+        when(authentication.withFence(any(),eq(false),any())).thenAnswer(i->{
+            assertEquals(proof(),i.getArgument(0));Supplier<?> action=i.getArgument(2);return tx.execute(s->action.get());
+        });
+        when(owner.requireOwner(any())).thenAnswer(i->{if(!ACTOR.equals(i.getArgument(0)))throw new HostingRentApplicationException(403,"FORBIDDEN");return ACTOR.ownerJiacn();});
+        var dto=new AgentRuntimeDTO();dto.setAgentId(AGENT);dto.setStatus("online");dto.setSystemAgent(false);
+        when(agents.requireApiKeyOwnedAgentForUpdate(ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        when(agents.requireApiKeyOwnedAgent(ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        when(agents.requireOwnedAgentCapabilities(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        versions=new SkillAgentVersions(app,runtimes,provider(agents),owner,manager);
+        var commands=new AgentCommandTransportDaoImpl(sql.getMapper(AgentCommandTransportMapper.class));writer=spy(new SkillInstallCommandWriter(commands,provider(schedules),"node-1"));
+        // Provision this fixture's private store explicitly; production never creates it at startup.
+        Path packageRoot=Files.createDirectory(scratch.resolve(database+"-packages"),
+                java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                        java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
+        packages=new SkillPackages(packageRoot);sessions=mock(AgentManagedSessionLookup.class);
+        when(sessions.isReady(eq("0"),eq(ACTOR.clientId()),eq(AGENT),any())).thenReturn(true);
+        when(sessions.dispatch(anyString(),anyString(),anyString(),any(),any())).thenReturn(AgentRawCommandDispatchResult.sent(1,1));
+        capabilities=mock(SkillCapabilityLookup.class);when(capabilities.lookup(any(),any())).thenReturn(SkillCapabilityLookup.View.unavailable(SkillCapabilityLookup.State.DISCONNECTED));
+        positionService=mock(cn.jia.agent.position.PositionSkillService.class);
+        when(positionService.currentState(any())).thenReturn(cn.jia.agent.position.PositionSkillState.empty());
+        when(positionService.read(any())).thenReturn(new cn.jia.agent.position.PositionSkillService.View(null,null,0,cn.jia.agent.position.PositionSkillState.empty()));
+        marketplace=new SkillMarketplaceService(market,app,trade,versions,runtimes,provider(writer),provider(packages),provider(authentication),provider(sessions),manager,positionService);
+        rentalMapper=mock(cn.jia.economy.mapper.EconomyHostingRentMapper.class);
+        rentalAdmission=new HostingRentWorkAdmission(rentalMapper,true);
+        service=new SkillManagementService(db,market,app,marketplace,trade,versions,runtimes,installations,authentication,identityLocks,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission);
+        dispatch=new SkillInstallDispatchService(app,market,marketplace,versions,authentication,commands,provider(sessions),manager);dispatch.setManagement(service);
+        recoveryMapper=sql.getMapper(AgentSkillInstallRecoveryMapper.class);
+        recoveryDao=new AgentCommandRecoveryDaoImpl(sql.getMapper(AgentCommandRecoveryMapper.class), new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null));
+        recovery=new SkillInstallRecoveryService(recoveryMapper,recoveryDao,dispatch,manager,new FixedTenantAdmissionPolicy("0", null),provider(schedules),"node-1");
+        for(var p:new PlatformSkillPackageCatalog().products()) {
+            market.insertProduct(new SkillProductEntity().setProductId(p.productId()).setSellerType("SYSTEM").setSellerId("SKILL_STORE").setName(p.name()).setDescription(p.description())
+                .setStatus("DRAFT").setVersion(1L).setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L).setUpdateTime(1L));
+            market.insertProductVersion(new SkillProductVersionEntity().setProductVersionId(p.productVersionId()).setProductId(p.productId()).setVersionSequence(1L)
+                .setSkillKey(p.skillKey()).setSkillVersion(p.skillVersion()).setPriceWen(p.priceWen()).setPackageSha256(p.packageSha256()).setPackageSize(p.packageSize())
+                .setApprovedPermissionsManifest(p.approvedPermissionsManifest()).setApprovedPermissionsSha256(p.approvedPermissionsSha256()).setDeploymentRestriction(p.deploymentRestriction())
+                .setReviewStatus("APPROVED").setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L));
+            market.publishProductVersion("0",ACTOR.clientId(),p.productId(),p.productVersionId(),1,2);
+        }
+        ledger.insertAccountIfAbsent(new EconomyAccountEntity().setAccountId("wallet").setOwnerType("USER").setOwnerId(ACTOR.actorId()).setPurpose("AVAILABLE")
+            .setCurrency("WEN").setBalanceWen(100000000L).setAllowNegative(0).setStatus("ACTIVE").setVersion(0L).setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L).setUpdateTime(1L));
+    }
+    @AfterEach void cleanup() {if(admin!=null&&database!=null&&database.matches("cyf_sm_[a-f0-9]{32}"))admin.execute("DROP DATABASE `"+database+"`");}
+    /** Replace only this test's trusted channel stub with actual persistent proof validation.
+     * Account/persona authority remains an explicit fixture; runtime/install rows and locks are SQL. */
+    protected void usePersistentAuthentication() throws Exception {
+        var ds=Objects.requireNonNull(jdbc.getDataSource());
+        // db/schema.sql exists in multiple modules. Select the actual runtime declaration,
+        // never whichever unrelated module happens to be first on a test classpath.
+        var runtimeDeclarations=new ArrayList<String>();
+        var resources=getClass().getClassLoader().getResources("db/schema.sql");
+        while(resources.hasMoreElements())try(var in=resources.nextElement().openStream()) {
+            String ddl=new String(in.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);
+            int start=ddl.indexOf("CREATE TABLE IF NOT EXISTS agent_runtime (");
+            if(start>=0)runtimeDeclarations.add(ddl.substring(start,ddl.indexOf(';',start)+1));
+        }
+        assertEquals(1,runtimeDeclarations.size(),"Exactly one production runtime schema declaration required");
+        jdbc.execute(runtimeDeclarations.getFirst());
+        for(String resource:List.of("db/agent-runtime-session-fence-v1.sql","db/agent-runtime-v1-schema.sql"))
+            new ResourceDatabasePopulator(new ClassPathResource(resource)).execute(ds);
+        for(Class<?> type:List.of(AgentRuntimeMapper.class,AgentRuntimeV1InstallationMapper.class))sql.getConfiguration().addMapper(type);
+        var rows=new AgentRuntimeDaoImpl();
+        org.springframework.test.util.ReflectionTestUtils.setField(rows,"baseMapper",sql.getMapper(AgentRuntimeMapper.class));
+        var installs=new AgentRuntimeV1InstallationDaoImpl();
+        org.springframework.test.util.ReflectionTestUtils.setField(installs,"baseMapper",sql.getMapper(AgentRuntimeV1InstallationMapper.class));
+        jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,token_hash,status,tenant_id,client_id,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation) VALUES (?,? ,?,7,?,'online','0',?,?,?,'runtime-1',1)",
+            AGENT,AGENT,ACTOR.ownerJiacn(),"urs1:"+proof().tokenDigest()+":1:1",ACTOR.clientId(),runtime.getRuntimeInstallationId(),"host-1");
+        jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,version,tenant_id,client_id) VALUES (?,?,'1',?,?,1,'ACTIVE',0,'0',?)",
+            runtime.getRuntimeInstallationId(),AGENT,"a".repeat(64),new byte[32],ACTOR.clientId());
+        var identities=mock(AgentIdentityService.class);
+        var identity=new AgentIdentityRegistryEntity().setCanonicalAgentId(AGENT).setOwnerJiacn(ACTOR.ownerJiacn()).setBindingId(7L).setLifecycleStatus("ACTIVE");
+        identity.setTenantId("0");identity.setClientId(ACTOR.clientId());
+        when(identities.requireRegistrationIdentityInScope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(identity);
+        when(identities.requireActiveIdentityForBinding("0",ACTOR.clientId(),ACTOR.ownerJiacn(),7L,AGENT)).thenReturn(identity);
+        when(identities.requireActiveBinding(identity,null)).thenReturn(new AgentPersonaBindingEntity().setId(7L));
+        when(identities.activateForFirstRegistration(identity)).thenReturn(identity);
+        var accounts=mock(cn.jia.user.security.AccountSecurityService.class);
+        when(accounts.findUniqueByExactJiacn(ACTOR.ownerJiacn())).thenReturn(Optional.of(new cn.jia.user.security.AccountSecuritySnapshot(1,ACTOR.ownerJiacn(),cn.jia.user.security.AccountState.ACTIVE,1)));
+        var authority=new AgentRuntimeAuthenticationService(rows,installs,mock(AgentIdentityRegistryDao.class),identities,accounts,
+            new cn.jia.agent.config.AgentTaskEventsGate(new cn.jia.agent.config.AgentTaskEventsProperties(true,List.of(new cn.jia.agent.config.AgentTaskEventsProperties.AllowedScope("0",ACTOR.clientId())))),
+                new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null));
+        var advice=new org.springframework.transaction.interceptor.TransactionInterceptor();
+        advice.setTransactionManager(manager);
+        advice.setTransactionAttributeSource(new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource());
+        var proxy=new org.springframework.aop.framework.ProxyFactory(authority);proxy.setProxyTargetClass(true);proxy.addAdvice(advice);
+        authentication=(AgentRuntimeAuthenticationService)proxy.getProxy();
+        var agents=mock(AgentService.class);var owner=mock(HostingRentOwnerResolver.class);
+        var dto=new AgentRuntimeDTO();dto.setAgentId(AGENT);dto.setSystemAgent(false);dto.setStatus("online");
+        when(owner.requireOwner(ACTOR)).thenReturn(ACTOR.ownerJiacn());
+        when(agents.requireApiKeyOwnedAgentForUpdate(ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        when(agents.requireApiKeyOwnedAgent(ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        when(agents.requireOwnedAgentCapabilities(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
+        versions=new SkillAgentVersions(app,rows,provider(agents),owner,manager);
+        service=new SkillManagementService(db,market,app,marketplace,trade,versions,rows,installs,authentication,identities,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission);
+    }
+    /** Immutable snapshot of ALL relevant SQL business rows, including versions and transport leases. */
+    protected Map<String,Object> businessSnapshot() {
+        Map<String,Object> snapshot=new LinkedHashMap<>();
+        for(String table:List.of("economy_account","economy_escrow","economy_escrow_funding_lot","economy_transaction","economy_entry","economy_skill_order","agent_skill_entitlement",
+                "agent_skill_installation","agent_skill_actor_root","agent_skill_agent_version","agent_skill_managed_state","agent_skill_change","agent_skill_change_command",
+                "agent_skill_management_result","agent_skill_installation_authorization","agent_skill_management_request","agent_skill_management_quote","agent_skill_delivery_binding","agent_skill_result_receipt","agent_command_delivery","agent_outbox_event")) {
+            var rows=new ArrayList<Map<String,String>>();
+            for(var row:jdbc.queryForList("SELECT * FROM "+table+" ORDER BY 1")) {
+                Map<String,String> values=new LinkedHashMap<>();
+                row.forEach((key,value)->values.put(key,value instanceof byte[] bytes?HexFormat.of().formatHex(bytes):Objects.toString(value,null)));rows.add(values);
+            }
+            snapshot.put(table,rows);
+        }
+        return snapshot;
+    }
+    protected Map<String,Object> acknowledgement(Map<String,Object> change) {
+        var cmd=command(change);var row=db.findCommand("0",ACTOR.clientId(),text(cmd,"commandId"));
+        return map("protocolVersion",1,"requestId","req-ack","messageType","command.ack","messageId","ack_"+UUID.randomUUID(),"correlationId",row.getMessageId(),"code","E0","msg","ok",
+            "data",map("schemaVersion",2,"skillChangeId",change.get("skillChangeId"),"commandId",cmd.get("commandId"),"attempt",cmd.get("attempt"),"fencingToken",cmd.get("fencingToken"),"deliveryEpoch",cmd.get("deliveryEpoch"),"ackStatus","RECEIVED"));
+    }
+    @SuppressWarnings("unchecked") static <T> ObjectProvider<T> provider(T value) {ObjectProvider<T> p=mock(ObjectProvider.class);when(p.getIfAvailable()).thenReturn(value);when(p.getObject()).thenReturn(value);return p;}
+    protected AgentRuntimeAuthenticationService.Proof proof(){return new AgentRuntimeAuthenticationService.Proof(new AgentRuntimeAuthentication.Scope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT,"runtime-1"),runtime.getRuntimeInstallationId(),"host-1",1L,"b".repeat(64),1L,1L);}
+    protected Map<String,Object> quoteData() {return map("action","INSTALL","agentId",AGENT,"skillKey","repo-test","sourceSkillInstallationId",null,"targetProductVersionId","spv_repo_test_1_0_0",
+        "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision","0","approvedPermissions",List.of());}
+    protected Map<String,Object> creation(Map<String,Object> q,Map<String,Object> request) {var data=new LinkedHashMap<>(request);data.remove("agentId");data.put("quoteId",q.get("quoteId"));data.put("expectedPrice",q.get("price"));return data;}
+    protected Map<String,Object> install() {var data=quoteData();var q=service.quote(ACTOR,"q-key",data,false);return service.create(ACTOR,AGENT,"create-key","request-create",creation(q,data),false);}
+    protected Map<String,Object> current(Map<String,Object> change){return service.change(ACTOR,AGENT,text(change,"skillChangeId"));}
+    protected Map<String,Object> command(Map<String,Object> value){var c=db.findChange("0",ACTOR.clientId(),text(value,"skillChangeId"));var cmd=db.findCommand("0",ACTOR.clientId(),c.getCommandId());return read(cmd.getDataJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"CommandData");}
+    protected Map<String,Object> evidence(Map<String,Object> value,String outcome,String reason) {
+        var cmd=command(value);String phase=text(cmd,"phase");
+        String prepared="PREPARED".equals(outcome)?hash("cyf.skill.prepared.v1",map("skillChangeId",value.get("skillChangeId"),"attempt",value.get("attempt"),"source",value.get("source"),"target",value.get("target"),"approvedPermissionsSha256",cmd.get("approvedPermissionsSha256"))):null;
+        return map("observedCommandId",cmd.get("commandId"),"phase",phase,"outcome",outcome,"actual","APPLIED".equals(outcome)?value.get("target"):null,
+            "appliedRevision","APPLIED".equals(outcome)?value.get("skillRevision"):"0","preparedSha256",prepared,"readiness","NOT_EXECUTABLE","reasonCode",reason,"observedAt",System.currentTimeMillis());
+    }
+    protected Map<String,Object> result(Map<String,Object> value,Map<String,Object> evidence) {
+        var cmd=command(value);var data=map("schemaVersion",2,"resultType","SKILL_CHANGE_RESULT","skillChangeId",value.get("skillChangeId"),"commandId",cmd.get("commandId"),
+            "agentId",AGENT,"runtimeInstallationId",runtime.getRuntimeInstallationId(),"executionRuntimeInstanceId","runtime-1","attempt",cmd.get("attempt"),
+            "fencingToken",cmd.get("fencingToken"),"deliveryEpoch",cmd.get("deliveryEpoch"),"skillRevision",cmd.get("skillRevision"),"evidence",evidence);
+        data.put("resultSha256",hash("cyf.skill.result.v2",data));return map("protocolVersion",1,"requestId","req-result","messageType","work.result","messageId","result_"+UUID.randomUUID(),"data",data);
+    }
+    void report(Map<String,Object> value,String outcome,String reason){service.result(proof(),result(value,evidence(value,outcome,reason)));}
+    void catalog(Map<String,Object> value) {
+        catalog(value,"EXECUTABLE".equals(object(value.get("target")).get("kind"))?SkillCapabilityLookup.Readiness.READY:SkillCapabilityLookup.Readiness.NOT_EXECUTABLE);
+    }
+    void catalog(Map<String,Object> value,SkillCapabilityLookup.Readiness readiness) {
+        var target=object(value.get("target"));var fact=new SkillCapabilityLookup.RuntimeSkill(text(value,"skillKey"),text(target,"skillVersion"),text(target,"packageSha256"),text(target,"manifestSha256"),"EXECUTABLE".equals(target.get("kind"))?"native-model":null,
+            readiness,null,readiness==SkillCapabilityLookup.Readiness.READY?"c".repeat(64):null,null,text(target,"skillInstallationId"),text(target,"productVersionId"),text(target,"kind"),text(value,"skillRevision"),Boolean.TRUE.equals(value.get("desiredEnabled")),System.currentTimeMillis());
+        var fence=new AgentManagedSessionLookup.SessionFence(runtime.getRuntimeInstallationId(),"host-1","runtime-1",1L);
+        when(capabilities.lookup(any(),any())).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session-1",fence,new SkillCapabilityLookup.Catalog("1",List.of(fact))));
+        service.capabilitiesChanged(proof());
+    }
+    long wallet(){return jdbc.queryForObject("SELECT balance_wen FROM economy_account WHERE account_id='wallet'",Long.class);}
+    int count(String table){return jdbc.queryForObject("SELECT COUNT(*) FROM "+table,Integer.class);}
+
+    protected void publishExecutable(String version,long sequence) throws Exception {
+        String manifest="""
+            {"schemaVersion":1,"skillKey":"pdf-export","skillVersion":"%s","title":"PDF","description":"synthetic approved fixture",
+             "runner":"native-model","entrypoint":"pdf.export","parametersSchema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},
+             "inputs":{"minItems":0,"maxItems":0,"acceptedMimeTypes":[]},
+             "outputs":{"dataSchema":null,"mimeTypes":["application/pdf"],"multiple":false,"artifactsRequired":true},"requirements":{}}
+            """.formatted(version);
+        var out=new java.io.ByteArrayOutputStream();
+        try(var zip=new java.util.zip.ZipOutputStream(out)) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("SKILL.md"));zip.write(("---\nname: pdf-export\ndescription: export pdf\nmetadata:\n  version: \""+version+"\"\n---\nExport PDF.\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));zip.closeEntry();
+            zip.putNextEntry(new java.util.zip.ZipEntry("manifest.json"));zip.write(manifest.getBytes(java.nio.charset.StandardCharsets.UTF_8));zip.closeEntry();
+        }
+        byte[] bytes=out.toByteArray();new SkillPackageStore(scratch.resolve(database+"-packages")).publish(bytes);
+        if(sequence==1)market.insertProduct(new SkillProductEntity().setProductId("sp_pdf").setSellerType("SYSTEM").setSellerId("SKILL_STORE").setName("PDF").setDescription("synthetic fixture")
+                .setStatus("DRAFT").setVersion(1L).setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L).setUpdateTime(1L));
+        market.insertProductVersion(new SkillProductVersionEntity().setProductVersionId("spv_pdf_"+sequence).setProductId("sp_pdf").setVersionSequence(sequence)
+            .setSkillKey("pdf-export").setSkillVersion(version).setPriceWen(5_000_000L).setPackageSha256(SkillPackageStore.sha256(bytes)).setPackageSize((long)bytes.length)
+            .setApprovedPermissionsManifest("[]").setApprovedPermissionsSha256(SkillPackageStore.sha256("[]".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+            .setDeploymentRestriction("NONE").setReviewStatus("APPROVED").setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L));
+        assertEquals(1,market.publishProductVersion("0",ACTOR.clientId(),"sp_pdf","spv_pdf_"+sequence,sequence,System.currentTimeMillis()));
+    }
+    private void publishInstruction() throws Exception {publishInstruction("1.0.0",1);}
+    protected void publishInstruction(String version,long sequence) throws Exception {
+        var out=new java.io.ByteArrayOutputStream();
+        try(var zip=new java.util.zip.ZipOutputStream(out)) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("SKILL.md"));
+            zip.write(("---\nname: pdf-export\ndescription: export pdf\nmetadata:\n  version: \""+version+"\"\n---\nDescribe a PDF.\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        byte[] bytes=out.toByteArray();new SkillPackageStore(scratch.resolve(database+"-packages")).publish(bytes);
+        if(sequence==1)market.insertProduct(new SkillProductEntity().setProductId("sp_pdf").setSellerType("SYSTEM").setSellerId("SKILL_STORE").setName("PDF").setDescription("instruction fixture")
+                .setStatus("DRAFT").setVersion(1L).setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L).setUpdateTime(1L));
+        market.insertProductVersion(new SkillProductVersionEntity().setProductVersionId("spv_pdf_"+sequence).setProductId("sp_pdf").setVersionSequence(sequence)
+                .setSkillKey("pdf-export").setSkillVersion(version).setPriceWen(5_000_000L).setPackageSha256(SkillPackageStore.sha256(bytes)).setPackageSize((long)bytes.length)
+                .setApprovedPermissionsManifest("[]").setApprovedPermissionsSha256(SkillPackageStore.sha256("[]".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .setDeploymentRestriction("NONE").setReviewStatus("APPROVED").setTenantId("0").setClientId(ACTOR.clientId()).setCreateTime(1L));
+        assertEquals(1,market.publishProductVersion("0",ACTOR.clientId(),"sp_pdf","spv_pdf_"+sequence,sequence,System.currentTimeMillis()));
+    }
+    private void markPositionSkill() {
+        // Shared catalog fact; the viewing owner's position state deliberately stays empty.
+        jdbc.update("UPDATE agent_skill_product SET skill_type='POSITION' WHERE product_id='sp_repo_test'");
+    }
+    @Test void anotherOwnersDefinitionProtectsCatalogAndManualInstallWithoutCopyingAppointments() {
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-position-skills.sql")).execute(jdbc.getDataSource());
+        var scope=new PositionAuthority.Scope(ACTOR.tenantId(),ACTOR.clientId(),"catalog-maintainer");
+        for(String permission:List.of("MANAGE_POSITIONS","SKILL_REVIEW","SKILL_PUBLISH"))
+            jdbc.update("INSERT INTO agent_position_authority VALUES(?,?,?,?,?)",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
+                    permission,"MANAGE_POSITIONS".equals(permission)?"positions":"skills:platform");
+        var realPositions=new cn.jia.agent.position.PositionSkillService(new cn.jia.agent.position.PositionSkillStore(jdbc),identityLocks,market,manager);
+        realPositions.defineSkill(scope,"define-position",new cn.jia.agent.position.PositionSkillState.Skill(
+                "repo-test",cn.jia.agent.position.PositionSkillState.SkillType.POSITION,"spv_repo_test_1_0_0"));
+        assertTrue(realPositions.read(new PositionAuthority.Scope(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn())).state().skills().isEmpty());
+        assertTrue(realPositions.read(new PositionAuthority.Scope(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn())).state().appointments().isEmpty());
+        // The actual browsing/installation actor is NOT the owner who defined the skill.
+        var row=((List<?>)service.skills(ACTOR,AGENT,true).get("items")).stream().map(SkillManagementCodec::object)
+                .filter(item->"repo-test".equals(item.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals(List.of("VIEW"),row.get("allowedActions"));
+        var product=marketplace.catalog(ACTOR,true).stream().filter(item->"repo-test".equals(item.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals(false,product.get("canPurchase"));
+        var failure=assertThrows(SkillMarketplaceException.class,()->service.quote(ACTOR,"cross-owner-quote",quoteData(),false));
+        assertEquals("POSITION_MANAGED_SKILL",failure.code());
+        assertEquals(0,count("economy_skill_purchase_quote"));assertEquals(0,count("economy_skill_order"));
+        var identity=new AgentIdentityRegistryEntity().setCanonicalAgentId("maintainer-agent").setBindingId(11L);
+        when(identityLocks.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),"maintainer-agent")).thenReturn(identity);
+        realPositions.configure(scope,"configure-position",new cn.jia.agent.position.PositionSkillState.Position(
+                "maintainer","Maintainer",1,"skills:platform",true,List.of("repo-test"),0),0);
+        var appointed=realPositions.appoint(scope,"appoint-position","maintainer","maintainer-agent");
+        assertTrue(appointed.state().installations().values().stream().allMatch(item->item.desired()&&!item.usable()));
+        var resigned=realPositions.resign(scope,"resign-position",appointed.resultId());
+        assertTrue(resigned.state().installations().values().stream().noneMatch(item->item.desired()));
+        assertTrue(market.selectPositionSkillKeys(scope.tenantId(),scope.clientId()).contains("repo-test"));
+        var legacyScope=new PositionAuthority.Scope(scope.tenantId(),scope.clientId(),"legacy-owner");
+        String legacy="{\"schemaVersion\":1,\"skills\":{\"repo-test\":{\"key\":\"repo-test\",\"type\":\"GENERAL\",\"productVersionId\":\"spv_repo_test_1_0_0\"}},\"positions\":{},\"appointments\":{},\"installations\":{}}";
+        jdbc.update("INSERT INTO agent_position_state VALUES(?,?,?,0,?)",legacyScope.tenantId(),legacyScope.clientId(),legacyScope.ownerJiacn(),legacy);
+        assertEquals(cn.jia.agent.position.PositionSkillState.SkillType.POSITION,realPositions.read(legacyScope).state().skills().get("repo-test").type());
+        assertTrue(jdbc.queryForObject("SELECT state_json FROM agent_position_state WHERE owner_jiacn='legacy-owner'",String.class).contains("GENERAL"));
+
+        assertFalse(market.selectPositionSkillKeys("other-tenant",ACTOR.clientId()).contains("repo-test"));
+        assertFalse(market.selectPositionSkillKeys(ACTOR.tenantId(),"other-client").contains("repo-test"));
+    }
+
+    @Test void ownerCannotChangeSharedClassificationWithOnlyPositionManagementPermission() {
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-position-skills.sql")).execute(jdbc.getDataSource());
+        var scope=new PositionAuthority.Scope(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn());
+        jdbc.update("INSERT INTO agent_position_authority VALUES(?,?,?,?,?)",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),"MANAGE_POSITIONS","positions");
+        var positions=new cn.jia.agent.position.PositionSkillService(new cn.jia.agent.position.PositionSkillStore(jdbc),identityLocks,market,manager);
+        var denied=assertThrows(cn.jia.agent.position.PositionSkillException.class,()->positions.defineSkill(scope,"denied-type",
+                new cn.jia.agent.position.PositionSkillState.Skill("repo-test",cn.jia.agent.position.PositionSkillState.SkillType.POSITION,"spv_repo_test_1_0_0")));
+        assertEquals(403,denied.status());assertFalse(market.selectPositionSkillKeys(scope.tenantId(),scope.clientId()).contains("repo-test"));
+        assertTrue(positions.read(scope).state().skills().isEmpty());
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM agent_position_operation",Integer.class));
+    }
+    @Test void generalSkillAttachedToOwnersPositionDoesNotBecomePositionOnly() {
+        var skill=new cn.jia.agent.position.PositionSkillState.Skill("repo-test",cn.jia.agent.position.PositionSkillState.SkillType.GENERAL,"spv_repo_test_1_0_0");
+        var local=new cn.jia.agent.position.PositionSkillState(1,Map.of(skill.key(),skill),Map.of(),Map.of(),Map.of());
+        when(positionService.currentState(any())).thenReturn(local);
+        when(positionService.read(any())).thenReturn(new cn.jia.agent.position.PositionSkillService.View(null,null,1,local));
+        var row=((List<?>)service.skills(ACTOR,AGENT,false).get("items")).stream().map(SkillManagementCodec::object)
+                .filter(item->"repo-test".equals(item.get("skillKey"))).findFirst().orElseThrow();
+        assertTrue(((List<?>)row.get("allowedActions")).contains("INSTALL"));
+        assertNotNull(service.quote(ACTOR,"general-attached",quoteData(),false).get("quoteId"));
+    }
+    @Test void sharedTypeAlsoBlocksLegacyQuoteAndPurchaseAfterAnEarlierQuote() {
+        String version=Long.toString(versions.requireOwned(ACTOR,AGENT,null,false));
+        var body=Map.of("productVersionId","spv_repo_test_1_0_0","targetAgentId",AGENT,"expectedAgentVersion",version);
+        var quote=marketplace.quote(ACTOR,UUID.randomUUID().toString(),body,false);
+        var purchase=Map.of("quoteId",(String)quote.get("quoteId"),"productVersionId","spv_repo_test_1_0_0",
+                "targetAgentId",AGENT,"expectedAgentVersion",version,"expectedPriceWen",
+                ((cn.jia.economy.common.Money)quote.get("price")).amountMinor(),"approvedPermissions","[]");
+        markPositionSkill();long balance=wallet();
+        var denied=assertThrows(SkillMarketplaceException.class,()->marketplace.quote(ACTOR,UUID.randomUUID().toString(),body,true));
+        assertEquals("POSITION_MANAGED_SKILL",denied.code());
+        denied=assertThrows(SkillMarketplaceException.class,()->marketplace.purchase(ACTOR,UUID.randomUUID().toString(),purchase,true));
+        assertEquals("POSITION_MANAGED_SKILL",denied.code());assertEquals(balance,wallet());
+        assertEquals(0,count("economy_skill_order"));assertEquals(0,count("agent_skill_change_command"));
+    }
+    @Test void positionSkillHasViewButNoOrdinaryLifecycleActionsEvenForAdmin() {
+        markPositionSkill();
+        var list=service.skills(ACTOR,AGENT,true);
+        var row=((List<?>)list.get("items")).stream().map(SkillManagementCodec::object)
+                .filter(item->"repo-test".equals(item.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals(List.of("VIEW"),row.get("allowedActions"));
+        assertTrue(((List<?>)row.get("deniedActions")).stream().map(SkillManagementCodec::object)
+                .allMatch(item->"POSITION_MANAGED_SKILL".equals(item.get("reasonCode"))));
+        var product=marketplace.catalog(ACTOR,true).stream().filter(item->"repo-test".equals(item.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals(false,product.get("canPurchase"));assertEquals("POSITION_MANAGED_SKILL",product.get("denialReason"));
+    }
+    @Test void positionSkillCannotQuoteOrSpendEvenForAdmin() {
+        markPositionSkill();long before=wallet();
+        var failure=assertThrows(SkillMarketplaceException.class,()->service.quote(ACTOR,"position-quote",quoteData(),true));
+        assertEquals("POSITION_MANAGED_SKILL",failure.code());assertEquals(before,wallet());
+        assertEquals(0,count("economy_skill_purchase_quote"));
+    }
+    @Test void positionClassificationAfterQuoteBlocksCreateWithoutSpending() {
+        var data=quoteData();var quote=service.quote(ACTOR,"ordinary-quote",data,false);long before=wallet();markPositionSkill();
+        var failure=assertThrows(SkillMarketplaceException.class,()->service.create(ACTOR,AGENT,"position-create","position-request",creation(quote,data),true));
+        assertEquals("POSITION_MANAGED_SKILL",failure.code());assertEquals(before,wallet());
+        assertEquals(0,count("economy_skill_order"));
+    }
+    @Test void managementLocksIdentityBeforeRuntimeAndVersionOwnershipChecks() throws Exception {
+        publishExecutable("1.0.0",1);
+        packageChange("INSTALL",null,"0","spv_pdf_1");
+        var order=inOrder(identityLocks,runtimeLocks);
+        order.verify(identityLocks).lockRegistrationIdentityInScope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT);
+        order.verify(runtimeLocks).lockInScope("0",ACTOR.clientId(),AGENT);
+    }
+
+    @Test void managedPublicationCoversExistingEntitlementAndRollsBackInvalidSource() throws Exception {
+        publishExecutable("1.0.0",1);
+        var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String sourceInstallation=text(object(first.get("target")),"skillInstallationId");
+        var out=new java.io.ByteArrayOutputStream();
+        try(var zip=new java.util.zip.ZipOutputStream(out)) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("SKILL.md"));
+            zip.write("---\nname: pdf-export\ndescription: export pdf\nmetadata:\n  version: \"2.0.0\"\n---\nUse native tools.\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            zip.closeEntry();
+        }
+        byte[] archive=out.toByteArray();var packageProvider=provider(packages);when(packageProvider.getIfUnique()).thenReturn(packages);
+        // This slice proves upgrade/entitlement rollback; position ACL/locking has its own real-MySQL suite.
+        var authority=mock(cn.jia.agent.service.PositionAuthority.class);
+        var publicationScope=new cn.jia.agent.service.PositionAuthority.Scope(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn());
+        var publicationGrant=new cn.jia.agent.service.PositionAuthority.Grant("fixture-appointment",1,1,AGENT,1,null,true);
+        when(authority.withSkillManagementAuthority(eq(publicationScope),eq(publicationGrant),any())).thenAnswer(invocation->
+                new org.springframework.transaction.support.TransactionTemplate(manager).execute(status->
+                        ((java.util.function.Supplier<?>)invocation.getArgument(2)).get()));
+        var publisher=new SkillPackagePublicationService(market,packageProvider,authority);
+        var invalid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",HexFormat.of().formatHex(SkillPackageStore.sha256(archive)),null,2,"missing-source");
+        assertEquals("SKILL_UPGRADE_SOURCE_INVALID",assertThrows(SkillMarketplaceException.class,()->publisher.publish(publicationScope,publicationGrant,invalid,archive)).code());
+        assertEquals("spv_pdf_1",market.selectProductForUpdate("0",ACTOR.clientId(),"sp_pdf").getCurrentProductVersionId());
+        assertNull(market.selectApprovedProductVersion("0",ACTOR.clientId(),"spv_pdf_2"));
+        var valid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",invalid.packageSha256(),null,2,"spv_pdf_1");
+        assertEquals("PUBLISHED",publisher.publish(publicationScope,publicationGrant,valid,archive).disposition());
+        assertEquals("RECORDED",publisher.publish(publicationScope,publicationGrant,valid,archive).disposition());
+        assertEquals("COVERED",db.upgradePolicy("0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2"));
+        int orders=count("economy_skill_order");
+        var upgrade=packageChange("UPGRADE",sourceInstallation,text(first,"skillRevision"),"spv_pdf_2");
+        assertNotNull(upgrade.get("orderId"));assertEquals("20",object(upgrade.get("price")).get("amountMinor"));
+        assertEquals("INSTRUCTION",object(upgrade.get("target")).get("kind"));
+        finishInstall(upgrade);assertEquals("SUCCEEDED",current(upgrade).get("status"));
+        assertEquals(orders+1,count("economy_skill_order"));
+    }
+    @Test void instructionNativeBindingUsesRealInstallationAndDisablingClosesAdmission() throws Exception {
+        publishInstruction();var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        var target=object(first.get("target"));assertEquals("INSTRUCTION",target.get("kind"));assertNull(target.get("manifestSha256"));
+        var list=service.skills(ACTOR,AGENT,false);
+        var item=object(((List<?>)list.get("items")).stream().filter(row->"pdf-export".equals(object(row).get("skillKey"))).findFirst().orElseThrow());
+        assertEquals(false,item.get("admissionEnabled"));assertEquals("NOT_EXECUTABLE",object(item.get("runtime")).get("state"));
+        String id=text(target,"skillInstallationId");var rows=service.descriptors(scope());assertEquals(1,rows.size());
+        var descriptor=rows.getFirst();assertTrue(descriptor.verifiedNative());assertNull(descriptor.manifestJson());assertNull(descriptor.manifestSha256());
+        var binding=service.admitNative(scope(),"pdf-export",id,()->service.nativeTaskBinding("0",ACTOR.clientId(),"exec-native","grant",1,AGENT,id));
+        assertNull(binding.get("manifestSha256"));assertNotNull(binding.get("approvedPermissionsSha256"));
+        assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validate("TaskSkillBinding",binding));
+        assertDoesNotThrow(()->SkillManagementCodec.validateNativeTaskBinding(binding));
+        policyChange("DISABLE",first);
+        assertThrows(SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",id,()->"never"));
+    }
+    @Test void nativeAdmissionRejectsSelfConsistentPermissionsNotMatchingEntitlement() throws Exception {
+        publishInstruction();var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String id=text(object(first.get("target")),"skillInstallationId");
+        var unrelated=List.of("READ_AUTHORIZED_INPUT");
+        jdbc.update("UPDATE agent_skill_installation_authorization SET permissions_json=?,permissions_sha256=? WHERE installation_id=?",
+                json(unrelated),hash("cyf.skill.permissions.v1",unrelated),id);
+        assertTrue(service.descriptors(scope()).isEmpty());
+        assertThrows(SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",id,()->"never"));
+    }
+    protected Map<String,Object> packageChange(String action,String source,String revision,String target) {
+        var request=map("action",action,"agentId",AGENT,"skillKey","pdf-export","sourceSkillInstallationId",source,"targetProductVersionId",target,
+            "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",revision,"approvedPermissions",List.of());
+        var q=service.quote(ACTOR,"q-"+UUID.randomUUID(),request,false);return service.create(ACTOR,AGENT,"c-"+UUID.randomUUID(),"request",creation(q,request),false);
+    }
+    protected Map<String,Object> policyChange(String action,Map<String,Object> c) {
+        return service.create(ACTOR,AGENT,"p-"+UUID.randomUUID(),"request",map("action",action,"skillKey",c.get("skillKey"),"sourceSkillInstallationId",object(c.get("target")).get("skillInstallationId"),
+            "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",c.get("skillRevision")),false);
+    }
+    void finishInstall(Map<String,Object> c) {report(c,"PREPARED",null);report(current(c),"APPLIED",null);catalog(current(c));}
+    protected SkillCapabilityLookup.Scope scope(){return new SkillCapabilityLookup.Scope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT);}
+    @Test void coveredUpgradePreservesExactOldTaskReferenceAndClosesAdmissionOnlyAtActivation() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String old=text(object(first.get("target")),"skillInstallationId");
+        var identities=mock(AgentIdentityService.class);
+        when(identities.requireCanonicalAgentIdInScope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(AGENT);
+        var descriptors=new InstalledSkillDescriptorService(identities,market,app,provider(packages),trade);
+        descriptors.setManagement(service,db);
+        assertEquals(List.of(old),descriptors.readCurrent(scope()).skills().stream().map(InstalledSkillDescriptorLookup.Descriptor::installationId).toList());
+        var frozen=service.admit(scope(),"pdf-export",old,()->service.taskBinding("0",ACTOR.clientId(),"exec-old","grant-old",1,AGENT,old));
+        publishExecutable("2.0.0",2);
+        var base=first;
+        var missing=assertThrows(SkillMarketplaceException.class,()->packageChange("UPGRADE",old,text(base,"skillRevision"),"spv_pdf_2"));assertEquals("SKILL_UPGRADE_POLICY_UNSET",missing.code());
+        jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","COVERED");
+        var upgrade=packageChange("UPGRADE",old,text(first,"skillRevision"),"spv_pdf_2");assertNotNull(upgrade.get("orderId"));assertEquals("HELD",upgrade.get("fundingStatus"));
+        assertEquals("old-active",service.admit(scope(),"pdf-export",old,()->"old-active"));
+        report(upgrade,"FAILED","DEPENDENCY_MISSING");upgrade=current(upgrade);
+        assertEquals("still-old",service.admit(scope(),"pdf-export",old,()->"still-old"));
+        assertEquals(List.of(old),descriptors.readCurrent(scope()).skills().stream().map(InstalledSkillDescriptorLookup.Descriptor::installationId).toList());
+        upgrade=service.retry(ACTOR,AGENT,text(upgrade,"skillChangeId"),"upgrade-retry","retry-request",map("expectedChangeRevision",upgrade.get("changeRevision")));
+        report(upgrade,"PREPARED",null);upgrade=current(upgrade);
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",old,()->"never"));
+        report(upgrade,"APPLIED",null);catalog(current(upgrade));upgrade=current(upgrade);assertEquals("SUCCEEDED",upgrade.get("status"));
+        String newest=text(object(upgrade.get("target")),"skillInstallationId");assertNotEquals(old,newest);
+        assertEquals(old,frozen.get("skillInstallationId"));assertEquals("spv_pdf_1",frozen.get("productVersionId"));
+        assertEquals(2,service.descriptors(scope()).size()); // old exact executable remains recoverable
+        assertEquals(2,descriptors.read(scope()).skills().size());
+        assertEquals(List.of(newest),descriptors.readCurrent(scope()).skills().stream().map(InstalledSkillDescriptorLookup.Descriptor::installationId).toList());
+        assertEquals("new",service.admit(scope(),"pdf-export",newest,()->"new"));assertEquals(2,count("economy_skill_order"));assertEquals(99_999_930L,wallet());
+    }
+    /** Convert a private successful fixture into an exact historical installation plus adoption
+     * projection. No new protocol command/result is invented by the migration. */
+    private Map<String,Object> adoptedFixture() throws Exception {
+        publishExecutable("1.0.0",1);var change=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(change);change=current(change);
+        String installation=text(object(change.get("target")),"skillInstallationId");
+        var auth=db.findAuthorization("0",ACTOR.clientId(),installation);
+        byte[] receiptHash=java.util.HexFormat.of().parseHex("d".repeat(64));
+        app.insertResult("0",ACTOR.clientId(),"historical-receipt",installation,receiptHash,"ACTIVE",1L);
+        String local="e".repeat(64),migration="adopt_"+hash("cyf.skill.adoption.identity.v1",map("tenantId","0","clientId",ACTOR.clientId(),"skillInstallationId",installation,"localEvidenceSha256",local));
+        var proof=map("schemaVersion",1,"migrationId",migration,"actorId",ACTOR.actorId(),"ownerJiacn",ACTOR.ownerJiacn(),"agentId",AGENT,"skillKey","pdf-export",
+                "runtimeInstallationId",runtime.getRuntimeInstallationId(),"runtimeHostId","host-1","receiptMessageId","historical-receipt","receiptSha256",HexFormat.of().formatHex(receiptHash),
+                "package",object(change.get("target")),"approvedPermissionsSha256",auth.getPermissionsSha256(),"localEvidenceSha256",local);
+        proof.put("evidenceSha256",hash("cyf.skill.adoption.v1",proof));
+        jdbc.update("UPDATE agent_skill_installation_authorization SET change_id=?,adoption_evidence_json=? WHERE installation_id=?",migration,json(proof),installation);
+        jdbc.update("DELETE FROM agent_skill_change_command");jdbc.update("DELETE FROM agent_skill_change");jdbc.update("DELETE FROM agent_skill_management_result");
+        jdbc.update("UPDATE agent_skill_installation SET schema_version=1");
+        return change;
+    }
+    @Test void exactHistoricalAdoptionSupportsDescriptorsAdmissionFrozenBindingAndDisableWithoutInventedApplied() throws Exception {
+        var adopted=adoptedFixture();String id=text(object(adopted.get("target")),"skillInstallationId");catalog(adopted);
+        assertEquals(0,count("agent_skill_change"));assertEquals(0,count("agent_skill_change_command"));assertEquals(0,count("agent_skill_management_result"));
+        assertEquals(1,service.descriptors(scope()).size());
+        var auth=db.findAuthorization("0",ACTOR.clientId(),id);
+        assertTrue(Boolean.TRUE.equals(tx.execute(s->service.qualifies(scope(),auth))));
+        assertEquals(id,service.admit(scope(),"pdf-export",id,()->service.taskBinding("0",ACTOR.clientId(),"exec-adopted","grant-adopted",1,AGENT,id)).get("skillInstallationId"));
+        var listed=service.skills(ACTOR,AGENT,false);
+        var matches=((List<?>)listed.get("items")).stream().map(SkillManagementCodec::object).filter(row->"pdf-export".equals(row.get("skillKey"))).toList();
+        assertEquals(1,matches.size());var item=matches.getFirst();assertNull(item.get("latestChange"));assertTrue(((List<?>)item.get("allowedActions")).contains("DISABLE"));
+        assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_skill_entitlement"));assertEquals(99_999_950L,wallet());
+        assertTrue(service.descriptors(new SkillCapabilityLookup.Scope("0",ACTOR.clientId(),"wrong-owner",AGENT)).isEmpty());
+        assertTrue(service.descriptors(new SkillCapabilityLookup.Scope("0","other-client",ACTOR.ownerJiacn(),AGENT)).isEmpty());
+    }
+    @Test void historicalAdoptionRejectsChangedReceiptDigestPackageOrLocalProofWithoutFinancialSideEffects() throws Exception {
+        var adopted=adoptedFixture();catalog(adopted);String id=text(object(adopted.get("target")),"skillInstallationId");
+        var original=jdbc.queryForObject("SELECT adoption_evidence_json FROM agent_skill_installation_authorization",String.class);
+        var beforeWallet=wallet();
+        jdbc.update("UPDATE agent_skill_result_receipt SET request_hash=?",new byte[32]);
+        assertTrue(service.descriptors(scope()).isEmpty());
+        assertFalse(Boolean.TRUE.equals(tx.execute(s->service.qualifies(scope(),db.findAuthorization("0",ACTOR.clientId(),id)))));
+        jdbc.update("UPDATE agent_skill_result_receipt SET request_hash=?",HexFormat.of().parseHex("d".repeat(64)));
+        assertEquals(1,service.descriptors(scope()).size());
+        for(String key:List.of("ownerJiacn","agentId","skillKey","receiptSha256","localEvidenceSha256","approvedPermissionsSha256")) {
+            var forged=read(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),null);forged.put(key,"f".repeat(64));
+            jdbc.update("UPDATE agent_skill_installation_authorization SET adoption_evidence_json=?",json(forged));
+            assertTrue(service.descriptors(scope()).isEmpty(),key);
+        }
+        jdbc.update("UPDATE agent_skill_installation_authorization SET adoption_evidence_json=?",original);
+        // Mutate the untrusted projection, not the original installation's FK-protected package.
+        var changedPackage=read(jdbc.queryForObject("SELECT package_json FROM agent_skill_installation_authorization",String.class).getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef");
+        changedPackage.put("packageSha256","0".repeat(64));
+        var changedProof=read(original.getBytes(java.nio.charset.StandardCharsets.UTF_8),null);changedProof.put("package",changedPackage);changedProof.remove("evidenceSha256");changedProof.put("evidenceSha256",hash("cyf.skill.adoption.v1",changedProof));
+        jdbc.update("UPDATE agent_skill_installation_authorization SET package_json=?,adoption_evidence_json=?",json(changedPackage),json(changedProof));assertTrue(service.descriptors(scope()).isEmpty());
+        assertEquals(beforeWallet,wallet());assertEquals(1,count("economy_skill_order"));assertEquals(0,count("agent_skill_change_command"));
+    }
+    @Test void historicalActiveWithoutExplicitAdoptionNeverQualifiesOrCreatesNewPurchase() throws Exception {
+        var adopted=adoptedFixture();catalog(adopted);String id=text(object(adopted.get("target")),"skillInstallationId");
+        jdbc.update("UPDATE agent_skill_installation_authorization SET adoption_evidence_json=NULL");
+        assertTrue(service.descriptors(scope()).isEmpty());
+        assertFalse(Boolean.TRUE.equals(tx.execute(s->service.qualifies(scope(),db.findAuthorization("0",ACTOR.clientId(),id)))));
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",id,()->"never"));
+        assertEquals(0,count("agent_skill_change_command"));assertEquals(1,count("economy_skill_order"));
+    }
+    private void rentalStatus(String status) {
+        when(rentalMapper.selectLatestLeaseForUpdate("0",ACTOR.clientId(),AGENT)).thenReturn(
+                new cn.jia.economy.entity.EconomyHostingLeaseEntity().setStatus(status).setPaidThrough(Long.MAX_VALUE));
+    }
+    @Test void rentalLockBlocksNewQuotesAndPreviouslyQuotedInstallWithoutPartialWrites() {
+        var input=quoteData();var quote=service.quote(ACTOR,"before-lock",input,false);
+        rentalStatus("LOCKED");
+        assertEquals(quote,service.quote(ACTOR,"before-lock",input,false));
+        assertThrows(HostingRentApplicationException.class,()->service.quote(ACTOR,"after-lock",input,false));
+        assertThrows(HostingRentApplicationException.class,()->service.create(ACTOR,AGENT,"after-lock","request",creation(quote,input),false));
+        assertEquals(100_000_000L,wallet());assertEquals(0,count("economy_skill_order"));
+        assertEquals(0,count("agent_skill_change"));assertEquals(0,count("agent_outbox_event"));
+    }
+    @Test void acceptedInstallCanReplayAndCompleteAfterRentalStartsFinishing() {
+        var input=quoteData();var quote=service.quote(ACTOR,"accepted-quote",input,false);var body=creation(quote,input);
+        var change=service.create(ACTOR,AGENT,"accepted-create","request",body,false);
+        rentalStatus("FINISHING");
+        assertEquals(change,service.create(ACTOR,AGENT,"accepted-create","request",body,false));
+        finishInstall(change);
+        assertEquals("SUCCEEDED",current(change).get("status"));assertEquals("CAPTURED",current(change).get("fundingStatus"));
+        assertEquals(99_999_950L,wallet());assertEquals(1,count("economy_skill_order"));
+    }
+    private void executorStopped() {
+        when(rentalMapper.selectLatestLeaseForUpdate("0",ACTOR.clientId(),AGENT)).thenReturn(
+                new EconomyHostingLeaseEntity().setStatus("FINISHING").setPaidThrough(Long.MAX_VALUE)
+                        .setHandoverId("handover").setExecutorStoppedAt(1L));
+    }
+    @Test void latePreparedAfterConfirmedStopRefundsWithoutCreatingActivationAndRetainsOriginalEvidence() {
+        var change=install();executorStopped();
+        var original=result(change,evidence(change,"PREPARED",null));
+        var receipt=service.result(proof(),original);
+        assertEquals(receipt,service.result(proof(),original));
+        var ended=current(change);
+        assertEquals("FAILED_FINAL",ended.get("status"));assertEquals("ENTITLEMENT_TERMINATED",ended.get("reasonCode"));
+        assertEquals("REFUNDED",ended.get("fundingStatus"));assertEquals(false,ended.get("retryAllowed"));
+        assertEquals(100_000_000L,wallet());assertEquals(1,count("agent_skill_change_command"));
+        assertEquals(1,count("agent_outbox_event"));assertEquals(1,count("agent_skill_management_result"));
+        var command=db.findCommand("0",ACTOR.clientId(),text(command(change),"commandId"));
+        assertEquals("RESULT",command.getState());
+        assertEquals("PREPARED",read(command.getEvidenceJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"InstallEvidence").get("outcome"));
+    }
+    @Test void confirmedStopDoesNotTurnUnknownActivationIntoRefundOrReexecution() {
+        var change=install();report(change,"PREPARED",null);var activation=current(change);executorStopped();
+        report(activation,"UNKNOWN","RECEIPT_UNKNOWN");
+        var ended=current(activation);assertEquals("RECOVERY_REQUIRED",ended.get("status"));
+        assertEquals(99_999_950L,wallet());assertEquals("INSTALLING",jdbc.queryForObject("SELECT status FROM economy_skill_order",String.class));
+        assertEquals(2,count("agent_skill_change_command"));
+    }
+    @Test void actualAppliedBeforeStopIsStillCapturedFromLateOriginalEvidence() {
+        var change=install();report(change,"PREPARED",null);var activation=current(change);executorStopped();
+        var applied=result(activation,evidence(activation,"APPLIED",null));
+        var receipt=service.result(proof(),applied);assertEquals(receipt,service.result(proof(),applied));
+        assertEquals("CAPTURED",current(activation).get("fundingStatus"));assertEquals(99_999_950L,wallet());
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM economy_skill_order",String.class));
+    }
+
+    @Test void committedStopFencesPendingMutationDispatchWithoutRefundingUnknownDelivery() {
+        var change=install();var cmd=command(change);
+        byte[] wire=jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class);
+        executorStopped();clearInvocations(sessions);
+        assertThrows(SkillMarketplaceException.class,()->service.dispatch("0",ACTOR.clientId(),ACTOR.ownerJiacn(),
+                text(change,"skillChangeId"),AGENT,text(cmd,"commandId"),wire));
+        verify(sessions,never()).dispatch(anyString(),anyString(),anyString(),any(),any());
+        assertEquals(99_999_950L,wallet());assertEquals("INSTALLING",jdbc.queryForObject("SELECT status FROM economy_skill_order",String.class));
+    }
+    @Test void stoppedDisableKeepsAdmissionClosedWithoutAnEndlessPendingRepairCommand() {
+        var change=install();finishInstall(change);var disable=policyChange("DISABLE",current(change));executorStopped();
+        var original=result(disable,evidence(disable,"NOT_STARTED","ENTITLEMENT_TERMINATED"));
+        var receipt=service.result(proof(),original);assertEquals(receipt,service.result(proof(),original));
+        var cmd=db.findCommand("0",ACTOR.clientId(),text(command(disable),"commandId"));
+        assertEquals("RESULT",cmd.getState());assertEquals("SUCCEEDED",current(disable).get("status"));
+        assertEquals(false,db.lockState("0",ACTOR.clientId(),AGENT,"repo-test").getAdmissionEnabled());
+        assertEquals(99_999_950L,wallet());
+    }
+
+    private ManagedHostingProvisioner.CurrentOperation stoppedHandover() {
+        when(rentalMapper.selectLatestLeaseForUpdate("0",ACTOR.clientId(),AGENT)).thenReturn(new EconomyHostingLeaseEntity()
+                .setStatus("FINISHING").setLeaseId("lease").setBindingId("7").setAgentId(AGENT).setHandoverId("lease").setExecutorStoppedAt(1L));
+        var p=new ManagedHostingProvisioner.Preparation("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT,"intent","lease","7",1);
+        return new ManagedHostingProvisioner.CurrentOperation(p,new ManagedHostingProvisioner.Candidate(runtime.getRuntimeInstallationId(),"manifest",null,0,1,"host-1"));
+    }
+    @Test void neverDispatchedPreparationRefundsOnceWithoutInventingRuntimeResult() {
+        var c=install();var handover=stoppedHandover();String id=text(c,"skillChangeId");
+        assertTrue(service.settleStoppedChangeForHandover(handover,id));
+        var once=businessSnapshot();assertTrue(service.settleStoppedChangeForHandover(handover,id));assertEquals(once,businessSnapshot());
+        assertEquals(100_000_000L,wallet());assertEquals("FAILED_FINAL",current(c).get("status"));
+        assertEquals("REFUNDED",current(c).get("fundingStatus"));assertEquals(0,count("agent_skill_management_result"));
+        var cmd=db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId"));
+        assertEquals("CANCELLED",cmd.getState());assertNull(cmd.getEvidenceJson());
+        assertEquals(1,count("agent_skill_change_command"));
+        assertThrows(SkillMarketplaceException.class,()->report(c,"PREPARED",null));
+        assertEquals(100_000_000L,wallet());assertEquals(0,count("agent_skill_management_result"));
+    }
+    @Test void preparedButNeverDispatchedActivationRefundsAndKeepsOriginalPrepareReceipt() {
+        var c=install();report(c,"PREPARED",null);var activation=current(c);var handover=stoppedHandover();
+        assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(100_000_000L,wallet());assertEquals(1,count("agent_skill_management_result"));
+        var cmd=db.findCommand("0",ACTOR.clientId(),text(command(activation),"commandId"));
+        assertEquals("CANCELLED",cmd.getState());assertNull(cmd.getEvidenceJson());
+        assertEquals(2,count("agent_skill_change_command"));assertEquals("REFUNDED",current(c).get("fundingStatus"));
+    }
+    @Test void claimedOriginalNeverRefundsMerelyBecauseCommandIsStillPending() {
+        var c=install();long now=System.currentTimeMillis();var hint=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        tx.executeWithoutResult(t->{
+            var d=recoveryDao.lockDelivery("0",ACTOR.clientId(),hint.getId());
+            var o=recoveryDao.lockActiveOutboxes("0",ACTOR.clientId(),d.getId(),d.getActiveMessageId()).getFirst();
+            assertEquals(1,recoveryMapper.claimDelivery(d,"old-sender",now+60000,now));
+            assertEquals(1,recoveryMapper.claimOutbox(o,"old-sender",now+60000,now));
+        });
+        var handover=stoppedHandover();assertFalse(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(99_999_950L,wallet());assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM agent_skill_change_command",String.class));
+        // Losing the lease or restoring PENDING does not erase the durable claim version/count.
+        jdbc.update("UPDATE agent_command_delivery SET status='PENDING',lease_owner=NULL,lease_until=NULL");
+        jdbc.update("UPDATE agent_outbox_event SET status='PENDING',lease_owner=NULL,lease_until=NULL");
+        assertFalse(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(99_999_950L,wallet());
+    }
+    @Test void staleRecoveryCandidateCannotDispatchAfterAtomicUndispatchedCancellation() {
+        var c=install();long now=System.currentTimeMillis();var stale=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        var handover=stoppedHandover();assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        clearInvocations(sessions);recovery.recover(stale,now);
+        verify(sessions,never()).dispatch(anyString(),anyString(),anyString(),any(),any());
+        assertTrue(recoveryMapper.pendingForAgent("0",null,AGENT,0).isEmpty());
+        assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));assertEquals(100_000_000L,wallet());
+    }
+    @Test void cancellationRollbackPreservesFundsAndOriginalUnsentCommand() {
+        var c=install();var handover=stoppedHandover();var before=businessSnapshot();
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(t->{
+            assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+            throw new IllegalStateException("later handover step failed");
+        }));
+        assertEquals(before,businessSnapshot());assertEquals(99_999_950L,wallet());
+        assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM agent_skill_change_command",String.class));
+    }
+    @Test void internalUndispatchedSettlementDoesNotRequireOriginalUserToRemainLoggedIn() {
+        var c=install();var handover=stoppedHandover();
+        doThrow(new HostingRentApplicationException(403,"HOSTING_RENT_OWNER_UNPROVEN")).when(ownerResolver).requireOwner(any());
+        assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));assertEquals(100_000_000L,wallet());
+        assertThrows(HostingRentApplicationException.class,()->service.quote(ACTOR,"new",quoteData(),false));
+    }
+    /** Actual native command/candidate/result SQL. Only position policy persistence and native identity are fixtures. */
+    private Map<String,Object> nativePositionInstall() {
+        var grant=new cn.jia.agent.position.PositionSkillState.Installation("grant-fixture",AGENT,runtime.getBindingId(),"repo-test",
+                true,true,1,cn.jia.agent.position.PositionSkillState.InstallState.INSTALL_PENDING,null,null,null,null,null,null);
+        var skill=new cn.jia.agent.position.PositionSkillState.Skill("repo-test",cn.jia.agent.position.PositionSkillState.SkillType.POSITION,"spv_repo_test_1_0_0");
+        var policy=new cn.jia.agent.position.PositionSkillPolicy(new cn.jia.agent.position.PositionSkillState(1,Map.of("repo-test",skill),
+                Map.of(),Map.of(),Map.of(grant.id(),grant)),()->UUID.randomUUID().toString());
+        when(positionService.currentState(any())).thenAnswer(i->policy.state());
+        when(positionService.runtimeState(any(),eq(AGENT),any())).thenAnswer(i->{
+            java.util.function.Function<cn.jia.agent.position.PositionSkillPolicy,Object> action=i.getArgument(2);
+            return tx.execute(t->action.apply(policy));
+        });
+        service.setPositionProvider(provider(positionService));
+        var version=market.selectApprovedProductVersion("0",ACTOR.clientId(),skill.productVersionId());
+        var description=packages.describe(version);
+        var input=new cn.jia.agent.position.PositionSkillRuntimeService.Prepared(grant,skill,description,packages.manifest(description));
+        var wire=tx.execute(t->service.reconcilePosition(proof(),input));
+        String changeId=text(object(wire.get("data")),"skillChangeId");
+        assertEquals(0,count("economy_skill_order"));assertEquals(0,count("agent_outbox_event"));
+        return read(db.findChange("0",ACTOR.clientId(),changeId).getDtoJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"SkillChange");
+    }
+    @Test void originalFailedPositionResultTerminatesWithoutOrderOrWalletMutation() {
+        var c=nativePositionInstall();report(c,"FAILED","DEPENDENCY_MISSING");var stopped=stoppedHandover();
+        var before=businessSnapshot();String receipt=db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId")).getEvidenceJson();
+        assertTrue(service.settleHandoverChanges(stopped));
+        assertEquals(100_000_000L,wallet());assertEquals(0,count("economy_skill_order"));
+        var after=businessSnapshot();
+        for(String table:List.of("economy_transaction","economy_entry","agent_skill_actor_root","agent_skill_installation","agent_skill_entitlement","agent_skill_management_result"))
+            assertEquals(before.get(table),after.get(table),table);
+        assertEquals(receipt,db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId")).getEvidenceJson());
+        assertEquals("FAILED_FINAL",current(c).get("status"));assertEquals("NONE",current(c).get("fundingStatus"));
+        assertTrue(service.settleHandoverChanges(stopped));assertEquals(after,businessSnapshot());
+    }
+    @Test void nativePositionPendingCannotBorrowMarketplaceNeverDispatchedProof() {
+        var c=nativePositionInstall();var stopped=stoppedHandover();var before=businessSnapshot();
+        assertFalse(service.settleHandoverChanges(stopped));assertEquals(before,businessSnapshot());
+        assertEquals("PENDING",db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId")).getState());
+    }
+    @Test void originalUnknownPositionResultRemainsUnresolvedAfterStop() {
+        var c=nativePositionInstall();report(c,"UNKNOWN","RECEIPT_UNKNOWN");var stopped=stoppedHandover();var before=businessSnapshot();
+        assertFalse(service.settleHandoverChanges(stopped));assertEquals(before,businessSnapshot());assertEquals(100_000_000L,wallet());
+    }
+    @Test void missingOriginalCommandCannotDisappearFromHeldFundingDiscovery() {
+        var c=install();var stopped=stoppedHandover();jdbc.update("DELETE FROM agent_skill_change_command");var before=businessSnapshot();
+        assertFalse(service.settleHandoverChanges(stopped));assertEquals(before,businessSnapshot());assertEquals(99_999_950L,wallet());
+    }
+    @Test void handoverDiscoveryPagesPastOneHundredAndFiltersOriginalRelationBeforeLimit() {
+        var c=install();var stopped=stoppedHandover();var p=stopped.preparation();var candidate=stopped.candidate();
+        var original=db.findChange(p.tenantId(),p.clientId(),text(c,"skillChangeId"));
+        // Discovery-only fixtures: identical timestamp forces use of the change_id tie breaker.
+        Set<String> expected=new HashSet<>();expected.add(original.getChangeId());
+        for(int i=0;i<102;i++) {
+            String id=String.format("page-%03d",i);boolean matching=i<100;
+            jdbc.update("INSERT INTO agent_skill_change (tenant_id,client_id,change_id,agent_id,skill_key,actor_id,owner_jiacn,version,dto_json,permissions_json,runtime_installation_id,runtime_host_id,entitlement_id,command_id,created_at,updated_at) SELECT tenant_id,client_id,?,agent_id,skill_key,actor_id,?,version,dto_json,permissions_json,runtime_installation_id,runtime_host_id,entitlement_id,command_id,created_at,updated_at FROM agent_skill_change WHERE change_id=?",
+                    id,matching?p.ownerJiacn():"other-owner",original.getChangeId());
+            if(matching)expected.add(id);
+        }
+        var first=db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),p.ownerJiacn(),candidate.installationId(),candidate.hostId(),0,"");
+        assertEquals(100,first.size());var last=first.getLast();
+        var second=db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),p.ownerJiacn(),candidate.installationId(),candidate.hostId(),last.getCreatedAt(),last.getChangeId());
+        assertEquals(1,second.size());Set<String> found=new HashSet<>();first.forEach(x->found.add(x.getChangeId()));second.forEach(x->found.add(x.getChangeId()));
+        assertEquals(expected,found);
+    }
+    @Test void handoverDiscoverySettlesOnlyOriginalPendingFeesAndStopsQueryingTerminalChanges() {
+        var c=install();report(c,"FAILED","DEPENDENCY_MISSING");var handover=stoppedHandover();
+        var p=handover.preparation();var candidate=handover.candidate();
+        assertEquals(1,db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),p.ownerJiacn(),candidate.installationId(),candidate.hostId(),0,"").size());
+        assertTrue(db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),"other-owner",candidate.installationId(),candidate.hostId(),0,"").isEmpty());
+        assertTrue(db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),p.ownerJiacn(),"other-installation",candidate.hostId(),0,"").isEmpty());
+        assertTrue(service.settleHandoverChanges(handover));assertEquals(100_000_000L,wallet());
+        assertTrue(db.handoverPendingPage(p.tenantId(),p.clientId(),p.agentId(),p.ownerJiacn(),candidate.installationId(),candidate.hostId(),0,"").isEmpty());
+        var before=businessSnapshot();assertTrue(service.settleHandoverChanges(handover));assertEquals(before,businessSnapshot());
+    }
+    @Test void handoverDiscoveryRetainsUnknownFeesAndDoesNotClaimFinancialReadiness() {
+        var c=install();report(c,"UNKNOWN","RECEIPT_UNKNOWN");var handover=stoppedHandover();var before=businessSnapshot();
+        assertFalse(service.settleHandoverChanges(handover));assertEquals(before,businessSnapshot());
+        assertThrows(IllegalStateException.class,()->tx.execute(t->service.settleHandoverChanges(handover)));
+    }
+    @Test void stoppedRetryablePreparationRefundsOnceWithoutRewritingFailedInstallationOrEvidence() {
+        var c=install();report(c,"FAILED","DEPENDENCY_MISSING");var handover=stoppedHandover();
+        String id=text(c,"skillChangeId");
+        var installation=businessSnapshot().get("agent_skill_installation");
+        var entitlement=businessSnapshot().get("agent_skill_entitlement");
+        String receipt=db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId")).getEvidenceJson();
+        assertTrue(service.settleStoppedChangeForHandover(handover,id));assertEquals(100_000_000L,wallet());
+        assertEquals(installation,businessSnapshot().get("agent_skill_installation"));
+        assertEquals(entitlement,businessSnapshot().get("agent_skill_entitlement"));
+        assertEquals(receipt,db.findCommand("0",ACTOR.clientId(),text(command(c),"commandId")).getEvidenceJson());
+        assertEquals("FAILED_FINAL",current(c).get("status"));assertEquals("REFUNDED",current(c).get("fundingStatus"));
+        var once=businessSnapshot();assertTrue(service.settleStoppedChangeForHandover(handover,id));assertEquals(once,businessSnapshot());
+    }
+    @Test void stoppedRetryableRefundRollsBackWithOriginalParentTransaction() {
+        var c=install();report(c,"FAILED","DEPENDENCY_MISSING");var handover=stoppedHandover();var before=businessSnapshot();
+        assertThrows(IllegalStateException.class,()->tx.execute(t->{
+            assertTrue(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+            throw new IllegalStateException("handover rollback");
+        }));
+        assertEquals(before,businessSnapshot());assertEquals(99_999_950L,wallet());
+        assertEquals("FAILED_RETRYABLE",current(c).get("status"));
+    }
+    @Test void stoppedUnknownPreparationCannotUseFailedChangeRefund() {
+        var c=install();report(c,"UNKNOWN","RECEIPT_UNKNOWN");var handover=stoppedHandover();var before=businessSnapshot();
+        assertFalse(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(before,businessSnapshot());assertEquals(99_999_950L,wallet());
+    }
+    @Test void stoppedAppliedInstallDoesNotRefundCapturedFee() {
+        var c=install();finishInstall(c);var handover=stoppedHandover();var before=businessSnapshot();
+        assertFalse(service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(before,businessSnapshot());assertEquals(99_999_950L,wallet());
+    }
+    @Test void finishingWithoutStopOrDifferentBindingCannotCancelOriginalSkillFees() {
+        var c=install();var handover=stoppedHandover();rentalStatus("FINISHING");
+        assertThrows(SkillMarketplaceException.class,()->service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        stoppedHandover();runtime.setBindingId(8L);
+        assertThrows(SkillMarketplaceException.class,()->service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(99_999_950L,wallet());assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM agent_skill_change_command",String.class));
+    }
+    @Test void neverDispatchedDisableTerminatesRepairWithoutRefundOrChangingPublicInstallation() {
+        var c=install();finishInstall(c);var disable=policyChange("DISABLE",current(c));var handover=stoppedHandover();
+        assertTrue(service.settleStoppedChangeForHandover(handover,text(disable,"skillChangeId")));
+        assertEquals("SUCCEEDED",current(disable).get("status"));assertEquals(99_999_950L,wallet());
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM economy_skill_order",String.class));
+        assertEquals("SUCCEEDED",jdbc.queryForObject("SELECT status FROM agent_skill_installation",String.class));
+        assertEquals(false,db.lockState("0",ACTOR.clientId(),AGENT,"repo-test").getAdmissionEnabled());
+        assertEquals("CANCELLED",db.findCommand("0",ACTOR.clientId(),text(command(disable),"commandId")).getState());
+    }
+    @Test void corruptPristineOutboxCannotBeUsedAsProofForARefund() {
+        var c=install();var handover=stoppedHandover();
+        jdbc.update("UPDATE agent_outbox_event SET wire_payload_hash=?",new byte[32]);
+        assertThrows(SkillMarketplaceException.class,()->service.settleStoppedChangeForHandover(handover,text(c,"skillChangeId")));
+        assertEquals(99_999_950L,wallet());assertEquals("PENDING",jdbc.queryForObject("SELECT state FROM agent_skill_change_command",String.class));
+        assertEquals(0,count("agent_skill_management_result"));
+    }
+
+    @Test void nativeMarketplaceWireCannotAcquireRabbitInboxAndBypassClaimProof() {
+        install();var properties=new cn.jia.agent.config.AgentRabbitSafetyProperties(
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.CommandOutbox(true),
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.RabbitTopology(true),
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.RabbitPublish(false),
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.RabbitConsume(true),
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.RabbitDispatch(false),
+                new cn.jia.agent.config.AgentRabbitSafetyProperties.RabbitBroker("isolated.invalid",35672,"fixture","fixture","/fixture"));
+        var inboxDao=mock(AgentCommandInboxDao.class);
+        var inbox=new cn.jia.agent.service.impl.AgentCommandInboxServiceImpl(inboxDao,
+                new cn.jia.agent.config.AgentRabbitSafetyGate(properties),manager,"0");
+        var row=jdbc.queryForMap("SELECT message_id,event_id,command_id,delivery_id,wire_payload FROM agent_outbox_event");
+        var message=new AgentInboxMessage(AgentInboxConsumers.AGENT_COMMAND_DISPATCH_V1,"0",ACTOR.clientId(),
+                (String)row.get("message_id"),(String)row.get("event_id"),(String)row.get("command_id"),
+                ((Number)row.get("delivery_id")).longValue(),(byte[])row.get("wire_payload"));
+        var conflict=assertThrows(AgentInboxIdentityConflictException.class,()->inbox.claim(message,"fixture",System.currentTimeMillis(),60000));
+        assertTrue(conflict.getMessage().contains("WIRE_CANONICAL_PROVENANCE_INVALID"));
+        verifyNoInteractions(inboxDao);assertEquals(0,jdbc.queryForObject("SELECT attempt_count FROM agent_outbox_event",Integer.class));
+    }
+
+    @Test void arrearsAndFinalFinishingBothBlockNewPolicyChanges() {
+        var first=install();finishInstall(first);var installed=current(first);
+        rentalStatus("FINISHING");long balance=wallet();int changes=count("agent_skill_change");
+        assertThrows(HostingRentApplicationException.class,()->policyChange("UNINSTALL",installed));
+        assertEquals(changes,count("agent_skill_change"));assertEquals(balance,wallet());
+        rentalStatus("LOCKED");
+        for (String action : List.of("ENABLE", "DISABLE", "UNINSTALL"))
+            assertThrows(HostingRentApplicationException.class,()->policyChange(action,installed));
+        assertEquals(changes,count("agent_skill_change"));assertEquals(balance,wallet());
+    }
+    @Test void installQuoteChargesFiftyWenIndependentOfPublishedProductPriceAndDoesNotReserve() {
+        var input=quoteData(); long before=wallet();
+        var quote=service.quote(ACTOR,"fixed-install-fee",input,false);
+        assertEquals("50",object(quote.get("price")).get("amountMinor"));
+        assertEquals("WEN",object(quote.get("price")).get("currency"));
+        assertEquals("PURCHASE",quote.get("coverage"));assertNull(quote.get("entitlementId"));
+        assertEquals(quote,service.quote(ACTOR,"fixed-install-fee",input,false));
+        assertEquals(before,wallet());assertEquals(0,count("economy_skill_order"));
+        var created=service.create(ACTOR,AGENT,"fixed-create","request",creation(quote,input),false);
+        assertEquals(before-50,wallet());assertEquals("HELD",created.get("fundingStatus"));
+        assertEquals(created,service.create(ACTOR,AGENT,"fixed-create","request",creation(quote,input),false));
+        assertEquals(before-50,wallet());assertEquals(1,count("economy_skill_order"));
+    }
+    @Test void installWithFortyNineWenCannotAcceptOrLeavePartialFinancialOrExecutionFacts() {
+        jdbc.update("UPDATE economy_account SET balance_wen=49 WHERE account_id='wallet'");
+        assertThrows(cn.jia.economy.exception.EconomyPostingException.class,this::install);
+        assertEquals(49,wallet());
+        for(String table:List.of("economy_skill_order","agent_skill_change","agent_skill_installation","agent_outbox_event"))
+            assertEquals(0,count(table),table);
+    }
+    @Test void installRejectsClientFreePriceWithoutReservingOrAccepting() {
+        var input=quoteData();var quote=service.quote(ACTOR,"fee-quote",input,false);
+        var create=creation(quote,input);create.put("expectedPrice",map("amountMinor","0","currency","WEN"));
+        var error=assertThrows(SkillMarketplaceException.class,()->service.create(ACTOR,AGENT,"wrong-fee","request",create,false));
+        assertEquals("SKILL_QUOTE_MISMATCH",error.code());assertEquals(100_000_000L,wallet());
+        assertEquals(0,count("economy_skill_order"));assertEquals(0,count("agent_skill_change"));
+    }
+    @Test void explicitPaidUpgradeReservesAndCapturesTwentyWenOnlyOnce() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        publishExecutable("2.0.0",2);
+        jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","PAID");
+        var upgrade=packageChange("UPGRADE",text(object(first.get("target")),"skillInstallationId"),text(first,"skillRevision"),"spv_pdf_2");
+        assertNotNull(upgrade.get("orderId"));assertNotEquals(first.get("orderId"),upgrade.get("orderId"));
+        assertEquals("20",object(upgrade.get("price")).get("amountMinor"));assertEquals("HELD",upgrade.get("fundingStatus"));
+        assertEquals(99_999_930L,wallet());report(upgrade,"PREPARED",null);upgrade=current(upgrade);
+        var applied=result(upgrade,evidence(upgrade,"APPLIED",null));service.result(proof(),applied);service.result(proof(),applied);
+        catalog(current(upgrade));assertEquals("SUCCEEDED",current(upgrade).get("status"));assertEquals("CAPTURED",current(upgrade).get("fundingStatus"));
+        assertEquals(2,count("economy_skill_order"));assertEquals(99_999_930L,wallet());
+    }
+    @Test void notAllowedUpgradeCannotCreateQuoteOrderOrInstallation() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        publishExecutable("2.0.0",2);jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","NOT_ALLOWED");
+        String source=text(object(first.get("target")),"skillInstallationId"),revision=text(first,"skillRevision");
+        assertEquals("SKILL_UPGRADE_NOT_ALLOWED",assertThrows(SkillMarketplaceException.class,()->packageChange("UPGRADE",source,revision,"spv_pdf_2")).code());
+        assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_skill_installation"));assertEquals(1,count("agent_skill_management_quote"));
+        assertEquals(99_999_950L,wallet());assertEquals("still-active",service.admit(scope(),"pdf-export",source,()->"still-active"));
+    }
+    @Test void authorizedLateOldAttemptIsAuditedWithoutChangingNewAttemptOrRefunding() {
+        var first=install();var oldResult=result(first,evidence(first,"FAILED","DEPENDENCY_MISSING"));
+        service.result(proof(),oldResult);var failed=current(first);
+        var retry=service.retry(ACTOR,AGENT,text(failed,"skillChangeId"),"retry-late","retry",map("expectedChangeRevision",failed.get("changeRevision")));
+        var late=new LinkedHashMap<>(oldResult);late.put("messageId","late-old-attempt");
+        var receipt=service.result(proof(),late);assertEquals("IGNORED_STALE",object(receipt.get("data")).get("receiptStatus"));
+        assertEquals(retry,current(retry));assertEquals(99_999_950L,wallet());assertEquals(1,count("economy_skill_order"));
+        assertEquals(2,count("agent_skill_installation"));
+    }
+    @Test void disableClosesApiAdmissionImmediatelyAndEnableRetryRetainsOriginalInstallation() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String installation=text(object(first.get("target")),"skillInstallationId");
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(false);
+        var disable=policyChange("DISABLE",first);assertEquals("SUCCEEDED",disable.get("status"));assertEquals(false,disable.get("runtimeSynced"));
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",installation,()->"never"));
+        var offline=disable;assertEquals("SKILL_AGENT_OFFLINE",assertThrows(SkillMarketplaceException.class,()->policyChange("ENABLE",offline)).code());
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(true);
+        var enable=policyChange("ENABLE",disable);report(enable,"FAILED","DEPENDENCY_MISSING");enable=current(enable);
+        var retry=service.retry(ACTOR,AGENT,text(enable,"skillChangeId"),"enable-retry","retry",map("expectedChangeRevision",enable.get("changeRevision")));
+        assertEquals(installation,object(retry.get("target")).get("skillInstallationId"));assertEquals(1,count("agent_skill_installation"));assertEquals("POLICY",command(retry).get("phase"));
+        report(retry,"APPLIED",null);catalog(current(retry));assertEquals("yes",service.admit(scope(),"pdf-export",installation,()->"yes"));
+    }
+
+    @Test void disabledPolicySynchronizesDespiteMissingRunnerDependenciesWithoutRevokingOldTaskBinding() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String installation=text(object(first.get("target")),"skillInstallationId");
+        var frozen=service.admit(scope(),"pdf-export",installation,()->service.taskBinding("0",ACTOR.clientId(),"old-execution","old-grant",1,AGENT,installation));
+        var disable=policyChange("DISABLE",first);report(disable,"APPLIED",null);
+        catalog(current(disable),SkillCapabilityLookup.Readiness.DEPENDENCY_MISSING);disable=current(disable);
+        assertEquals("SUCCEEDED",disable.get("status"));assertEquals(true,disable.get("runtimeSynced"));assertEquals(false,disable.get("desiredEnabled"));
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",installation,()->"never"));
+        assertEquals(installation,frozen.get("skillInstallationId"));assertEquals(1,service.descriptors(scope()).size());
+    }
+
+    @Test void exactTaskAttachmentCommitsAndRollsBackWithTheRealAdmissionTransaction() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String installation=text(object(first.get("target")),"skillInstallationId");var target=object(first.get("target"));
+        var snapshot=map("skill",map("installationId",installation,"packageSha256",target.get("packageSha256")),"taskGrant",map("id","grant","version",1));
+        String frozen=json(snapshot),digest=HexFormat.of().formatHex(SkillPackageStore.sha256(frozen.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        var insert=(java.util.function.Consumer<String>)(execution->{
+            var binding=service.taskBinding("0",ACTOR.clientId(),execution,"grant",1,AGENT,installation);
+            taskAttachments.insertReady(new SkillExecutionEntity().setTenantId("0").setClientId(ACTOR.clientId()).setOwnerJiacn(ACTOR.ownerJiacn())
+                .setExecutionId(execution).setSkillKey("pdf-export").setSkillVersion("1.0.0").setPackageSha256(text(target,"packageSha256"))
+                .setManifestSha256(text(target,"manifestSha256")).setSnapshotJson(frozen).setSnapshotSha256(digest).setTaskSkillBindingJson(json(binding)).setCreatedAt(1L));
+        });
+        assertThrows(IllegalStateException.class,()->service.admit(scope(),"pdf-export",installation,()->{insert.accept("exec-rolled-back");throw new IllegalStateException("synthetic task authorization failure");}));
+        assertNull(taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"exec-rolled-back"));
+        service.admit(scope(),"pdf-export",installation,()->{insert.accept("exec-pinned");return null;});
+        var row=taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"exec-pinned");assertNotNull(row);
+        assertEquals(digest,row.getSnapshotSha256());assertEquals(installation,read(row.getTaskSkillBindingJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"TaskSkillBinding").get("skillInstallationId"));
+        policyChange("DISABLE",first);assertEquals(row.getTaskSkillBindingJson(),taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"exec-pinned").getTaskSkillBindingJson());
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",installation,()->{insert.accept("exec-denied");return null;}));
+        assertNull(taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"exec-denied"));
+        // This exercises actual admission + attachment SQL; full task-grant ACL is a separate PWE consumer test.
+    }
+    @Test void taskBindingIncrementalMigrationPreservesHistoricalSnapshotAndOnlyAttachesOnce() {
+        jdbc.execute("ALTER TABLE agent_skill_execution DROP COLUMN task_skill_binding_json");
+        jdbc.update("INSERT INTO agent_skill_execution(tenant_id,client_id,owner_jiacn,execution_id,skill_key,skill_version,package_sha256,manifest_sha256,snapshot_json,snapshot_sha256,phase,effects_json,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,'READY','{}',0,1,1)",
+            "0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical","pdf-export","1.0.0","a".repeat(64),"b".repeat(64),"{\"frozen\":true}","c".repeat(64));
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-skill-management-sm-c1.sql")).execute(source(database));
+        var before=taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical");assertNull(before.getTaskSkillBindingJson());
+        assertEquals(0,taskAttachments.bindTaskSkill("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical","d".repeat(64),0,"{}",2));
+        assertEquals(1,taskAttachments.bindTaskSkill("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical","c".repeat(64),0,"{}",2));
+        assertEquals(0,taskAttachments.bindTaskSkill("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical","c".repeat(64),1,"{\"different\":true}",3));
+        var after=taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical");assertEquals(before.getSnapshotJson(),after.getSnapshotJson());assertEquals(before.getSnapshotSha256(),after.getSnapshotSha256());
+    }
+
+    @Test void offlineFirstInstallFlowsThroughRealOutboxPrepareActivateAppliedAndCurrentCatalog() {
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(false);
+        var c=install();assertEquals("WAITING_AGENT",c.get("status"));assertEquals(99_999_950L,wallet());
+        assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_outbox_event"));
+        var pkg=service.packageBytes(proof(),text(object(c.get("target")),"skillInstallationId"));assertTrue(pkg.length>0);
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(true);runSkillSchedules();
+        verify(sessions).dispatch(eq("0"),eq(ACTOR.clientId()),eq(AGENT),any(),any());
+        report(c,"PREPARED",null);c=current(c);assertEquals("ACTIVATING",c.get("status"));assertEquals("ACTIVATE",command(c).get("phase"));
+        assertEquals(2,count("agent_outbox_event"));
+        var applied=result(c,evidence(c,"APPLIED",null));var receipt=service.result(proof(),applied);assertEquals(receipt,service.result(proof(),applied));
+        c=current(c);assertEquals("VERIFYING",c.get("status"));assertEquals("CAPTURED",c.get("fundingStatus"));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM economy_skill_order",String.class));
+        assertEquals("SUCCEEDED",jdbc.queryForObject("SELECT status FROM agent_skill_installation",String.class));
+        catalog(c);c=current(c);assertEquals("SUCCEEDED",c.get("status"));assertEquals(true,c.get("runtimeSynced"));
+        var list=service.skills(ACTOR,AGENT,false);validate("SkillList",list);
+        String installationId=text(object(c.get("target")),"skillInstallationId");
+        // Instruction packages are discoverable but never executable task admission.
+        assertThrows(SkillMarketplaceException.class,()->service.admit(new SkillCapabilityLookup.Scope("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT),"repo-test",installationId,()->"not-called"));
+    }
+    @Test void determinatePrepareFailureRetainsOriginalMoneyAndRetryGetsNewCandidateAndFence() {
+        var c=install();var first=c;report(c,"FAILED","DEPENDENCY_MISSING");c=current(c);assertEquals("FAILED_RETRYABLE",c.get("status"));assertEquals(99_999_950L,wallet());
+        var action=map("expectedChangeRevision",c.get("changeRevision"));var retried=service.retry(ACTOR,AGENT,text(c,"skillChangeId"),"retry-key","retry-request",action);
+        assertEquals(retried,service.retry(ACTOR,AGENT,text(c,"skillChangeId"),"retry-key","retry-request",action));
+        String changeId=text(c,"skillChangeId");var changedAction=map("expectedChangeRevision",retried.get("changeRevision"));
+        assertEquals("IDEMPOTENCY_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.retry(ACTOR,AGENT,changeId,"retry-key","request",changedAction)).code());
+        assertEquals("SKILL_STATE_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.retry(ACTOR,AGENT,changeId,"new-retry-key","request",action)).code());
+        assertEquals(first.get("orderId"),retried.get("orderId"));assertEquals(2,retried.get("attempt"));assertNotEquals(object(first.get("target")).get("skillInstallationId"),object(retried.get("target")).get("skillInstallationId"));
+        assertEquals(1,count("economy_skill_order"));assertEquals(2,count("agent_skill_installation"));assertEquals(99_999_950L,wallet());
+    }
+    @Test void unknownNeverRefundsOrRetriesAndReadReconcileDoesNotInstall() {
+        var c=install();report(c,"UNKNOWN","RECEIPT_UNKNOWN");c=current(c);assertEquals("RECOVERY_REQUIRED",c.get("status"));assertEquals("HELD",c.get("fundingStatus"));
+        var action=map("expectedChangeRevision",c.get("changeRevision"));String id=text(c,"skillChangeId");
+        assertThrows(SkillMarketplaceException.class,()->service.retry(ACTOR,AGENT,id,"retry-key","request",action));
+        var reconciled=service.reconcile(ACTOR,AGENT,id,"read-1","request",action);
+        assertEquals(reconciled,service.reconcile(ACTOR,AGENT,id,"read-1","replay-request",action));
+        var changedAction=map("expectedChangeRevision",Long.toString(Long.parseLong(text(c,"changeRevision"))+1));
+        assertEquals("IDEMPOTENCY_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.reconcile(ACTOR,AGENT,id,"read-1","request",changedAction)).code());
+        assertEquals("SKILL_STATE_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.reconcile(ACTOR,AGENT,id,"new-read-key","request",changedAction)).code());
+        service.reconcile(ACTOR,AGENT,id,"read-2","request",action);
+        assertEquals(1,count("agent_skill_installation"));assertEquals(2,count("agent_outbox_event"));assertEquals(99_999_950L,wallet());
+    }
+    @Test void rejectedAuthorizationRefundsOnceAndRefundedOrderNeverRevives() {
+        var c=install();var message=result(c,evidence(c,"FAILED","ENTITLEMENT_TERMINATED"));validate("Result",message);
+        service.result(proof(),message);service.result(proof(),message);
+        c=current(c);assertEquals("FAILED_FINAL",c.get("status"));assertEquals("REFUNDED",c.get("fundingStatus"));assertEquals(100_000_000L,wallet());
+        var action=map("expectedChangeRevision",c.get("changeRevision"));String id=text(c,"skillChangeId");
+        assertThrows(SkillMarketplaceException.class,()->service.retry(ACTOR,AGENT,id,"retry","request",action));
+        var list=service.skills(ACTOR,AGENT,false);
+        var row=((List<?>)list.get("items")).stream().map(SkillManagementCodec::object).filter(v->"repo-test".equals(v.get("skillKey"))).findFirst().orElseThrow();
+        assertTrue(((List<?>)row.get("allowedActions")).contains("INSTALL")); // confirmed failed managed facts are not unknown legacy evidence
+    }
+    @Test void outboxFailureRollsBackMoneyOrderInstallationAndIdempotencyAsOneTransaction() {
+        var data=quoteData();var quote=service.quote(ACTOR,"quote",data,false);
+        doThrow(new IllegalStateException("synthetic outbox failure")).when(writer).writeManagement(any(),any(),any(),any());
+        assertThrows(IllegalStateException.class,()->service.create(ACTOR,AGENT,"create","request",creation(quote,data),false));
+        assertEquals(100_000_000L,wallet());for(String table:List.of("economy_skill_order","agent_skill_change","agent_skill_installation","agent_outbox_event"))assertEquals(0,count(table),table);
+        assertEquals(1,count("agent_skill_management_request")); // only quote accepted
+    }
+    @Test void simultaneousDuplicateCreateHasOneFinancialAndOutboxEffect() throws Exception {
+        var data=quoteData();var quote=service.quote(ACTOR,"quote",data,false);var body=creation(quote,data);
+        var pool=Executors.newFixedThreadPool(2);var start=new CountDownLatch(1);
+        try {
+            Callable<Map<String,Object>> call=()->{start.await();return service.create(ACTOR,AGENT,"same-key","same-request",body,false);};
+            var a=pool.submit(call);var b=pool.submit(call);start.countDown();assertEquals(a.get().get("skillChangeId"),b.get().get("skillChangeId"));
+        }finally {pool.shutdownNow();}
+        assertEquals(99_999_950L,wallet());assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_outbox_event"));
+    }
+    @Test void acceptedQuoteAndCreateReplayPreserveCasAndIdempotencyAndOwnerBoundaries() {
+        var data=quoteData();var quote=service.quote(ACTOR,"quote",data,false);var body=creation(quote,data);
+        var accepted=service.create(ACTOR,AGENT,"accepted","first-request",body,false);
+        assertEquals(accepted,service.create(ACTOR,AGENT,"accepted","replay-request",body,false));
+        assertEquals(quote,service.quote(ACTOR,"quote",data,false)); // Original expectedAgentVersion is now stale.
+        var alteredQuote=new LinkedHashMap<>(data);alteredQuote.put("expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)));
+        assertEquals("IDEMPOTENCY_CONFLICT",assertThrows(SkillMarketplaceException.class,()->service.quote(ACTOR,"quote",alteredQuote,false)).code());
+        assertEquals("SKILL_STATE_CONFLICT",assertThrows(SkillMarketplaceException.class,()->service.quote(ACTOR,"new-quote-key",data,false)).code());
+        assertEquals("SKILL_STATE_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.create(ACTOR,AGENT,"new-key","request",body,false)).code());
+        var altered=new LinkedHashMap<>(body);altered.put("expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)));
+        assertEquals("IDEMPOTENCY_CONFLICT",assertThrows(SkillMarketplaceException.class,
+            ()->service.create(ACTOR,AGENT,"accepted","request",altered,false)).code());
+        assertThrows(RuntimeException.class,()->service.create(new HostingRentHttp.Actor(ACTOR.actorId(),"0",ACTOR.clientId(),"foreign-owner"),
+            AGENT,"accepted","request",body,false));
+        assertEquals(99_999_950L,wallet());assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_outbox_event"));
+    }
+    @Test void stoppedReceivedPreparationRefundsOriginalHoldExactlyOnce() {
+        var c=install();
+        var stopped=result(c,evidence(c,"NOT_STARTED","ENTITLEMENT_TERMINATED"));
+        var receipt=service.result(proof(),stopped);assertEquals(receipt,service.result(proof(),stopped));
+        var ended=current(c);assertEquals("FAILED_FINAL",ended.get("status"));assertEquals("REFUNDED",ended.get("fundingStatus"));
+        assertEquals(false,ended.get("retryAllowed"));assertEquals(100_000_000L,wallet());
+        assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_skill_management_result"));
+    }
+    @Test void stoppedReceivedActivationRefundsWithoutClaimingAnAppliedInstallation() {
+        var c=install();report(c,"PREPARED",null);var activation=current(c);
+        var stopped=result(activation,evidence(activation,"NOT_STARTED","ENTITLEMENT_TERMINATED"));
+        var receipt=service.result(proof(),stopped);assertEquals(receipt,service.result(proof(),stopped));
+        var ended=current(c);assertEquals("FAILED_FINAL",ended.get("status"));assertEquals("REFUNDED",ended.get("fundingStatus"));
+        assertEquals(false,ended.get("retryAllowed"));assertEquals(100_000_000L,wallet());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_skill_installation WHERE status='SUCCEEDED'",Integer.class));
+        assertEquals(1,count("economy_skill_order"));
+    }
+    @Test void terminalReasonCannotRefundUnknownPreparation() {
+        var c=install();var unknown=result(c,evidence(c,"UNKNOWN","ENTITLEMENT_TERMINATED"));validate("Result",unknown);
+        service.result(proof(),unknown);c=current(c);assertEquals("RECOVERY_REQUIRED",c.get("status"));
+        assertEquals("HELD",c.get("fundingStatus"));assertEquals(false,c.get("retryAllowed"));assertEquals(99_999_950L,wallet());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_skill_order WHERE status='REFUNDED'",Integer.class));
+    }
+    @Test void terminalReasonCannotRefundUnprovenActivation() {
+        var c=install();report(c,"PREPARED",null);c=current(c);assertEquals("ACTIVATING",c.get("status"));
+        var failed=result(c,evidence(c,"FAILED","ENTITLEMENT_TERMINATED"));validate("Result",failed);
+        service.result(proof(),failed);c=current(c);assertEquals("RECOVERY_REQUIRED",c.get("status"));
+        assertEquals("HELD",c.get("fundingStatus"));assertEquals(false,c.get("retryAllowed"));assertEquals(99_999_950L,wallet());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_skill_order WHERE status='REFUNDED'",Integer.class));
+    }
+    @Test void getQueriesDoNotCreateVersionStateOrCommandsAndCrossOwnerCannotRead() {
+        var list=service.skills(ACTOR,AGENT,false);assertFalse(((List<?>)list.get("items")).isEmpty());
+        for(String table:List.of("agent_skill_agent_version","agent_skill_managed_state","agent_outbox_event"))assertEquals(0,count(table));
+        assertThrows(RuntimeException.class,()->service.skills(new HostingRentHttp.Actor("other","0",ACTOR.clientId(),"other-owner"),AGENT,false));
+    }
+    private void runSkillSchedules() {
+        for(var work:schedules.claimDue("node-1",100,60000)) {
+            recovery.executeScheduled(new ScheduledInvocation("0",work.key(),work.claim().revision()));
+            assertTrue(schedules.succeed(work));
+        }
+    }
+    @Test void nativeScheduleAndFundsCommitTogetherAndCallbackKeepsOriginalWire() {
+        var c=install();
+        assertEquals(1,count("task_scheduled_work"));
+        assertEquals(99_999_950L,wallet());
+        byte[] original=jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class);
+        runSkillSchedules();
+        assertArrayEquals(original,jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class));
+        assertEquals("SENT",jdbc.queryForObject("SELECT status FROM agent_command_delivery",String.class));
+        assertNotNull(schedules.nextWake("node-1"));
+        assertTrue(schedules.claimDue("node-1",100,60000).isEmpty());
+        assertEquals(99_999_950L,wallet());assertEquals(1,count("agent_command_delivery"));
+    }
+    @Test void nativeScheduleRollsBackWithFailedSkillOrder() {
+        doAnswer(call->{
+            call.callRealMethod();assertEquals(1,count("task_scheduled_work"));
+            throw new IllegalStateException("abort order after durable schedule");
+        }).when(writer).writeManagement(any(),any(),any(),any());
+        var failure=assertThrows(IllegalStateException.class,()->install());
+        assertEquals("abort order after durable schedule",failure.getMessage());
+        assertEquals(100_000_000L,wallet());assertEquals(0,count("task_scheduled_work"));
+        assertEquals(0,count("agent_command_delivery"));assertEquals(0,count("agent_outbox_event"));
+    }
+    @Test void nativeReconnectMovesRecoveryToSocketNodeWithoutPollingOldNode() {
+        install();byte[] original=jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class);
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(false);
+        runSkillSchedules();
+        assertNull(schedules.nextWake("node-1"));
+        assertEquals("PENDING",jdbc.queryForObject("SELECT status FROM agent_command_delivery",String.class));
+        var next=new SkillInstallRecoveryService(recoveryMapper,recoveryDao,dispatch,manager,
+                new FixedTenantAdmissionPolicy("0",null),provider(schedules),"node-2");
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(true);
+        next.sessionReady("0",ACTOR.clientId(),AGENT);
+        assertTrue(schedules.claimDue("node-1",100,60000).isEmpty());
+        var work=schedules.claimDue("node-2",100,60000);assertEquals(1,work.size());
+        next.executeScheduled(new ScheduledInvocation("0",work.getFirst().key(),work.getFirst().claim().revision()));
+        assertTrue(schedules.succeed(work.getFirst()));
+        assertEquals("SENT",jdbc.queryForObject("SELECT status FROM agent_command_delivery",String.class));
+        assertArrayEquals(original,jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class));
+        assertEquals(1,count("agent_command_delivery"));assertEquals(99_999_950L,wallet());
+        verify(sessions,times(1)).dispatch(anyString(),anyString(),anyString(),any(),any());
+    }
+    @Test void nativeScheduleSqlFailureCannotLeavePaidOrderOrWire() {
+        jdbc.execute("DROP TABLE task_scheduled_work");
+        assertThrows(org.springframework.dao.DataAccessException.class,()->install());
+        assertEquals(100_000_000L,wallet());assertEquals(0,count("agent_command_delivery"));
+        assertEquals(0,count("agent_outbox_event"));assertEquals(0,count("agent_skill_change"));
+    }
+    @Test void nativeRecoveryDiscoveryFiltersProcessScopeInSql() {
+        install();long now=System.currentTimeMillis();
+        assertFalse(recoveryMapper.pendingForAgent(ACTOR.tenantId(),ACTOR.clientId(),AGENT,0).isEmpty());
+        assertTrue(recoveryMapper.pendingForAgent("tenant-blue",ACTOR.clientId(),AGENT,0).isEmpty());
+        assertTrue(recoveryMapper.pendingForAgent(ACTOR.tenantId(),"foreign-client",AGENT,0).isEmpty());
+        assertTrue(recoveryMapper.pendingForAgent(ACTOR.tenantId(),ACTOR.clientId().toUpperCase(Locale.ROOT),AGENT,0).isEmpty());
+        assertEquals(1,count("agent_skill_agent_version"));
+        assertEquals(ACTOR.tenantId(),jdbc.queryForObject("SELECT tenant_id FROM agent_skill_agent_version",String.class));
+    }
+    @Test void nativeRecoveryClaimAndFinishCasRejectWrongLeaseAndCaseChangedScope() {
+        install();long now=System.currentTimeMillis();var d=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        tx.executeWithoutResult(status->{
+            assertEquals(1,recoveryMapper.claimDelivery(d,"lease-A",now+60000,now));
+            assertEquals(0,recoveryMapper.claimDelivery(d,"lease-B",now+60000,now));
+            var current=recoveryDao.lockDelivery("0",ACTOR.clientId(),d.getId());
+            assertEquals(0,recoveryMapper.finishDelivery(current,"lease-a","SENT",null,"wrong lease",now));
+            current.setClientId(ACTOR.clientId().toUpperCase(Locale.ROOT));
+            assertEquals(0,recoveryMapper.finishDelivery(current,"lease-A","SENT",null,"wrong client",now));
+            current.setClientId(ACTOR.clientId());current.setOwnerJiacn(ACTOR.ownerJiacn().toUpperCase(Locale.ROOT));
+            assertEquals(0,recoveryMapper.finishDelivery(current,"lease-A","SENT",null,"wrong owner",now));
+            current.setOwnerJiacn(ACTOR.ownerJiacn());current.setCommandId(current.getCommandId().toUpperCase(Locale.ROOT));
+            assertEquals(0,recoveryMapper.finishDelivery(current,"lease-A","SENT",null,"wrong command",now));
+            var o=recoveryDao.lockActiveOutboxes("0",ACTOR.clientId(),d.getId(),d.getActiveMessageId()).getFirst();
+            assertEquals(1,recoveryMapper.claimOutbox(o,"lease-A",now+60000,now));
+            assertEquals(0,recoveryMapper.claimOutbox(o,"lease-B",now+60000,now));
+            o=recoveryDao.lockActiveOutboxes("0",ACTOR.clientId(),d.getId(),d.getActiveMessageId()).getFirst();
+            assertEquals(0,recoveryMapper.finishOutbox(o,"lease-a","SENT",null,"wrong lease",now));
+            o.setClientId(ACTOR.clientId().toUpperCase(Locale.ROOT));
+            assertEquals(0,recoveryMapper.finishOutbox(o,"lease-A","SENT",null,"wrong scope",now));
+        });
+        assertEquals("lease-A",jdbc.queryForObject("SELECT lease_owner FROM agent_command_delivery",String.class));
+        assertEquals("lease-A",jdbc.queryForObject("SELECT lease_owner FROM agent_outbox_event",String.class));
+        assertEquals(now+60000,SkillInstallRecoveryService.nextAttempt(recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst()));
+    }
+    @Test void nativeRecoveryRespectsLiveLeaseThenReclaimsExpiredLeaseWithoutMintingWireOrRabbitWork() {
+        var c=install();byte[] wire=jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class);
+        long now=System.currentTimeMillis();var d=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        jdbc.update("UPDATE agent_command_delivery SET status='CONSUMED',lease_owner='prior',lease_until=?,update_time=?",now+60000,now-70000);
+        jdbc.update("UPDATE agent_outbox_event SET status='CLAIMED',lease_owner='prior',lease_until=?,update_time=?",now+60000,now-70000);
+        var before=businessSnapshot();recovery.recover(d,now);assertEquals(before,businessSnapshot());
+        verify(sessions,never()).dispatch(anyString(),anyString(),anyString(),any(),any());
+        var relay=sql.getMapper(AgentOutboxRelayMapper.class);
+        assertTrue(relay.selectDueCandidates("0", ACTOR.clientId(), now+120000,25).isEmpty());assertTrue(relay.selectCorruptCandidates("0", ACTOR.clientId(), now+120000,25).isEmpty());assertTrue(relay.selectStaleCandidates("0", ACTOR.clientId(), now+120000,25).isEmpty());
+        jdbc.update("UPDATE agent_command_delivery SET lease_until=?",now-1);jdbc.update("UPDATE agent_outbox_event SET lease_until=?",now-1);
+        when(sessions.dispatch(anyString(),anyString(),anyString(),any(),any())).thenAnswer(call->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            assertArrayEquals(wire,call.getArgument(4));return AgentRawCommandDispatchResult.sent(1,1);
+        });
+        recovery.recover(d,now);
+        assertEquals("SENT",jdbc.queryForObject("SELECT status FROM agent_command_delivery",String.class));
+        assertEquals("SENT",jdbc.queryForObject("SELECT status FROM agent_outbox_event",String.class));
+        assertEquals("NONE",jdbc.queryForObject("SELECT publisher_confirm_status FROM agent_outbox_event",String.class));
+        assertNull(jdbc.queryForObject("SELECT confirmed_at FROM agent_outbox_event",Long.class));
+        assertArrayEquals(wire,jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class));
+        assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_skill_change_command"));assertEquals(99_999_950L,wallet());
+        assertEquals(c.get("attempt"),current(c).get("attempt"));
+    }
+    @Test void nativeRecoveryOutboxClaimCasLossRollsBackDeliveryLease() {
+        install();long now=System.currentTimeMillis();var hint=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        var before=businessSnapshot();var failing=spy(recoveryMapper);
+        doReturn(0).when(failing).claimOutbox(any(),anyString(),anyLong(),anyLong());
+        var gate=new EconomyPreviewGate(new EconomyPreviewProperties(true,List.of(new EconomyPreviewProperties.AllowedScope("0",ACTOR.clientId()))));
+        var fixture=new SkillInstallRecoveryService(failing,recoveryDao,dispatch,manager,new FixedTenantAdmissionPolicy("0", null),provider(schedules),"node-1");
+        assertThrows(SkillMarketplaceException.class,()->fixture.recover(hint,now));
+        assertEquals(before,businessSnapshot());verify(sessions,never()).dispatch(anyString(),anyString(),anyString(),any(),any());
+    }
+    @Test void nativeAckRacingSenderCannotLetOldCompletionOverwriteReclaimedLease() {
+        var c=install();long now=System.currentTimeMillis();var hint=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        var afterReclaim=new java.util.concurrent.atomic.AtomicReference<Map<String,Object>>();
+        when(sessions.dispatch(anyString(),anyString(),anyString(),any(),any())).thenAnswer(call->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            service.acknowledge(proof(),acknowledgement(c));
+            tx.executeWithoutResult(status->{
+                long reclaim=now+120000;
+                var d=recoveryDao.lockDelivery("0",ACTOR.clientId(),hint.getId());
+                var o=recoveryDao.lockActiveOutboxes("0",ACTOR.clientId(),d.getId(),d.getActiveMessageId()).getFirst();
+                assertEquals(1,recoveryMapper.claimDelivery(d,"new-owner",reclaim+60000,reclaim));
+                assertEquals(1,recoveryMapper.claimOutbox(o,"new-owner",reclaim+60000,reclaim));
+            });
+            afterReclaim.set(businessSnapshot());return AgentRawCommandDispatchResult.sent(1,1);
+        });
+        recovery.recover(hint,now);assertNotNull(afterReclaim.get());assertEquals(afterReclaim.get(),businessSnapshot());
+        assertEquals("RECEIVED",jdbc.queryForObject("SELECT state FROM agent_skill_change_command",String.class));
+        assertEquals("new-owner",jdbc.queryForObject("SELECT lease_owner FROM agent_outbox_event",String.class));
+    }
+    @Test void preparedResultRacingSendCompletionPreservesNewPhaseAndImmutableOriginalWire() {
+        var c=install();long now=System.currentTimeMillis();var hint=recoveryMapper.pendingForAgent("0",null,AGENT,0).getFirst();
+        byte[] original=jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event",byte[].class);
+        when(sessions.dispatch(anyString(),anyString(),anyString(),any(),any())).thenAnswer(call->{
+            service.acknowledge(proof(),acknowledgement(c));report(c,"PREPARED",null);return AgentRawCommandDispatchResult.sent(1,1);
+        });
+        recovery.recover(hint,now);
+        assertEquals("ACTIVATING",current(c).get("status"));assertEquals("ACTIVATE",command(current(c)).get("phase"));
+        assertEquals(2,count("agent_outbox_event"));assertEquals(1,count("economy_skill_order"));assertEquals(99_999_950L,wallet());
+        assertArrayEquals(original,jdbc.queryForObject("SELECT wire_payload FROM agent_outbox_event WHERE command_id=?",byte[].class,hint.getCommandId()));
+        assertEquals("RESULT",jdbc.queryForObject("SELECT state FROM agent_skill_change_command WHERE command_id=?",String.class,hint.getCommandId()));
+    }
+    @Test void realMysqlGeneratedGuardsRetainExpressionsAndNullUniqueness() {
+        SkillTransportStorageAssertions.generatedGuards(jdbc,true,"0",ACTOR.clientId(),AGENT);
+    }
+    @Test void realMysqlAuditTriggersRejectUpdateAndDeleteWithoutChangingEvidence() {
+        SkillTransportStorageAssertions.immutableAudit(jdbc,"0",ACTOR.clientId(),AGENT);
+    }
+
+    private void uninstallApplied(Map<String,Object> change) {
+        var e=evidence(change,"APPLIED",null);e.put("actual",null);service.result(proof(),result(change,e));
+    }
+    private void emptyCurrentCatalog() {
+        var fence=new AgentManagedSessionLookup.SessionFence(runtime.getRuntimeInstallationId(),"host-1","runtime-1",1L);
+        when(capabilities.lookup(any(),any())).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session-1",fence,new SkillCapabilityLookup.Catalog("2",List.of())));
+        service.capabilitiesChanged(proof());
+    }
+    @Test void uninstallRequiresExactRemovalAndCurrentCatalogThenReinstallChargesNewInstallFee() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        String installation=text(object(first.get("target")),"skillInstallationId");long paidBalance=wallet();
+        var frozen=service.admit(scope(),"pdf-export",installation,()->service.taskBinding("0",ACTOR.clientId(),"retained-execution","retained-grant",1,AGENT,installation));
+        var removal=policyChange("UNINSTALL",first);
+        assertEquals("NONE",removal.get("fundingStatus"));assertNull(removal.get("orderId"));assertNull(removal.get("price"));
+        assertThrows(SkillMarketplaceException.class,()->service.admit(scope(),"pdf-export",installation,()->"never"));
+        assertThrows(SkillMarketplaceException.class,()->policyChange("ENABLE",removal));
+        // Existing disable-style evidence (actual target) cannot claim uninstall.
+        assertThrows(SkillMarketplaceException.class,()->report(removal,"APPLIED",null));
+        uninstallApplied(removal);assertEquals("VERIFYING",current(removal).get("status"));
+        assertEquals(installation,db.lockState("0",ACTOR.clientId(),AGENT,"pdf-export").getActiveInstallationId());
+        emptyCurrentCatalog();var done=current(removal);assertEquals("SUCCEEDED",done.get("status"));assertEquals(true,done.get("runtimeSynced"));
+        assertNull(db.lockState("0",ACTOR.clientId(),AGENT,"pdf-export").getActiveInstallationId());
+        assertEquals(installation,frozen.get("skillInstallationId"));assertEquals(1,service.descriptors(scope()).size());assertEquals(paidBalance,wallet());
+        var request=map("action","INSTALL","agentId",AGENT,"skillKey","pdf-export","sourceSkillInstallationId",null,"targetProductVersionId","spv_pdf_1",
+                "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",done.get("skillRevision"),"approvedPermissions",List.of());
+        var q=service.quote(ACTOR,"reinstall-quote",request,false);assertEquals("PURCHASE",q.get("coverage"));assertEquals("50",object(q.get("price")).get("amountMinor"));
+        var input=creation(q,request);var reinstall=service.create(ACTOR,AGENT,"reinstall","reinstall-request",input,false);
+        assertEquals(reinstall,service.create(ACTOR,AGENT,"reinstall","reinstall-request",input,false));
+        finishInstall(reinstall);assertEquals("SUCCEEDED",current(reinstall).get("status"));assertEquals(paidBalance-50,wallet());
+        assertNotEquals(installation,object(reinstall.get("target")).get("skillInstallationId"));assertEquals(2,service.descriptors(scope()).size());
+    }
+    @Test void uninstallHistoricalAdoptionRequiresNewPaidInstallationWithoutReusingOldRights() throws Exception {
+        var adopted=adoptedFixture();catalog(adopted);long balance=wallet();
+        String old=text(object(adopted.get("target")),"skillInstallationId");
+        var removal=policyChange("UNINSTALL",adopted);uninstallApplied(removal);emptyCurrentCatalog();
+        var done=current(removal);assertEquals("SUCCEEDED",done.get("status"));
+        var request=map("action","INSTALL","agentId",AGENT,"skillKey","pdf-export","sourceSkillInstallationId",null,"targetProductVersionId","spv_pdf_1",
+                "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",done.get("skillRevision"),"approvedPermissions",List.of());
+        // Paid reinstall still requires valid evidence that the old installation was removed.
+        jdbc.update("UPDATE agent_skill_result_receipt SET request_hash=?",new byte[32]);
+        assertEquals("SKILL_ALREADY_ORDERED",assertThrows(SkillMarketplaceException.class,
+                ()->service.quote(ACTOR,"tampered-adopted-reinstall",request,false)).code());
+        assertEquals(1,count("economy_skill_order"));assertEquals(balance,wallet());
+        jdbc.update("UPDATE agent_skill_result_receipt SET request_hash=?",HexFormat.of().parseHex("d".repeat(64)));
+        var quote=service.quote(ACTOR,"adopted-reinstall-quote",request,false);
+        assertEquals("PURCHASE",quote.get("coverage"));assertEquals("50",object(quote.get("price")).get("amountMinor"));
+        var reinstall=service.create(ACTOR,AGENT,"adopted-reinstall","adopted-reinstall-request",creation(quote,request),false);
+        finishInstall(reinstall);assertEquals("SUCCEEDED",current(reinstall).get("status"));assertEquals(balance-50,wallet());
+        assertNotEquals(old,object(reinstall.get("target")).get("skillInstallationId"));assertEquals(2,service.descriptors(scope()).size());
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_skill_installation_authorization WHERE adoption_evidence_json IS NOT NULL",Integer.class));
+    }
+    @Test void uninstallOfflineFailureRetryAndUnknownNeverDeleteOrReopenAdmission() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        var disabled=policyChange("DISABLE",first);report(disabled,"APPLIED",null);catalog(current(disabled));
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(false);
+        var removal=policyChange("UNINSTALL",current(disabled));assertEquals("WAITING_AGENT",removal.get("status"));
+        when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(true);
+        report(removal,"NOT_STARTED","PREPARATION_FAILED");var failed=current(removal);assertEquals("FAILED_RETRYABLE",failed.get("status"));
+        var retried=service.retry(ACTOR,AGENT,text(failed,"skillChangeId"),"retry-uninstall","retry-request",map("expectedChangeRevision",failed.get("changeRevision")));
+        assertEquals(2,retried.get("attempt"));assertEquals(removal.get("skillChangeId"),retried.get("skillChangeId"));assertEquals(removal.get("target"),retried.get("target"));
+        report(retried,"UNKNOWN","RECEIPT_UNKNOWN");var unknown=current(retried);assertEquals("RECOVERY_REQUIRED",unknown.get("status"));
+        assertEquals(false,unknown.get("retryAllowed"));assertEquals(1,count("agent_skill_installation"));assertEquals(1,count("agent_skill_entitlement"));
+        assertThrows(SkillMarketplaceException.class,()->service.retry(ACTOR,AGENT,text(unknown,"skillChangeId"),"illegal-retry","request",map("expectedChangeRevision",unknown.get("changeRevision"))));
+        assertEquals(false,db.lockState("0",ACTOR.clientId(),AGENT,"pdf-export").getAdmissionEnabled());
+    }
+
+
+    @Test void retiredProductLeavesInstalledManagementIntactButNotRecommendations() {
+        var c=install();report(c,"PREPARED",null);c=current(c);report(c,"APPLIED",null);catalog(current(c));c=current(c);
+        assertEquals("SUCCEEDED",c.get("status"));
+        assertEquals(1,service.recommendationSkills(ACTOR,List.of(new cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO(new cn.jia.agent.entity.AgentTaskTargetSummaryDTO(AGENT,AGENT,null,true,"online"),List.of(),ACTOR.ownerJiacn()))).get(AGENT).size());
+        var version=market.selectApprovedProductVersion("0",ACTOR.clientId(),text(object(c.get("target")),"productVersionId"));
+        String productId=version.getProductId();
+        var product=tx.execute(s->market.selectProductForUpdate("0",ACTOR.clientId(),productId));
+        var before=businessSnapshot();
+        assertEquals(1,market.retireProduct("0",ACTOR.clientId(),productId,product.getVersion(),System.currentTimeMillis()));
+        assertTrue(service.recommendationSkills(ACTOR,List.of(new cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO(new cn.jia.agent.entity.AgentTaskTargetSummaryDTO(AGENT,AGENT,null,true,"online"),List.of(),ACTOR.ownerJiacn()))).get(AGENT).isEmpty());
+        var rows=(List<?>)service.skills(ACTOR,AGENT,false).get("items");
+        var installed=rows.stream().map(SkillManagementCodec::object).filter(r->version.getSkillKey().equals(r.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals(product.getName(),installed.get("name"));assertNull(installed.get("candidate"));
+        assertNotNull(installed.get("installed"));assertTrue(((List<?>)installed.get("allowedActions")).contains("UNINSTALL"));
+        assertFalse(((List<?>)installed.get("allowedActions")).contains("INSTALL"));
+        assertEquals(before,businessSnapshot());
+        String installedId=text(object(c.get("target")),"skillInstallationId");
+        assertTrue(service.descriptors(scope()).stream().anyMatch(d->installedId.equals(d.installationId())));
+        assertTrue(packages.prepare(version).bytes().length>0);
+        // The installation-only download remains closed after PREPARE; retirement must not reopen it.
+        assertEquals("SKILL_DOWNLOAD_FORBIDDEN",assertThrows(SkillMarketplaceException.class,()->service.packageBytes(proof(),installedId)).code());
+    }
+
+}

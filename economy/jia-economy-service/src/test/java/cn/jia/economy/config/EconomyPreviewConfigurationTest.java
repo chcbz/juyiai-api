@@ -1,0 +1,187 @@
+package cn.jia.economy.config;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class EconomyPreviewConfigurationTest {
+    private static final ApplicationContextRunner RUNNER = new ApplicationContextRunner()
+            .withUserConfiguration(EconomyConfiguration.class);
+    private static final ApplicationContextRunner PROPERTIES_RUNNER = new ApplicationContextRunner()
+            .withUserConfiguration(PropertiesOnlyConfiguration.class);
+
+    @Test
+    void absentConfigurationStartsDisabledWithoutJdbcOrSchemaMutation() {
+        RUNNER.run(context -> {
+            assertNull(context.getStartupFailure());
+            assertFalse(context.getBean(EconomyPreviewGate.class).allows("tenant-a", "client-a"));
+            assertTrue(context.getBeansOfType(EconomySchemaInitializer.class).isEmpty());
+            assertTrue(context.getBeansOfType(EconomyHostingRentSchemaInitializer.class).isEmpty());
+        });
+    }
+
+    @Test
+    void hostingSchemaRequiresItsOwnExplicitFlagAndNeverFollowsPreviewAlone() throws Exception {
+        var method = EconomyConfiguration.class.getMethod(
+                "economyHostingRentSchemaInitializer", org.springframework.jdbc.core.JdbcTemplate.class);
+        var condition = method.getAnnotation(
+                org.springframework.boot.autoconfigure.condition.ConditionalOnProperty.class);
+        assertNotNull(condition);
+        assertEquals("economy.hosting-rent", condition.prefix());
+        assertEquals(List.of("schema-enabled"), List.of(condition.name()));
+        assertEquals("true", condition.havingValue());
+        assertFalse(condition.matchIfMissing());
+    }
+
+    @Test
+    void applicationContextBindsCanonicalConstructorFields() {
+        PROPERTIES_RUNNER.withPropertyValues(
+                        "economy.preview.enabled=true",
+                        "economy.preview.test-issuance-enabled=true",
+                        "economy.preview.allowed-scopes[0].tenant-id=Tenant-A",
+                        "economy.preview.allowed-scopes[0].client-id=Client-A",
+                        "economy.campaigns.grants[0].enabled=true",
+                        "economy.campaigns.grants[0].event=HALL_ENTERED",
+                        "economy.campaigns.grants[0].amount-wen=3500",
+                        "economy.campaigns.grants[0].id=beta-hall-welcome-v1")
+                .run(context -> {
+                    assertNull(context.getStartupFailure());
+                    EconomyPreviewProperties properties = context.getBean(EconomyPreviewProperties.class);
+                    var grant = context.getBean(EconomyCampaignProperties.class).grants().getFirst();
+                    assertTrue(properties.enabled());
+                    assertTrue(properties.testIssuanceEnabled());
+                    assertEquals(List.of(new EconomyPreviewProperties.AllowedScope("Tenant-A", "Client-A")),
+                            properties.allowedScopes());
+                    assertTrue(grant.enabled());
+                    assertEquals(3500L, grant.amountWen());
+                    assertEquals("beta-hall-welcome-v1", grant.id());
+                });
+
+        PROPERTIES_RUNNER.withPropertyValues(
+                        "economy.preview.enabled=false",
+                        "economy.preview.test-issuance-enabled=false")
+                .run(context -> {
+                    assertNull(context.getStartupFailure());
+                    EconomyPreviewProperties properties = context.getBean(EconomyPreviewProperties.class);
+                    assertFalse(properties.enabled());
+                    assertFalse(properties.testIssuanceEnabled());
+                    assertEquals(List.of(), properties.allowedScopes());
+                });
+    }
+
+    @Test
+    void exactAllowlistIsCaseSensitiveAndEnabledRequiresAtLeastOneScope() {
+        EconomyPreviewGate gate = new EconomyPreviewGate(new EconomyPreviewProperties(true, List.of(
+                new EconomyPreviewProperties.AllowedScope("Tenant-A", "Client-A"))));
+        assertTrue(gate.allows("Tenant-A", "Client-A"));
+        assertFalse(gate.allows("tenant-a", "Client-A"));
+        assertFalse(gate.allows("Tenant-A", "client-a"));
+        assertThrows(IllegalStateException.class,
+                () -> new EconomyPreviewGate(new EconomyPreviewProperties(true, List.of())));
+    }
+
+    @Test
+    void malformedEnabledConfigurationFailsBeforeSchemaBeanCanResolveJdbc() {
+        RUNNER.withPropertyValues(
+                        "economy.preview.enabled=true",
+                        "economy.preview.allowed-scopes[0].tenant-id=tenant-*",
+                        "economy.preview.allowed-scopes[0].client-id=client-a")
+                .run(context -> {
+                    Throwable failure = context.getStartupFailure();
+                    assertNotNull(failure);
+                    assertTrue(failureChain(failure).contains("Invalid economy.preview configuration"),
+                            failureChain(failure));
+                });
+    }
+
+    @Test
+    void exactScopeConfigurationRejectsControlNulAndUnpairedSurrogateIdentities() {
+        for (String invalid : List.of("tenant\u0000a", "tenant\u001fa", "tenant\ud800", "tenant\udc00")) {
+            assertThrows(IllegalStateException.class, () -> new EconomyPreviewGate(
+                    new EconomyPreviewProperties(true, List.of(
+                            new EconomyPreviewProperties.AllowedScope(invalid, "Client-A")))), invalid);
+        }
+    }
+
+    @Test void compoundTriggerDdlIsBounded() {
+        assertEquals(7, EconomySchemaInitializer.tableDdlStatements().size());
+    }
+
+    @Test
+    void triggerNormalizationPreservesLiteralBytesWhileCanonicalizingOutsideFormatting() {
+        String literal = " (( BEGIN\n SIGNAL SQLSTATE _utf8mb4 '45000' "
+                + "SET `MESSAGE_TEXT` = _UTF8MB4 '_utf8mb4 MiXeD (A = B)  O''Brien\\'s'; END )) ";
+        String changedLiteral = " (( BEGIN\n SIGNAL SQLSTATE _utf8mb4 '45000' "
+                + "SET `MESSAGE_TEXT` = _UTF8MB4 '_utf8mb4 miXeD (A = B)  O''Brien\\'s'; END )) ";
+        String canonical = "BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable'; END";
+        String formatted = " (( BEGIN\n SIGNAL SQLSTATE _utf8mb4 '45000' "
+                + "SET `MESSAGE_TEXT` = _UTF8MB4 'immutable'; END )) ";
+
+        assertEquals("begin signal sqlstate '45000' set message_text='_utf8mb4 MiXeD (A = B)  O''Brien\\'s'; end",
+                cn.jia.core.sql.SchemaSqlText.normalizeTriggerSql(literal));
+        assertNotEquals(cn.jia.core.sql.SchemaSqlText.normalizeTriggerSql(literal),
+                cn.jia.core.sql.SchemaSqlText.normalizeTriggerSql(changedLiteral));
+        assertEquals(cn.jia.core.sql.SchemaSqlText.normalizeTriggerSql(canonical),
+                cn.jia.core.sql.SchemaSqlText.normalizeTriggerSql(formatted));
+    }
+
+    @Test
+    void bundledProfilesPreserveExplicitEconomicScope() throws Exception {
+        Path root = apiRoot();
+        for (String profile : List.of(
+                "starter/src/main/resources/application-dev.properties",
+                "starter/src/main/resources/application-grey.properties",
+                "starter/src/main/resources/application-prod.properties",
+                "starter/src/test/resources/application-test.properties")) {
+            List<String> declarations = Files.readAllLines(root.resolve(profile), StandardCharsets.UTF_8).stream()
+                    .filter(line -> line.startsWith("economy.preview.enabled="))
+                    .toList();
+            boolean production=profile.endsWith("application-prod.properties");
+            assertEquals(List.of("economy.preview.enabled="+production), declarations, profile);
+            if(production) {
+                var scope=Files.readAllLines(root.resolve(profile),StandardCharsets.UTF_8).stream()
+                        .filter(line->line.startsWith("economy.preview.allowed-scopes[")).toList();
+                assertEquals(List.of("economy.preview.allowed-scopes[0].tenant-id=0",
+                        "economy.preview.allowed-scopes[0].client-id=jiafewnnv58ec2379c"),scope);
+                assertTrue(Files.readAllLines(root.resolve(profile),StandardCharsets.UTF_8)
+                        .contains("economy.preview.test-issuance-enabled=false"));
+            }
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableConfigurationProperties({EconomyPreviewProperties.class, EconomyCampaignProperties.class})
+    static class PropertiesOnlyConfiguration {
+    }
+
+    private static String failureChain(Throwable failure) {
+        StringBuilder result = new StringBuilder();
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            result.append(current.getClass().getName()).append(':').append(current.getMessage()).append('\n');
+        }
+        return result.toString();
+    }
+
+    private static Path apiRoot() {
+        Path current = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (Path candidate = current; candidate != null; candidate = candidate.getParent()) {
+            if (Files.isRegularFile(candidate.resolve("settings.gradle"))
+                    && Files.isDirectory(candidate.resolve("economy"))) return candidate;
+        }
+        throw new IllegalStateException("Cannot locate API worktree root from " + current);
+    }
+}

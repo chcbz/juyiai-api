@@ -1,0 +1,241 @@
+import org.gradle.api.GradleException
+import org.gradle.api.tasks.testing.Test
+
+plugins {
+    id 'org.springframework.boot' version '4.0.1'
+}
+
+def isForbiddenPublicBootJarMember = rootProject.ext.isForbiddenPublicArtifactJarMember
+
+sourceSets {
+    publicArtifactVerifier {
+        java.srcDir 'src/publicArtifactVerifier/java'
+        resources.setSrcDirs([])
+    }
+    publicArtifactVerifierTest {
+        java.srcDir 'src/publicArtifactVerifierTest/java'
+        resources.setSrcDirs([])
+        compileClasspath += sourceSets.publicArtifactVerifier.output
+        runtimeClasspath += sourceSets.publicArtifactVerifier.output
+    }
+    poiProductionRuntimeClasspathTest {
+        java.srcDir 'src/poiProductionRuntimeClasspathTest/java'
+        resources.setSrcDirs([])
+    }
+}
+
+dependencies {
+    api project(':common:jia-common-starter')
+    api project(':base:jia-base-starter')
+    api project(':dwz:jia-dwz-starter')
+    api project(':isp:jia-isp-starter')
+    api project(':material:jia-material-starter')
+    api project(':oauth:jia-oauth-client-starter')
+    api project(':oauth:jia-oauth-resource-starter')
+    api project(':oauth:jia-oauth-server-starter')
+    api project(':sms:jia-sms-starter')
+    api project(':task:jia-task-starter')
+    api project(':user:jia-user-starter')
+    api project(':workflow:jia-workflow-starter')
+    api project(':chat:jia-chat-starter')
+
+    api project(':agent:jia-agent-service')
+    api project(':agent:jia-agent-mapper')
+    api project(':kefu:jia-kefu-service')
+    api project(':kefu:jia-kefu-mapper')
+    api project(':point:jia-point-service')
+    api project(':point:jia-point-mapper')
+    api project(':economy:jia-economy-service')
+    api project(':economy:jia-economy-mapper')
+    api project(':wx:jia-wx-service')
+    api project(':wx:jia-wx-mapper')
+
+    implementation(libs.spring.boot.starter.redisson)
+    implementation(libs.spring.boot.starter.thymeleaf)
+    implementation(libs.spring.boot.starter.data.redis)
+    implementation(libs.spring.boot.starter.data.ldap)
+    implementation(libs.spring.boot.starter.cache)
+    implementation(libs.spring.boot.starter.security)
+    implementation(libs.spring.security.oauth2.authorization.server)
+    implementation(libs.spring.boot.starter.oauth2.resource.server)
+    implementation(libs.spring.boot.starter.oauth2.client)
+    implementation(libs.spring.boot.starter.elasticsearch)
+    implementation(libs.spring.boot.starter.amqp)
+    implementation(libs.spring.boot.starter.actuator)
+    implementation(libs.spring.boot.starter.websocket)
+    implementation(libs.spring.ai.starter.model.deepseek)
+    implementation("org.springframework.ai:spring-ai-starter-model-openai:${libs.versions.spring.ai.asProvider().get()}")
+    implementation(libs.camunda)
+    implementation(libs.jodd)
+
+    testImplementation project(':common:jia-common-test')
+    testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.junit.jupiter)
+    testAnnotationProcessor libs.lombok
+    testCompileOnly libs.lombok
+
+    publicArtifactVerifierTestImplementation(libs.junit.jupiter)
+    publicArtifactVerifierTestRuntimeOnly(libs.junit.platform.launcher)
+    poiProductionRuntimeClasspathTestImplementation(libs.junit.jupiter)
+    poiProductionRuntimeClasspathTestRuntimeOnly(libs.junit.platform.launcher)
+}
+
+version = '1.1.48-SNAPSHOT'
+
+description = 'starter'
+
+jar {
+    enabled = false
+}
+
+// Supply only the application's runtime graph to the isolated mail regression loader.
+// Do not use testRuntimeClasspath: test-only mail can conceal a broken bootJar runtime.
+tasks.named('test', Test) {
+    inputs.files(sourceSets.main.runtimeClasspath).withPropertyName('smsMainRuntimeClasspath')
+    doFirst {
+        systemProperty 'cyf.sms.main-runtime-classpath', sourceSets.main.runtimeClasspath.asPath
+    }
+}
+
+def publicArtifactVerifierTests = tasks.register('publicArtifactVerifierTest', Test) {
+    group = 'verification'
+    description = 'Runs isolated mutation tests for the dependency-free public artifact verifier.'
+    testClassesDirs = sourceSets.publicArtifactVerifierTest.output.classesDirs
+    classpath = sourceSets.publicArtifactVerifierTest.runtimeClasspath
+    useJUnitPlatform()
+}
+
+def poiProductionRuntimeClasspathTests = tasks.register('poiProductionRuntimeClasspathTest', Test) {
+    group = 'verification'
+    description = 'Verifies the production application runtime has one coherent Apache POI schema graph.'
+    dependsOn tasks.named(sourceSets.poiProductionRuntimeClasspathTest.classesTaskName)
+    testClassesDirs = sourceSets.poiProductionRuntimeClasspathTest.output.classesDirs
+    classpath = sourceSets.poiProductionRuntimeClasspathTest.runtimeClasspath
+    inputs.files(sourceSets.main.runtimeClasspath).withPropertyName('poiMainRuntimeClasspath')
+    doFirst {
+        systemProperty 'cyf.poi.main-runtime-classpath', sourceSets.main.runtimeClasspath.asPath
+    }
+    useJUnitPlatform()
+}
+
+tasks.register('publicBootJarSecurityPolicyTest') {
+    group = 'verification'
+    description = 'Compatibility lifecycle alias for the isolated public artifact verifier tests.'
+    dependsOn publicArtifactVerifierTests
+}
+
+tasks.named('check') {
+    dependsOn publicArtifactVerifierTests
+    dependsOn poiProductionRuntimeClasspathTests
+}
+
+bootJar {
+    mainClass = 'cn.jia.JiaApplication'
+    manifest {
+        attributes 'Start-Class': 'cn.jia.JiaApplication'
+    }
+    exclude { details -> isForbiddenPublicBootJarMember(details.path) }
+    dependsOn publicArtifactVerifierTests
+    dependsOn poiProductionRuntimeClasspathTests
+    dependsOn tasks.named(sourceSets.publicArtifactVerifier.classesTaskName)
+    doLast {
+        def captured = new ByteArrayOutputStream()
+        int exitValue
+        try {
+            def execution = providers.javaexec {
+                classpath = sourceSets.publicArtifactVerifier.runtimeClasspath
+                mainClass = 'cn.jia.build.security.PublicArtifactVerifier'
+                args archiveFile.get().asFile.absolutePath,
+                        new File(temporaryDir, 'public-artifact-verifier-root').absolutePath
+                ignoreExitValue = true
+            }
+            exitValue = execution.result.get().exitValue
+            captured.write(execution.standardOutput.asBytes.get())
+            captured.write(execution.standardError.asBytes.get())
+        } catch (Exception ignored) {
+            throw new GradleException('Public bootJar security policy violations:\n - <public-artifact-verifier-error>')
+        }
+        if (exitValue != 0) {
+            def fixedTokens = [
+                    '<nested-zip-eocd-error>',
+                    '<nested-zip-central-directory-error>',
+                    '<nested-zip-local-header-error>',
+                    '<nested-zip-data-descriptor-error>',
+                    '<nested-zip-occurrence-mismatch>',
+                    '<nested-zip-payload-integrity-error>',
+                    '<nested-zip-unsupported>',
+                    '<nested-zip-limit-error>',
+                    '<configuration-parse-error>',
+                    '<nested-temp-security-error>',
+                    '<nested-temp-cleanup-error>',
+                    '<public-artifact-verifier-error>'
+            ] as Set
+            def outputLines = captured.toString('UTF-8').readLines().findAll { !it.empty }
+            def diagnostics = outputLines.findAll { line ->
+                def tokenSeparator = line.lastIndexOf(': ')
+                if (tokenSeparator >= 0 && fixedTokens.contains(line.substring(tokenSeparator + 2))) {
+                    return line.substring(0, tokenSeparator) ==~ /(?:<public-bootjar>|<nested-temp>|[-A-Za-z0-9_.\/!]+)/
+                }
+                line == '<public-artifact-verifier-error>' ||
+                        line ==~ /[-A-Za-z0-9_.\/!]+/ ||
+                        line ==~ /[-A-Za-z0-9_.\/!]+: [-A-Za-z0-9_.]*api-key[-A-Za-z0-9_.]*/
+            }
+            if (diagnostics.empty || diagnostics.size() != outputLines.size()) {
+                diagnostics = ['<public-artifact-verifier-error>']
+            }
+            throw new GradleException('Public bootJar security policy violations:\n - ' +
+                    diagnostics.join('\n - '))
+        }
+    }
+}
+
+// Exact 49a931 -> 29ce multimedia schema/application wiring verification.
+// This opt-in fixture uses only a caller-provided isolated MySQL database; it is never part of
+// the default test/check graph and cannot select a production URL or start Provider traffic.
+def mmd29ceUpgradeWiringSourceSet = sourceSets.create('mmd29ceUpgradeWiring') {
+    java.srcDir 'src/mmd29ceUpgradeWiringTest/java'
+    resources.srcDir 'src/mmd29ceUpgradeWiringTest/resources'
+    // Compile and run against the real production application graph. Do not inherit the starter
+    // test graph: common-test is unrelated to this fixture and starts an avoidable compiler fork.
+    compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+    runtimeClasspath += output + compileClasspath + sourceSets.main.runtimeClasspath
+}
+dependencies {
+    add(mmd29ceUpgradeWiringSourceSet.implementationConfigurationName, libs.junit.jupiter)
+    add(mmd29ceUpgradeWiringSourceSet.runtimeOnlyConfigurationName, libs.mysql)
+    add(mmd29ceUpgradeWiringSourceSet.runtimeOnlyConfigurationName, libs.junit.platform.launcher)
+    add(mmd29ceUpgradeWiringSourceSet.runtimeOnlyConfigurationName,
+            'com.github.lansheng228:embedded-redis:7.4.1') { transitive = false }
+}
+tasks.register('mmd29ceUpgradeWiring', Test) {
+    group = 'verification'
+    description = 'Runs the exact old-catalog to 29ce MySQL migration, restart and JiaApplication wiring fixture.'
+    dependsOn tasks.named(mmd29ceUpgradeWiringSourceSet.classesTaskName)
+    testClassesDirs = mmd29ceUpgradeWiringSourceSet.output.classesDirs
+    classpath = mmd29ceUpgradeWiringSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+    systemProperty 'cyf.mmd29ce.repo-root', rootProject.rootDir.absolutePath
+    environment 'CYF_MMD29CE_DB_PREFIX', 'mmd29ce_20261002_01a0f2bb_'
+}
+
+// PDF-SKILL-20261022: the owning project resolves its own production graph.
+// Do not resolve this configuration from another project's task (Gradle 9 lock safety).
+def verifyPdfProcessingBoundary = tasks.register('verifyPdfProcessingBoundary') {
+    group = 'verification'
+    description = 'Ensures the application runtime excludes PDFBox/pdf2dom.'
+    doLast {
+        def forbidden = configurations.runtimeClasspath.resolvedConfiguration.resolvedArtifacts.findAll {
+            it.moduleVersion.id.group in ['org.apache.pdfbox', 'net.sf.cssbox']
+        }
+        if (!forbidden.empty) {
+            throw new GradleException("PDF processing belongs in Agent/browser, not ${project.path}: " +
+                    forbidden.collect { it.moduleVersion.id }.join(', '))
+        }
+    }
+}
+tasks.withType(Test).configureEach { dependsOn verifyPdfProcessingBoundary }
+tasks.named('bootJar') { dependsOn verifyPdfProcessingBoundary }

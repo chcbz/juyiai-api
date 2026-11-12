@@ -1,0 +1,404 @@
+package cn.jia.core.util;
+
+import lombok.extern.slf4j.Slf4j;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
+
+/**
+ * GraalVM Native Image 兼容的工具类
+ * @author chc
+ */
+@Slf4j
+public class ClassUtil {
+    
+    /**
+     * GraalVM Native Image 模式标记
+     * 在编译时可通过 -Dgraalvm.native.mode=true 启用
+     */
+    private static final boolean GRAALVM_NATIVE_MODE = 
+        System.getProperty("graalvm.native.mode") != null || 
+        System.getProperty("org.graalvm.nativeimage.SubstrateInvocationTransition") != null;
+    
+    /**
+     * 注册的类名映射表（用于 GraalVM Native Image 模式）
+     * 在静态初始化时预加载已知类
+     */
+    private static final Map<String, Class<?>> REGISTERED_CLASSES = new ConcurrentHashMap<>();
+    
+    static {
+        // 注册已知的基础类
+        registerClass("cn.jia.core.entity.BaseEntity");
+        registerClass("cn.jia.core.common.EsSecurityHandler");
+    }
+    
+    /**
+     * 注册类到映射表（GraalVM Native Image 兼容）
+     */
+    private static void registerClass(String className) {
+        try {
+            Class<?> clazz = Class.forName(className);
+            REGISTERED_CLASSES.put(className, clazz);
+        } catch (Throwable e) {
+            // 静默忽略，编译时可能不可用
+        }
+    }
+    
+    /**
+     * GraalVM 安全的方式获取类
+     * 在 Native Image 模式下优先使用预注册类
+     *
+     * @param className 类名
+     * @return 类
+     */
+    public static Class<?> forName(String className) {
+        // 先检查预注册类
+        Class<?> registered = REGISTERED_CLASSES.get(className);
+        if (registered != null) {
+            return registered;
+        }
+        
+        // 非 GraalVM 模式或未注册的类，使用传统方式
+        try {
+            Class<?> clazz = Class.forName(className);
+            // 缓存以便后续使用
+            REGISTERED_CLASSES.putIfAbsent(className, clazz);
+            return clazz;
+        } catch (Throwable e) {
+            log.error("无法获取类：{}", className);
+            return null;
+        }
+    }
+
+    /**
+     * 获取某包下（包括该包的所有子包）所有类
+     *
+     * @param packageName 包名
+     * @return 类的完整名称
+     */
+    public static List<String> getClassNames(String packageName) {
+        return getClassNames(packageName, true);
+    }
+
+    /**
+     * 获取某包下所有类
+     *
+     * @param packageName  包名
+     * @param childPackage 是否遍历子包
+     * @return 类的完整名称
+     */
+    public static List<String> getClassNames(String packageName, boolean childPackage) {
+        List<String> fileNames = new ArrayList<>();
+        ClassLoader loader = Thread.currentThread().getContextClassLoader();
+        String packagePath = packageName.replace(".", "/");
+        try {
+            Enumeration<URL> urls = loader.getResources(packagePath);
+            while (urls.hasMoreElements()) {
+                URL url = urls.nextElement();
+                log.info("getClassName URL: " + url.toString());
+                String type = url.getProtocol();
+                if ("file".equals(type)) {
+                    fileNames.addAll(getClassNameByFile(url.getPath(), null, childPackage));
+                } else if ("jar".equals(type)) {
+                    fileNames.addAll(getClassNameByJar(url.getPath(), childPackage));
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return fileNames;
+    }
+
+    /**
+     * 从项目文件获取某包下所有类
+     *
+     * @param filePath     文件路径
+     * @param className    类名集合
+     * @param childPackage 是否遍历子包
+     * @return 类的完整名称
+     */
+    private static List<String> getClassNameByFile(String filePath, List<String> className, boolean childPackage) {
+        List<String> myClassName = new ArrayList<>();
+        File file = new File(filePath);
+        File[] childFiles = file.listFiles();
+        if (childFiles != null) {
+            for (File childFile : childFiles) {
+                if (childFile.isDirectory()) {
+                    if (childPackage) {
+                        myClassName.addAll(getClassNameByFile(childFile.getPath(), myClassName, true));
+                    }
+                } else {
+                    String childFilePath = childFile.getPath();
+                    if (childFilePath.endsWith(".class")) {
+                        childFilePath = childFilePath.substring(childFilePath.indexOf(File.separator + "classes") + 9,
+                                childFilePath.lastIndexOf("."));
+                        childFilePath = childFilePath.replace(File.separator, ".");
+                        childFilePath = childFilePath.startsWith("java.main") ? childFilePath.substring(10) : childFilePath;
+                        myClassName.add(childFilePath);
+                    }
+                }
+            }
+        }
+
+        return myClassName;
+    }
+
+    /**
+     * 从jar获取某包下所有类
+     *
+     * @param jarPath      jar文件路径
+     * @param childPackage 是否遍历子包
+     * @return 类的完整名称
+     */
+    private static List<String> getClassNameByJar(String jarPath, boolean childPackage) {
+        log.info("getClassNameByJar jarPath: " + jarPath);
+        List<String> myClassName = new ArrayList<>();
+        JarFile jarFile;
+        try {
+            int pathIndex = jarPath.lastIndexOf("!");
+            String jarFilePath = jarPath.substring(0, pathIndex);
+            if (jarFilePath.endsWith(".jar")) {
+                String fileUrl = jarPath.substring(0, pathIndex);
+                if (fileUrl.contains("!")) {
+                    fileUrl = "jar:" + fileUrl;
+                }
+                URL url = new URL(fileUrl);
+                InputStream is = url.openStream();
+                String filename = url.getPath().substring(url.getPath().lastIndexOf("/") + 1);
+                filename = FileUtil.getName(filename) + "_" + DateUtil.getDateString() + "." + FileUtil.getExtension(filename);
+                FileUtil.create(is, "/tmp/" + filename);
+                jarFile = new JarFile(new File("/tmp/" + filename));
+            } else {
+                jarFile = new JarFile(jarFilePath.substring(5, jarFilePath.lastIndexOf("!")));
+            }
+            log.info("getClassNameByJar jarFile: " + jarFile.getName());
+
+            String packagePath = jarPath.substring(pathIndex + 2);
+
+            Enumeration<JarEntry> entrys = jarFile.entries();
+            while (entrys.hasMoreElements()) {
+                JarEntry jarEntry = entrys.nextElement();
+                String entryName = jarEntry.getName();
+                if (entryName.endsWith(".class")) {
+                    if (childPackage) {
+                        int idx = entryName.indexOf(packagePath);
+                        if (idx != -1) {
+                            entryName = entryName.replace("/", ".").substring(idx, entryName.lastIndexOf("."));
+                            myClassName.add(entryName);
+                        }
+                    } else {
+                        int index = entryName.lastIndexOf("/");
+                        String myPackagePath;
+                        if (index != -1) {
+                            myPackagePath = entryName.substring(0, index);
+                        } else {
+                            myPackagePath = entryName;
+                        }
+                        if (myPackagePath.endsWith(packagePath)) {
+                            entryName = packagePath + "." + entryName.substring(index + 1);
+                            myClassName.add(entryName);
+                        }
+                    }
+                }
+            }
+            jarFile.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return myClassName;
+    }
+
+    /**
+     * 从所有jar中搜索该包，并获取该包下所有类
+     *
+     * @param urls         URL集合
+     * @param packagePath  包路径
+     * @param childPackage 是否遍历子包
+     * @return 类的完整名称
+     */
+    private static List<String> getClassNameByJars(URL[] urls, String packagePath, boolean childPackage) {
+        List<String> myClassName = new ArrayList<>();
+        if (urls != null) {
+			for (URL url : urls) {
+				String urlPath = url.getPath();
+				// 不必搜索classes文件夹
+				if (urlPath.endsWith("classes/")) {
+					continue;
+				}
+				String jarPath = urlPath + "!/" + packagePath;
+				myClassName.addAll(getClassNameByJar(jarPath, childPackage));
+			}
+        }
+        return myClassName;
+    }
+
+    public static String getJarRealPath(Class<?> c) {
+        String jarWholePath = c.getProtectionDomain().getCodeSource().getLocation().getFile();
+        jarWholePath = java.net.URLDecoder.decode(jarWholePath, StandardCharsets.UTF_8);
+        return new File(jarWholePath).getParentFile().getAbsolutePath();
+    }
+
+    /**
+     * @param o          操作对象
+     * @param methodName 方法名
+     * @param attName    属性名
+     * @param value      值
+     * @return get方法返回实际值 set方法返回操作后对象
+     */
+    private static Object operation(Object o, String methodName, String attName, Class<?> paramType, Object value) {
+        // 方法赋值出错标志
+        boolean opErr = false;
+        Object res = null;
+        Class<?> type = o.getClass();
+        try {
+            Method method;
+            if (methodName.contains("get")) {
+                // get方法
+                // 获取方法
+                method = type.getMethod(methodName);
+                // 执行
+                res = method.invoke(o);
+            } else {
+                // set方法
+                // 当没有传入参数类型时通过value获取参数类型
+                paramType = paramType == null ? value.getClass() : paramType;
+                // 获取方法
+                method = type.getMethod(methodName, paramType);
+                // 执行
+                method.invoke(o, value);
+                res = o;
+            }
+        } catch (Exception e) {
+            // 通过get/set方法操作属性失败
+            opErr = true;
+            System.err.println("[WARN] 直接对属性'" + attName + "进行操作(不借助get/set方法).");
+        }
+
+        if (opErr) {
+            // 通过打破封装方式直接对值进行操作
+            try {
+                Field field = null;
+                // 获取属性
+                field = type.getDeclaredField(attName);
+                // 打破封装
+                field.setAccessible(true);
+
+                if (methodName.contains("get")) {
+                    // get方法
+                    // 获取属性值
+                    res = field.get(o);
+                } else {
+                    // set方法
+                    // 设置属性值
+                    field.set(o, value);
+                    res = o;
+                }
+            } catch (Exception e) {
+                //两种方法都操作失败
+                System.err.println("[ERROR] 属性'" + attName + "'操作失败.");
+            }
+        }
+
+        return res;
+    }
+
+    /**
+     * 设置属性值
+     *
+     * @param o         操作对象
+     * @param attName   属性名
+     * @param value     参数值
+     * @param paramType 参数类型
+     * @return 操作后对象
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T setAttribute(T o, String attName, Object value, Class<?> paramType) {
+        if (o == null || attName == null || attName.isEmpty()) {
+            return null;
+        }
+        String methodName = attNameHandle("set", attName);
+
+        return (T) operation(o, methodName, attName, paramType, value);
+    }
+
+    /**
+     * 获取属性值
+     *
+     * @param o          操作对象
+     * @param attName    属性名
+     * @return
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T getAttribute(Object o, String attName) {
+        if (o == null || attName == null || attName.isEmpty()) {
+            return null;
+        }
+        String methodName = attNameHandle("get", attName);
+
+        return (T) operation(o, methodName, attName, null, null);
+    }
+
+    /**
+     * 属性名处理
+     *
+     * @param method  方法(get/set)
+     * @param attName 属性名
+     * @return
+     */
+    private static String attNameHandle(String method, String attName) {
+        StringBuilder res = new StringBuilder(method);
+        // 属性只有一个字母
+        if (attName.length() == 1) {
+            res.append(attName.toUpperCase());
+        } else {
+            // 属性包含两个字母及以上
+            char[] charArray = attName.toCharArray();
+			// 当前两个字符为小写时,将首字母转换为大写
+            if (Character.isLowerCase(charArray[0]) && Character.isLowerCase(charArray[1])) {
+                res.append(Character.toUpperCase(charArray[0]));
+                res.append(attName.substring(1));
+            } else {
+                res.append(attName);
+            }
+        }
+
+        return res.toString();
+    }
+
+    /**
+     * 获取指定类的所有静态变量的值
+     *
+     * @param clazz 类
+     * @return 变量列表
+     */
+    public static List<Object> getStaticFieldValues(Class<?> clazz) {
+        List<Object> values = new ArrayList<>();
+        try {
+            Field[] fields = clazz.getDeclaredFields();
+            for (Field field : fields) {
+                if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
+                    // 如果字段为私有的，需要设置为可访问
+                    field.setAccessible(true);
+                    // 静态字段的值为 null
+                    Object value = field.get(null);
+                    values.add(value);
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return values;
+    }
+}

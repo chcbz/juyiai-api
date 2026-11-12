@@ -1,0 +1,156 @@
+package cn.jia.chat.handler;
+
+import cn.jia.agent.service.SkillCapabilityLookup.*;
+import cn.jia.agent.service.AgentManagedSessionLookup.SessionFence;
+import cn.jia.agent.security.AgentRuntimeAuthenticationService;
+import org.junit.jupiter.api.Test;
+import org.springframework.web.socket.*;
+import tools.jackson.databind.ObjectMapper;
+import java.util.*;
+import static cn.jia.chat.handler.AgentWebSocketRuntimeAuthenticationTest.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class AgentWebSocketSkillExecutionRegistrationTest {
+    final Scope scope = new Scope(TENANT, CLIENT, OWNER, AGENT);
+    final SessionFence fence = new SessionFence(UnifiedRuntimeTestSupport.INSTALLATION, "host-1", "runtime-a", 1);
+    final SkillExecutionSessionRegistry registry = new SkillExecutionSessionRegistry();
+    final ObjectMapper json = new ObjectMapper();
+
+    Fixture fixture() throws Exception {
+        var f = new Fixture(false); f.handler.setSkillExecutionSessions(registry);
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))
+                .thenReturn(new AgentRuntimeAuthenticationService.Receipt("native-runtime-v1", TENANT, CLIENT, OWNER,
+                        AGENT, "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+        return f;
+    }
+    @SuppressWarnings("unchecked") String wire(Fixture f, Object report) {
+        Map<String,Object> payload = json.readValue(f.command(), Map.class);
+        UnifiedRuntimeTestSupport.registrationProof(f.session, payload);
+        payload.put("durableStateHealthy", true); payload.put("readyCommandTypes", List.of());
+        if (report != null) payload.put("skillExecution", report);
+        return json.writeValueAsString(cn.jia.agent.common.AgentMessageWire.event("agent.register",payload,null));
+    }
+    void register(Fixture f, Object report) { f.handler.handleTextMessage(f.session, new TextMessage(wire(f, report))); }
+
+    @Test void onlyDeliveredAuthenticatedRegistrationActivatesExactTrustedSubject() throws Exception {
+        var f = fixture();
+        doAnswer(inv -> {
+            String frame = ((TextMessage)inv.getArgument(0)).getPayload();
+            if (frame.contains("agent.registered")) assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+            f.frames.add(frame); return null;
+        }).when(f.session).sendMessage(any());
+        register(f, SkillExecutionFixtures.catalog());
+        assertEquals(State.AVAILABLE, registry.lookup(scope, fence).state());
+        assertEquals(2, registry.lookup(scope, fence).catalog().skills().size());
+        assertEquals(State.DISCONNECTED, registry.lookup(new Scope(TENANT, CLIENT, "foreign-owner", AGENT), fence).state());
+        assertEquals(State.FENCED, registry.lookup(scope, new SessionFence(fence.runtimeInstallationId(), "foreign-host", "runtime-a", 1)).state());
+    }
+    @Test void readyListenersOnlyRunAfterAuthenticatedDeliveredLocalRegistration() throws Exception {
+        var f=fixture();var listener=mock(cn.jia.agent.service.AgentSessionReadyListener.class);
+        f.handler.setSessionReadyListeners(List.of(listener));
+        doAnswer(call->{
+            assertEquals(State.AVAILABLE,registry.lookup(scope,fence).state());
+            return null;
+        }).when(listener).sessionReady(TENANT,CLIENT,AGENT);
+        register(f,SkillExecutionFixtures.catalog());
+        verify(listener).sessionReady(TENANT,CLIENT,AGENT);
+        clearInvocations(listener);
+        doThrow(new java.io.IOException("receipt unavailable")).when(f.session).sendMessage(any());
+        register(f,SkillExecutionFixtures.catalog());verifyNoInteractions(listener);
+    }
+    @Test void failedDurableReadyCallbackDoesNotKeepARegisteredTransport() throws Exception {
+        var f=fixture();var listener=mock(cn.jia.agent.service.AgentSessionReadyListener.class);
+        f.handler.setSessionReadyListeners(List.of(listener));
+        doThrow(new IllegalStateException("schedule unavailable")).when(listener).sessionReady(TENANT,CLIENT,AGENT);
+        register(f,SkillExecutionFixtures.catalog());
+        assertEquals(State.DISCONNECTED,registry.lookup(scope,fence).state());
+        assertTrue(f.frames.stream().anyMatch(frame->frame.contains("AGENT_REGISTRATION_UNAVAILABLE")));
+        verify(f.auth,atLeastOnce()).disconnect("socket-a");
+        verify(f.session).close(CloseStatus.SERVER_ERROR);
+    }
+    @Test void sameSocketCapabilityRefreshDoesNotWithdrawAcknowledgedAuthority() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        clearInvocations(f.auth);
+        doAnswer(inv -> {
+            // Concurrent HTTP admissions and directory queries can occur at both
+            // stages of a readiness refresh, before the replacement is committed.
+            assertEquals(State.AVAILABLE, registry.lookup(scope, fence).state());
+            return new cn.jia.agent.entity.AgentRegisterResultDTO(AGENT, TOKEN, "online");
+        }).when(f.service).register(any());
+        doAnswer(inv -> {
+            assertEquals(State.AVAILABLE, registry.lookup(scope, fence).state());
+            f.frames.add(((TextMessage) inv.getArgument(0)).getPayload());
+            return null;
+        }).when(f.session).sendMessage(any());
+        register(f, SkillExecutionFixtures.catalog());
+        verify(f.auth, never()).disconnect("socket-a");
+        verify(f.service, times(2)).register(any());
+        assertEquals(State.AVAILABLE, registry.lookup(scope, fence).state());
+    }
+
+    @Test void actualAuthenticationRecordIsProjectedBeforeRegistrationReceiptSerialization() throws Exception {
+        var f = fixture();
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))
+                .thenReturn(new AgentRuntimeAuthenticationService.Receipt("native-runtime-v1", TENANT, CLIENT, OWNER,
+                        AGENT, "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 9007199254740993L, true));
+        register(f, SkillExecutionFixtures.catalog());
+        var frames = f.frames.stream().map(json::readTree)
+                .filter(frame -> "agent.registered".equals(frame.path("messageType").asText())).toList();
+        assertEquals(1, frames.size());
+        var auth = frames.getFirst().path("data").path("runtimeAuth");
+        assertEquals(UnifiedRuntimeTestSupport.INSTALLATION, auth.path("runtimeInstallationId").asText());
+        assertFalse(auth.has("installationId"));
+        assertTrue(auth.path("sessionGeneration").isTextual());
+        assertEquals("9007199254740993", auth.path("sessionGeneration").asText());
+        assertEquals(OWNER, auth.path("ownerJiacn").asText());
+        assertFalse(auth.has("tokenDigest")); assertFalse(auth.has("sessionToken"));
+    }
+    @Test void missingOrMalformedReportReplacesPriorDirectoryWithoutDisruptingOtherRegistration() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        register(f, null); assertEquals(State.INVALID_DECLARATION, registry.lookup(scope, fence).state());
+        register(f, SkillExecutionFixtures.catalog());
+        var report = SkillExecutionFixtures.catalog(); report.put("ownerJiacn", "foreign-owner"); register(f, report);
+        assertEquals(State.INVALID_DECLARATION, registry.lookup(scope, fence).state());
+        assertTrue(f.frames.stream().anyMatch(frame -> frame.contains("agent.registered")));
+    }
+    @Test void duplicateJsonKeysRejectAndRemovePriorDirectoryWithoutNormalizingThemAway() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        String duplicated = wire(f, SkillExecutionFixtures.catalog()).replace("\"catalogRevision\":\"7\"", "\"catalogRevision\":\"7\",\"catalogRevision\":\"8\"");
+        assertTrue(duplicated.contains("\"catalogRevision\":\"8\""));
+        f.handler.handleTextMessage(f.session, new TextMessage(duplicated));
+        assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+        assertTrue(f.frames.stream().anyMatch(frame -> frame.contains("MESSAGE_INVALID")));
+    }
+    @Test void failedAuthenticationOrReceiptDeliveryNeverRetainsPriorDirectory() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        when(f.auth.bind(anyString(), any(AgentRuntimeAuthenticationService.Proof.class), any()))
+                .thenThrow(new IllegalArgumentException("private"));
+        register(f, SkillExecutionFixtures.catalog()); assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+        f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        doThrow(new java.io.IOException("private")).when(f.session).sendMessage(any());
+        register(f, SkillExecutionFixtures.catalog()); assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+    }
+    @Test void disconnectUnhealthyStateAndRevokedBindingNeverReturnCachedFacts() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        when(f.auth.isCurrentBinding(any(), any(), any(), any(), any(), any())).thenReturn(false);
+        assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+        when(f.auth.isCurrentBinding(any(), any(), any(), any(), any(), any())).thenReturn(true);
+        f.handler.afterConnectionClosed(f.session, CloseStatus.NORMAL);
+        assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+        register(f, SkillExecutionFixtures.catalog());
+        String unhealthy = wire(f, SkillExecutionFixtures.catalog()).replace("\"durableStateHealthy\":true", "\"durableStateHealthy\":false");
+        f.handler.handleTextMessage(f.session, new TextMessage(unhealthy));
+        assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
+    }
+    @Test void presenceCannotReplaceDirectoryOrGrantReadiness() throws Exception {
+        var f = fixture(); register(f, SkillExecutionFixtures.catalog());
+        var runtime = new cn.jia.agent.entity.AgentRuntimeDTO(); runtime.setAgentId(AGENT); runtime.setStatus("online");
+        when(f.service.updateStatus(eq(AGENT), any())).thenReturn(runtime);
+        String wire = wire(f, Map.of("forged", true)).replace("agent.register", "agent.presence");
+        var root=json.readTree(wire); ((tools.jackson.databind.node.ObjectNode)root.get("data")).put("status","online"); wire=json.writeValueAsString(root);
+        f.handler.handleTextMessage(f.session, new TextMessage(wire));
+        assertEquals("7", registry.lookup(scope, fence).catalog().catalogRevision());
+    }
+}

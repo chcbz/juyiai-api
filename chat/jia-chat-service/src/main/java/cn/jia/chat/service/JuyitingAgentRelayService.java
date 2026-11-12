@@ -1,0 +1,393 @@
+package cn.jia.chat.service;
+
+import cn.jia.agent.service.AgentService;
+import cn.jia.agent.service.PersonalWorkspaceTaskLinkService;
+import cn.jia.chat.deliberation.InteractionRoute;
+import cn.jia.chat.handler.AgentWebSocketHandler;
+import cn.jia.chat.entity.ChatConversationEntity;
+import cn.jia.chat.handler.dto.ChatMessageDTO;
+import cn.jia.core.context.EsContextHolder;
+import cn.jia.core.util.JsonUtil;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
+import java.util.Optional;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class JuyitingAgentRelayService {
+    private final AgentWebSocketHandler agentWebSocketHandler;
+    private final ChatConversationEventBroker chatConversationEventBroker;
+    private final BuiltinHallAgentSupport builtinHallAgentSupport;
+    private final ChatConversationService chatConversationService;
+    private final AgentService agentService;
+    private final JuyitingConversationScopeService scopeService;
+    private final PersonalWorkspaceTaskLinkService taskLinkService;
+    private final ChatDeliberationService deliberationService;
+
+    private static final String MATERIALS_AVAILABLE = "AVAILABLE";
+    private static final String MATERIALS_UNAVAILABLE = "UNAVAILABLE";
+
+    public JuyitingAgentRelayResult relay(
+            ChatMessageDTO chatMessage, String conversationId,
+            ServerResolvedSender sender, InteractionRoute route) {
+        JuyitingConversationScope requestedScope = scopeService.resolve(chatMessage);
+        if (!JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING.equals(scopeService.resolveConversationType(chatMessage))
+                || requestedScope.scopeType() == null) {
+            return new JuyitingAgentRelayResult(false, Mono.just(false), Flux.empty());
+        }
+
+        ServerResolvedSender trustedSender = requireTrustedSender(sender);
+        String tenantId = requireIdentityPart(EsContextHolder.getContext().getTenantId());
+        String ownerJiacn = trustedSender.jiacn();
+        String ownerClientId = trustedSender.clientId();
+        JuyitingConversationScope scope;
+        try {
+            scope = scopeService.authorize(
+                    chatMessage, requestedScope, tenantId, ownerClientId);
+        } catch (RuntimeException denied) {
+            return deniedScope(conversationId, requestedScope);
+        }
+        ChatConversationEntity conversation = chatConversationService.getOwned(
+                tenantId, ownerJiacn, ownerClientId, conversationId);
+        if (!conversationMatchesScope(conversation, scope)) {
+            return new JuyitingAgentRelayResult(true, Mono.just(true), Flux.just(JsonUtil.toSafeJson(Map.of(
+                    "error", "conversation scope mismatch",
+                    "conversationId", conversationId,
+                    "conversationType", JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING
+            ))));
+        }
+        long generation = lifecycleGeneration(conversation);
+        if (!tenantId.equals(requireIdentityPart(conversation.getTenantId()))) {
+            return deniedScope(conversationId, scope);
+        }
+
+        Optional<String> forbiddenTarget = forbiddenOwnedRosterTarget(
+                scope, tenantId, ownerClientId);
+        if (forbiddenTarget.isPresent()) {
+            return new JuyitingAgentRelayResult(true, Mono.just(true), Flux.just(JsonUtil.toSafeJson(Map.of(
+                    "error", "target outside owned roster",
+                    "agentId", forbiddenTarget.get(),
+                    "conversationId", conversationId,
+                    "conversationType", JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING,
+                    "conversationScopeType", scope.scopeType(),
+                    "conversationScopeKey", scope.scopeKey()
+            ))));
+        }
+
+        Map<String, Object> taskMaterials = trustedTaskMaterials(scope, trustedSender, tenantId);
+        ChatDeliberationService.Admission admission = deliberationService.admit(
+                tenantId, trustedSender, conversationId, generation, scope, route,
+                chatMessage, taskMaterials);
+        if (admission.replay()) {
+            return replayAdmission(admission);
+        }
+
+        // Admission commit is the only acceptance boundary. The SmartLifecycle durable relay
+        // independently claims every child DISPATCH and routes builtin/hosted work per target.
+        List<String> accepted = admission.dispatches().stream()
+                .map(dispatch -> buildAgentDeliveryEventJson(
+                        conversationId, dispatch.targetAgentId(), false, dispatch))
+                .toList();
+        Flux<String> durableEvents = requestScopedEvents(
+                admission, tenantId, ownerJiacn, ownerClientId, conversationId, generation);
+        return new JuyitingAgentRelayResult(true, Mono.just(true),
+                Flux.fromIterable(accepted).concatWith(durableEvents));
+    }
+
+    /** One POST owns one buffer; the independent conversation events stream stays live. */
+    private Flux<String> requestScopedEvents(ChatDeliberationService.Admission admission,
+            String tenantId, String ownerJiacn, String clientId, String conversationId, long generation) {
+        return Flux.using(() -> {
+                    ChatConversationEventBroker.LiveSubscription subscription =
+                            chatConversationEventBroker.subscribeBuffered(conversationId, generation,
+                                    () -> chatConversationService.isLiveGeneration(
+                                            tenantId, ownerJiacn, clientId, conversationId, generation));
+                    if (subscription == null) throw new IllegalStateException("Conversation stream unavailable");
+                    return subscription;
+                }, subscription -> readRequestTerminal(
+                        admission, tenantId, ownerJiacn, clientId, conversationId, generation)
+                        .flatMapMany(terminal -> terminal ? Flux.empty() : subscription.flux()
+                                .filter(event -> matchesRequestEvent(event, admission,
+                                        tenantId, ownerJiacn, clientId, conversationId, generation))
+                                // Each blocking transaction finishes before the next event is examined.
+                                .concatMap(event -> readRequestTerminal(admission, tenantId, ownerJiacn,
+                                                clientId, conversationId, generation)
+                                        .map(done -> new RequestFrame(event, done)), 1)
+                                .takeUntil(RequestFrame::terminal)
+                                .map(RequestFrame::payload)),
+                ChatConversationEventBroker.LiveSubscription::close)
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private Mono<Boolean> readRequestTerminal(ChatDeliberationService.Admission admission,
+            String tenantId, String ownerJiacn, String clientId, String conversationId, long generation) {
+        return Mono.fromCallable(() -> {
+            // Never recover identity from a scheduler thread's ThreadLocal.
+            ChatDeliberationService.RequestView view =
+                    deliberationService.getRequest(tenantId, ownerJiacn, clientId, admission.requestId());
+            String revision = Long.toString(admission.requestRevision());
+            String expectedGeneration = Long.toString(generation);
+            if (view == null || !Objects.equals(conversationId, admission.conversationId())
+                    || generation != admission.conversationGeneration()
+                    || !Objects.equals(admission.requestId(), view.requestId())
+                    || !revision.equals(view.requestRevision())
+                    || !conversationId.equals(view.conversationId())
+                    || !expectedGeneration.equals(view.conversationGeneration())) {
+                throw new IllegalStateException("Request scope unavailable");
+            }
+            // This completion rule is only for CHAT/INSPECT. Typed EXECUTE owns a different
+            // lifecycle: even terminal CHAT turns must not settle its execution-state stream.
+            if (view.steps() == null || view.steps().stream().anyMatch(step -> step == null
+                    || !("CHAT".equals(step.kind()) || "INSPECT".equals(step.kind())))) return false;
+            if (view.turns() == null || view.turns().isEmpty() || admission.dispatches().isEmpty()) return false;
+            Set<String> seen = new HashSet<>();
+            boolean allTerminal = true;
+            for (ChatDeliberationService.TurnView turn : view.turns()) {
+                if (turn == null || turn.turnId() == null || !seen.add(turn.turnId())
+                        || !Objects.equals(view.requestId(), turn.requestId())
+                        || !revision.equals(turn.requestRevision())
+                        || !conversationId.equals(turn.conversationId())
+                        || !expectedGeneration.equals(turn.conversationGeneration())) {
+                    throw new IllegalStateException("Request turn scope unavailable");
+                }
+                allTerminal &= turn.state() != null && TERMINAL_TURN_STATES.contains(turn.state());
+            }
+            for (ChatDeliberationService.Dispatch dispatch : admission.dispatches()) {
+                if (!seen.contains(dispatch.turnId())) return false;
+                if (view.turns().stream().noneMatch(turn -> dispatch.turnId().equals(turn.turnId())
+                        && Objects.equals(dispatch.targetAgentId(), turn.targetAgentId()))) {
+                    throw new IllegalStateException("Request turn target unavailable");
+                }
+            }
+            return view.state() != null && TERMINAL_REQUEST_STATES.contains(view.state()) && allTerminal;
+        }).subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private boolean matchesRequestEvent(String json, ChatDeliberationService.Admission admission,
+            String tenantId, String ownerJiacn, String clientId, String conversationId, long generation) {
+        try {
+            Map<?, ?> event = JsonUtil.getMapper().readValue(json, Map.class);
+            return event != null && admission.requestId().equals(event.get("requestId"))
+                    && optionalEventFieldMatches(event, "conversationId", conversationId)
+                    && optionalEventFieldMatches(event, "conversationGeneration", Long.toString(generation))
+                    && optionalEventFieldMatches(event, "requestRevision", Long.toString(admission.requestRevision()))
+                    && optionalEventFieldMatches(event, "tenantId", tenantId)
+                    && optionalEventFieldMatches(event, "ownerJiacn", ownerJiacn)
+                    && optionalEventFieldMatches(event, "clientId", clientId);
+        } catch (Exception malformed) {
+            return false;
+        }
+    }
+
+    private boolean optionalEventFieldMatches(Map<?, ?> event, String field, String expected) {
+        if (!event.containsKey(field)) return true;
+        Object value = event.get(field);
+        if (expected.equals(value)) return true;
+        // Identity strings are byte-exact; only decimal version fields admit integral JSON numbers.
+        return ("conversationGeneration".equals(field) || "requestRevision".equals(field))
+                && (value instanceof Long || value instanceof Integer) && expected.equals(value.toString());
+    }
+
+    private static final Set<String> TERMINAL_REQUEST_STATES =
+            Set.of("COMPLETED", "FAILED", "CANCELLED", "PARTIAL");
+    private static final Set<String> TERMINAL_TURN_STATES =
+            Set.of("FINAL_PERSISTED", "PUBLISHED", "FAILED", "CANCELLED");
+    private record RequestFrame(String payload, boolean terminal) { }
+
+    public String selectedAgentId(ChatMessageDTO chatMessage) {
+        JuyitingConversationScope scope = scopeService.resolve(chatMessage);
+        return scope.targetAgentId();
+    }
+
+    private Optional<String> forbiddenOwnedRosterTarget(
+            JuyitingConversationScope scope, String tenantId, String ownerClientId) {
+        // Transactional admission freezes the exact task grant for new requests and restores
+        // the original receipt for replay. An owned-roster preflight would wrongly reject B
+        // or re-authorize an old request against today's assignment.
+        if ("bounty".equals(scope.scopeType()) && scope.targetAgentIds().size()==1
+                && scope.authoritativeAgentIds().size()<=1) return Optional.empty();
+        for (String agentId : scope.targetAgentIds()) {
+            if (builtinHallAgentSupport.isBuiltinAgent(agentId)) {
+                continue;
+            }
+            try {
+                agentService.get(agentId);
+            } catch (RuntimeException error) {
+                return Optional.of(agentId);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private Map<String, Object> trustedTaskMaterials(
+            JuyitingConversationScope scope, ServerResolvedSender sender, String tenantId) {
+        if (scope.taskId() == null) {
+            return null;
+        }
+        try {
+            PersonalWorkspaceTaskLinkService.LinkListView page = taskLinkService.list(
+                    new PersonalWorkspaceTaskLinkService.Scope(
+                            tenantId, sender.clientId(), sender.jiacn()),
+                    scope.taskId(), null);
+            if (page == null || page.items() == null) {
+                return unavailableTaskMaterials();
+            }
+            List<Map<String, Object>> items = page.items().stream()
+                    .filter(link -> isActiveTaskMaterial(link, scope.taskId()))
+                    .map(link -> Map.<String, Object>of(
+                            "fileId", link.fileId(),
+                            "version", link.version(),
+                            "role", link.role()))
+                    .toList();
+            return Map.of(
+                    "status", MATERIALS_AVAILABLE,
+                    "complete", page.nextCursor() == null,
+                    "items", items);
+        } catch (RuntimeException unavailable) {
+            return unavailableTaskMaterials();
+        }
+    }
+
+    private boolean isActiveTaskMaterial(
+            PersonalWorkspaceTaskLinkService.LinkView link, String authorizedTaskId) {
+        return link != null
+                && authorizedTaskId.equals(link.taskId())
+                && "ACTIVE".equals(link.state())
+                && ("INPUT".equals(link.role()) || "REFERENCE".equals(link.role()))
+                && validMaterialFileId(link.fileId())
+                && link.version() > 0;
+    }
+
+    private boolean validMaterialFileId(String fileId) {
+        return fileId != null
+                && !fileId.isBlank()
+                && fileId.equals(fileId.strip())
+                && fileId.codePointCount(0, fileId.length()) <= 100
+                && fileId.chars().noneMatch(Character::isISOControl);
+    }
+
+    private Map<String, Object> unavailableTaskMaterials() {
+        return Map.of(
+                "status", MATERIALS_UNAVAILABLE,
+                "complete", false,
+                "items", List.of());
+    }
+    private boolean conversationMatchesScope(
+            ChatConversationEntity conversation, JuyitingConversationScope requested) {
+        if (conversation == null
+                || !JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING.equals(
+                conversation.getConversationType())
+                || !java.util.Objects.equals(conversation.getConversationScopeType(), requested.scopeType())
+                || !java.util.Objects.equals(conversation.getConversationScopeKey(), requested.scopeKey())
+                || !java.util.Objects.equals(conversation.getTaskId(), requested.taskId())) {
+            return false;
+        }
+        String trustedTarget = conversation.getTargetAgentId();
+        if (trustedTarget != null && !trustedTarget.isBlank()
+                && requested.targetAgentIds().stream().anyMatch(
+                agentId -> !trustedTarget.equals(agentId))) {
+            return false;
+        }
+        List<String> persistedTargets;
+        try {
+            persistedTargets = scopeService.parsePersistedTargetAgentIds(
+                    conversation.getTargetAgentIds());
+        } catch (RuntimeException invalidPersistedScope) {
+            return false;
+        }
+        return !persistedTargets.isEmpty()
+                && persistedTargets.containsAll(requested.targetAgentIds());
+    }
+
+    private JuyitingAgentRelayResult deniedScope(
+            String conversationId, JuyitingConversationScope scope) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("error", "task conversation scope unavailable");
+        event.put("conversationId", conversationId);
+        event.put("conversationType", JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING);
+        if (scope != null) {
+            event.put("conversationScopeType", scope.scopeType());
+            event.put("conversationScopeKey", scope.scopeKey());
+        }
+        return new JuyitingAgentRelayResult(
+                true, Mono.just(true), Flux.just(JsonUtil.toSafeJson(event)));
+    }
+
+    private long lifecycleGeneration(ChatConversationEntity conversation) {
+        Long generation = conversation == null ? null : conversation.getLifecycleGeneration();
+        if (generation == null) {
+            return 1L;
+        }
+        if (generation < 1) {
+            throw new IllegalStateException("Conversation generation is unavailable");
+        }
+        return generation;
+    }
+
+    private ServerResolvedSender requireTrustedSender(ServerResolvedSender sender) {
+        if (sender == null || !ServerResolvedSender.USER_TYPE.equals(sender.type())) {
+            throw new IllegalStateException("Authenticated sender identity is unavailable");
+        }
+        requireIdentityPart(sender.jiacn());
+        requireIdentityPart(sender.clientId());
+        if (sender.displayName() == null || sender.displayName().isBlank()
+                || !sender.displayName().equals(sender.displayName().strip())
+                || sender.displayName().codePointCount(0, sender.displayName().length()) > 100
+                || sender.displayName().codePoints().anyMatch(Character::isISOControl)) {
+            throw new IllegalStateException("Authenticated sender identity is unavailable");
+        }
+        return sender;
+    }
+
+    private String requireIdentityPart(String value) {
+        if (value == null || value.isBlank() || !value.equals(value.strip())
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalStateException("Conversation identity is unavailable");
+        }
+        return value;
+    }
+
+    private String buildAgentDeliveryEventJson(String conversationId, String agentId, boolean delivered,
+            ChatDeliberationService.Dispatch dispatch) {
+        return JsonUtil.toSafeJson(Map.of(
+                "agentDelivery", Map.of("agentId", agentId, "delivered", delivered,
+                        "accepted", true, "state", delivered ? "DISPATCHED" : "QUEUED"),
+                "conversationId", conversationId,
+                "conversationType", JuyitingConversationScopeService.CONVERSATION_TYPE_JUYITING,
+                "requestId", dispatch == null ? "" : dispatch.requestId(),
+                "turnId", dispatch == null ? "" : dispatch.turnId(),
+                "dispatchId", dispatch == null ? "" : dispatch.dispatchId(),
+                "targetAgentId", agentId,
+                "eventId", UUID.randomUUID().toString(),
+                "eventVersion", "1",
+                "occurredAt", Long.toString(System.currentTimeMillis())));
+    }
+
+    private JuyitingAgentRelayResult replayAdmission(ChatDeliberationService.Admission admission) {
+        List<String> events = admission.dispatches().stream().map(dispatch -> JsonUtil.toSafeJson(Map.ofEntries(
+                Map.entry("type", "chat_request_replay"),
+                Map.entry("conversationId", admission.conversationId()),
+                Map.entry("requestId", admission.requestId()),
+                Map.entry("requestRevision", Long.toString(admission.requestRevision())),
+                Map.entry("turnId", dispatch.turnId()),
+                Map.entry("dispatchId", dispatch.dispatchId()),
+                Map.entry("targetAgentId", dispatch.targetAgentId()),
+                Map.entry("state", dispatch.state()),
+                Map.entry("eventId", UUID.randomUUID().toString()),
+                Map.entry("eventVersion", "1"),
+                Map.entry("occurredAt", Long.toString(System.currentTimeMillis()))))).toList();
+        return new JuyitingAgentRelayResult(true, Mono.just(true), Flux.fromIterable(events));
+    }
+
+}

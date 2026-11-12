@@ -1,0 +1,2540 @@
+package cn.jia.agent.config;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Component;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.List;
+import java.util.Locale;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+@org.springframework.context.annotation.Profile("schema-maintenance")
+public class AgentSchemaInitializer implements InitializingBean {
+    private final JdbcTemplate jdbcTemplate;
+    private Boolean h2Database;
+
+    @Override
+    public void afterPropertiesSet() {
+        ensureAgentPersonaColumns();
+        ensureAgentRuntimeColumns();
+        ensureBindingTable();
+        ensureHostedProfileTable();
+        ensureIdentitySchema();
+        ensureTaskCollaborationSchema();
+        ensureTaskNoteTable();
+        ensureSceneTables();
+        ensureTaskEventSchema();
+        ensureHistoricalEventBaselineAuditSchema();
+    }
+
+    private void ensureAgentPersonaColumns() {
+        addColumnIfMissing("agent_persona", "persona_code",
+                "persona_code VARCHAR(50) DEFAULT NULL COMMENT 'Water Margin persona code'");
+        addColumnIfMissing("agent_persona", "rank_no",
+                "rank_no INT DEFAULT NULL COMMENT 'Liangshan ranking number'");
+        addColumnIfMissing("agent_persona", "star_name",
+                "star_name VARCHAR(50) DEFAULT NULL COMMENT 'Star name'");
+        addColumnIfMissing("agent_persona", "visual_config",
+                "visual_config TEXT COMMENT 'Frontend visual config JSON'");
+        addColumnIfMissing("agent_persona", "system_agent",
+                "system_agent TINYINT(1) DEFAULT 0 COMMENT 'System controlled persona'");
+        // Scoped code/name uniqueness is installed by the explicit persona maintenance SQL.
+        // Never recreate the retired global unique index on an already migrated database.
+        addIndexIfMissing("agent_persona", "idx_agent_persona_system",
+                "CREATE INDEX idx_agent_persona_system ON agent_persona (system_agent)");
+    }
+
+    private void ensureAgentRuntimeColumns() {
+        addColumnIfMissing("agent_runtime", "execution_model",
+                "execution_model VARCHAR(200) DEFAULT NULL COMMENT 'Reported default execution model'");
+        addColumnIfMissing("agent_runtime", "owner_jiacn",
+                "owner_jiacn VARCHAR(50) DEFAULT NULL COMMENT 'Bound user Jia account'");
+        addColumnIfMissing("agent_runtime", "persona_code",
+                "persona_code VARCHAR(50) DEFAULT NULL COMMENT 'Bound persona code'");
+        addColumnIfMissing("agent_runtime", "binding_id",
+                "binding_id BIGINT DEFAULT NULL COMMENT 'Persona binding ID'");
+        addIndexIfMissing("agent_runtime", "idx_agent_runtime_owner",
+                "CREATE INDEX idx_agent_runtime_owner ON agent_runtime (client_id, owner_jiacn)");
+        addIndexIfMissing("agent_runtime", "idx_agent_runtime_persona_code",
+                "CREATE INDEX idx_agent_runtime_persona_code ON agent_runtime (persona_code)");
+    }
+
+    private void ensureBindingTable() {
+        String generatedColumnStorage = isH2Database() ? "" : " STORED";
+        String ownerJiacnColumn = "owner_jiacn VARCHAR(50) GENERATED ALWAYS AS (jiacn)"
+                + generatedColumnStorage;
+        String lifecycleColumn = "lifecycle_status VARCHAR(20) GENERATED ALWAYS AS "
+                + "(CASE status WHEN 2 THEN 'PROVISIONED' WHEN 1 THEN 'ACTIVE' "
+                + "WHEN 0 THEN 'SUSPENDED' WHEN 3 THEN 'RETIRED' ELSE NULL END)"
+                + generatedColumnStorage;
+        String activePersonaColumn = "active_persona_code VARCHAR(50) GENERATED ALWAYS AS "
+                + "(CASE WHEN status = 1 THEN persona_code ELSE NULL END)" + generatedColumnStorage;
+        String activeAgentColumn = "active_agent_id     VARCHAR(100) GENERATED ALWAYS AS "
+                + "(CASE WHEN status = 1 THEN agent_id ELSE NULL END)" + generatedColumnStorage;
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_persona_binding (
+                    id                  BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    jiacn               VARCHAR(50) NOT NULL COMMENT 'Legacy writable owner Jia account field',
+                    %s,
+                    persona_code        VARCHAR(50) NOT NULL COMMENT 'Water Margin persona code',
+                    agent_id            VARCHAR(100) NOT NULL COMMENT 'Canonical Agent ID',
+                    bound_at            BIGINT NOT NULL COMMENT 'Bind time',
+                    status              INT NOT NULL DEFAULT 1 COMMENT '2 provisioned, 1 active, 0 suspended, 3 retired',
+                    %s,
+                    %s,
+                    %s,
+                    create_time         BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time         BIGINT DEFAULT NULL COMMENT 'Update time',
+                    tenant_id           VARCHAR(50) NOT NULL DEFAULT '0' COMMENT 'Single tenant scope; always 0',
+                    client_id           VARCHAR(50) DEFAULT NULL COMMENT 'Owner-scope client ID',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_agent_binding_active_persona (tenant_id, client_id, active_persona_code),
+                    UNIQUE KEY uk_agent_binding_active_agent (active_agent_id),
+                    KEY idx_agent_binding_user (client_id, jiacn, status),
+                    KEY idx_agent_binding_agent (client_id, agent_id, status),
+                    KEY idx_agent_binding_persona (client_id, persona_code, status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Durable Agent persona binding history'
+                """.formatted(ownerJiacnColumn, lifecycleColumn, activePersonaColumn, activeAgentColumn));
+        // Existing binding contracts are migrated only by explicitly approved maintenance.
+        // Reject drift before generated-column/index additions can mask an old tenant contract.
+        validateBindingTenantContract();
+        addRequiredColumnIfMissing("agent_persona_binding", "owner_jiacn", ownerJiacnColumn);
+        addRequiredColumnIfMissing("agent_persona_binding", "lifecycle_status", lifecycleColumn);
+        addRequiredColumnIfMissing("agent_persona_binding", "active_persona_code", activePersonaColumn);
+        addRequiredColumnIfMissing("agent_persona_binding", "active_agent_id", activeAgentColumn);
+        ensureRequiredIndex("agent_persona_binding", "uk_agent_binding_active_persona", true,
+                List.of("tenant_id", "client_id", "active_persona_code"),
+                "CREATE UNIQUE INDEX uk_agent_binding_active_persona "
+                        + "ON agent_persona_binding (tenant_id, client_id, active_persona_code)");
+        ensureRequiredIndex("agent_persona_binding", "uk_agent_binding_active_agent", true,
+                List.of("active_agent_id"),
+                "CREATE UNIQUE INDEX uk_agent_binding_active_agent ON agent_persona_binding (active_agent_id)");
+    }
+
+    void validateBindingTenantContract() {
+        boolean h2 = isH2Database();
+        String schema = h2 ? "SCHEMA()" : "DATABASE()";
+        List<java.util.Map<String, Object>> columns = jdbcTemplate.queryForList("""
+                SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE, COLUMN_DEFAULT
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND LOWER(table_name) = 'agent_persona_binding'
+                  AND LOWER(column_name) = 'tenant_id'
+                """.formatted(schema));
+        if (columns.size() != 1) {
+            throw new IllegalStateException("Agent binding tenant column catalog drift");
+        }
+        java.util.Map<String, Object> column = columns.getFirst();
+        Object length = column.get("CHARACTER_MAXIMUM_LENGTH");
+        String expectedType = h2 ? "character varying" : "varchar";
+        Object defaultValue = column.get("COLUMN_DEFAULT");
+        // H2 reports a SQL string literal; MySQL reports the actual default string.
+        if (h2 && "'0'".equals(defaultValue)) defaultValue = "0";
+        if (!expectedType.equalsIgnoreCase(String.valueOf(column.get("DATA_TYPE")))
+                || !(length instanceof Number) || ((Number) length).longValue() != 50L
+                || !"NO".equalsIgnoreCase(String.valueOf(column.get("IS_NULLABLE")))
+                || !"0".equals(defaultValue)) {
+            throw new IllegalStateException("Agent binding tenant type/nullability/default drift");
+        }
+    }
+
+    private void ensureHostedProfileTable() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_hosted_profile (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    binding_id BIGINT NOT NULL,
+                    owner_jiacn VARCHAR(50) NOT NULL,
+                    canonical_agent_id VARCHAR(100) NOT NULL,
+                    persona_code VARCHAR(50) NOT NULL,
+                    profile_key VARCHAR(160) NOT NULL,
+                    api_key_id VARCHAR(100) NOT NULL,
+                    lifecycle_state VARCHAR(32) NOT NULL,
+                    resume_state VARCHAR(32) DEFAULT NULL,
+                    generation BIGINT NOT NULL DEFAULT 0,
+                    desired_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    last_error VARCHAR(1000) DEFAULT NULL,
+                    create_time BIGINT DEFAULT NULL,
+                    update_time BIGINT DEFAULT NULL,
+                    tenant_id VARCHAR(50) NOT NULL,
+                    client_id VARCHAR(50) NOT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_hosted_binding (binding_id),
+                    UNIQUE KEY uk_hosted_profile_key (profile_key),
+                    UNIQUE KEY uk_hosted_api_key (api_key_id),
+                    KEY idx_hosted_scope_state (tenant_id,client_id,owner_jiacn,lifecycle_state)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Durable hosted Agent profile publication state'
+                """);
+        for (String forbidden : List.of("api_key", "apikey", "credential", "secret")) {
+            if (!inspectColumnDefinition("agent_hosted_profile", forbidden).isEmpty()) {
+                throw new IllegalStateException("PWA-HOSTED-P0 forbids plaintext credential column " + forbidden);
+            }
+        }
+        ensureRequiredIndex("agent_hosted_profile", "uk_hosted_binding", true, List.of("binding_id"), "");
+        ensureRequiredIndex("agent_hosted_profile", "uk_hosted_profile_key", true, List.of("profile_key"), "");
+        ensureRequiredIndex("agent_hosted_profile", "uk_hosted_api_key", true, List.of("api_key_id"), "");
+        ensureRequiredIndex("agent_hosted_profile", "idx_hosted_scope_state", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "lifecycle_state"), "");
+        if (!isH2Database()) validateHostedProfileSchema();
+    }
+
+    void validateHostedProfileSchema() {
+        String engine = jdbcTemplate.queryForObject("""
+                SELECT ENGINE FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = 'agent_hosted_profile'
+                """, String.class);
+        if (!"InnoDB".equalsIgnoreCase(engine)) {
+            throw new IllegalStateException("PWA-HOSTED-P0 table must use InnoDB but was " + engine);
+        }
+        validateTableCollation("agent_hosted_profile", "utf8mb4_0900_bin");
+
+        java.util.Map<String, BackfillColumnExpectation> expected = java.util.Map.ofEntries(
+                java.util.Map.entry("id", new BackfillColumnExpectation("agent_hosted_profile", "id", "bigint", "bigint", false, null, null)),
+                java.util.Map.entry("binding_id", new BackfillColumnExpectation("agent_hosted_profile", "binding_id", "bigint", "bigint", false, null, null)),
+                java.util.Map.entry("owner_jiacn", new BackfillColumnExpectation("agent_hosted_profile", "owner_jiacn", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("canonical_agent_id", new BackfillColumnExpectation("agent_hosted_profile", "canonical_agent_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("persona_code", new BackfillColumnExpectation("agent_hosted_profile", "persona_code", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("profile_key", new BackfillColumnExpectation("agent_hosted_profile", "profile_key", "varchar", "varchar(160)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("api_key_id", new BackfillColumnExpectation("agent_hosted_profile", "api_key_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("lifecycle_state", new BackfillColumnExpectation("agent_hosted_profile", "lifecycle_state", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("resume_state", new BackfillColumnExpectation("agent_hosted_profile", "resume_state", "varchar", "varchar(32)", true, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("generation", new BackfillColumnExpectation("agent_hosted_profile", "generation", "bigint", "bigint", false, "0", null)),
+                java.util.Map.entry("desired_enabled", new BackfillColumnExpectation("agent_hosted_profile", "desired_enabled", "tinyint", "tinyint(1)", false, "1", null)),
+                java.util.Map.entry("last_error", new BackfillColumnExpectation("agent_hosted_profile", "last_error", "varchar", "varchar(1000)", true, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("create_time", new BackfillColumnExpectation("agent_hosted_profile", "create_time", "bigint", "bigint", true, null, null)),
+                java.util.Map.entry("update_time", new BackfillColumnExpectation("agent_hosted_profile", "update_time", "bigint", "bigint", true, null, null)),
+                java.util.Map.entry("tenant_id", new BackfillColumnExpectation("agent_hosted_profile", "tenant_id", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin")),
+                java.util.Map.entry("client_id", new BackfillColumnExpectation("agent_hosted_profile", "client_id", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin")));
+        java.util.Map<String, BackfillColumnDefinition> actual = new java.util.LinkedHashMap<>();
+        jdbcTemplate.query("""
+                SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
+                       COLLATION_NAME, EXTRA
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = 'agent_hosted_profile'
+                ORDER BY ORDINAL_POSITION
+                """, rs -> {
+            actual.put(rs.getString("COLUMN_NAME"), new BackfillColumnDefinition(
+                    rs.getString("DATA_TYPE"), rs.getString("COLUMN_TYPE"),
+                    "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                    rs.getString("COLUMN_DEFAULT"), rs.getString("COLLATION_NAME"),
+                    rs.getString("EXTRA")));
+        });
+        if (!actual.keySet().equals(expected.keySet())) {
+            throw new IllegalStateException("PWA-HOSTED-P0 column set drift: " + actual.keySet());
+        }
+        for (var entry : expected.entrySet()) {
+            BackfillColumnExpectation want = entry.getValue();
+            BackfillColumnDefinition got = actual.get(entry.getKey());
+            boolean matches = want.dataType().equalsIgnoreCase(got.dataType())
+                    && normalizeSql(want.columnType()).equals(normalizeSql(got.columnType()))
+                    && want.nullable() == got.nullable()
+                    && java.util.Objects.equals(want.defaultValue(), got.defaultValue())
+                    && (want.collation() == null ? got.collation() == null
+                    : want.collation().equalsIgnoreCase(got.collation()));
+            if ("id".equals(entry.getKey())) matches &= "auto_increment".equalsIgnoreCase(got.extra());
+            else matches &= got.extra() == null || got.extra().isBlank();
+            if (!matches) throw new IllegalStateException(
+                    "PWA-HOSTED-P0 column drift at " + entry.getKey() + ": " + got);
+        }
+
+        java.util.Set<String> expectedIndexes = java.util.Set.of("PRIMARY", "uk_hosted_binding",
+                "uk_hosted_profile_key", "uk_hosted_api_key", "idx_hosted_scope_state");
+        java.util.Set<String> actualIndexes = new java.util.HashSet<>(jdbcTemplate.queryForList("""
+                SELECT DISTINCT INDEX_NAME FROM information_schema.statistics
+                WHERE table_schema = DATABASE() AND table_name = 'agent_hosted_profile'
+                """, String.class));
+        if (!actualIndexes.equals(expectedIndexes)) {
+            throw new IllegalStateException("PWA-HOSTED-P0 index set drift: " + actualIndexes);
+        }
+        ensureRequiredIndex("agent_hosted_profile", "PRIMARY", true, List.of("id"), "");
+
+        Integer foreignKeyCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.table_constraints
+                WHERE constraint_schema=DATABASE() AND table_name='agent_hosted_profile'
+                  AND constraint_type='FOREIGN KEY'
+                """, Integer.class);
+        if (foreignKeyCount == null || foreignKeyCount != 0) {
+            throw new IllegalStateException("PWA-HOSTED-P0 table must not have foreign keys");
+        }
+        Integer triggerCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.triggers
+                WHERE trigger_schema=DATABASE() AND event_object_table='agent_hosted_profile'
+                """, Integer.class);
+        if (triggerCount == null || triggerCount != 0) {
+            throw new IllegalStateException("PWA-HOSTED-P0 table must not have triggers");
+        }
+    }
+
+    private void validateExistingIdentityTables(boolean validateTriggers) {
+        boolean registryExists = tableExists("agent_identity_registry");
+        boolean aliasExists = tableExists("agent_identity_alias");
+        if (registryExists != aliasExists) {
+            throw new IllegalStateException(
+                    "A02 identity schema is partial: registry and alias tables must exist together");
+        }
+        if (!registryExists) {
+            return;
+        }
+
+        validateIdentityColumn("agent_identity_registry", "canonical_agent_id",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "canonical_type",
+                "varchar", "varchar(32)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "lifecycle_status",
+                "varchar", "varchar(20)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "client_id",
+                "varchar", "varchar(50)", true, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "owner_jiacn",
+                "varchar", "varchar(50)", true, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "tenant_id",
+                "varchar", "varchar(50)", true, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_registry", "binding_id",
+                "bigint", "bigint", true, null, null);
+        validateIdentityColumn("agent_identity_registry", "audit_reason",
+                "varchar", "varchar(1000)", false, "utf8mb4_0900_bin", null);
+
+        validateIdentityColumn("agent_identity_alias", "registry_id",
+                "bigint", "bigint", false, null, null);
+        validateIdentityColumn("agent_identity_alias", "canonical_agent_id",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "alias_type",
+                "varchar", "varchar(32)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "alias_value",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "alias_status",
+                "varchar", "varchar(20)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "client_id",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "owner_jiacn",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "tenant_id",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_identity_alias", "active_key",
+                "tinyint", "tinyint", true, null,
+                "(case when ((alias_status = 'ACTIVE') and (valid_to is null)) then 1 else null end)");
+
+        validateIdentityColumn("agent_identity_registry", "live_agent_id",
+                "varchar", "varchar(100)", true, "utf8mb4_0900_bin",
+                "(case when (lifecycle_status in ('PROVISIONED','ACTIVE')) then canonical_agent_id else null end)");
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_live_agent", true,
+                List.of("live_agent_id"), "");
+        ensureRequiredIndex("agent_identity_registry", "idx_identity_registry_agent", false,
+                List.of("canonical_agent_id"), "");
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_binding", true,
+                List.of("binding_id"), "");
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_alias_target", true,
+                List.of("id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id"), "");
+        ensureRequiredIndex("agent_identity_registry", "idx_identity_registry_scope_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "lifecycle_status"), "");
+        ensureRequiredIndex("agent_identity_alias", "uk_identity_alias_active", true,
+                List.of("client_id", "owner_jiacn", "alias_type", "alias_value", "active_key"), "");
+        ensureRequiredIndex("agent_identity_alias", "idx_identity_alias_registry", false,
+                List.of("registry_id", "alias_status"), "");
+        ensureRequiredIndex("agent_identity_alias", "idx_identity_alias_canonical", false,
+                List.of("canonical_agent_id", "alias_status"), "");
+
+        if (!isH2Database()) {
+            validateTableCollation("agent_identity_registry", "utf8mb4_0900_bin");
+            validateTableCollation("agent_identity_alias", "utf8mb4_0900_bin");
+            validateIdentityAliasForeignKey();
+            if (validateTriggers) {
+                validateIdentityTriggers();
+            }
+        }
+    }
+
+    private void validateRuntimeIdentityProjection() {
+        if (!tableExists("agent_runtime")) {
+            return;
+        }
+        validateIdentityColumn("agent_runtime", "owner_jiacn",
+                "varchar", "varchar(50)", true, null, null);
+        validateIdentityColumn("agent_runtime", "persona_code",
+                "varchar", "varchar(50)", true, null, null);
+        validateIdentityColumn("agent_runtime", "binding_id",
+                "bigint", "bigint", true, null, null);
+        ensureRequiredIndex("agent_runtime", "idx_agent_runtime_owner", false,
+                List.of("client_id", "owner_jiacn"), "");
+        ensureRequiredIndex("agent_runtime", "idx_agent_runtime_persona_code", false,
+                List.of("persona_code"), "");
+    }
+
+    private void validateIdentityColumn(
+            String table, String column, String dataType, String columnType,
+            boolean nullable, String collation, String generationExpression) {
+        List<ColumnDefinition> definitions = inspectColumnDefinition(table, column);
+        if (definitions.size() != 1) {
+            throw new IllegalStateException("A02 required column " + table + "." + column
+                    + " is missing or duplicated");
+        }
+        ColumnDefinition actual = definitions.get(0);
+        boolean matches = dataType.equalsIgnoreCase(actual.dataType())
+                && normalizeSql(columnType).equals(normalizeSql(actual.columnType()))
+                && nullable == actual.nullable();
+        if (collation != null && !isH2Database()) {
+            matches &= collation.equalsIgnoreCase(actual.collation());
+        }
+        if (generationExpression != null) {
+            matches &= normalizeIdentityExpression(generationExpression)
+                    .equals(normalizeIdentityExpression(actual.generationExpression()));
+        } else {
+            matches &= actual.generationExpression() == null
+                    || actual.generationExpression().isBlank();
+        }
+        if (!matches) {
+            throw new IllegalStateException("A02 required column " + table + "." + column
+                    + " has incompatible type/nullability/collation/generated expression: " + actual);
+        }
+    }
+
+    private List<ColumnDefinition> inspectColumnDefinition(String table, String column) {
+        if (isH2Database()) {
+            return jdbcTemplate.query("""
+                    SELECT DATA_TYPE, DECLARED_DATA_TYPE AS COLUMN_TYPE, IS_NULLABLE,
+                           COLLATION_NAME, GENERATION_EXPRESSION
+                    FROM information_schema.columns
+                    WHERE table_schema = SCHEMA()
+                      AND LOWER(table_name) = LOWER(?)
+                      AND LOWER(column_name) = LOWER(?)
+                    """, (rs, rowNum) -> new ColumnDefinition(
+                    rs.getString("DATA_TYPE"), rs.getString("COLUMN_TYPE"),
+                    "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                    rs.getString("COLLATION_NAME"), rs.getString("GENERATION_EXPRESSION")),
+                    table, column);
+        }
+        return jdbcTemplate.query("""
+                SELECT DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLLATION_NAME, GENERATION_EXPRESSION
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, (rs, rowNum) -> new ColumnDefinition(
+                rs.getString("DATA_TYPE"), rs.getString("COLUMN_TYPE"),
+                "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                rs.getString("COLLATION_NAME"), rs.getString("GENERATION_EXPRESSION")),
+                table, column);
+    }
+
+    private void validateTableCollation(String table, String expected) {
+        String actual = jdbcTemplate.queryForObject("""
+                SELECT TABLE_COLLATION FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, String.class, table);
+        if (!expected.equalsIgnoreCase(actual)) {
+            throw new IllegalStateException("A02 identity table " + table
+                    + " must use binary collation " + expected + " but was " + actual);
+        }
+    }
+
+    private void validateIdentityAliasForeignKey() {
+        List<ForeignKeyColumn> columns = jdbcTemplate.query("""
+                SELECT kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME,
+                       kcu.REFERENCED_COLUMN_NAME, kcu.ORDINAL_POSITION,
+                       rc.UPDATE_RULE, rc.DELETE_RULE
+                FROM information_schema.key_column_usage kcu
+                JOIN information_schema.referential_constraints rc
+                  ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+                 AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+                  AND kcu.TABLE_NAME = 'agent_identity_alias'
+                  AND kcu.CONSTRAINT_NAME = 'fk_identity_alias_registry_scope'
+                ORDER BY kcu.ORDINAL_POSITION
+                """, (rs, rowNum) -> new ForeignKeyColumn(
+                rs.getString("COLUMN_NAME"), rs.getString("REFERENCED_TABLE_NAME"),
+                rs.getString("REFERENCED_COLUMN_NAME"), rs.getInt("ORDINAL_POSITION"),
+                rs.getString("UPDATE_RULE"), rs.getString("DELETE_RULE")));
+        List<String> expectedColumns = List.of(
+                "registry_id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id");
+        List<String> expectedReferencedColumns = List.of(
+                "id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id");
+        boolean matches = columns.size() == expectedColumns.size();
+        for (int i = 0; matches && i < columns.size(); i++) {
+            ForeignKeyColumn column = columns.get(i);
+            matches = expectedColumns.get(i).equalsIgnoreCase(column.column())
+                    && expectedReferencedColumns.get(i).equalsIgnoreCase(column.referencedColumn())
+                    && "agent_identity_registry".equalsIgnoreCase(column.referencedTable())
+                    && column.position() == i + 1
+                    && "RESTRICT".equalsIgnoreCase(column.updateRule())
+                    && "RESTRICT".equalsIgnoreCase(column.deleteRule());
+        }
+        if (!matches) {
+            throw new IllegalStateException(
+                    "A02 alias composite FK definition is missing or incompatible");
+        }
+    }
+
+    private void validateIdentityTriggers() {
+        java.util.Map<String, TriggerDefinition> expected = expectedIdentityTriggers();
+        List<TriggerDefinition> actual = jdbcTemplate.query("""
+                SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING,
+                       EVENT_MANIPULATION, ACTION_STATEMENT
+                FROM information_schema.triggers
+                WHERE trigger_schema = DATABASE()
+                  AND trigger_name IN (
+                    'trg_identity_registry_immutable_update', 'trg_identity_registry_no_delete',
+                    'trg_identity_alias_immutable_update', 'trg_identity_alias_no_delete')
+                """, (rs, rowNum) -> new TriggerDefinition(
+                rs.getString("TRIGGER_NAME"), rs.getString("EVENT_OBJECT_TABLE"),
+                rs.getString("ACTION_TIMING"), rs.getString("EVENT_MANIPULATION"),
+                rs.getString("ACTION_STATEMENT")));
+        if (actual.size() != expected.size()) {
+            throw new IllegalStateException("A02 requires four exact identity protection triggers");
+        }
+        for (TriggerDefinition trigger : actual) {
+            TriggerDefinition required = expected.get(trigger.name());
+            boolean matches = required != null
+                    && required.table().equalsIgnoreCase(trigger.table())
+                    && required.timing().equalsIgnoreCase(trigger.timing())
+                    && required.event().equalsIgnoreCase(trigger.event())
+                    && normalizeSql(required.statement()).equals(normalizeSql(trigger.statement()));
+            if (!matches) {
+                throw new IllegalStateException("A02 trigger " + trigger.name()
+                        + " has an incompatible definition");
+            }
+        }
+    }
+
+    private java.util.Map<String, TriggerDefinition> expectedIdentityTriggers() {
+        return java.util.Map.of(
+                "trg_identity_registry_immutable_update", new TriggerDefinition(
+                        "trg_identity_registry_immutable_update", "agent_identity_registry", "BEFORE", "UPDATE", """
+                        BEGIN
+                            IF NOT (NEW.canonical_agent_id <=> OLD.canonical_agent_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: canonical_agent_id is immutable after insert';
+                            END IF;
+                            IF NOT (NEW.canonical_type <=> OLD.canonical_type) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: canonical_type is immutable after insert';
+                            END IF;
+                            IF NOT (NEW.client_id <=> OLD.client_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: client_id is immutable after insert';
+                            END IF;
+                            IF NOT (NEW.owner_jiacn <=> OLD.owner_jiacn) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: owner_jiacn is immutable after insert';
+                            END IF;
+                            IF NOT (NEW.tenant_id <=> OLD.tenant_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: tenant_id is immutable after insert';
+                            END IF;
+                            IF NOT (NEW.binding_id <=> OLD.binding_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: binding_id is immutable after insert';
+                            END IF;
+                            IF OLD.lifecycle_status = 'RETIRED' AND NEW.lifecycle_status <> 'RETIRED' THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: RETIRED identity cannot be resurrected';
+                            END IF;
+                        END
+                        """),
+                "trg_identity_registry_no_delete", new TriggerDefinition(
+                        "trg_identity_registry_no_delete", "agent_identity_registry", "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: physical delete of identity registry is forbidden';
+                        END
+                        """),
+                "trg_identity_alias_immutable_update", new TriggerDefinition(
+                        "trg_identity_alias_immutable_update", "agent_identity_alias", "BEFORE", "UPDATE", """
+                        BEGIN
+                            IF NOT (NEW.registry_id <=> OLD.registry_id)
+                               OR NOT (NEW.canonical_agent_id <=> OLD.canonical_agent_id)
+                               OR NOT (NEW.alias_type <=> OLD.alias_type)
+                               OR NOT (NEW.alias_value <=> OLD.alias_value)
+                               OR NOT (NEW.client_id <=> OLD.client_id)
+                               OR NOT (NEW.owner_jiacn <=> OLD.owner_jiacn)
+                               OR NOT (NEW.tenant_id <=> OLD.tenant_id) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: alias identity and owner scope are immutable';
+                            END IF;
+                            IF OLD.alias_status = 'REVOKED' AND NEW.alias_status = 'ACTIVE' THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: REVOKED alias cannot be reactivated';
+                            END IF;
+                        END
+                        """),
+                "trg_identity_alias_no_delete", new TriggerDefinition(
+                        "trg_identity_alias_no_delete", "agent_identity_alias", "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'A02: physical delete of identity alias is forbidden';
+                        END
+                        """));
+    }
+
+    private void createIdentityTriggers() {
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_identity_registry_immutable_update");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_identity_registry_no_delete");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_identity_alias_immutable_update");
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_identity_alias_no_delete");
+        for (TriggerDefinition trigger : expectedIdentityTriggers().values()) {
+            jdbcTemplate.execute("CREATE TRIGGER " + trigger.name() + " " + trigger.timing()
+                    + " " + trigger.event() + " ON " + trigger.table()
+                    + " FOR EACH ROW " + trigger.statement());
+        }
+    }
+
+    String normalizeSql(String sql) {
+        if (sql == null) {
+            return "";
+        }
+        return sql.toLowerCase(Locale.ROOT)
+                .replace("`", "")
+                .replace("_utf8mb4", "")
+                .replace("\\", "")
+                .replaceAll("\\s*\\(\\s*", "(")
+                .replaceAll("\\s*\\)\\s*", ")")
+                .replaceAll("\\s*,\\s*", ",")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private String normalizeIdentityExpression(String sql) {
+        if (sql == null) {
+            return "";
+        }
+        return sql.toLowerCase(Locale.ROOT)
+                .replace("`", "")
+                .replace("_utf8mb4", "")
+                .replace("\\", "")
+                .replaceAll("[()]", " ")
+                .replaceAll("\\s*,\\s*", ",")
+                .replaceAll("\\s*(<>|>=|<=|=|>|<)\\s*", "$1")
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private boolean tableExists(String table) {
+        String catalogQuery = isH2Database()
+                ? """
+                  SELECT COUNT(*) FROM information_schema.tables
+                  WHERE table_schema = SCHEMA() AND LOWER(table_name) = LOWER(?)
+                  """
+                : """
+                  SELECT COUNT(*) FROM information_schema.tables
+                  WHERE table_schema = DATABASE() AND table_name = ?
+                  """;
+        List<Integer> counts = jdbcTemplate.query(catalogQuery,
+                (rs, rowNum) -> rs.getInt(1), table);
+        return !counts.isEmpty() && counts.get(0) > 0;
+    }
+
+    static record ColumnDefinition(
+            String dataType, String columnType, boolean nullable,
+            String collation, String generationExpression) {}
+
+    static record ForeignKeyColumn(
+            String column, String referencedTable, String referencedColumn,
+            int position, String updateRule, String deleteRule) {}
+    static record TriggerDefinition(
+            String name, String table, String timing, String event, String statement) {}
+    static record BackfillColumnExpectation(
+            String table, String column, String dataType, String columnType,
+            boolean nullable, String defaultValue, String collation) {}
+    static record BackfillColumnDefinition(
+            String dataType, String columnType, boolean nullable,
+            String defaultValue, String collation, String extra) {
+        BackfillColumnDefinition(
+                String dataType, String columnType, boolean nullable,
+                String defaultValue, String collation) {
+            this(dataType, columnType, nullable, defaultValue, collation, "");
+        }
+    }
+
+    private void ensureIdentitySchema() {
+        validateRuntimeIdentityProjection();
+        boolean identityTablesAlreadyExist = tableExists("agent_identity_registry")
+                || tableExists("agent_identity_alias");
+        validateExistingIdentityTables(false);
+        String generatedColumnStorage = isH2Database() ? "" : " STORED";
+        String activeAliasColumn = "active_key TINYINT GENERATED ALWAYS AS "
+                + "( CASE WHEN alias_status = 'ACTIVE' AND valid_to IS NULL THEN 1 ELSE NULL END)"
+                + generatedColumnStorage;
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_identity_registry (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    canonical_agent_id      VARCHAR(100) NOT NULL COMMENT 'Public Agent ID | immutable per relationship | retained across invitations',
+                    canonical_type          VARCHAR(32) NOT NULL COMMENT 'OPAQUE/LEGACY_CANONICAL/SYSTEM | immutable after insert',
+                    lifecycle_status        VARCHAR(20) NOT NULL DEFAULT 'PROVISIONED' COMMENT 'PROVISIONED/ACTIVE/SUSPENDED/RETIRED | RETIRED is terminal and cannot be reverted',
+                    client_id               VARCHAR(50) DEFAULT NULL COMMENT 'Immutable owner-scope client after insert | NULL only for system identity',
+                    owner_jiacn             VARCHAR(50) DEFAULT NULL COMMENT 'Immutable owner-scope jiacn after insert | NULL only for system identity',
+                    tenant_id               VARCHAR(50) DEFAULT '0' COMMENT 'Single tenant scope; 0 for every identity including system rows',
+                    binding_id              BIGINT DEFAULT NULL COMMENT 'Audited source binding ID | immutable after insert | not an ownership substitute',
+                    provisioned_at          BIGINT DEFAULT NULL COMMENT 'Provisioned time',
+                    activated_at            BIGINT DEFAULT NULL COMMENT 'First activation time',
+                    suspended_at            BIGINT DEFAULT NULL COMMENT 'Latest suspension time',
+                    retired_at              BIGINT DEFAULT NULL COMMENT 'Retirement time | RETIRED is terminal and cannot be reverted',
+                    audit_reason            VARCHAR(1000) NOT NULL COMMENT 'Auditable creation/migration reason | immutable after insert',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time             BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    live_agent_id VARCHAR(100) GENERATED ALWAYS AS
+                        (CASE WHEN lifecycle_status IN ('PROVISIONED', 'ACTIVE') THEN canonical_agent_id ELSE NULL END)%s,
+                    UNIQUE KEY uk_identity_registry_live_agent (live_agent_id),
+                    KEY idx_identity_registry_agent (canonical_agent_id),
+                    UNIQUE KEY uk_identity_registry_binding (binding_id),
+                    UNIQUE KEY uk_identity_registry_alias_target
+                        (id, canonical_agent_id, client_id, owner_jiacn, tenant_id),
+                    KEY idx_identity_registry_scope_status (tenant_id, client_id, owner_jiacn, lifecycle_status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Durable canonical Agent identity registry | collation binary enforces exact case matching'
+                """.formatted(generatedColumnStorage));
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_identity_alias (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    registry_id             BIGINT NOT NULL COMMENT 'Target identity registry ID | immutable after insert',
+                    canonical_agent_id      VARCHAR(100) NOT NULL COMMENT 'Resolved canonical agentId | immutable after insert',
+                    alias_type              VARCHAR(32) NOT NULL DEFAULT 'LEGACY_AGENT_ID' COMMENT 'v1 online alias type | immutable after insert',
+                    alias_value             VARCHAR(100) NOT NULL COMMENT 'Legacy agent ID resolved only with full owner scope | immutable after insert',
+                    alias_status            VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE/REVOKED | once REVOKED cannot become ACTIVE again',
+                    valid_from              BIGINT NOT NULL COMMENT 'Alias activation time',
+                    valid_to                BIGINT DEFAULT NULL COMMENT 'Alias revocation time, not used directly for uniqueness',
+                    %s,
+                    client_id               VARCHAR(50) NOT NULL COMMENT 'Immutable owner-scope client after insert',
+                    owner_jiacn             VARCHAR(50) NOT NULL COMMENT 'Immutable owner-scope jiacn after insert',
+                    tenant_id               VARCHAR(50) NOT NULL COMMENT 'Single tenant scope; always 0 | immutable after insert',
+                    audit_reason            VARCHAR(1000) NOT NULL COMMENT 'Auditable alias evidence/reason',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time             BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_identity_alias_active
+                        (tenant_id, client_id, owner_jiacn, alias_type, alias_value, active_key),
+                    KEY idx_identity_alias_registry (registry_id, alias_status),
+                    KEY idx_identity_alias_canonical (canonical_agent_id, alias_status),
+
+                    CONSTRAINT fk_identity_alias_registry_scope FOREIGN KEY
+                        (registry_id, canonical_agent_id, client_id, owner_jiacn, tenant_id)
+                        REFERENCES agent_identity_registry
+                        (id, canonical_agent_id, client_id, owner_jiacn, tenant_id)
+                        ON UPDATE RESTRICT ON DELETE RESTRICT
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Scoped legacy Agent ID compatibility aliases | collation binary enforces exact case matching'
+                """.formatted(activeAliasColumn));
+
+        addRequiredColumnIfMissing("agent_identity_alias", "active_key", activeAliasColumn);
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_agent", true,
+                List.of("canonical_agent_id"),
+                "CREATE UNIQUE INDEX uk_identity_registry_agent "
+                        + "ON agent_identity_registry (canonical_agent_id)");
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_binding", true,
+                List.of("binding_id"),
+                "CREATE UNIQUE INDEX uk_identity_registry_binding ON agent_identity_registry (binding_id)");
+        ensureRequiredIndex("agent_identity_registry", "uk_identity_registry_alias_target", true,
+                List.of("id", "canonical_agent_id", "client_id", "owner_jiacn", "tenant_id"),
+                "CREATE UNIQUE INDEX uk_identity_registry_alias_target "
+                        + "ON agent_identity_registry "
+                        + "(id, canonical_agent_id, client_id, owner_jiacn, tenant_id)");
+        ensureRequiredIndex("agent_identity_registry", "idx_identity_registry_scope_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "lifecycle_status"),
+                "CREATE INDEX idx_identity_registry_scope_status "
+                        + "ON agent_identity_registry (tenant_id, client_id, owner_jiacn, lifecycle_status)");
+        ensureRequiredIndex("agent_identity_alias", "uk_identity_alias_active", true,
+                List.of("client_id", "owner_jiacn", "alias_type", "alias_value", "active_key"),
+                "CREATE UNIQUE INDEX uk_identity_alias_active "
+                        + "ON agent_identity_alias (tenant_id, client_id, owner_jiacn, alias_type, alias_value, active_key)");
+        ensureRequiredIndex("agent_identity_alias", "idx_identity_alias_registry", false,
+                List.of("registry_id", "alias_status"),
+                "CREATE INDEX idx_identity_alias_registry ON agent_identity_alias (registry_id, alias_status)");
+        ensureRequiredIndex("agent_identity_alias", "idx_identity_alias_canonical", false,
+                List.of("canonical_agent_id", "alias_status"),
+                "CREATE INDEX idx_identity_alias_canonical "
+                        + "ON agent_identity_alias (canonical_agent_id, alias_status)");
+        if (!isH2Database() && (!identityTablesAlreadyExist
+                || identityProtectionTriggerCount() == 0 && tablesAreEmpty(
+                        "agent_identity_registry", "agent_identity_alias"))) {
+            createIdentityTriggers();
+        }
+        validateExistingIdentityTables(true);
+    }
+
+    private void ensureTaskCollaborationSchema() {
+        boolean backfillIssueAlreadyExists = tableExists("agent_task_backfill_issue");
+        boolean backfillBatchAlreadyExists = tableExists("agent_task_backfill_manifest_batch");
+        boolean backfillManifestAlreadyExists = tableExists("agent_task_backfill_manifest");
+        boolean backfillRunAlreadyExists = tableExists("agent_task_backfill_run");
+        boolean backfillAuditAlreadyExists = backfillIssueAlreadyExists
+                || backfillBatchAlreadyExists || backfillManifestAlreadyExists
+                || backfillRunAlreadyExists;
+        boolean bootstrapBackfillTriggers = false;
+        if (backfillAuditAlreadyExists && !isH2Database()) {
+            if (!(backfillIssueAlreadyExists && backfillBatchAlreadyExists
+                    && backfillManifestAlreadyExists && backfillRunAlreadyExists)) {
+                throw new IllegalStateException("B09 audit schema is partial; run the exact B09 audit migration");
+            }
+            validateBackfillAuditSchema();
+            bootstrapBackfillTriggers = backfillAuditTriggerCount() == 0 && tablesAreEmpty(
+                    "agent_task_backfill_issue", "agent_task_backfill_manifest_batch",
+                    "agent_task_backfill_manifest", "agent_task_backfill_run");
+            if (!bootstrapBackfillTriggers) {
+                validateBackfillAuditTriggers();
+            }
+        }
+
+        addRequiredColumnIfMissing("agent_task_meta", "collaboration_mode",
+                "collaboration_mode VARCHAR(20) NOT NULL DEFAULT 'single' COMMENT 'single/team'");
+        addRequiredColumnIfMissing("agent_task_meta", "risk_level",
+                "risk_level VARCHAR(20) NOT NULL DEFAULT 'low' COMMENT 'low/medium/high'");
+        addRequiredColumnIfMissing("agent_task_meta", "max_agents",
+                "max_agents INT NOT NULL DEFAULT 1 COMMENT 'Maximum collaboration agent count'");
+        addRequiredColumnIfMissing("agent_task_meta", "coordinator_agent_id",
+                "coordinator_agent_id VARCHAR(100) DEFAULT NULL COMMENT 'ADR-001 canonical coordinator agentId'");
+        addRequiredColumnIfMissing("agent_task_meta", "review_required",
+                "review_required TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Whether independent review is required'");
+        addRequiredColumnIfMissing("agent_task_meta", "task_version",
+                "task_version BIGINT NOT NULL DEFAULT 0 COMMENT 'Task aggregate optimistic lock version'");
+        addRequiredColumnIfMissing("agent_task_meta", "current_event_version",
+                "current_event_version BIGINT NOT NULL DEFAULT 0 COMMENT 'Latest persisted task event version'");
+        migrateTaskMetaScopedUniqueness();
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_member (
+                    id                  BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    task_id             VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                    owner_jiacn         VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                    agent_id            VARCHAR(100) NOT NULL COMMENT 'ADR-001 canonical agentId',
+                    member_role         VARCHAR(20) NOT NULL COMMENT 'coordinator/worker/reviewer/observer',
+                    member_status       VARCHAR(20) NOT NULL DEFAULT 'invited' COMMENT 'invited/accepted/working/done/rejected/blocked/failed/left',
+                    assignment_source   VARCHAR(20) NOT NULL DEFAULT 'manual' COMMENT 'manual/auto/migration',
+                    joined_at           BIGINT DEFAULT NULL COMMENT 'Join or invitation time',
+                    accepted_at         BIGINT DEFAULT NULL COMMENT 'Acceptance time',
+                    started_at          BIGINT DEFAULT NULL COMMENT 'Work start time',
+                    completed_at        BIGINT DEFAULT NULL COMMENT 'Completion time',
+                    last_heartbeat_at   BIGINT DEFAULT NULL COMMENT 'Last member heartbeat time',
+                    failure_reason      VARCHAR(1000) DEFAULT NULL COMMENT 'Failure or blocking reason',
+                    version             BIGINT NOT NULL DEFAULT 0 COMMENT 'Optimistic lock version',
+                    tenant_id           VARCHAR(50) NOT NULL COMMENT 'Owner jiacn scope',
+                    client_id           VARCHAR(50) NOT NULL COMMENT 'OAuth/API client scope',
+                    create_time         BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time         BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_member_scope (tenant_id, client_id, owner_jiacn, task_id, agent_id),
+                    KEY idx_task_member_agent_status (tenant_id, client_id, owner_jiacn, agent_id, member_status),
+                    KEY idx_task_member_task_status (tenant_id, client_id, owner_jiacn, task_id, member_status),
+                    KEY idx_task_member_task_role (tenant_id, client_id, owner_jiacn, task_id, member_role, member_status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Scoped Agent task members'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_work_item (
+                    id                  BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    work_item_id        VARCHAR(100) NOT NULL COMMENT 'Stable work item ID',
+                    task_id             VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                    owner_jiacn         VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                    title               VARCHAR(255) NOT NULL COMMENT 'Work item title',
+                    description         TEXT COMMENT 'Work item description',
+                    work_type           VARCHAR(30) NOT NULL COMMENT 'Work item type',
+                    required_abilities  TEXT COMMENT 'Required abilities JSON array',
+                    assignee_agent_id   VARCHAR(100) DEFAULT NULL COMMENT 'ADR-001 canonical assignee agentId',
+                    status              VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT 'pending/ready/claimed/running/blocked/submitted/completed/failed/cancelled',
+                    priority            INT NOT NULL DEFAULT 0 COMMENT 'Higher value means higher priority',
+                    required_item       TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'Whether task completion requires this item',
+                    dependency_json     TEXT COMMENT 'Dependency work item IDs JSON array',
+                    lease_token         VARCHAR(100) DEFAULT NULL COMMENT 'Current claim lease token',
+                    lease_until         BIGINT DEFAULT NULL COMMENT 'Lease expiry time',
+                    attempt_count       INT NOT NULL DEFAULT 0 COMMENT 'Execution attempts',
+                    max_attempts        INT NOT NULL DEFAULT 3 COMMENT 'Maximum execution attempts',
+                    result_artifact_id  VARCHAR(100) DEFAULT NULL COMMENT 'Accepted result artifact ID',
+                    submitted_at        BIGINT DEFAULT NULL COMMENT 'Submission time',
+                    completed_at        BIGINT DEFAULT NULL COMMENT 'Review completion time',
+                    version             BIGINT NOT NULL DEFAULT 0 COMMENT 'Optimistic lock version',
+                    tenant_id           VARCHAR(50) NOT NULL COMMENT 'Owner jiacn scope',
+                    client_id           VARCHAR(50) NOT NULL COMMENT 'OAuth/API client scope',
+                    create_time         BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time         BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_work_item_scope (tenant_id, client_id, owner_jiacn, work_item_id),
+                    KEY idx_work_item_task_status (tenant_id, client_id, owner_jiacn, task_id, status, priority),
+                    KEY idx_work_item_assignee_status (tenant_id, client_id, owner_jiacn, assignee_agent_id, status, lease_until),
+                    KEY idx_work_item_lease (status, lease_until, id),
+                    KEY idx_work_item_task_required (tenant_id, client_id, owner_jiacn, task_id, required_item, status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Scoped Agent task work items'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_backfill_issue (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    issue_key               CHAR(64) NOT NULL COMMENT 'Deterministic SHA-256 issue identity',
+                    meta_id                 BIGINT NOT NULL COMMENT 'Source agent_task_meta primary key',
+                    task_id                 VARCHAR(100) NOT NULL COMMENT 'Source task ID',
+                    source_hash             CHAR(64) NOT NULL COMMENT 'SHA-256 of the original assignee field',
+                    source_format           VARCHAR(32) NOT NULL COMMENT 'Detected legacy assignee shape',
+                    source_shape            VARCHAR(32) NOT NULL COMMENT 'Parsed scalar/array/object location',
+                    source_ordinal          INT NOT NULL COMMENT 'Stable source element ordinal',
+                    raw_assignee            VARCHAR(100) DEFAULT NULL COMMENT 'Original agent_task_meta.assigned_agent_id',
+                    source_agent_id         VARCHAR(100) DEFAULT NULL COMMENT 'Parsed historical Agent ID before resolution',
+                    issue_code              VARCHAR(64) NOT NULL COMMENT 'Fail-closed B09 exception/review code',
+                    issue_reason            VARCHAR(1000) NOT NULL COMMENT 'Auditable resolution reason',
+                    first_report_sha256     CHAR(64) NOT NULL COMMENT 'First approved canonical manifest digest',
+                    last_report_sha256      CHAR(64) NOT NULL COMMENT 'Latest approved canonical manifest digest',
+                    first_seen_at           BIGINT NOT NULL COMMENT 'First apply observation time',
+                    last_seen_at            BIGINT NOT NULL COMMENT 'Latest apply observation time',
+                    occurrence_count        BIGINT NOT NULL DEFAULT 1 COMMENT 'Number of approved apply observations',
+                    last_operator           VARCHAR(100) NOT NULL COMMENT 'Latest approved migration operator',
+                    tenant_id               VARCHAR(50) DEFAULT NULL COMMENT 'Source owner jiacn scope, nullable only for audited bad history',
+                    client_id               VARCHAR(50) DEFAULT NULL COMMENT 'Source OAuth/API client scope, nullable only for audited bad history',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time             BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_backfill_issue_key (issue_key),
+                    KEY idx_task_backfill_issue_scope_task (tenant_id, client_id, task_id, issue_code),
+                    KEY idx_task_backfill_issue_code_seen (issue_code, last_seen_at, id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Auditable B09 historical task backfill exceptions'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_backfill_manifest_batch (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    report_sha256           CHAR(64) NOT NULL COMMENT 'Database-recomputed canonical manifest digest',
+                    manifest_row_count      BIGINT NOT NULL DEFAULT 0 COMMENT 'Exact sealed manifest row count',
+                    seal_status             VARCHAR(16) NOT NULL COMMENT 'LOADING/SEALED/LEGACY_UNSEALED, only SEALED is consumable',
+                    approved_operator       VARCHAR(100) NOT NULL COMMENT 'Operator/ticket that approved this manifest',
+                    approved_at             BIGINT NOT NULL COMMENT 'Approval time',
+                    sealed_at               BIGINT DEFAULT NULL COMMENT 'Seal time, non-null only when SEALED',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_backfill_manifest_batch_digest (report_sha256),
+                    KEY idx_task_backfill_manifest_batch_status (seal_status, approved_at, id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Sealed B09 canonical manifest approval batch'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_backfill_manifest (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    report_sha256           CHAR(64) NOT NULL COMMENT 'Database-recomputed canonical manifest digest',
+                    manifest_row_key        CHAR(64) NOT NULL COMMENT 'Database-verified deterministic source row identity',
+                    manifest_row_sha256     CHAR(64) NOT NULL COMMENT 'Database-recomputed source/scope/resolution digest',
+                    meta_id                 BIGINT NOT NULL COMMENT 'Approved source agent_task_meta primary key',
+                    task_id                 VARCHAR(100) NOT NULL COMMENT 'Approved source task ID',
+                    tenant_id               VARCHAR(50) DEFAULT NULL COMMENT 'Approved tenant scope',
+                    client_id               VARCHAR(50) DEFAULT NULL COMMENT 'Approved client scope',
+                    source_hash             CHAR(64) NOT NULL COMMENT 'Approved original assignee SHA-256',
+                    source_format           VARCHAR(32) NOT NULL COMMENT 'Approved source format',
+                    source_shape            VARCHAR(32) NOT NULL COMMENT 'Approved source element shape',
+                    source_ordinal          INT NOT NULL COMMENT 'Approved source element ordinal',
+                    source_agent_id         VARCHAR(100) DEFAULT NULL COMMENT 'Approved parsed source Agent ID',
+                    canonical_agent_id      VARCHAR(100) DEFAULT NULL COMMENT 'Approved canonical Agent ID',
+                    resolution_status       VARCHAR(64) NOT NULL COMMENT 'Approved row resolution',
+                    task_resolution_status  VARCHAR(32) NOT NULL COMMENT 'Approved task resolution',
+                    approved_operator       VARCHAR(100) NOT NULL COMMENT 'Operator/ticket that approved this manifest',
+                    approved_at             BIGINT NOT NULL COMMENT 'Approval time',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_backfill_manifest_row (report_sha256, manifest_row_key),
+                    KEY idx_task_backfill_manifest_meta (report_sha256, meta_id, source_ordinal, manifest_row_key),
+                    KEY idx_task_backfill_manifest_resolution
+                        (report_sha256, task_resolution_status, resolution_status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Immutable rows of a sealed B09 canonical manifest'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_backfill_run (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    run_id                  CHAR(36) NOT NULL COMMENT 'Apply run UUID',
+                    report_sha256           CHAR(64) NOT NULL COMMENT 'Approved canonical manifest digest',
+                    operator                VARCHAR(100) NOT NULL COMMENT 'Approved migration operator/ticket',
+                    manifest_row_count      BIGINT NOT NULL COMMENT 'Rows matched against sealed manifest',
+                    issue_row_count         BIGINT NOT NULL DEFAULT 0 COMMENT 'Issue observations in this run',
+                    member_insert_count     BIGINT NOT NULL DEFAULT 0 COMMENT 'Members inserted in this run',
+                    work_item_insert_count  BIGINT NOT NULL DEFAULT 0 COMMENT 'Work items inserted in this run',
+                    started_at              BIGINT NOT NULL COMMENT 'Run start time',
+                    completed_at            BIGINT NOT NULL COMMENT 'Run commit time',
+                    run_status              VARCHAR(20) NOT NULL COMMENT 'SUCCEEDED only, failures roll back',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_backfill_run_id (run_id),
+                    KEY idx_task_backfill_run_report (report_sha256, completed_at, id),
+                    KEY idx_task_backfill_run_operator (operator, completed_at, id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Immutable successful B09 apply run audit'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_request (
+                    id                  BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    request_id          VARCHAR(100) NOT NULL COMMENT 'Stable request ID',
+                    task_id             VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                    owner_jiacn         VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                    work_item_id        VARCHAR(100) DEFAULT NULL COMMENT 'Related work item ID',
+                    requester_agent_id  VARCHAR(100) NOT NULL COMMENT 'ADR-001 canonical requester agentId',
+                    target_type         VARCHAR(20) NOT NULL COMMENT 'agent/role/user/system',
+                    target_id           VARCHAR(100) NOT NULL COMMENT 'Canonical agentId, role, user or system target',
+                    request_type        VARCHAR(30) NOT NULL COMMENT 'help/clarification/dependency/review/resource/reassignment/approval',
+                    status              VARCHAR(20) NOT NULL DEFAULT 'open' COMMENT 'open/acknowledged/resolved/rejected/cancelled',
+                    priority            INT NOT NULL DEFAULT 0 COMMENT 'Higher value means higher priority',
+                    title               VARCHAR(255) NOT NULL COMMENT 'Request title',
+                    description         TEXT NOT NULL COMMENT 'Request details',
+                    response_json       MEDIUMTEXT COMMENT 'Structured response JSON',
+                    due_at              BIGINT DEFAULT NULL COMMENT 'Requested response deadline',
+                    acknowledged_at     BIGINT DEFAULT NULL COMMENT 'Acknowledgement time',
+                    resolved_at         BIGINT DEFAULT NULL COMMENT 'Resolution time',
+                    version             BIGINT NOT NULL DEFAULT 0 COMMENT 'Optimistic lock version',
+                    tenant_id           VARCHAR(50) NOT NULL COMMENT 'Owner jiacn scope',
+                    client_id           VARCHAR(50) NOT NULL COMMENT 'OAuth/API client scope',
+                    create_time         BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time         BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_task_request_scope (tenant_id, client_id, owner_jiacn, request_id),
+                    KEY idx_task_request_task_status (tenant_id, client_id, owner_jiacn, task_id, status, priority, create_time),
+                    KEY idx_task_request_target_status (tenant_id, client_id, owner_jiacn, target_type, target_id, status, due_at),
+                    KEY idx_task_request_work_item (tenant_id, client_id, owner_jiacn, work_item_id, status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Scoped Agent collaboration requests'
+                """);
+
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_artifact (
+                    id                      BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    artifact_id             VARCHAR(100) NOT NULL COMMENT 'Stable logical artifact ID',
+                    task_id                 VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                    owner_jiacn             VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                    work_item_id            VARCHAR(100) DEFAULT NULL COMMENT 'Related work item ID',
+                    producer_agent_id       VARCHAR(100) NOT NULL COMMENT 'ADR-001 canonical producer agentId',
+                    artifact_type           VARCHAR(30) NOT NULL COMMENT 'summary/document/patch/commit/test_report/analysis/dataset/link',
+                    title                   VARCHAR(255) NOT NULL COMMENT 'Artifact title',
+                    content                 MEDIUMTEXT COMMENT 'Inline artifact content',
+                    storage_uri             VARCHAR(1000) DEFAULT NULL COMMENT 'External large object location',
+                    content_hash            VARCHAR(128) DEFAULT NULL COMMENT 'Content integrity hash',
+                    artifact_version        INT NOT NULL DEFAULT 1 COMMENT 'Logical artifact version',
+                    visibility              VARCHAR(20) NOT NULL DEFAULT 'task_members' COMMENT 'task_members/reviewer/private',
+                    metadata_json           TEXT COMMENT 'Artifact metadata JSON',
+                    created_at              BIGINT NOT NULL COMMENT 'Artifact publication time',
+                    tenant_id               VARCHAR(50) NOT NULL COMMENT 'Owner jiacn scope',
+                    client_id               VARCHAR(50) NOT NULL COMMENT 'OAuth/API client scope',
+                    create_time             BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time             BIGINT DEFAULT NULL COMMENT 'Update time',
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_artifact_version (tenant_id, client_id, owner_jiacn, artifact_id, artifact_version),
+                    KEY idx_artifact_task_created (tenant_id, client_id, owner_jiacn, task_id, created_at),
+                    KEY idx_artifact_work_item (tenant_id, client_id, owner_jiacn, work_item_id, artifact_type, created_at),
+                    KEY idx_artifact_producer (tenant_id, client_id, owner_jiacn, producer_agent_id, created_at),
+                    KEY idx_artifact_hash (tenant_id, client_id, owner_jiacn, content_hash)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Scoped versioned Agent task artifacts'
+                """);
+
+        ensureRequiredIndex("agent_task_meta", "idx_agent_task_meta_scope_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "reward_status", "update_time", "id"),
+                "CREATE INDEX idx_agent_task_meta_scope_status "
+                        + "ON agent_task_meta (tenant_id, client_id, owner_jiacn, reward_status, update_time, id)");
+        ensureRequiredIndex("agent_task_meta", "idx_agent_task_meta_scope_coordinator", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "coordinator_agent_id", "reward_status"),
+                "CREATE INDEX idx_agent_task_meta_scope_coordinator "
+                        + "ON agent_task_meta (tenant_id, client_id, owner_jiacn, coordinator_agent_id, reward_status)");
+
+        ensureRequiredIndex("agent_task_member", "uk_task_member_scope", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "agent_id"),
+                "CREATE UNIQUE INDEX uk_task_member_scope "
+                        + "ON agent_task_member (tenant_id, client_id, owner_jiacn, task_id, agent_id)");
+        ensureRequiredIndex("agent_task_member", "idx_task_member_agent_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "agent_id", "member_status"),
+                "CREATE INDEX idx_task_member_agent_status "
+                        + "ON agent_task_member (tenant_id, client_id, owner_jiacn, agent_id, member_status)");
+        ensureRequiredIndex("agent_task_member", "idx_task_member_task_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "member_status"),
+                "CREATE INDEX idx_task_member_task_status "
+                        + "ON agent_task_member (tenant_id, client_id, owner_jiacn, task_id, member_status)");
+        ensureRequiredIndex("agent_task_member", "idx_task_member_task_role", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "member_role", "member_status"),
+                "CREATE INDEX idx_task_member_task_role "
+                        + "ON agent_task_member (tenant_id, client_id, owner_jiacn, task_id, member_role, member_status)");
+
+        ensureRequiredIndex("agent_task_work_item", "uk_work_item_scope", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "work_item_id"),
+                "CREATE UNIQUE INDEX uk_work_item_scope "
+                        + "ON agent_task_work_item (tenant_id, client_id, owner_jiacn, work_item_id)");
+        ensureRequiredIndex("agent_task_work_item", "idx_work_item_task_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "status", "priority"),
+                "CREATE INDEX idx_work_item_task_status "
+                        + "ON agent_task_work_item (tenant_id, client_id, owner_jiacn, task_id, status, priority)");
+        ensureRequiredIndex("agent_task_work_item", "idx_work_item_assignee_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "assignee_agent_id", "status", "lease_until"),
+                "CREATE INDEX idx_work_item_assignee_status "
+                        + "ON agent_task_work_item (tenant_id, client_id, owner_jiacn, assignee_agent_id, status, lease_until)");
+        ensureRequiredIndex("agent_task_work_item", "idx_work_item_lease", false,
+                List.of("status", "lease_until", "id"),
+                "CREATE INDEX idx_work_item_lease ON agent_task_work_item (status, lease_until, id)");
+        ensureRequiredIndex("agent_task_work_item", "idx_work_item_task_required", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "required_item", "status"),
+                "CREATE INDEX idx_work_item_task_required "
+                        + "ON agent_task_work_item (tenant_id, client_id, owner_jiacn, task_id, required_item, status)");
+
+        ensureRequiredIndex("agent_task_backfill_issue", "uk_task_backfill_issue_key", true,
+                List.of("issue_key"),
+                "CREATE UNIQUE INDEX uk_task_backfill_issue_key ON agent_task_backfill_issue (issue_key)");
+        ensureRequiredIndex("agent_task_backfill_issue", "idx_task_backfill_issue_scope_task", false,
+                List.of("tenant_id", "client_id", "task_id", "issue_code"),
+                "CREATE INDEX idx_task_backfill_issue_scope_task "
+                        + "ON agent_task_backfill_issue (tenant_id, client_id, task_id, issue_code)");
+        ensureRequiredIndex("agent_task_backfill_issue", "idx_task_backfill_issue_code_seen", false,
+                List.of("issue_code", "last_seen_at", "id"),
+                "CREATE INDEX idx_task_backfill_issue_code_seen "
+                        + "ON agent_task_backfill_issue (issue_code, last_seen_at, id)");
+
+        ensureRequiredIndex("agent_task_backfill_manifest_batch",
+                "uk_task_backfill_manifest_batch_digest", true,
+                List.of("report_sha256"),
+                "CREATE UNIQUE INDEX uk_task_backfill_manifest_batch_digest "
+                        + "ON agent_task_backfill_manifest_batch (report_sha256)");
+        ensureRequiredIndex("agent_task_backfill_manifest_batch",
+                "idx_task_backfill_manifest_batch_status", false,
+                List.of("seal_status", "approved_at", "id"),
+                "CREATE INDEX idx_task_backfill_manifest_batch_status "
+                        + "ON agent_task_backfill_manifest_batch (seal_status, approved_at, id)");
+
+        ensureRequiredIndex("agent_task_backfill_manifest", "uk_task_backfill_manifest_row", true,
+                List.of("report_sha256", "manifest_row_key"),
+                "CREATE UNIQUE INDEX uk_task_backfill_manifest_row "
+                        + "ON agent_task_backfill_manifest (report_sha256, manifest_row_key)");
+        ensureRequiredIndex("agent_task_backfill_manifest", "idx_task_backfill_manifest_meta", false,
+                List.of("report_sha256", "meta_id", "source_ordinal", "manifest_row_key"),
+                "CREATE INDEX idx_task_backfill_manifest_meta ON agent_task_backfill_manifest "
+                        + "(report_sha256, meta_id, source_ordinal, manifest_row_key)");
+        ensureRequiredIndex("agent_task_backfill_manifest", "idx_task_backfill_manifest_resolution", false,
+                List.of("report_sha256", "task_resolution_status", "resolution_status"),
+                "CREATE INDEX idx_task_backfill_manifest_resolution ON agent_task_backfill_manifest "
+                        + "(report_sha256, task_resolution_status, resolution_status)");
+
+        ensureRequiredIndex("agent_task_backfill_run", "uk_task_backfill_run_id", true,
+                List.of("run_id"),
+                "CREATE UNIQUE INDEX uk_task_backfill_run_id ON agent_task_backfill_run (run_id)");
+        ensureRequiredIndex("agent_task_backfill_run", "idx_task_backfill_run_report", false,
+                List.of("report_sha256", "completed_at", "id"),
+                "CREATE INDEX idx_task_backfill_run_report "
+                        + "ON agent_task_backfill_run (report_sha256, completed_at, id)");
+        ensureRequiredIndex("agent_task_backfill_run", "idx_task_backfill_run_operator", false,
+                List.of("operator", "completed_at", "id"),
+                "CREATE INDEX idx_task_backfill_run_operator "
+                        + "ON agent_task_backfill_run (operator, completed_at, id)");
+
+        ensureRequiredIndex("agent_task_request", "uk_task_request_scope", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "request_id"),
+                "CREATE UNIQUE INDEX uk_task_request_scope "
+                        + "ON agent_task_request (tenant_id, client_id, owner_jiacn, request_id)");
+        ensureRequiredIndex("agent_task_request", "idx_task_request_task_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "status", "priority", "create_time"),
+                "CREATE INDEX idx_task_request_task_status "
+                        + "ON agent_task_request (tenant_id, client_id, owner_jiacn, task_id, status, priority, create_time)");
+        ensureRequiredIndex("agent_task_request", "idx_task_request_target_status", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "target_type", "target_id", "status", "due_at"),
+                "CREATE INDEX idx_task_request_target_status "
+                        + "ON agent_task_request (tenant_id, client_id, owner_jiacn, target_type, target_id, status, due_at)");
+        ensureRequiredIndex("agent_task_request", "idx_task_request_work_item", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "work_item_id", "status"),
+                "CREATE INDEX idx_task_request_work_item "
+                        + "ON agent_task_request (tenant_id, client_id, owner_jiacn, work_item_id, status)");
+
+        ensureRequiredIndex("agent_task_artifact", "uk_artifact_version", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "artifact_id", "artifact_version"),
+                "CREATE UNIQUE INDEX uk_artifact_version "
+                        + "ON agent_task_artifact (tenant_id, client_id, owner_jiacn, artifact_id, artifact_version)");
+        ensureRequiredIndex("agent_task_artifact", "idx_artifact_task_created", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "created_at"),
+                "CREATE INDEX idx_artifact_task_created "
+                        + "ON agent_task_artifact (tenant_id, client_id, owner_jiacn, task_id, created_at)");
+        ensureRequiredIndex("agent_task_artifact", "idx_artifact_work_item", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "work_item_id", "artifact_type", "created_at"),
+                "CREATE INDEX idx_artifact_work_item "
+                        + "ON agent_task_artifact (tenant_id, client_id, owner_jiacn, work_item_id, artifact_type, created_at)");
+        ensureRequiredIndex("agent_task_artifact", "idx_artifact_producer", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "producer_agent_id", "created_at"),
+                "CREATE INDEX idx_artifact_producer "
+                        + "ON agent_task_artifact (tenant_id, client_id, owner_jiacn, producer_agent_id, created_at)");
+        ensureRequiredIndex("agent_task_artifact", "idx_artifact_hash", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "content_hash"),
+                "CREATE INDEX idx_artifact_hash "
+                        + "ON agent_task_artifact (tenant_id, client_id, owner_jiacn, content_hash)");
+
+        if (!isH2Database()) {
+            if (!backfillAuditAlreadyExists || bootstrapBackfillTriggers) {
+                createBackfillAuditTriggers();
+            }
+            if (backfillAuditAlreadyExists) {
+                validateBackfillAuditSchema();
+                validateBackfillAuditTriggers();
+            }
+        }
+    }
+
+    private int identityProtectionTriggerCount() {
+        return namedTriggerCount(List.of(
+                "trg_identity_registry_immutable_update", "trg_identity_registry_no_delete",
+                "trg_identity_alias_immutable_update", "trg_identity_alias_no_delete"));
+    }
+
+    private int backfillAuditTriggerCount() {
+        return namedTriggerCount(List.of(
+                "trg_task_backfill_issue_insert_guard", "trg_task_backfill_issue_update_guard",
+                "trg_task_backfill_issue_no_delete", "trg_task_backfill_manifest_batch_insert_guard",
+                "trg_task_backfill_manifest_batch_update_guard", "trg_task_backfill_manifest_batch_no_delete",
+                "trg_task_backfill_manifest_insert_guard", "trg_task_backfill_manifest_no_update",
+                "trg_task_backfill_manifest_no_delete", "trg_task_backfill_run_insert_guard",
+                "trg_task_backfill_run_no_update", "trg_task_backfill_run_no_delete"));
+    }
+
+    private int namedTriggerCount(List<String> names) {
+        String placeholders = String.join(",", java.util.Collections.nCopies(names.size(), "?"));
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.triggers "
+                        + "WHERE trigger_schema = DATABASE() AND trigger_name IN (" + placeholders + ")",
+                Integer.class, names.toArray());
+        return count == null ? 0 : count;
+    }
+
+    private boolean tablesAreEmpty(String... tables) {
+        for (String table : tables) {
+            Long count = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
+            if (count == null || count != 0L) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void migrateTaskMetaScopedUniqueness() {
+        ensureRequiredIndex("agent_task_meta", "uk_agent_task_meta_scope", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id"),
+                "CREATE UNIQUE INDEX uk_agent_task_meta_scope "
+                        + "ON agent_task_meta (tenant_id, client_id, owner_jiacn, task_id)");
+        for (String indexName : inspectSingleColumnUniqueIndexes("agent_task_meta", "task_id")) {
+            if (!indexName.matches("[A-Za-z0-9_$]+")) {
+                throw new IllegalStateException("Unsafe legacy agent_task_meta index name: " + indexName);
+            }
+            String dropSql = isH2Database()
+                    ? "DROP INDEX " + indexName
+                    : "ALTER TABLE agent_task_meta DROP INDEX `" + indexName + "`";
+            jdbcTemplate.execute(dropSql);
+        }
+        if (!inspectSingleColumnUniqueIndexes("agent_task_meta", "task_id").isEmpty()) {
+            throw new IllegalStateException(
+                    "Legacy global UNIQUE(task_id) remains on agent_task_meta");
+        }
+    }
+
+    private List<String> inspectSingleColumnUniqueIndexes(String table, String column) {
+        if (jdbcTemplate.getDataSource() == null) {
+            return List.of();
+        }
+        String sql = isH2Database() ? """
+                SELECT INDEX_NAME
+                FROM information_schema.index_columns
+                WHERE table_schema = SCHEMA()
+                  AND LOWER(table_name) = LOWER(?)
+                  AND IS_UNIQUE = TRUE
+                  AND LOWER(index_name) <> 'primary_key'
+                GROUP BY INDEX_NAME
+                HAVING COUNT(*) = 1 AND LOWER(MAX(COLUMN_NAME)) = LOWER(?)
+                ORDER BY INDEX_NAME
+                """ : """
+                SELECT INDEX_NAME
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = ?
+                  AND NON_UNIQUE = 0
+                  AND index_name <> 'PRIMARY'
+                GROUP BY INDEX_NAME
+                HAVING COUNT(*) = 1 AND LOWER(MAX(COLUMN_NAME)) = LOWER(?)
+                ORDER BY INDEX_NAME
+                """;
+        return jdbcTemplate.query(sql, (rs, rowNum) -> rs.getString("INDEX_NAME"), table, column);
+    }
+
+    private void validateBackfillAuditSchema() {
+        validateBackfillTableCollation("agent_task_backfill_issue");
+        validateBackfillTableCollation("agent_task_backfill_manifest_batch");
+        validateBackfillTableCollation("agent_task_backfill_manifest");
+        validateBackfillTableCollation("agent_task_backfill_run");
+        for (String table : List.of(
+                "agent_task_backfill_issue", "agent_task_backfill_manifest_batch",
+                "agent_task_backfill_manifest", "agent_task_backfill_run")) {
+            validateBackfillPrimaryKey(table);
+        }
+
+        List<BackfillColumnExpectation> expected = List.of(
+                new BackfillColumnExpectation("agent_task_backfill_issue", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "issue_key", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "meta_id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "task_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "source_hash", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "source_format", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "source_shape", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "source_ordinal", "int", "int", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "raw_assignee", "varchar", "varchar(100)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "source_agent_id", "varchar", "varchar(100)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "issue_code", "varchar", "varchar(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "issue_reason", "varchar", "varchar(1000)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "first_report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "last_report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "first_seen_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "last_seen_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "occurrence_count", "bigint", "bigint", false, "1", null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "last_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "tenant_id", "varchar", "varchar(50)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "client_id", "varchar", "varchar(50)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "create_time", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_issue", "update_time", "bigint", "bigint", true, null, null),
+
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "manifest_row_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "seal_status", "varchar", "varchar(16)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "approved_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "approved_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "sealed_at", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest_batch", "create_time", "bigint", "bigint", true, null, null),
+
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "manifest_row_key", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "manifest_row_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "meta_id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "task_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "tenant_id", "varchar", "varchar(50)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "client_id", "varchar", "varchar(50)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "source_hash", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "source_format", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "source_shape", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "source_ordinal", "int", "int", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "source_agent_id", "varchar", "varchar(100)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "canonical_agent_id", "varchar", "varchar(100)", true, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "resolution_status", "varchar", "varchar(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "task_resolution_status", "varchar", "varchar(32)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "approved_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "approved_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_manifest", "create_time", "bigint", "bigint", true, null, null),
+
+                new BackfillColumnExpectation("agent_task_backfill_run", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "run_id", "char", "char(36)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_run", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_run", "operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_run", "manifest_row_count", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "issue_row_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "member_insert_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "work_item_insert_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "started_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "completed_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_backfill_run", "run_status", "varchar", "varchar(20)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_backfill_run", "create_time", "bigint", "bigint", true, null, null));
+        for (BackfillColumnExpectation column : expected) {
+            validateBackfillColumn(column);
+        }
+    }
+
+    void validateBackfillPrimaryKey(String table) {
+        List<IndexColumn> primary = inspectRequiredIndex(table, "PRIMARY");
+        boolean matches = primary != null && primary.size() == 1
+                && primary.get(0).nonUnique() == 0
+                && primary.get(0).sequence() == 1
+                && primary.get(0).subPart() == null
+                && "id".equalsIgnoreCase(primary.get(0).columnName());
+        if (!matches) {
+            throw new IllegalStateException("B09 audit table " + table
+                    + " must have PRIMARY KEY (id)");
+        }
+    }
+
+    void validateBackfillColumn(BackfillColumnExpectation expected) {
+        List<BackfillColumnDefinition> actual = jdbcTemplate.query("""
+                SELECT DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
+                       COLLATION_NAME, EXTRA
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, (rs, rowNum) -> new BackfillColumnDefinition(
+                rs.getString("DATA_TYPE"), rs.getString("COLUMN_TYPE"),
+                "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                rs.getString("COLUMN_DEFAULT"), rs.getString("COLLATION_NAME"),
+                rs.getString("EXTRA")),
+                expected.table(), expected.column());
+        if (actual.size() != 1) {
+            throw new IllegalStateException("B09 audit column " + expected.table() + "."
+                    + expected.column() + " is missing or duplicated");
+        }
+        BackfillColumnDefinition column = actual.get(0);
+        boolean matches = expected.dataType().equalsIgnoreCase(column.dataType())
+                && normalizeSql(expected.columnType()).equals(normalizeSql(column.columnType()))
+                && expected.nullable() == column.nullable()
+                && java.util.Objects.equals(expected.defaultValue(), column.defaultValue())
+                && (expected.collation() == null
+                    ? column.collation() == null
+                    : expected.collation().equalsIgnoreCase(column.collation()))
+                && (!"id".equals(expected.column())
+                    || "auto_increment".equalsIgnoreCase(column.extra()));
+        if (!matches) {
+            throw new IllegalStateException("B09 audit column " + expected.table() + "."
+                    + expected.column()
+                    + " has incompatible type/null/default/collation/auto_increment: " + column);
+        }
+    }
+
+    private void validateBackfillTableCollation(String table) {
+        String actual = jdbcTemplate.queryForObject("""
+                SELECT TABLE_COLLATION FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, String.class, table);
+        if (!"utf8mb4_0900_bin".equalsIgnoreCase(actual)) {
+            throw new IllegalStateException("B09 audit table " + table
+                    + " must use utf8mb4_0900_bin but was " + actual);
+        }
+    }
+
+    void validateBackfillAuditTriggers() {
+        java.util.Map<String, TriggerDefinition> expected = expectedBackfillAuditTriggers();
+        List<TriggerDefinition> actual = jdbcTemplate.query("""
+                SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING,
+                       EVENT_MANIPULATION, ACTION_STATEMENT
+                FROM information_schema.triggers
+                WHERE trigger_schema = DATABASE()
+                  AND trigger_name IN (
+                    'trg_task_backfill_manifest_batch_insert_guard',
+                    'trg_task_backfill_manifest_batch_update_guard',
+                    'trg_task_backfill_manifest_batch_no_delete',
+                    'trg_task_backfill_manifest_insert_guard',
+                    'trg_task_backfill_manifest_no_update',
+                    'trg_task_backfill_manifest_no_delete',
+                    'trg_task_backfill_issue_insert_guard',
+                    'trg_task_backfill_issue_update_guard',
+                    'trg_task_backfill_issue_no_delete',
+                    'trg_task_backfill_run_insert_guard',
+                    'trg_task_backfill_run_no_update',
+                    'trg_task_backfill_run_no_delete')
+                """, (rs, rowNum) -> new TriggerDefinition(
+                rs.getString("TRIGGER_NAME"), rs.getString("EVENT_OBJECT_TABLE"),
+                rs.getString("ACTION_TIMING"), rs.getString("EVENT_MANIPULATION"),
+                rs.getString("ACTION_STATEMENT")));
+        if (actual.size() != expected.size()) {
+            throw new IllegalStateException("B09 requires twelve exact procedure-gated audit triggers");
+        }
+        for (TriggerDefinition trigger : actual) {
+            TriggerDefinition required = expected.get(trigger.name());
+            if (required == null
+                    || !required.table().equalsIgnoreCase(trigger.table())
+                    || !required.timing().equalsIgnoreCase(trigger.timing())
+                    || !required.event().equalsIgnoreCase(trigger.event())
+                    || !normalizeSql(required.statement()).equals(normalizeSql(trigger.statement()))) {
+                throw new IllegalStateException("B09 audit trigger " + trigger.name()
+                        + " has an incompatible table or definition");
+            }
+        }
+    }
+
+    private void createBackfillAuditTriggers() {
+        for (TriggerDefinition trigger : expectedBackfillAuditTriggers().values()) {
+            jdbcTemplate.execute("CREATE TRIGGER " + trigger.name() + " " + trigger.timing()
+                    + " " + trigger.event() + " ON " + trigger.table()
+                    + " FOR EACH ROW " + trigger.statement());
+        }
+    }
+
+    private java.util.Map<String, TriggerDefinition> expectedBackfillAuditTriggers() {
+        return java.util.Map.ofEntries(
+                java.util.Map.entry("trg_task_backfill_manifest_batch_insert_guard", new TriggerDefinition(
+                        "trg_task_backfill_manifest_batch_insert_guard", "agent_task_backfill_manifest_batch",
+                        "BEFORE", "INSERT", """
+                        BEGIN
+                            IF NEW.report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR NEW.approved_operator IS NULL
+                               OR CHAR_LENGTH(NEW.approved_operator) NOT BETWEEN 1 AND 100
+                               OR BINARY NEW.approved_operator <> BINARY TRIM(NEW.approved_operator)
+                               OR REGEXP_LIKE(NEW.approved_operator, '[[:cntrl:]]', 'c')
+                               OR NOT (
+                                   (BINARY NEW.seal_status = BINARY 'LOADING'
+                                    AND NEW.manifest_row_count = 0 AND NEW.sealed_at IS NULL
+                                    AND NEW.approved_at > 0 AND NEW.create_time = NEW.approved_at)
+                                   OR
+                                   (BINARY NEW.seal_status = BINARY 'LEGACY_UNSEALED'
+                                    AND NEW.manifest_row_count > 0 AND NEW.sealed_at IS NULL
+                                    AND NEW.approved_at > 0)
+                               ) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 manifest batch insert requires exact loading or quarantined legacy state';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_manifest_batch_update_guard", new TriggerDefinition(
+                        "trg_task_backfill_manifest_batch_update_guard", "agent_task_backfill_manifest_batch",
+                        "BEFORE", "UPDATE", """
+                        BEGIN
+                            IF NOT (
+                                BINARY OLD.seal_status = BINARY 'LOADING'
+                                AND BINARY NEW.seal_status = BINARY 'SEALED'
+                                AND OLD.manifest_row_count = 0
+                                AND NEW.manifest_row_count > 0
+                                AND NEW.sealed_at IS NOT NULL
+                                AND BINARY NEW.report_sha256 = BINARY OLD.report_sha256
+                                AND BINARY NEW.approved_operator = BINARY OLD.approved_operator
+                                AND NEW.approved_at = OLD.approved_at
+                                AND NEW.create_time <=> OLD.create_time
+                                AND (SELECT COUNT(*) FROM agent_task_backfill_manifest m
+                                     WHERE BINARY m.report_sha256 = BINARY OLD.report_sha256
+                                       AND BINARY m.approved_operator = BINARY OLD.approved_operator
+                                       AND m.approved_at = OLD.approved_at) = NEW.manifest_row_count
+                            ) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 manifest batch permits only exact LOADING to SEALED transition';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_manifest_batch_no_delete", new TriggerDefinition(
+                        "trg_task_backfill_manifest_batch_no_delete", "agent_task_backfill_manifest_batch",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 manifest batch cannot be deleted';
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_manifest_insert_guard", new TriggerDefinition(
+                        "trg_task_backfill_manifest_insert_guard", "agent_task_backfill_manifest",
+                        "BEFORE", "INSERT", """
+                        BEGIN
+                            IF NEW.manifest_row_key NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR NEW.manifest_row_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR NEW.source_hash NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR (SELECT COUNT(*) FROM agent_task_backfill_manifest_batch b
+                                   WHERE BINARY b.report_sha256 = BINARY NEW.report_sha256
+                                     AND BINARY b.seal_status = BINARY 'LOADING'
+                                     AND b.manifest_row_count = 0 AND b.sealed_at IS NULL
+                                     AND BINARY b.approved_operator = BINARY NEW.approved_operator
+                                     AND b.approved_at = NEW.approved_at
+                                     AND b.create_time <=> NEW.create_time) <> 1 THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 manifest rows require the matching procedure-owned loading batch';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_manifest_no_update", new TriggerDefinition(
+                        "trg_task_backfill_manifest_no_update", "agent_task_backfill_manifest",
+                        "BEFORE", "UPDATE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 approved manifest is immutable';
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_manifest_no_delete", new TriggerDefinition(
+                        "trg_task_backfill_manifest_no_delete", "agent_task_backfill_manifest",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 approved manifest cannot be deleted';
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_issue_insert_guard", new TriggerDefinition(
+                        "trg_task_backfill_issue_insert_guard", "agent_task_backfill_issue",
+                        "BEFORE", "INSERT", """
+                        BEGIN
+                            IF NEW.issue_key NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR NEW.first_report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR BINARY NEW.first_report_sha256 <> BINARY NEW.last_report_sha256
+                               OR NEW.occurrence_count <> 1
+                               OR NEW.first_seen_at <> NEW.last_seen_at
+                               OR NEW.create_time <> NEW.first_seen_at
+                               OR NEW.update_time <> NEW.last_seen_at
+                               OR (SELECT COUNT(*) FROM agent_task_backfill_manifest_batch b
+                                   WHERE BINARY b.report_sha256 = BINARY NEW.last_report_sha256
+                                     AND BINARY b.seal_status = BINARY 'SEALED'
+                                     AND BINARY b.approved_operator = BINARY NEW.last_operator) <> 1 THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 issue insert requires a matching sealed approval';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_issue_update_guard", new TriggerDefinition(
+                        "trg_task_backfill_issue_update_guard", "agent_task_backfill_issue",
+                        "BEFORE", "UPDATE", """
+                        BEGIN
+                            IF NOT (
+                                NEW.id = OLD.id
+                                AND BINARY NEW.issue_key = BINARY OLD.issue_key
+                                AND NEW.meta_id = OLD.meta_id
+                                AND BINARY NEW.task_id = BINARY OLD.task_id
+                                AND BINARY NEW.source_hash = BINARY OLD.source_hash
+                                AND BINARY NEW.source_format = BINARY OLD.source_format
+                                AND BINARY NEW.source_shape = BINARY OLD.source_shape
+                                AND NEW.source_ordinal = OLD.source_ordinal
+                                AND BINARY NEW.raw_assignee <=> BINARY OLD.raw_assignee
+                                AND BINARY NEW.source_agent_id <=> BINARY OLD.source_agent_id
+                                AND BINARY NEW.issue_code = BINARY OLD.issue_code
+                                AND BINARY NEW.issue_reason = BINARY OLD.issue_reason
+                                AND BINARY NEW.first_report_sha256 = BINARY OLD.first_report_sha256
+                                AND NEW.first_seen_at = OLD.first_seen_at
+                                AND NEW.occurrence_count = OLD.occurrence_count + 1
+                                AND NEW.last_seen_at >= OLD.last_seen_at
+                                AND BINARY NEW.tenant_id <=> BINARY OLD.tenant_id
+                                AND BINARY NEW.client_id <=> BINARY OLD.client_id
+                                AND NEW.create_time <=> OLD.create_time
+                                AND NEW.update_time = NEW.last_seen_at
+                                AND (SELECT COUNT(*) FROM agent_task_backfill_manifest_batch b
+                                     WHERE BINARY b.report_sha256 = BINARY NEW.last_report_sha256
+                                       AND BINARY b.seal_status = BINARY 'SEALED'
+                                       AND BINARY b.approved_operator = BINARY NEW.last_operator) = 1
+                            ) THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 issue audit permits only one sealed apply observation increment';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_issue_no_delete", new TriggerDefinition(
+                        "trg_task_backfill_issue_no_delete", "agent_task_backfill_issue",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 issue audit cannot be deleted';
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_run_insert_guard", new TriggerDefinition(
+                        "trg_task_backfill_run_insert_guard", "agent_task_backfill_run",
+                        "BEFORE", "INSERT", """
+                        BEGIN
+                            IF NEW.run_id IS NULL OR CHAR_LENGTH(NEW.run_id) <> 36
+                               OR NEW.report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+                               OR BINARY NEW.run_status <> BINARY 'SUCCEEDED'
+                               OR NEW.manifest_row_count <= 0 OR NEW.issue_row_count < 0
+                               OR NEW.member_insert_count < 0 OR NEW.work_item_insert_count < 0
+                               OR NEW.completed_at < NEW.started_at OR NEW.create_time <> NEW.completed_at
+                               OR (SELECT COUNT(*) FROM agent_task_backfill_manifest_batch b
+                                   WHERE BINARY b.report_sha256 = BINARY NEW.report_sha256
+                                     AND BINARY b.seal_status = BINARY 'SEALED'
+                                     AND BINARY b.approved_operator = BINARY NEW.operator
+                                     AND b.manifest_row_count = NEW.manifest_row_count) <> 1
+                               OR (SELECT COUNT(*) FROM agent_task_backfill_manifest m
+                                   WHERE BINARY m.report_sha256 = BINARY NEW.report_sha256)
+                                  <> NEW.manifest_row_count THEN
+                                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 run insert requires a complete matching sealed approval';
+                            END IF;
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_run_no_update", new TriggerDefinition(
+                        "trg_task_backfill_run_no_update", "agent_task_backfill_run",
+                        "BEFORE", "UPDATE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 run audit is immutable';
+                        END
+                        """)),
+                java.util.Map.entry("trg_task_backfill_run_no_delete", new TriggerDefinition(
+                        "trg_task_backfill_run_no_delete", "agent_task_backfill_run",
+                        "BEFORE", "DELETE", """
+                        BEGIN
+                            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'B09 run audit cannot be deleted';
+                        END
+                        """)));
+    }
+
+    void ensureHistoricalEventBaselineAuditSchema() {
+        boolean batchExists = tableExists("agent_task_historical_event_manifest_batch");
+        boolean manifestExists = tableExists("agent_task_historical_event_manifest");
+        boolean runExists = tableExists("agent_task_historical_event_run");
+        boolean anyExists = batchExists || manifestExists || runExists;
+        boolean bootstrapTriggers = false;
+        if (anyExists && !(batchExists && manifestExists && runExists)) {
+            throw new IllegalStateException(
+                    "C01H audit schema is partial; install the exact three-table schema");
+        }
+        if (anyExists && !isH2Database()) {
+            validateHistoricalEventAuditSchema();
+            bootstrapTriggers = historicalEventTriggerCount() == 0 && tablesAreEmpty(
+                    "agent_task_historical_event_manifest_batch",
+                    "agent_task_historical_event_manifest",
+                    "agent_task_historical_event_run");
+            if (!bootstrapTriggers) {
+                validateHistoricalEventAuditTriggers();
+            }
+        }
+
+        jdbcTemplate.execute("""
+CREATE TABLE IF NOT EXISTS agent_task_historical_event_manifest_batch (
+    id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    report_sha256 CHAR(64) NOT NULL COMMENT 'Ordered canonical C01H manifest digest',
+    b09_report_sha256 CHAR(64) NOT NULL COMMENT 'Explicit SEALED B09 report digest',
+    b09_run_id CHAR(36) NOT NULL COMMENT 'Explicit matching SUCCEEDED B09 run UUID',
+    b09_operator VARCHAR(100) NOT NULL COMMENT 'B09 approved/apply operator',
+    b09_completed_at BIGINT NOT NULL COMMENT 'B09 successful run completion epoch millis',
+    manifest_row_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Exact sealed task rows',
+    insert_required_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Reviewed INSERT_REQUIRED rows',
+    exact_noop_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Reviewed EXACT_NOOP rows',
+    blocked_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Must remain zero for SEALED',
+    seal_status VARCHAR(16) NOT NULL COMMENT 'LOADING/SEALED',
+    approved_operator VARCHAR(100) NOT NULL COMMENT 'Independent C01H approver/ticket',
+    approved_at BIGINT NOT NULL COMMENT 'Approval epoch millis',
+    sealed_at BIGINT DEFAULT NULL COMMENT 'Seal epoch millis',
+    create_time BIGINT DEFAULT NULL COMMENT 'Create epoch millis',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_historical_event_batch_report (report_sha256),
+    KEY idx_historical_event_batch_b09 (b09_report_sha256, b09_run_id, seal_status),
+    KEY idx_historical_event_batch_status (seal_status, approved_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='C01H sealed historical task event baseline batch'
+                """);
+        jdbcTemplate.execute("""
+CREATE TABLE IF NOT EXISTS agent_task_historical_event_manifest (
+    id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    report_sha256 CHAR(64) NOT NULL COMMENT 'Owning canonical C01H manifest digest',
+    manifest_row_key CHAR(64) NOT NULL COMMENT 'Length-prefixed byte-exact task row key',
+    manifest_row_sha256 CHAR(64) NOT NULL COMMENT 'Canonical reviewed row digest',
+    b09_report_sha256 CHAR(64) NOT NULL COMMENT 'Explicit SEALED B09 report digest',
+    b09_run_id CHAR(36) NOT NULL COMMENT 'Explicit matching SUCCEEDED B09 run UUID',
+    b09_operator VARCHAR(100) NOT NULL COMMENT 'Exact B09 operator',
+    b09_completed_at BIGINT NOT NULL COMMENT 'Exact B09 completed_at used as occurred_at',
+    meta_id BIGINT NOT NULL COMMENT 'Exact task root primary key',
+    tenant_id VARCHAR(50) NOT NULL COMMENT 'Byte-exact tenant scope',
+    client_id VARCHAR(50) NOT NULL COMMENT 'Byte-exact client scope',
+    task_id VARCHAR(100) NOT NULL COMMENT 'Byte-exact task ID',
+    event_id VARCHAR(100) NOT NULL COMMENT 'c01h- plus length-prefixed scope SHA-256',
+    decision_status VARCHAR(20) NOT NULL COMMENT 'INSERT_REQUIRED/EXACT_NOOP',
+    expected_event_version BIGINT NOT NULL COMMENT 'Next or existing baseline event version',
+    content_sha256 CHAR(64) NOT NULL COMMENT 'Canonical task/member/work-item snapshot digest',
+    member_count BIGINT NOT NULL COMMENT 'Exact member snapshot count',
+    work_item_count BIGINT NOT NULL COMMENT 'Exact work-item snapshot count',
+    task_version_snapshot BIGINT NOT NULL COMMENT 'Must remain unchanged',
+    current_event_version_snapshot BIGINT NOT NULL COMMENT 'Reviewed pre-apply event cursor',
+    event_chain_count BIGINT NOT NULL COMMENT 'Reviewed complete event count',
+    event_chain_min_version BIGINT DEFAULT NULL COMMENT 'NULL for empty chain, otherwise one',
+    event_chain_max_version BIGINT DEFAULT NULL COMMENT 'NULL for empty chain, otherwise current version',
+    baseline_event_version BIGINT DEFAULT NULL COMMENT 'Existing exact baseline version for EXACT_NOOP',
+    approved_operator VARCHAR(100) NOT NULL COMMENT 'Independent C01H approver/ticket',
+    approved_at BIGINT NOT NULL COMMENT 'Approval epoch millis',
+    create_time BIGINT DEFAULT NULL COMMENT 'Create epoch millis',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_historical_event_manifest_row (report_sha256, manifest_row_key),
+    UNIQUE KEY uk_historical_event_manifest_scope (report_sha256, tenant_id, client_id, task_id),
+    KEY idx_historical_event_manifest_event (event_id, content_sha256),
+    KEY idx_historical_event_manifest_b09 (b09_report_sha256, b09_run_id, decision_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Immutable C01H reviewed task baseline rows'
+                """);
+        jdbcTemplate.execute("""
+CREATE TABLE IF NOT EXISTS agent_task_historical_event_run (
+    id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    run_id CHAR(36) NOT NULL COMMENT 'C01H apply UUID',
+    report_sha256 CHAR(64) NOT NULL COMMENT 'Consumed SEALED C01H report',
+    b09_report_sha256 CHAR(64) NOT NULL COMMENT 'Bound SEALED B09 report',
+    b09_run_id CHAR(36) NOT NULL COMMENT 'Bound SUCCEEDED B09 run',
+    operator VARCHAR(100) NOT NULL COMMENT 'Byte-exact approved C01H operator',
+    manifest_row_count BIGINT NOT NULL COMMENT 'Exact sealed task rows',
+    event_insert_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Events appended by this run',
+    version_update_count BIGINT NOT NULL DEFAULT 0 COMMENT 'current_event_version CAS updates',
+    exact_noop_count BIGINT NOT NULL DEFAULT 0 COMMENT 'Rows proved exact no-op',
+    started_at BIGINT NOT NULL COMMENT 'Run start epoch millis',
+    completed_at BIGINT NOT NULL COMMENT 'Run commit epoch millis',
+    run_status VARCHAR(20) NOT NULL COMMENT 'SUCCEEDED only, failures roll back',
+    create_time BIGINT DEFAULT NULL COMMENT 'Create epoch millis',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_historical_event_run_id (run_id),
+    KEY idx_historical_event_run_report (report_sha256, completed_at, id),
+    KEY idx_historical_event_run_b09 (b09_report_sha256, b09_run_id, completed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Immutable successful C01H baseline apply runs'
+                """);
+
+        if (!isH2Database()) {
+            if (!anyExists || bootstrapTriggers) {
+                createHistoricalEventAuditTriggers();
+            }
+            validateHistoricalEventAuditSchema();
+            validateHistoricalEventAuditTriggers();
+        }
+    }
+
+    private int historicalEventTriggerCount() {
+        return namedTriggerCount(List.of(
+                "trg_historical_event_batch_insert_guard",
+                "trg_historical_event_batch_update_guard",
+                "trg_historical_event_batch_no_delete",
+                "trg_historical_event_manifest_insert_guard",
+                "trg_historical_event_manifest_no_update",
+                "trg_historical_event_manifest_no_delete",
+                "trg_historical_event_run_insert_guard",
+                "trg_historical_event_run_no_update",
+                "trg_historical_event_run_no_delete"));
+    }
+
+    void validateHistoricalEventAuditSchema() {
+        for (String table : List.of(
+                "agent_task_historical_event_manifest_batch",
+                "agent_task_historical_event_manifest",
+                "agent_task_historical_event_run")) {
+            String engine = jdbcTemplate.queryForObject("""
+                    SELECT ENGINE FROM information_schema.tables
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, String.class, table);
+            if (!"InnoDB".equalsIgnoreCase(engine)) {
+                throw new IllegalStateException("C01H audit table " + table
+                        + " must use InnoDB but was " + engine);
+            }
+            String collation = jdbcTemplate.queryForObject("""
+                    SELECT TABLE_COLLATION FROM information_schema.tables
+                    WHERE table_schema = DATABASE() AND table_name = ?
+                    """, String.class, table);
+            if (!"utf8mb4_0900_bin".equalsIgnoreCase(collation)) {
+                throw new IllegalStateException("C01H audit table " + table
+                        + " must use utf8mb4_0900_bin but was " + collation);
+            }
+            validateHistoricalPrimaryKey(table);
+        }
+        List<BackfillColumnExpectation> expected = List.of(
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "b09_report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "b09_run_id", "char", "char(36)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "b09_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "b09_completed_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "manifest_row_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "insert_required_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "exact_noop_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "blocked_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "seal_status", "varchar", "varchar(16)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "approved_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "approved_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "sealed_at", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest_batch", "create_time", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "manifest_row_key", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "manifest_row_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "b09_report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "b09_run_id", "char", "char(36)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "b09_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "b09_completed_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "meta_id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "tenant_id", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "client_id", "varchar", "varchar(50)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "task_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "event_id", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "decision_status", "varchar", "varchar(20)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "expected_event_version", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "content_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "member_count", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "work_item_count", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "task_version_snapshot", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "current_event_version_snapshot", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "event_chain_count", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "event_chain_min_version", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "event_chain_max_version", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "baseline_event_version", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "approved_operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "approved_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_manifest", "create_time", "bigint", "bigint", true, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "id", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "run_id", "char", "char(36)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "b09_report_sha256", "char", "char(64)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "b09_run_id", "char", "char(36)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "operator", "varchar", "varchar(100)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "manifest_row_count", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "event_insert_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "version_update_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "exact_noop_count", "bigint", "bigint", false, "0", null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "started_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "completed_at", "bigint", "bigint", false, null, null),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "run_status", "varchar", "varchar(20)", false, null, "utf8mb4_0900_bin"),
+                new BackfillColumnExpectation("agent_task_historical_event_run", "create_time", "bigint", "bigint", true, null, null));
+        for (BackfillColumnExpectation column : expected) {
+            validateHistoricalColumn(column);
+        }
+        validateHistoricalIndex("agent_task_historical_event_manifest_batch",
+                "uk_historical_event_batch_report", true, List.of("report_sha256"));
+        validateHistoricalIndex("agent_task_historical_event_manifest_batch",
+                "idx_historical_event_batch_b09", false,
+                List.of("b09_report_sha256", "b09_run_id", "seal_status"));
+        validateHistoricalIndex("agent_task_historical_event_manifest_batch",
+                "idx_historical_event_batch_status", false,
+                List.of("seal_status", "approved_at", "id"));
+        validateHistoricalIndex("agent_task_historical_event_manifest",
+                "uk_historical_event_manifest_row", true,
+                List.of("report_sha256", "manifest_row_key"));
+        validateHistoricalIndex("agent_task_historical_event_manifest",
+                "uk_historical_event_manifest_scope", true,
+                List.of("report_sha256", "tenant_id", "client_id", "task_id"));
+        validateHistoricalIndex("agent_task_historical_event_manifest",
+                "idx_historical_event_manifest_event", false,
+                List.of("event_id", "content_sha256"));
+        validateHistoricalIndex("agent_task_historical_event_manifest",
+                "idx_historical_event_manifest_b09", false,
+                List.of("b09_report_sha256", "b09_run_id", "decision_status"));
+        validateHistoricalIndex("agent_task_historical_event_run",
+                "uk_historical_event_run_id", true, List.of("run_id"));
+        validateHistoricalIndex("agent_task_historical_event_run",
+                "idx_historical_event_run_report", false,
+                List.of("report_sha256", "completed_at", "id"));
+        validateHistoricalIndex("agent_task_historical_event_run",
+                "idx_historical_event_run_b09", false,
+                List.of("b09_report_sha256", "b09_run_id", "completed_at"));
+        validateHistoricalUniqueIndexSet("agent_task_historical_event_manifest_batch",
+                List.of("PRIMARY", "uk_historical_event_batch_report"));
+        validateHistoricalUniqueIndexSet("agent_task_historical_event_manifest",
+                List.of("PRIMARY", "uk_historical_event_manifest_row",
+                        "uk_historical_event_manifest_scope"));
+        validateHistoricalUniqueIndexSet("agent_task_historical_event_run",
+                List.of("PRIMARY", "uk_historical_event_run_id"));
+    }
+
+    private void validateHistoricalPrimaryKey(String table) {
+        List<IndexColumn> primary = inspectRequiredIndex(table, "PRIMARY");
+        if (primary == null || primary.size() != 1 || primary.get(0).nonUnique() != 0
+                || primary.get(0).sequence() != 1 || primary.get(0).subPart() != null
+                || !"id".equalsIgnoreCase(primary.get(0).columnName())) {
+            throw new IllegalStateException("C01H audit table " + table
+                    + " must have exact PRIMARY KEY (id)");
+        }
+    }
+
+    private void validateHistoricalColumn(BackfillColumnExpectation expected) {
+        List<BackfillColumnDefinition> actual = jdbcTemplate.query("""
+                SELECT DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT,
+                       COLLATION_NAME, EXTRA
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                """, (rs, rowNum) -> new BackfillColumnDefinition(
+                rs.getString("DATA_TYPE"), rs.getString("COLUMN_TYPE"),
+                "YES".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                rs.getString("COLUMN_DEFAULT"), rs.getString("COLLATION_NAME"),
+                rs.getString("EXTRA")), expected.table(), expected.column());
+        if (actual.size() != 1) {
+            throw new IllegalStateException("C01H audit column " + expected.table() + "."
+                    + expected.column() + " is missing or duplicated");
+        }
+        BackfillColumnDefinition column = actual.get(0);
+        boolean matches = expected.dataType().equalsIgnoreCase(column.dataType())
+                && normalizeSql(expected.columnType()).equals(normalizeSql(column.columnType()))
+                && expected.nullable() == column.nullable()
+                && java.util.Objects.equals(expected.defaultValue(), column.defaultValue())
+                && (expected.collation() == null ? column.collation() == null
+                    : expected.collation().equalsIgnoreCase(column.collation()))
+                && (!"id".equals(expected.column())
+                    || "auto_increment".equalsIgnoreCase(column.extra()));
+        if (!matches) {
+            throw new IllegalStateException("C01H audit column " + expected.table() + "."
+                    + expected.column() + " has incompatible structure: " + column);
+        }
+    }
+
+    private void validateHistoricalIndex(
+            String table, String index, boolean unique, List<String> columns) {
+        ensureRequiredIndex(table, index, unique, columns, "");
+    }
+
+    private void validateHistoricalUniqueIndexSet(String table, List<String> expected) {
+        List<String> actual = jdbcTemplate.queryForList("""
+                SELECT DISTINCT index_name FROM information_schema.statistics
+                WHERE table_schema = DATABASE() AND table_name = ? AND non_unique = 0
+                ORDER BY index_name
+                """, String.class, table);
+        List<String> sortedExpected = expected.stream().sorted().toList();
+        if (!actual.equals(sortedExpected)) {
+            throw new IllegalStateException("C01H audit table " + table
+                    + " has incompatible UNIQUE indexes: " + actual);
+        }
+    }
+
+    void validateHistoricalEventAuditTriggers() {
+        java.util.Map<String, TriggerDefinition> expected = expectedHistoricalEventAuditTriggers();
+        List<TriggerDefinition> actual = jdbcTemplate.query("""
+                SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_TIMING,
+                       EVENT_MANIPULATION, ACTION_STATEMENT
+                FROM information_schema.triggers
+                WHERE trigger_schema = DATABASE()
+                  AND event_object_table IN (
+                      'agent_task_historical_event_manifest_batch',
+                      'agent_task_historical_event_manifest',
+                      'agent_task_historical_event_run')
+                """, (rs, rowNum) -> new TriggerDefinition(
+                rs.getString("TRIGGER_NAME"), rs.getString("EVENT_OBJECT_TABLE"),
+                rs.getString("ACTION_TIMING"), rs.getString("EVENT_MANIPULATION"),
+                rs.getString("ACTION_STATEMENT")));
+        if (actual.size() != expected.size()) {
+            throw new IllegalStateException("C01H requires nine exact tamper-evident audit triggers");
+        }
+        for (TriggerDefinition trigger : actual) {
+            TriggerDefinition required = expected.get(trigger.name());
+            if (required == null || !required.table().equalsIgnoreCase(trigger.table())
+                    || !required.timing().equalsIgnoreCase(trigger.timing())
+                    || !required.event().equalsIgnoreCase(trigger.event())
+                    || !normalizeSql(required.statement()).equals(normalizeSql(trigger.statement()))) {
+                throw new IllegalStateException("C01H audit trigger " + trigger.name()
+                        + " has an incompatible table or definition");
+            }
+        }
+    }
+
+    private void createHistoricalEventAuditTriggers() {
+        for (TriggerDefinition trigger : expectedHistoricalEventAuditTriggers().values()) {
+            jdbcTemplate.execute("CREATE TRIGGER " + trigger.name() + " " + trigger.timing()
+                    + " " + trigger.event() + " ON " + trigger.table()
+                    + " FOR EACH ROW " + trigger.statement());
+        }
+    }
+
+    private java.util.Map<String, TriggerDefinition> expectedHistoricalEventAuditTriggers() {
+        return java.util.Map.ofEntries(
+                java.util.Map.entry("trg_historical_event_batch_insert_guard", new TriggerDefinition(
+                        "trg_historical_event_batch_insert_guard", "agent_task_historical_event_manifest_batch", "BEFORE", "INSERT", """
+BEGIN
+    IF NEW.report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.b09_report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.b09_run_id IS NULL OR CHAR_LENGTH(NEW.b09_run_id) <> 36
+       OR NEW.b09_completed_at <= 0 OR NEW.manifest_row_count <> 0
+       OR NEW.insert_required_count <> 0 OR NEW.exact_noop_count <> 0
+       OR NEW.blocked_count <> 0 OR BINARY NEW.seal_status <> BINARY 'LOADING'
+       OR NEW.sealed_at IS NOT NULL OR NEW.approved_at <= 0
+       OR NEW.create_time <> NEW.approved_at
+       OR NEW.approved_operator IS NULL OR CHAR_LENGTH(NEW.approved_operator) NOT BETWEEN 1 AND 100
+       OR BINARY NEW.approved_operator <> BINARY TRIM(NEW.approved_operator)
+       OR REGEXP_LIKE(NEW.approved_operator, '[[:cntrl:]]', 'c') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H batch insert requires exact procedure-owned LOADING state';
+    END IF;
+END
+                        """)),
+                java.util.Map.entry("trg_historical_event_batch_update_guard", new TriggerDefinition(
+                        "trg_historical_event_batch_update_guard", "agent_task_historical_event_manifest_batch", "BEFORE", "UPDATE", """
+BEGIN
+    IF NOT (BINARY OLD.seal_status = BINARY 'LOADING'
+        AND BINARY NEW.seal_status = BINARY 'SEALED'
+        AND OLD.manifest_row_count = 0 AND OLD.insert_required_count = 0
+        AND OLD.exact_noop_count = 0 AND OLD.blocked_count = 0
+        AND NEW.manifest_row_count > 0 AND NEW.blocked_count = 0
+        AND NEW.insert_required_count + NEW.exact_noop_count = NEW.manifest_row_count
+        AND NEW.sealed_at IS NOT NULL AND NEW.sealed_at >= NEW.approved_at
+        AND BINARY NEW.report_sha256 = BINARY OLD.report_sha256
+        AND BINARY NEW.b09_report_sha256 = BINARY OLD.b09_report_sha256
+        AND BINARY NEW.b09_run_id = BINARY OLD.b09_run_id
+        AND BINARY NEW.b09_operator = BINARY OLD.b09_operator
+        AND NEW.b09_completed_at = OLD.b09_completed_at
+        AND BINARY NEW.approved_operator = BINARY OLD.approved_operator
+        AND NEW.approved_at = OLD.approved_at AND NEW.create_time <=> OLD.create_time
+        AND (SELECT COUNT(*) FROM agent_task_historical_event_manifest m
+             WHERE BINARY m.report_sha256 = BINARY NEW.report_sha256
+               AND BINARY m.approved_operator = BINARY NEW.approved_operator
+               AND m.approved_at = NEW.approved_at) = NEW.manifest_row_count
+        AND (SELECT COUNT(*) FROM agent_task_historical_event_manifest m
+             WHERE BINARY m.report_sha256 = BINARY NEW.report_sha256
+               AND BINARY m.decision_status = BINARY 'INSERT_REQUIRED') = NEW.insert_required_count
+        AND (SELECT COUNT(*) FROM agent_task_historical_event_manifest m
+             WHERE BINARY m.report_sha256 = BINARY NEW.report_sha256
+               AND BINARY m.decision_status = BINARY 'EXACT_NOOP') = NEW.exact_noop_count) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H batch permits only complete zero-blocked LOADING to SEALED';
+    END IF;
+END
+                        """)),
+                java.util.Map.entry("trg_historical_event_batch_no_delete", new TriggerDefinition(
+                        "trg_historical_event_batch_no_delete", "agent_task_historical_event_manifest_batch", "BEFORE", "DELETE", """
+BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H sealed batch cannot be deleted'; END
+                        """)),
+                java.util.Map.entry("trg_historical_event_manifest_insert_guard", new TriggerDefinition(
+                        "trg_historical_event_manifest_insert_guard", "agent_task_historical_event_manifest", "BEFORE", "INSERT", """
+BEGIN
+    IF NEW.manifest_row_key NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.manifest_row_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.content_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.event_id NOT REGEXP BINARY '^c01h-[0-9a-f]{64}$'
+       OR BINARY NEW.decision_status NOT IN (BINARY 'INSERT_REQUIRED', BINARY 'EXACT_NOOP')
+       OR NEW.member_count <= 0 OR NEW.work_item_count <= 0
+       OR NEW.expected_event_version <= 0 OR NEW.task_version_snapshot < 0
+       OR NEW.current_event_version_snapshot < 0 OR NEW.event_chain_count < 0
+       OR (BINARY NEW.decision_status = BINARY 'INSERT_REQUIRED'
+           AND (NEW.baseline_event_version IS NOT NULL
+                OR NEW.expected_event_version <> NEW.current_event_version_snapshot + 1))
+       OR (BINARY NEW.decision_status = BINARY 'EXACT_NOOP'
+           AND (NEW.baseline_event_version IS NULL
+                OR NEW.expected_event_version <> NEW.baseline_event_version))
+       OR (SELECT COUNT(*) FROM agent_task_historical_event_manifest_batch b
+           WHERE BINARY b.report_sha256 = BINARY NEW.report_sha256
+             AND BINARY b.seal_status = BINARY 'LOADING'
+             AND b.manifest_row_count = 0 AND b.blocked_count = 0
+             AND BINARY b.b09_report_sha256 = BINARY NEW.b09_report_sha256
+             AND BINARY b.b09_run_id = BINARY NEW.b09_run_id
+             AND BINARY b.b09_operator = BINARY NEW.b09_operator
+             AND b.b09_completed_at = NEW.b09_completed_at
+             AND BINARY b.approved_operator = BINARY NEW.approved_operator
+             AND b.approved_at = NEW.approved_at) <> 1 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H manifest row requires matching procedure-owned LOADING batch';
+    END IF;
+END
+                        """)),
+                java.util.Map.entry("trg_historical_event_manifest_no_update", new TriggerDefinition(
+                        "trg_historical_event_manifest_no_update", "agent_task_historical_event_manifest", "BEFORE", "UPDATE", """
+BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H sealed manifest is immutable'; END
+                        """)),
+                java.util.Map.entry("trg_historical_event_manifest_no_delete", new TriggerDefinition(
+                        "trg_historical_event_manifest_no_delete", "agent_task_historical_event_manifest", "BEFORE", "DELETE", """
+BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H sealed manifest cannot be deleted'; END
+                        """)),
+                java.util.Map.entry("trg_historical_event_run_insert_guard", new TriggerDefinition(
+                        "trg_historical_event_run_insert_guard", "agent_task_historical_event_run", "BEFORE", "INSERT", """
+BEGIN
+    IF NEW.run_id IS NULL OR CHAR_LENGTH(NEW.run_id) <> 36
+       OR NEW.report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR NEW.b09_report_sha256 NOT REGEXP BINARY '^[0-9a-f]{64}$'
+       OR BINARY NEW.run_status <> BINARY 'SUCCEEDED'
+       OR NEW.manifest_row_count <= 0 OR NEW.event_insert_count < 0
+       OR NEW.version_update_count < 0 OR NEW.exact_noop_count < 0
+       OR NEW.event_insert_count <> NEW.version_update_count
+       OR NEW.event_insert_count + NEW.exact_noop_count <> NEW.manifest_row_count
+       OR NEW.completed_at < NEW.started_at OR NEW.create_time <> NEW.completed_at
+       OR (SELECT COUNT(*) FROM agent_task_historical_event_manifest_batch b
+           WHERE BINARY b.report_sha256 = BINARY NEW.report_sha256
+             AND BINARY b.seal_status = BINARY 'SEALED'
+             AND BINARY b.b09_report_sha256 = BINARY NEW.b09_report_sha256
+             AND BINARY b.b09_run_id = BINARY NEW.b09_run_id
+             AND BINARY b.approved_operator = BINARY NEW.operator
+             AND b.manifest_row_count = NEW.manifest_row_count) <> 1
+       OR (SELECT COUNT(*) FROM agent_task_historical_event_manifest m
+           WHERE BINARY m.report_sha256 = BINARY NEW.report_sha256) <> NEW.manifest_row_count THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H run insert requires one complete sealed manifest and exact counts';
+    END IF;
+END
+                        """)),
+                java.util.Map.entry("trg_historical_event_run_no_update", new TriggerDefinition(
+                        "trg_historical_event_run_no_update", "agent_task_historical_event_run", "BEFORE", "UPDATE", """
+BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H successful run is immutable'; END
+                        """)),
+                java.util.Map.entry("trg_historical_event_run_no_delete", new TriggerDefinition(
+                        "trg_historical_event_run_no_delete", "agent_task_historical_event_run", "BEFORE", "DELETE", """
+BEGIN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'C01H successful run cannot be deleted'; END
+                        """)));
+    }
+
+    private boolean isH2Database() {
+        if (h2Database != null) {
+            return h2Database;
+        }
+        DataSource dataSource = jdbcTemplate.getDataSource();
+        if (dataSource == null) {
+            h2Database = false;
+            return h2Database;
+        }
+        try (Connection connection = dataSource.getConnection()) {
+            String productName = connection.getMetaData().getDatabaseProductName();
+            h2Database = productName != null && productName.toLowerCase(Locale.ROOT).contains("h2");
+            return h2Database;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Unable to determine database dialect for agent schema initialization", e);
+        }
+    }
+
+    private void ensureTaskNoteTable() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_task_note (
+                    id                  BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                    task_id             VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                    owner_jiacn         VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                    author_id           VARCHAR(100) DEFAULT NULL COMMENT 'Author ID',
+                    author_type         VARCHAR(20) NOT NULL DEFAULT 'user' COMMENT 'user/agent/system',
+                    note_type           VARCHAR(20) NOT NULL DEFAULT 'summary' COMMENT 'summary/report/meeting/system',
+                    content             TEXT NOT NULL COMMENT 'Note content',
+                    created_at          BIGINT NOT NULL COMMENT 'Note created time',
+                    create_time         BIGINT DEFAULT NULL COMMENT 'Create time',
+                    update_time         BIGINT DEFAULT NULL COMMENT 'Update time',
+                    tenant_id           VARCHAR(50) DEFAULT '0' COMMENT 'Tenant ID',
+                    client_id           VARCHAR(50) DEFAULT NULL COMMENT 'Client ID',
+                    PRIMARY KEY (id),
+                    KEY idx_agent_task_note_task_id (tenant_id, client_id, owner_jiacn, task_id),
+                    KEY idx_agent_task_note_created_at (created_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Agent task notes'
+                """);
+    }
+
+    private void ensureSceneTables() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_scene_state (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    scene_id VARCHAR(100) NOT NULL,
+                    agent_id VARCHAR(100) NOT NULL,
+                    persona_code VARCHAR(50) NOT NULL,
+                    behavior VARCHAR(50) NOT NULL,
+                    origin_region_id VARCHAR(100) DEFAULT NULL,
+                    target_region_id VARCHAR(100) NOT NULL,
+                    related_type VARCHAR(50) DEFAULT NULL,
+                    related_id VARCHAR(100) DEFAULT NULL,
+                    phase VARCHAR(20) NOT NULL,
+                    state_version BIGINT NOT NULL,
+                    started_at BIGINT NOT NULL,
+                    expected_arrival_at BIGINT DEFAULT NULL,
+                    expires_at BIGINT DEFAULT NULL,
+                    tenant_id VARCHAR(50) NOT NULL,
+                    client_id VARCHAR(50) NOT NULL,
+                    owner_jiacn VARCHAR(50) NOT NULL,
+                    create_time BIGINT DEFAULT NULL,
+                    update_time BIGINT DEFAULT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_agent_scene_state_scope_agent (tenant_id, client_id, owner_jiacn, scene_id, agent_id),
+                    KEY idx_agent_scene_state_scope_version (tenant_id, client_id, owner_jiacn, scene_id, state_version)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_scene_event (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    scene_id VARCHAR(100) NOT NULL,
+                    scene_version BIGINT NOT NULL,
+                    event_type VARCHAR(50) NOT NULL,
+                    event_json TEXT NOT NULL,
+                    occurred_at BIGINT NOT NULL,
+                    tenant_id VARCHAR(50) NOT NULL,
+                    client_id VARCHAR(50) NOT NULL,
+                    owner_jiacn VARCHAR(50) NOT NULL,
+                    create_time BIGINT DEFAULT NULL,
+                    update_time BIGINT DEFAULT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_agent_scene_event_scope_version (tenant_id, client_id, owner_jiacn, scene_id, scene_version),
+                    KEY idx_agent_scene_event_scope_occurred (tenant_id, client_id, owner_jiacn, scene_id, occurred_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_scene_version (
+                    tenant_id VARCHAR(50) NOT NULL,
+                    client_id VARCHAR(50) NOT NULL,
+                    owner_jiacn VARCHAR(50) NOT NULL,
+                    scene_id VARCHAR(100) NOT NULL,
+                    current_version BIGINT NOT NULL,
+                    create_time BIGINT DEFAULT NULL,
+                    update_time BIGINT DEFAULT NULL,
+                    PRIMARY KEY (tenant_id, client_id, owner_jiacn, scene_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_scene_phase_report (
+                    id BIGINT NOT NULL AUTO_INCREMENT,
+                    scene_id VARCHAR(100) NOT NULL,
+                    report_id VARCHAR(100) NOT NULL,
+                    agent_id VARCHAR(100) NOT NULL,
+                    state_version BIGINT NOT NULL,
+                    phase VARCHAR(20) NOT NULL,
+                    region_id VARCHAR(100) NOT NULL,
+                    result VARCHAR(30) NOT NULL,
+                    occurred_at BIGINT NOT NULL,
+                    processed_at BIGINT NOT NULL,
+                    tenant_id VARCHAR(50) NOT NULL,
+                    client_id VARCHAR(50) NOT NULL,
+                    owner_jiacn VARCHAR(50) NOT NULL,
+                    create_time BIGINT DEFAULT NULL,
+                    update_time BIGINT DEFAULT NULL,
+                    PRIMARY KEY (id),
+                    UNIQUE KEY uk_agent_scene_phase_report_scope_report
+                        (tenant_id, client_id, owner_jiacn, scene_id, report_id),
+                    KEY idx_agent_scene_phase_report_scope_agent_version
+                        (tenant_id, client_id, owner_jiacn, scene_id, agent_id, state_version)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+
+        ensureRequiredIndex("agent_scene_state", "uk_agent_scene_state_scope_agent", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "agent_id"),
+                "CREATE UNIQUE INDEX uk_agent_scene_state_scope_agent "
+                        + "ON agent_scene_state (tenant_id, client_id, owner_jiacn, scene_id, agent_id)");
+        ensureRequiredIndex("agent_scene_state", "idx_agent_scene_state_scope_version", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "state_version"),
+                "CREATE INDEX idx_agent_scene_state_scope_version "
+                        + "ON agent_scene_state (tenant_id, client_id, owner_jiacn, scene_id, state_version)");
+        ensureRequiredIndex("agent_scene_event", "uk_agent_scene_event_scope_version", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "scene_version"),
+                "CREATE UNIQUE INDEX uk_agent_scene_event_scope_version "
+                        + "ON agent_scene_event (tenant_id, client_id, owner_jiacn, scene_id, scene_version)");
+        ensureRequiredIndex("agent_scene_event", "idx_agent_scene_event_scope_occurred", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "occurred_at"),
+                "CREATE INDEX idx_agent_scene_event_scope_occurred "
+                        + "ON agent_scene_event (tenant_id, client_id, owner_jiacn, scene_id, occurred_at)");
+        ensureRequiredIndex("agent_scene_phase_report", "uk_agent_scene_phase_report_scope_report", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "report_id"),
+                "CREATE UNIQUE INDEX uk_agent_scene_phase_report_scope_report "
+                        + "ON agent_scene_phase_report (tenant_id, client_id, owner_jiacn, scene_id, report_id)");
+        ensureRequiredIndex("agent_scene_phase_report", "idx_agent_scene_phase_report_scope_agent_version", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id", "agent_id", "state_version"),
+                "CREATE INDEX idx_agent_scene_phase_report_scope_agent_version "
+                        + "ON agent_scene_phase_report (tenant_id, client_id, owner_jiacn, scene_id, agent_id, state_version)");
+        ensureRequiredIndex("agent_scene_version", "PRIMARY", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "scene_id"),
+                "ALTER TABLE agent_scene_version ADD PRIMARY KEY (tenant_id, client_id, owner_jiacn, scene_id)");
+    }
+
+    void ensureTaskEventSchema() {
+        if (!tableExists("agent_task_event")) {
+            jdbcTemplate.execute("""
+                    CREATE TABLE IF NOT EXISTS agent_task_event (
+                        id              BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+                        task_id         VARCHAR(100) NOT NULL COMMENT 'Task ID',
+                        owner_jiacn     VARCHAR(50) NOT NULL COMMENT 'Authenticated task owner',
+                        event_version   BIGINT NOT NULL COMMENT 'Monotonic event version',
+                        event_id        VARCHAR(100) NOT NULL COMMENT 'Deterministic stable event identifier',
+                        event_type      VARCHAR(64) NOT NULL COMMENT 'Event type',
+                        actor_type      VARCHAR(20) NOT NULL COMMENT 'Actor classification',
+                        actor_id        VARCHAR(100) DEFAULT NULL COMMENT 'Actor identity',
+                        aggregate_type  VARCHAR(30) NOT NULL COMMENT 'Aggregate type',
+                        aggregate_id    VARCHAR(100) NOT NULL COMMENT 'Aggregate instance ID',
+                        event_json      MEDIUMTEXT NOT NULL COMMENT 'Event payload JSON',
+                        occurred_at     BIGINT NOT NULL COMMENT 'Event occurrence timestamp',
+                        tenant_id       VARCHAR(50) NOT NULL COMMENT 'Owner jiacn scope',
+                        client_id       VARCHAR(50) NOT NULL COMMENT 'OAuth/API client scope',
+                        create_time     BIGINT DEFAULT NULL COMMENT 'Create time',
+                        update_time     BIGINT DEFAULT NULL COMMENT 'Update time',
+                        PRIMARY KEY (id),
+                        UNIQUE KEY uk_task_event_version (tenant_id, client_id, owner_jiacn, task_id, event_version),
+                        UNIQUE KEY uk_task_event_id (tenant_id, client_id, owner_jiacn, event_id),
+                        KEY idx_task_event_occurred (tenant_id, client_id, owner_jiacn, task_id, occurred_at),
+                        KEY idx_event_actor_time (tenant_id, client_id, owner_jiacn, actor_type, actor_id, occurred_at),
+                        KEY idx_event_type_time (tenant_id, client_id, owner_jiacn, event_type, occurred_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin COMMENT='Scoped task event journal'
+                    """);
+        }
+        validateTaskEventSchema();
+    }
+
+    private void validateTaskEventSchema() {
+        if (!tableExists("agent_task_event")) {
+            throw new IllegalStateException(
+                    "agent_task_event is missing after CREATE TABLE IF NOT EXISTS");
+        }
+        if (isH2Database()) {
+            return;
+        }
+        if (!tableExists("agent_task_meta")) {
+            throw new IllegalStateException(
+                    "agent_task_meta is required for task event version allocation");
+        }
+        validateInnoDbTable("agent_task_meta");
+        validateInnoDbTable("agent_task_event");
+        validateTableCollation("agent_task_event", "utf8mb4_0900_bin");
+
+        validateIdentityColumn("agent_task_event", "id",
+                "bigint", "bigint", false, null, null);
+        validateIdentityColumn("agent_task_event", "task_id",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "event_version",
+                "bigint", "bigint", false, null, null);
+        validateIdentityColumn("agent_task_event", "event_id",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "event_type",
+                "varchar", "varchar(64)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "actor_type",
+                "varchar", "varchar(20)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "actor_id",
+                "varchar", "varchar(100)", true, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "aggregate_type",
+                "varchar", "varchar(30)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "aggregate_id",
+                "varchar", "varchar(100)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "event_json",
+                "mediumtext", "mediumtext", false, null, null);
+        validateIdentityColumn("agent_task_event", "occurred_at",
+                "bigint", "bigint", false, null, null);
+        validateIdentityColumn("agent_task_event", "tenant_id",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "client_id",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "owner_jiacn",
+                "varchar", "varchar(50)", false, "utf8mb4_0900_bin", null);
+        validateIdentityColumn("agent_task_event", "create_time",
+                "bigint", "bigint", true, null, null);
+        validateIdentityColumn("agent_task_event", "update_time",
+                "bigint", "bigint", true, null, null);
+
+        ensureRequiredIndex("agent_task_event", "PRIMARY", true,
+                List.of("id"),
+                "ALTER TABLE agent_task_event ADD PRIMARY KEY (id)");
+        ensureRequiredIndex("agent_task_event", "uk_task_event_version", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "event_version"),
+                "CREATE UNIQUE INDEX uk_task_event_version ON agent_task_event "
+                        + "(tenant_id, client_id, owner_jiacn, task_id, event_version)");
+        ensureRequiredIndex("agent_task_event", "uk_task_event_id", true,
+                List.of("tenant_id", "client_id", "owner_jiacn", "event_id"),
+                "CREATE UNIQUE INDEX uk_task_event_id ON agent_task_event "
+                        + "(tenant_id, client_id, owner_jiacn, event_id)");
+        ensureRequiredIndex("agent_task_event", "idx_task_event_occurred", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "occurred_at"),
+                "CREATE INDEX idx_task_event_occurred ON agent_task_event "
+                        + "(tenant_id, client_id, owner_jiacn, task_id, occurred_at)");
+        ensureRequiredIndex("agent_task_event", "idx_event_actor_time", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "actor_type", "actor_id", "occurred_at"),
+                "CREATE INDEX idx_event_actor_time ON agent_task_event "
+                        + "(tenant_id, client_id, owner_jiacn, actor_type, actor_id, occurred_at)");
+        ensureRequiredIndex("agent_task_event", "idx_event_type_time", false,
+                List.of("tenant_id", "client_id", "owner_jiacn", "event_type", "occurred_at"),
+                "CREATE INDEX idx_event_type_time ON agent_task_event "
+                        + "(tenant_id, client_id, owner_jiacn, event_type, occurred_at)");
+
+        validateTaskEventAutoIncrement();
+        validateTaskEventUniqueIndexes();
+    }
+
+    void validateInnoDbTable(String table) {
+        String engine = jdbcTemplate.queryForObject("""
+                SELECT ENGINE FROM information_schema.tables
+                WHERE table_schema = DATABASE() AND table_name = ?
+                """, String.class, table);
+        if (!"InnoDB".equalsIgnoreCase(engine)) {
+            throw new IllegalStateException(
+                    table + " must use InnoDB for transactional task event writes but was " + engine);
+        }
+    }
+
+    /**
+     * Enforce the minimal safe uniqueness policy for the task event journal.
+     * Required scoped UNIQUE indexes and PRIMARY must be exact; additional
+     * ordinary NON_UNIQUE indexes remain allowed for query optimization.
+     */
+    void validateTaskEventUniqueIndexes() {
+        List<TaskEventIndexColumn> rows = jdbcTemplate.query("""
+                SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, SUB_PART
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'agent_task_event'
+                  AND NON_UNIQUE = 0
+                ORDER BY INDEX_NAME, SEQ_IN_INDEX
+                """, (rs, rowNum) -> new TaskEventIndexColumn(
+                rs.getString("INDEX_NAME"),
+                rs.getString("COLUMN_NAME"),
+                rs.getInt("SEQ_IN_INDEX"),
+                rs.getObject("SUB_PART") == null ? null : rs.getInt("SUB_PART")));
+
+        java.util.Map<String, List<String>> expected = java.util.Map.of(
+                "PRIMARY", List.of("id"),
+                "uk_task_event_id", List.of("tenant_id", "client_id", "owner_jiacn", "event_id"),
+                "uk_task_event_version",
+                List.of("tenant_id", "client_id", "owner_jiacn", "task_id", "event_version"));
+        java.util.Map<String, java.util.ArrayList<String>> actual = new java.util.LinkedHashMap<>();
+        for (TaskEventIndexColumn row : rows) {
+            if (row.indexName() == null || row.columnName() == null
+                    || row.sequence() <= 0 || row.subPart() != null) {
+                throw new IllegalStateException(
+                        "agent_task_event has an incompatible UNIQUE index component: " + row);
+            }
+            java.util.ArrayList<String> columns = actual.computeIfAbsent(
+                    row.indexName(), ignored -> new java.util.ArrayList<>());
+            if (row.sequence() != columns.size() + 1) {
+                throw new IllegalStateException(
+                        "agent_task_event UNIQUE index has invalid ordered columns: " + row.indexName());
+            }
+            columns.add(row.columnName().toLowerCase(Locale.ROOT));
+        }
+        if (!expected.equals(actual)) {
+            throw new IllegalStateException(
+                    "agent_task_event UNIQUE indexes must be exactly " + expected
+                    + "; dangerous scoped-uniqueness drift found: " + actual);
+        }
+    }
+
+    private void validateTaskEventAutoIncrement() {
+        String extra = jdbcTemplate.queryForObject("""
+                SELECT EXTRA FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'agent_task_event'
+                  AND column_name = 'id'
+                """, String.class);
+        if (extra == null || !extra.toLowerCase(Locale.ROOT).contains("auto_increment")) {
+            throw new IllegalStateException(
+                    "agent_task_event.id must be AUTO_INCREMENT but EXTRA=" + extra);
+        }
+    }
+
+    private void addRequiredColumnIfMissing(String table, String column, String definition) {
+        String catalogQuery = isH2Database()
+                ? """
+                  SELECT COUNT(*)
+                  FROM information_schema.columns
+                  WHERE table_schema = SCHEMA()
+                    AND LOWER(table_name) = LOWER(?)
+                    AND LOWER(column_name) = LOWER(?)
+                  """
+                : """
+                  SELECT COUNT(*)
+                  FROM information_schema.columns
+                  WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                  """;
+        Integer count = jdbcTemplate.queryForObject(catalogQuery, Integer.class, table, column);
+        if (count == null || count == 0) {
+            jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + definition);
+        }
+    }
+
+    private void addColumnIfMissing(String table, String column, String definition) {
+        try {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
+                    """, Integer.class, table, column);
+            if (count == null || count == 0) {
+                jdbcTemplate.execute("ALTER TABLE " + table + " ADD COLUMN " + definition);
+            }
+        } catch (Exception e) {
+            log.warn("Unable to ensure column {}.{}: {}", table, column, e.getMessage());
+        }
+    }
+
+    private void addIndexIfMissing(String table, String indexName, String sql) {
+        try {
+            Integer count = jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM information_schema.statistics
+                    WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?
+                    """, Integer.class, table, indexName);
+            if (count == null || count == 0) {
+                jdbcTemplate.execute(sql);
+            }
+        } catch (Exception e) {
+            log.warn("Unable to ensure index {}.{}: {}", table, indexName, e.getMessage());
+        }
+    }
+
+    private void ensureRequiredIndex(
+            String table, String indexName, boolean unique, List<String> columns, String createSql) {
+        List<IndexColumn> actual = inspectRequiredIndex(table, indexName);
+        if ("agent_identity_alias".equals(table) && "uk_identity_alias_active".equals(indexName)
+                && actual != null && actual.size() == 6) {
+            columns = List.of("tenant_id", "client_id", "owner_jiacn", "alias_type", "alias_value", "active_key");
+        }
+        if (actual == null || actual.isEmpty()) {
+            if (createSql == null || createSql.isBlank()) {
+                throw new IllegalStateException("Required index " + table + "." + indexName
+                        + " is missing");
+            }
+            jdbcTemplate.execute(createSql);
+            return;
+        }
+        int expectedNonUnique = unique ? 0 : 1;
+        boolean matches = actual.size() == columns.size();
+        for (int i = 0; matches && i < actual.size(); i++) {
+            IndexColumn part = actual.get(i);
+            matches = part.nonUnique() == expectedNonUnique
+                    && part.sequence() == i + 1
+                    && part.subPart() == null
+                    && columns.get(i).equals(part.columnName().toLowerCase(Locale.ROOT));
+        }
+        if (!matches) {
+            throw new IllegalStateException("Required index " + table + "." + indexName
+                    + " has an incompatible uniqueness or ordered column definition");
+        }
+    }
+
+    private boolean h2TableExists(String table) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM information_schema.tables
+                WHERE table_schema = SCHEMA() AND LOWER(table_name) = LOWER(?)
+                """, Integer.class, table);
+        return count != null && count > 0;
+    }
+
+    private List<IndexColumn> inspectRequiredIndex(String table, String indexName) {
+        if (isH2Database()) {
+            if ("PRIMARY".equals(indexName)) {
+                return jdbcTemplate.query("""
+                        SELECT 0 AS NON_UNIQUE, kcu.COLUMN_NAME,
+                               kcu.ORDINAL_POSITION AS SEQ_IN_INDEX,
+                               CAST(NULL AS INTEGER) AS SUB_PART
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_catalog = kcu.constraint_catalog
+                         AND tc.constraint_schema = kcu.constraint_schema
+                         AND tc.constraint_name = kcu.constraint_name
+                        WHERE tc.table_schema = SCHEMA()
+                          AND LOWER(tc.table_name) = LOWER(?)
+                          AND tc.constraint_type = 'PRIMARY KEY'
+                        ORDER BY kcu.ordinal_position
+                        """, INDEX_COLUMN_MAPPER, table);
+            }
+            return jdbcTemplate.query("""
+                    SELECT CASE WHEN IS_UNIQUE THEN 0 ELSE 1 END AS NON_UNIQUE,
+                           COLUMN_NAME, ORDINAL_POSITION AS SEQ_IN_INDEX,
+                           CAST(NULL AS INTEGER) AS SUB_PART
+                    FROM information_schema.index_columns
+                    WHERE table_schema = SCHEMA()
+                      AND LOWER(table_name) = LOWER(?)
+                      AND LOWER(index_name) = LOWER(?)
+                    ORDER BY ordinal_position
+                    """, INDEX_COLUMN_MAPPER, table, indexName);
+        }
+        return jdbcTemplate.query("""
+                SELECT NON_UNIQUE, COLUMN_NAME, SEQ_IN_INDEX, SUB_PART
+                FROM information_schema.statistics
+                WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?
+                ORDER BY SEQ_IN_INDEX
+                """, INDEX_COLUMN_MAPPER, table, indexName);
+    }
+
+    private static final RowMapper<IndexColumn> INDEX_COLUMN_MAPPER = (rs, rowNum) ->
+            new IndexColumn(
+                    rs.getInt("NON_UNIQUE"),
+                    rs.getString("COLUMN_NAME"),
+                    rs.getInt("SEQ_IN_INDEX"),
+                    rs.getObject("SUB_PART") == null ? null : rs.getInt("SUB_PART"));
+
+    static record IndexColumn(int nonUnique, String columnName, int sequence, Integer subPart) {}
+    static record TaskEventIndexColumn(
+            String indexName, String columnName, int sequence, Integer subPart) {}
+
+}

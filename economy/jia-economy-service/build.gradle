@@ -1,0 +1,88 @@
+dependencies {
+    api project(':economy:jia-economy-api')
+    implementation project(':economy:jia-economy-mapper')
+    implementation project(':common:jia-common-service')
+    compileOnly libs.spring.security.oauth2.resource.server
+    compileOnly libs.spring.security.oauth2.jose
+    testImplementation project(':common:jia-common-test')
+    testImplementation libs.spring.security.oauth2.resource.server
+    testImplementation libs.spring.security.oauth2.jose
+    testImplementation libs.spring.security.config
+    testImplementation 'org.springframework.security:spring-security-web'
+    testImplementation 'org.apache.tomcat.embed:tomcat-embed-core'
+    testRuntimeOnly libs.mysql
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-economy-service'
+
+
+// Economy hosting configuration/schema slice. It is isolated from historical
+// default-test compilation debt and keeps the real MySQL fixture opt-in through
+// CYF_ECO_MYSQL_URL; without that environment variable only the no-DB contract runs.
+def economyHostingRegressionSourceSet = sourceSets.create('economyHostingRegression') {
+    java {
+        srcDir 'src/test/java'
+        include 'cn/jia/economy/config/EconomyPreviewConfigurationTest.java'
+        include 'cn/jia/economy/config/EconomyHostingRentSchemaInitializerMySqlTest.java'
+        include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
+        include 'cn/jia/economy/service/impl/HostingRentLedgerServiceRealTransactionTest.java'
+        include 'cn/jia/economy/service/impl/EconomyPostingServiceRealTransactionTest.java'
+    }
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(economyHostingRegressionSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(economyHostingRegressionSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('economyHostingRegression', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs isolated economy hosting preview and opt-in MySQL schema regressions.'
+    dependsOn tasks.named(economyHostingRegressionSourceSet.classesTaskName)
+    testClassesDirs = economyHostingRegressionSourceSet.output.classesDirs
+    classpath = economyHostingRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// Real HTTP fixtures use the same Servlet/Spring versions as the application artifact.
+gradle.projectsEvaluated {
+    def applicationRuntime = project(':starter').configurations.runtimeClasspath
+    configurations.testCompileClasspath.shouldResolveConsistentlyWith(applicationRuntime)
+    configurations.testRuntimeClasspath.shouldResolveConsistentlyWith(applicationRuntime)
+}
+
+// Actual MySQL usage journal regression, independent of unrelated HTTP fixture compilation.
+def usageCostRegressionSourceSet = sourceSets.create('usageCostRegression') {
+    java {
+        srcDir 'src/test/java'
+        include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
+        include 'cn/jia/economy/service/impl/UsageCostServiceMySqlTest.java'
+    }
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(usageCostRegressionSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(usageCostRegressionSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('usageCostRegression', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs the opt-in real MySQL usage cost journal regressions.'
+    dependsOn tasks.named(usageCostRegressionSourceSet.classesTaskName)
+    testClassesDirs = usageCostRegressionSourceSet.output.classesDirs
+    classpath = usageCostRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}

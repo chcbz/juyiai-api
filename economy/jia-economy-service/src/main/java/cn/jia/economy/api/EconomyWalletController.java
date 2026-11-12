@@ -1,0 +1,421 @@
+package cn.jia.economy.api;
+
+import cn.jia.core.security.TenantClaimPolicy;
+
+import cn.jia.economy.common.EconomyConstants;
+import cn.jia.economy.common.WenAmount;
+import cn.jia.economy.common.Money;
+import cn.jia.economy.config.EconomyPreviewGate;
+import cn.jia.economy.entity.EconomyWalletLedgerRow;
+import cn.jia.economy.exception.EconomyPostingException;
+import cn.jia.economy.service.EconomyPostingResult;
+import cn.jia.economy.service.EconomyScope;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+/** Development-preview wallet edge. JWT claims are the only scope source. */
+@RestController
+@RequestMapping("/economy")
+public final class EconomyWalletController {
+    private static final String CACHE_CONTROL_VALUE = "private, no-store";
+    private static final int DEFAULT_LIMIT = 50;
+    private static final int MAX_LIMIT = 100;
+    private static final Pattern CANONICAL_UUID = Pattern.compile(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+    private static final ObjectMapper STRICT_JSON = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .build();
+
+    private final EconomyPreviewGate gate;
+    private final EconomyWalletService walletService;
+
+    public EconomyWalletController(EconomyPreviewGate gate, EconomyWalletService walletService) {
+        this.gate = Objects.requireNonNull(gate, "gate");
+        this.walletService = Objects.requireNonNull(walletService, "walletService");
+    }
+
+    @GetMapping(value = "/wallet", produces = MediaType.APPLICATION_JSON_VALUE)
+    public cn.jia.core.entity.JsonResult<WalletResponse> wallet(HttpServletRequest request, Authentication authentication) {
+        requireNoQuery(request);
+        Subject subject = requireSubject(authentication);
+        requirePreviewScope(subject.scope());
+        EconomyWalletService.WalletSnapshot snapshot = walletService.wallet(subject.scope(), subject.actorId());
+        return cn.jia.core.entity.JsonResult.success(new WalletResponse(EconomyConstants.CURRENCY_WEN, Money.wen(snapshot.availableWen()),
+                Money.wen(snapshot.heldWen()), Long.toString(snapshot.version())));
+    }
+
+    @GetMapping(value = "/ledger", produces = MediaType.APPLICATION_JSON_VALUE)
+    public cn.jia.core.entity.JsonResult<LedgerResponse> ledger(HttpServletRequest request, Authentication authentication) {
+        Subject subject = requireSubject(authentication);
+        requirePreviewScope(subject.scope());
+        Query query = parseLedgerQuery(request);
+        EconomyWalletService.LedgerPage page = walletService.ledger(
+                subject.scope(), subject.actorId(), query.cursor(), query.limit());
+        List<LedgerItemResponse> items = new ArrayList<>(page.rows().size());
+        for (EconomyWalletLedgerRow row : page.rows()) items.add(toLedgerItem(row));
+        return cn.jia.core.entity.JsonResult.success(new LedgerResponse(List.copyOf(items), encodeCursor(page.nextCursor()), page.nextCursor() != null));
+    }
+
+    @PostMapping(value = "/events", consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public cn.jia.core.entity.JsonResult<CampaignEventResponse> observeEvent(
+            @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] rawBody,
+            HttpServletRequest request, Authentication authentication) {
+        requireNoQuery(request);
+        Subject subject = requireSubject(authentication);
+        requirePreviewScope(subject.scope());
+        var event = parseEvent(rawBody);
+        var receipts = walletService.observeEvent(subject.scope(), subject.actorId(), event).stream()
+                .map(r -> new CampaignReceiptResponse(r.transactionId(), r.status(),
+                        Money.wen(r.amountWen()), r.campaignRef())).toList();
+        return cn.jia.core.entity.JsonResult.success(new CampaignEventResponse(receipts));
+    }
+
+    private static cn.jia.economy.config.EconomyCampaignProperties.Event parseEvent(byte[] rawBody) {
+        try {
+            JsonNode body = STRICT_JSON.readTree(rawBody);
+            if (body == null || !body.isObject() || body.size() != 1
+                    || !body.has("event") || !body.get("event").isTextual()) throw badRequest();
+            return cn.jia.economy.config.EconomyCampaignProperties.Event.valueOf(body.get("event").textValue());
+        } catch (Exception invalid) {
+            throw badRequest();
+        }
+    }
+
+    @PostMapping(value = "/preview/issuances", consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public cn.jia.core.entity.JsonResult<IssuanceResponse> issue(@cn.jia.core.annotation.ApiJsonData @RequestBody byte[] rawBody, HttpServletRequest request,
+            Authentication authentication) {
+        requireNoQuery(request);
+        Subject subject = requireSubject(authentication);
+        requirePreviewScope(subject.scope());
+        if (!gate.testIssuanceEnabled()) throw disabled();
+        String idempotencyKey = singleHeader(request, "Idempotency-Key");
+        if (!CANONICAL_UUID.matcher(idempotencyKey).matches()) throw badRequest();
+        IssuanceRequest body = parseIssuanceBody(rawBody);
+        byte[] requestHash = requestHash(subject, body);
+        EconomyPostingResult result = walletService.issue(subject.scope(), subject.actorId(), idempotencyKey,
+                requestHash, body.amountWen(), body.campaignRef());
+        return cn.jia.core.entity.JsonResult.success(new IssuanceResponse(result.transactionId(), result.status(), Money.wen(body.amountWen())));
+    }
+
+    @ExceptionHandler(EconomyRequestException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<EconomyErrorDetails>> requestFailure(EconomyRequestException exception) {
+        return error(exception.status, exception.code, exception.getMessage(), false);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<EconomyErrorDetails>> unreadableBody(HttpMessageNotReadableException ignored) {
+        return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Invalid economy request", false);
+    }
+
+    @ExceptionHandler(EconomyPostingException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<EconomyErrorDetails>> postingFailure(EconomyPostingException exception) {
+        return switch (exception.reason()) {
+            case FEATURE_DISABLED -> error(HttpStatus.FORBIDDEN, "ECONOMY_PREVIEW_DISABLED",
+                    "Economy preview is disabled for this request", false);
+            case IDEMPOTENCY_CONFLICT -> error(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT",
+                    "Idempotency-Key is already bound to a different request", false);
+            case INVALID_COMMAND, AMOUNT_RANGE_EXCEEDED, IMBALANCED_TRANSACTION, INSUFFICIENT_FUNDS,
+                    ACCOUNT_NOT_FOUND, ACCOUNT_NOT_ACTIVE, ESCROW_CONFLICT -> error(HttpStatus.BAD_REQUEST,
+                    "BAD_REQUEST", "Invalid economy request", false);
+            case CONCURRENCY_CONFLICT -> error(HttpStatus.CONFLICT, "ECONOMY_CONCURRENCY_CONFLICT",
+                    "Economy request conflicted; retry with the same Idempotency-Key", true);
+            default -> error(HttpStatus.SERVICE_UNAVAILABLE, "ECONOMY_UNAVAILABLE",
+                    "Economy service is temporarily unavailable", true);
+        };
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<EconomyErrorDetails>> unexpectedFailure(Exception ignored) {
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "ECONOMY_UNAVAILABLE",
+                "Economy service is temporarily unavailable", true);
+    }
+
+    private void requirePreviewScope(EconomyScope scope) {
+        if (!gate.allows(scope.tenantId(), scope.clientId())) throw disabled();
+    }
+
+    private static Subject requireSubject(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()
+                || !(authentication instanceof JwtAuthenticationToken jwt)) {
+            throw new EconomyRequestException(HttpStatus.UNAUTHORIZED, "ECONOMY_UNAUTHENTICATED",
+                    "Authentication is required");
+        }
+        Map<String, Object> claims = jwt.getToken().getClaims();
+        Object jiacn = claims.get("jiacn");
+        Object clientId = claims.get("client_id");
+        Object subject = claims.get("sub");
+        if (!(jiacn instanceof String ownerJiacn) || !(clientId instanceof String client)
+                || !(subject instanceof String actor)
+                || !validExact(ownerJiacn, 50) || "0".equals(ownerJiacn)
+                || !validExact(client, 50) || !validExact(actor, 100)) {
+            throw new EconomyRequestException(HttpStatus.FORBIDDEN, "ECONOMY_FORBIDDEN",
+                    "Economy scope is unavailable");
+        }
+        try {
+            return new Subject(new EconomyScope(TenantClaimPolicy.resolve(claims), client), actor);
+        } catch (IllegalArgumentException denied) {
+            throw new EconomyRequestException(HttpStatus.FORBIDDEN, "ECONOMY_FORBIDDEN",
+                    "Economy scope is unavailable");
+        }
+    }
+
+    private static void requireNoQuery(HttpServletRequest request) {
+        if (!request.getParameterMap().isEmpty()) throw badRequest();
+    }
+
+    private static Query parseLedgerQuery(HttpServletRequest request) {
+        Set<String> allowed = Set.of("cursor", "pageSize");
+        for (String name : request.getParameterMap().keySet()) {
+            if (!allowed.contains(name) || request.getParameterValues(name) == null
+                    || request.getParameterValues(name).length != 1) throw badRequest();
+        }
+        String[] cursorValues = request.getParameterValues("cursor");
+        String cursorValue = cursorValues == null ? null : cursorValues[0];
+        String[] limitValues = request.getParameterValues("pageSize");
+        int limit = DEFAULT_LIMIT;
+        if (limitValues != null) {
+            String raw = limitValues[0];
+            if (raw == null || !raw.matches("(?:[1-9]|[1-9][0-9]{1,2})")) throw badRequest();
+            try {
+                limit = Integer.parseInt(raw);
+            } catch (NumberFormatException exception) {
+                throw badRequest();
+            }
+            if (limit > MAX_LIMIT) throw badRequest();
+        }
+        return new Query(cursorValue == null || cursorValue.isEmpty() ? null : decodeCursor(cursorValue), limit);
+    }
+
+    private static String singleHeader(HttpServletRequest request, String name) {
+        Enumeration<String> values = request.getHeaders(name);
+        if (values == null || !values.hasMoreElements()) throw badRequest();
+        String value = values.nextElement();
+        if (values.hasMoreElements() || value == null || value.contains(",")) throw badRequest();
+        return value;
+    }
+
+    private static void requireEmptyObject(byte[] rawBody) {
+        if (rawBody == null || rawBody.length == 0) throw badRequest();
+        try {
+            JsonNode root = STRICT_JSON.readTree(rawBody);
+            if (root == null || !root.isObject() || root.size() != 0) throw badRequest();
+        } catch (EconomyRequestException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw badRequest();
+        }
+    }
+
+    private static IssuanceRequest parseIssuanceBody(byte[] rawBody) {
+        if (rawBody == null || rawBody.length == 0) throw badRequest();
+        try {
+            JsonNode root = STRICT_JSON.readTree(rawBody);
+            if (root == null || !root.isObject() || root.size() != 2
+                    || !root.has("amount") || !root.has("campaignRef")
+                    || !root.get("amount").isObject() || !root.get("campaignRef").isTextual()) {
+                throw badRequest();
+            }
+            JsonNode money = root.get("amount");
+            if (money.size() != 2 || !money.has("amountMinor") || !money.has("currency")
+                    || !money.get("amountMinor").isTextual() || !money.get("currency").isTextual()
+                    || !EconomyConstants.CURRENCY_WEN.equals(money.get("currency").textValue())) throw badRequest();
+            String amount = money.get("amountMinor").textValue();
+            String campaign = root.get("campaignRef").textValue();
+            long parsed = WenAmount.parseUnsigned(amount);
+            if (parsed == 0 || !validExact(campaign, 100)) throw badRequest();
+            return new IssuanceRequest(parsed, campaign);
+        } catch (EconomyRequestException | EconomyPostingException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw badRequest();
+        }
+    }
+
+    private static byte[] requestHash(Subject subject, IssuanceRequest body) {
+        try {
+            var envelope = STRICT_JSON.createObjectNode();
+            var actor = envelope.putObject("actor");
+            actor.put("tenantId", subject.scope().tenantId());
+            actor.put("clientId", subject.scope().clientId());
+            actor.put("userId", subject.actorId());
+            envelope.put("method", "POST");
+            envelope.put("route", "/economy/preview/issuances");
+            var closedBody = envelope.putObject("body");
+            closedBody.put("amountWen", WenAmount.format(body.amountWen()));
+            closedBody.put("campaignRef", body.campaignRef());
+            return MessageDigest.getInstance("SHA-256").digest(STRICT_JSON.writeValueAsBytes(envelope));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to canonicalize issuance request", exception);
+        }
+    }
+
+    private static LedgerItemResponse toLedgerItem(EconomyWalletLedgerRow row) {
+        if (row == null || !validExact(row.getTransactionId(), 100) || !validExact(row.getEntryId(), 140)
+                || !validExact(row.getBusinessType(), 32) || !validExact(row.getBusinessRef(), 100)
+                || !"POSTED".equals(row.getStatus()) || row.getPostedAt() == null || row.getPostedAt() < 0
+                || row.getSignedAmountWen() == null || row.getSignedAmountWen() == 0) {
+            throw new EconomyPostingException(EconomyPostingException.Reason.JOURNAL_CORRUPT,
+                    "wallet ledger row is invalid");
+        }
+        long signed = row.getSignedAmountWen();
+        String direction = signed > 0 ? "CREDIT" : "DEBIT";
+        long amount;
+        try {
+            amount = signed > 0 ? signed : Math.negateExact(signed);
+        } catch (ArithmeticException exception) {
+            throw new EconomyPostingException(EconomyPostingException.Reason.JOURNAL_CORRUPT,
+                    "wallet ledger amount is invalid", exception);
+        }
+        return new LedgerItemResponse(row.getTransactionId(), row.getEntryId(), row.getBusinessType(),
+                row.getBusinessRef(), direction, Money.wen(amount), row.getStatus(),
+                row.getPostedAt());
+    }
+
+    private static String encodeCursor(EconomyWalletService.Cursor cursor) {
+        if (cursor == null) return null;
+        if (cursor.postedAt() < 0 || cursor.rowId() < 1) {
+            throw new EconomyPostingException(EconomyPostingException.Reason.JOURNAL_CORRUPT,
+                    "wallet ledger cursor is invalid");
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+                ByteBuffer.allocate(16).putLong(cursor.postedAt()).putLong(cursor.rowId()).array());
+    }
+
+    private static EconomyWalletService.Cursor decodeCursor(String value) {
+        if (!value.matches("[A-Za-z0-9_-]{22}")) throw badRequest();
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(value);
+            if (decoded.length != 16 || !Base64.getUrlEncoder().withoutPadding().encodeToString(decoded).equals(value)) {
+                throw badRequest();
+            }
+            ByteBuffer bytes = ByteBuffer.wrap(decoded);
+            long postedAt = bytes.getLong();
+            long rowId = bytes.getLong();
+            if (postedAt < 0 || rowId < 1) throw badRequest();
+            return new EconomyWalletService.Cursor(postedAt, rowId);
+        } catch (IllegalArgumentException exception) {
+            throw badRequest();
+        }
+    }
+
+    private static boolean validExact(String value, int maxBytes) {
+        if (value == null || value.isEmpty() || hasUnpairedSurrogate(value)
+                || value.getBytes(StandardCharsets.UTF_8).length > maxBytes
+                || isPadding(value.codePointAt(0)) || isPadding(value.codePointBefore(value.length()))) {
+            return false;
+        }
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static boolean hasUnpairedSurrogate(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char unit = value.charAt(index);
+            if (Character.isHighSurrogate(unit)) {
+                if (++index >= value.length() || !Character.isLowSurrogate(value.charAt(index))) return true;
+            } else if (Character.isLowSurrogate(unit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isPadding(int codePoint) {
+        return Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint);
+    }
+
+    private static EconomyRequestException badRequest() {
+        return new EconomyRequestException(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Invalid economy request");
+    }
+
+    private static EconomyRequestException disabled() {
+        return new EconomyRequestException(HttpStatus.FORBIDDEN, "ECONOMY_PREVIEW_DISABLED",
+                "Economy preview is disabled for this request");
+    }
+
+    private static ResponseEntity<cn.jia.core.entity.JsonResult<EconomyErrorDetails>> error(
+            HttpStatus status, String code, String message, boolean retryable) {
+        var result = cn.jia.core.entity.JsonResult.<EconomyErrorDetails>failure(code, message);
+        result.setData(new EconomyErrorDetails(retryable, null));
+        return ResponseEntity.status(status).header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL_VALUE)
+                .contentType(new MediaType(MediaType.APPLICATION_JSON, StandardCharsets.UTF_8)).body(result);
+    }
+
+    private record Subject(EconomyScope scope, String actorId) {
+    }
+
+    private record Query(EconomyWalletService.Cursor cursor, int limit) {
+    }
+
+    private record IssuanceRequest(long amountWen, String campaignRef) {
+    }
+
+    public record WalletResponse(String currency, Money available, Money held, String version) {
+    }
+
+    public record LedgerResponse(List<LedgerItemResponse> items, String nextCursor, boolean hasMore) {
+    }
+
+    public record LedgerItemResponse(String transactionId, String entryId, String businessType, String businessRef,
+                                     String direction, Money amount, String status, long postedAt) {
+    }
+
+    public record IssuanceResponse(String transactionId, String status, Money amount) {
+    }
+
+    public record CampaignReceiptResponse(
+            String transactionId, String status, Money amount, String campaignRef) {
+    }
+
+    public record CampaignEventResponse(List<CampaignReceiptResponse> grants) { }
+
+    public record EconomyErrorDetails(boolean retryable, String currentVersion) { }
+    public record EconomyError(String code, String message, boolean retryable, String currentVersion) {
+    }
+
+    private static final class EconomyRequestException extends RuntimeException {
+        private final HttpStatus status;
+        private final String code;
+
+        private EconomyRequestException(HttpStatus status, String code, String message) {
+            super(message);
+            this.status = status;
+            this.code = code;
+        }
+    }
+}

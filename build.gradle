@@ -1,0 +1,353 @@
+ext.forbiddenPublicArtifactJarExtensions = [
+        '.p12',
+        '.pfx',
+        '.jks',
+        '.keystore',
+        '.pem',
+        '.key'
+].asImmutable()
+
+ext.isForbiddenPublicArtifactJarMember = { String memberName ->
+    def normalizedName = memberName.replace('\\', '/').toLowerCase(Locale.ROOT)
+    def baseName = normalizedName.substring(normalizedName.lastIndexOf('/') + 1)
+    baseName in ['application-dev.properties', 'application-dev.yml', 'application-dev.yaml'] ||
+            rootProject.ext.forbiddenPublicArtifactJarExtensions.any { normalizedName.endsWith(it) }
+}
+
+/**
+ * Keeps a module's optional Spring Boot entry point outside its library runtime artifact.
+ * The launcher remains available through a dedicated source set, classified jar and JavaExec task.
+ */
+ext.configureStandaloneLauncher = { Project launcherProject, String applicationClass ->
+    def launcherSourceSet = launcherProject.sourceSets.create('launcher') {
+        java.srcDir 'src/launcher/java'
+        resources.srcDir 'src/launcher/resources'
+        compileClasspath += launcherProject.sourceSets.main.output
+        runtimeClasspath += output + compileClasspath
+    }
+
+    launcherProject.configurations.named(launcherSourceSet.implementationConfigurationName) {
+        extendsFrom launcherProject.configurations.implementation
+    }
+    launcherProject.configurations.named(launcherSourceSet.runtimeOnlyConfigurationName) {
+        extendsFrom launcherProject.configurations.runtimeOnly
+    }
+
+    def launcherJar = launcherProject.tasks.register('launcherJar', Jar) {
+        group = 'build'
+        description = "Assembles the standalone launcher artifact for ${launcherProject.path}."
+        archiveClassifier = 'launcher'
+        from launcherSourceSet.output
+    }
+
+    def launcherElements = launcherProject.configurations.create('standaloneLauncherElements') {
+        canBeConsumed = true
+        canBeResolved = false
+        description = "Standalone launcher artifact for ${launcherProject.path}."
+    }
+    launcherProject.artifacts.add(launcherElements.name, launcherJar)
+
+    launcherProject.tasks.register('runStandalone', JavaExec) {
+        group = 'application'
+        description = "Runs ${applicationClass} with ${launcherProject.path}'s library runtime."
+        dependsOn launcherProject.tasks.named(launcherSourceSet.classesTaskName)
+        classpath = launcherSourceSet.runtimeClasspath
+        mainClass = applicationClass
+    }
+
+    launcherProject.ext.standaloneLauncherClass = applicationClass
+}
+
+allprojects {
+    group = 'cn.jia'
+
+    tasks.withType(org.gradle.api.tasks.bundling.Jar).configureEach {
+        exclude { details -> rootProject.ext.isForbiddenPublicArtifactJarMember.call(details.path) }
+    }
+}
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'maven-publish'
+    dependencies {
+        implementation libs.slf4j.api
+        implementation libs.jakarta.inject.api
+        implementation libs.jakarta.annotation.api
+        implementation libs.mapstruct.core
+        compileOnly 'org.jetbrains:annotations:24.1.0'
+        annotationProcessor libs.lombok
+        annotationProcessor libs.mapstruct.processor
+        compileOnly libs.lombok
+        testAnnotationProcessor libs.lombok
+        testCompileOnly libs.lombok
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs << '-parameters'
+    }
+    tasks.named('test') {
+        useJUnitPlatform()
+    }
+    // 移除 afterEvaluate，直接在 publishing 块中配置，利用延迟配置特性
+    publishing {
+        publications {
+            mavenJava(MavenPublication) {
+                from components.java
+            }
+        }
+        repositories {
+            maven {
+                // 显式命名仓库以确保生成的任务名称明确
+                name = "Maven"
+                // 使用 provider 延迟计算 URL，确保读取到正确的版本信息
+                url = provider {
+                    version.toString().endsWith('SNAPSHOT')
+                            ? rootProject.ext.snapshotsRepoUrl
+                            : rootProject.ext.releasesRepoUrl
+                }
+                credentials {
+                    username = rootProject.ext.repoUsername
+                    password = rootProject.ext.repoPassword
+                }
+            }
+        }
+    }
+}
+// 使用任务配置避让，避免在配置阶段实例化所有子项目任务
+tasks.register('publishAllToLocal') {
+    dependsOn subprojects.collect { it.tasks.named('publishToMavenLocal') }
+}
+tasks.register('publishAllToMavenRepository') {
+    // 任务名称规则：publish${PublicationName}PublicationTo${RepositoryName}Repository
+    // 此处对应仓库名为 "Maven"，生成的任务名为 publishMavenJavaPublicationToMavenRepository
+    // 若需发布所有出版物，可使用 publishAllPublicationsToMavenRepository
+    dependsOn subprojects.collect { it.tasks.named('publishAllPublicationsToMavenRepository') }
+}
+
+// Architecture convergence AC-05: syntax-only JDK parsing, no type analysis or compilation.
+// Keep this collector in the existing layering entrypoint; it must never rewrite its baseline.
+class ArchitectureBoundaryScanner extends com.sun.source.util.TreeScanner<Void, Void> {
+    String sourcePath
+    String sourceDomain
+    String className = '<unit>'
+    String methodName = '<class>'
+    Map<String, Map> sourceIndex
+    Set<Map> findings
+    boolean scopedNewSource
+
+    void finding(String rule, String symbol) {
+        findings.add([rule: rule, sourcePath: sourcePath, symbol: symbol])
+    }
+
+    @Override Void visitClass(com.sun.source.tree.ClassTree node, Void unused) {
+        String previous = className
+        className = previous == '<unit>' ? node.simpleName.toString() : previous + '.' + node.simpleName
+        try { return super.visitClass(node, unused) } finally { className = previous }
+    }
+
+    @Override Void visitMethod(com.sun.source.tree.MethodTree node, Void unused) {
+        String previous = methodName
+        methodName = node.name.toString() + '(' + node.parameters.collect { it.type.toString() }.join(',') + ')'
+        try { return super.visitMethod(node, unused) } finally { methodName = previous }
+    }
+
+    @Override Void visitImport(com.sun.source.tree.ImportTree node, Void unused) {
+        String target = node.qualifiedIdentifier.toString()
+        def targets = []
+        if (target.endsWith('.*') && !node.isStatic()) {
+            String pkg = target.substring(0, target.length() - 2)
+            targets = sourceIndex.values().findAll { it.pkg == pkg }
+        } else {
+            String candidate = target
+            while (candidate.contains('.')) {
+                if (sourceIndex.containsKey(candidate)) { targets = [sourceIndex[candidate]]; break }
+                candidate = candidate.substring(0, candidate.lastIndexOf('.'))
+            }
+        }
+        if (targets.any { it.domain != sourceDomain && it.domain != 'common' &&
+                (it.path.contains('-service/src/main/java/') || it.path.contains('/mapper/') || it.path.contains('/dao/impl/')) }) {
+            finding('G1', target)
+        }
+        return null // imports are not uses of SecurityContextHolder in a method
+    }
+
+    void checkIdentity(String name) {
+        if (sourcePath.contains('/service/') && (name == 'SecurityContextHolder' ||
+                name == 'org.springframework.security.core.context.SecurityContextHolder')) {
+            finding('G2', className + '#' + methodName + ':SecurityContextHolder')
+        }
+    }
+    @Override Void visitIdentifier(com.sun.source.tree.IdentifierTree node, Void unused) {
+        checkIdentity(node.name.toString())
+        return super.visitIdentifier(node, unused)
+    }
+    @Override Void visitMemberSelect(com.sun.source.tree.MemberSelectTree node, Void unused) {
+        checkIdentity(node.toString())
+        return super.visitMemberSelect(node, unused)
+    }
+    @Override Void visitLiteral(com.sun.source.tree.LiteralTree node, Void unused) {
+        if (node.value instanceof String) {
+            String value = node.value
+            if (sourceDomain == 'chat') {
+                def tables = value =~ /(?i)\bagent_personal_workspace_(?:task_file_link|file_version|file)\b/
+                tables.each { table -> finding('G3', className + '#' + methodName + ':' + table.toLowerCase(Locale.ROOT)) }
+            }
+            if (scopedNewSource && (value =~ /(?i)\b(?:create|alter|drop|truncate)\s+table\b/).find()) {
+                finding('G4', className + '#' + methodName + ':schema-write')
+            }
+        }
+        return super.visitLiteral(node, unused)
+    }
+    @Override Void visitAnnotation(com.sun.source.tree.AnnotationTree node, Void unused) {
+        String name = node.annotationType.toString().tokenize('.').last()
+        if (scopedNewSource && name in ['Controller', 'RestController', 'RequestMapping', 'GetMapping',
+                'PostMapping', 'PutMapping', 'DeleteMapping', 'PatchMapping']) finding('G4', 'HTTP:' + name)
+        return super.visitAnnotation(node, unused)
+    }
+}
+
+ext.collectArchitectureBoundaries = { File sourceRoot, Collection<File> sourceFiles, Set<String> scopedNewSources ->
+    def compiler = javax.tools.ToolProvider.systemJavaCompiler
+    if (compiler == null) throw new IllegalStateException('validateLayering requires the configured JDK compiler')
+    def diagnostics = new javax.tools.DiagnosticCollector<javax.tools.JavaFileObject>()
+    def manager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, java.nio.charset.StandardCharsets.UTF_8)
+    try {
+        def task = compiler.getTask(null, manager, diagnostics, ['-proc:none'], null,
+                manager.getJavaFileObjectsFromFiles(sourceFiles))
+        def units = task.parse().toList()
+        def errors = diagnostics.diagnostics.findAll { it.kind == javax.tools.Diagnostic.Kind.ERROR }
+        if (errors) throw new IllegalStateException('Architecture source parse failed: ' + errors.join('\n'))
+        Map<String, Map> index = [:]
+        def paths = [:]
+        units.each { unit ->
+            String path = sourceRoot.toPath().relativize(new File(unit.sourceFile.toUri()).toPath()).toString().replace('\\', '/')
+            String domain = path.tokenize('/')[0]
+            if (domain == 'mat') domain = 'material'
+            String pkg = unit.packageName?.toString() ?: ''
+            paths[unit] = [path: path, domain: domain]
+            unit.typeDecls.findAll { it instanceof com.sun.source.tree.ClassTree }.each { type ->
+                index[pkg + '.' + type.simpleName] = [path: path, domain: domain, pkg: pkg]
+            }
+        }
+        Set<Map> findings = new LinkedHashSet<>()
+        units.each { unit ->
+            def entry = paths[unit]
+            // Starter composition and common infrastructure are not business-domain consumers.
+            if (entry.domain in ['common', 'starter', 'plugin'] || entry.path.contains('-starter/')) return
+            new ArchitectureBoundaryScanner(sourcePath: entry.path, sourceDomain: entry.domain,
+                    sourceIndex: index, findings: findings, scopedNewSource: scopedNewSources.contains(entry.path)).scan(unit, null)
+        }
+        return findings.toList().sort { a, b -> (a.rule + a.sourcePath + a.symbol) <=> (b.rule + b.sourcePath + b.symbol) }
+    } finally { manager.close() }
+}
+
+tasks.register('validateLayering') {
+    group = 'verification'
+    description = 'Validates module layering: service -> mapper -> api/core.'
+
+    doLast {
+        def violations = []
+
+        fileTree(rootDir) {
+            include '**/jia-*-mapper/build.gradle'
+            exclude 'build/**'
+        }.each { buildFile ->
+            buildFile.eachLine { line ->
+                if (line =~ /^\s*(api|implementation|compileOnly|runtimeOnly)\s+project\(':.*:jia-.*-service'\)/) {
+                    violations << "${rootDir.toPath().relativize(buildFile.toPath())}: mapper module must not depend on service module"
+                }
+            }
+        }
+
+        fileTree(rootDir) {
+            include '**/jia-*-api/build.gradle'
+            exclude 'build/**'
+        }.each { buildFile ->
+            buildFile.eachLine { line ->
+                if (line =~ /^\s*(api|implementation|compileOnly|runtimeOnly)\s+project\(':.*:jia-.*-service'\)/) {
+                    violations << "${rootDir.toPath().relativize(buildFile.toPath())}: api module must not depend on service module"
+                }
+            }
+        }
+
+        fileTree(rootDir) {
+            include '**/jia-*-service/src/main/java/**/dao/*.java'
+            exclude '**/build/**'
+        }.each { sourceFile ->
+            violations << "${rootDir.toPath().relativize(sourceFile.toPath())}: DAO interfaces belong in mapper modules"
+        }
+
+        def commonMapper = file('common/jia-common-mapper/build.gradle')
+        if (commonMapper.exists() && commonMapper.text.contains("project(':common:jia-common-service')")) {
+            violations << "common/jia-common-mapper/build.gradle: common mapper must not depend on common service"
+        }
+
+        fileTree(rootDir) {
+            include '**/jia-*-service/build.gradle'
+            exclude 'common/**'
+            exclude 'build/**'
+        }.each { buildFile ->
+            buildFile.eachLine { line ->
+                if (line =~ /^\s*api\s+project\(':common:jia-common-service'\)/) {
+                    violations << "${rootDir.toPath().relativize(buildFile.toPath())}: service module must not expose common-service with api"
+                }
+            }
+        }
+
+        def legacyBaseDao = file('common/jia-common-service/src/main/java/cn/jia/core/dao/IBaseDao.java')
+        if (legacyBaseDao.exists()) {
+            violations << "common/jia-common-service/src/main/java/cn/jia/core/dao/IBaseDao.java: IBaseDao belongs in common-api"
+        }
+
+        // RB-1 skill/economy v1: skills own lifecycle; economy owns trade and money.
+        fileTree(file('economy')) {
+            include '**/src/main/java/**/*.java'
+        }.each { sourceFile ->
+            if (sourceFile.text =~ /\bcn\.jia\.agent\./) {
+                violations << "${rootDir.toPath().relativize(sourceFile.toPath())}: economy must not depend on agent"
+            }
+        }
+        fileTree(file('agent')) {
+            include '**/src/main/java/**/skill/**/*.java'
+        }.each { sourceFile ->
+            if (sourceFile.text =~ /\bcn\.jia\.economy\.(entity|mapper)\./) {
+                violations << "${rootDir.toPath().relativize(sourceFile.toPath())}: skill lifecycle must use economy API, not trade persistence"
+            }
+        }
+        def tradeEntities = ['SkillOrderEntity.java', 'SkillPurchaseQuoteEntity.java', 'SkillOrderReceiptEntity.java']
+        fileTree(file('economy/jia-economy-core/src/main/java/cn/jia/economy/entity/skill')) {
+            include '*.java'
+        }.each { sourceFile ->
+            if (!tradeEntities.contains(sourceFile.name)) {
+                violations << "${sourceFile.name}: non-trade skill entities belong to agent-core"
+            }
+        }
+        ['EconomySkillMarketplaceMapper', 'EconomySkillApplicationMapper',
+         'EconomySkillManagementMapper', 'EconomySkillCredentialMapper'].each { legacy ->
+            if (file("economy/jia-economy-mapper/src/main/java/cn/jia/economy/mapper/${legacy}.java").exists()) {
+                violations << "${legacy}: mixed skill persistence must be split by responsibility"
+            }
+        }
+
+        // Exact pre-existing exceptions only. No auto-accept or baseline generation mode in the task.
+        def baseline = new groovy.json.JsonSlurper().parse(file('docs/architecture-boundary-baseline.json'))
+        def key = { item -> [item.rule, item.sourcePath, item.symbol] }
+        def allowed = baseline.exceptions.collect { key(it) }.toSet()
+        def sources = fileTree(rootDir) {
+            include '**/src/main/java/**/*.java'
+            exclude '**/build/**', '**/.gradle/**', '**/src/test/**'
+        }.files
+        rootProject.ext.collectArchitectureBoundaries(rootDir, sources, baseline.scopedNewSources.toSet()).each { edge ->
+            if (edge.rule == 'G4' || !allowed.contains(key(edge))) {
+                violations << "${edge.sourcePath}: ${edge.rule} ${edge.symbol} (no scoped baseline exception)"
+            }
+        }
+        (allprojects.collect { it.path }.toSet() - baseline.projectPaths.toSet()).each { added ->
+            violations << "G4: unplanned Gradle project ${added}"
+        }
+
+        if (!violations.empty) {
+            throw new GradleException("Layering violations:\n - " + violations.join('\n - '))
+        }
+    }
+}

@@ -1,0 +1,4 @@
+-- 初始化微信公众号信息数据
+truncate table wx_mp_info;
+INSERT INTO wx_mp_info (acid, client_id, token, access_token, encodingaeskey, level, name, account, original, signature, country, province, city, username, password, update_time, status, appid, secret, styleid, subscribeurl, auth_refresh_token)
+VALUES (1, 'fixture-client_id-1', 'fixture-token-10', '', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 2, '饭粒保', 'fixture-token-10', 'fixture-original-11', '', '', '', '', 'fixture@example.com', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 0, 1, 'fixture-appid-8', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 1, '', '');

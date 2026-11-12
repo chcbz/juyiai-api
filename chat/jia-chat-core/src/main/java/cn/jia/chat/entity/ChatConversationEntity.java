@@ -1,0 +1,78 @@
+package cn.jia.chat.entity;
+
+import cn.jia.chat.serialization.ExactLongIdSerializer;
+import tools.jackson.databind.annotation.JsonSerialize;
+import cn.jia.core.entity.BaseEntity;
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableField;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.experimental.Accessors;
+
+import java.io.Serial;
+
+/**
+ * <p>
+ * 聊天会话
+ * </p>
+ *
+ * @author chc
+ * @since 2026-04-19
+ */
+@Data
+@EqualsAndHashCode(callSuper = true)
+@Accessors(chain = true)
+@TableName("chat_conversation")
+@Schema(name = "ChatConversation对象", description = "聊天会话")
+public class ChatConversationEntity extends BaseEntity {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    @TableId(value = "id", type = IdType.AUTO)
+    @JsonSerialize(using = ExactLongIdSerializer.class)
+    private Long id;
+    @Schema(description = "会话标题")
+    private String title;
+
+    @Schema(description = "用户ID")
+    private String jiacn;
+
+    @Schema(description = "会话类型（normal-普通/juyiting-聚义厅）")
+    @TableField("conversation_type")
+    private String conversationType;
+
+    @Schema(description = "conversation scope type: public/bounty/private")
+    @TableField("conversation_scope_type")
+    private String conversationScopeType;
+
+    @Schema(description = "conversation scope key for juyiting isolation")
+    @TableField("conversation_scope_key")
+    private String conversationScopeKey;
+
+    @Schema(description = "juyiting bounty task id")
+    @TableField("task_id")
+    private String taskId;
+
+    @Schema(description = "juyiting private target agent id")
+    @TableField("target_agent_id")
+    private String targetAgentId;
+
+    @Schema(description = "persisted JSON array of allowed juyiting target agent ids")
+    @TableField("target_agent_ids")
+    private String targetAgentIds;
+
+    @Schema(description = "会话状态（ACTIVE/CLOSED）")
+    private Integer status;
+
+    @Schema(description = "durable deletion tombstone timestamp in epoch milliseconds")
+    @TableField("deleted_at")
+    private Long deletedAt;
+
+    @Schema(description = "monotonic lifecycle generation incremented by deletion")
+    @TableField("lifecycle_generation")
+    private Long lifecycleGeneration;
+}

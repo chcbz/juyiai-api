@@ -1,0 +1,830 @@
+package cn.jia.chat.service;
+
+import cn.jia.agent.service.PersonalWorkspaceExecutionService;
+import cn.jia.chat.deliberation.ChatInteractionStepStore;
+import org.springframework.beans.factory.annotation.Autowired;
+import cn.jia.chat.deliberation.ChatContextSnapshotEntity;
+import cn.jia.chat.deliberation.ChatDeliberationDao;
+import cn.jia.chat.deliberation.ChatDispatchOutboxEntity;
+import cn.jia.chat.deliberation.ChatTurnEntity;
+import cn.jia.chat.deliberation.ChatTypedDeliberationStore;
+import cn.jia.chat.handler.TypedInspectionSessionRegistry;
+import cn.jia.core.util.JsonUtil;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/** One action-v5 final store for CHAT. Action events contain references, not execution authority. */
+@Service
+public class ChatActionFinalService {
+    private org.springframework.context.ApplicationEventPublisher outboxEvents;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setOutboxEvents(org.springframework.context.ApplicationEventPublisher value) { outboxEvents = value; }
+
+    public static final String ACTION_EVENT = "ACTION_REQUESTED";
+    public record Prepared(ChatActionFinalValidator.ValidatedFinal validated,
+            ChatTypedDeliberationStore.Scope scope, ChatTypedDeliberationStore.Admission admission,
+            ChatTypedDeliberationStore.Outcome existing) { }
+
+    /** Immutable stored parent; the action itself is not execution authority. */
+    public record BoundAction(ChatTypedDeliberationStore.Outcome outcome,
+            ChatTypedDeliberationStore.Admission admission, ChatActionFinalValidator.ValidatedFinal validated) { }
+
+    private final ChatTypedDeliberationStore store;
+    private final ChatDeliberationDao dao;
+    private final TypedInspectionSessionRegistry sessions;
+
+    public ChatActionFinalService(ChatTypedDeliberationStore store, ChatDeliberationDao dao,
+            TypedInspectionSessionRegistry sessions) {
+        this.store = Objects.requireNonNull(store); this.dao = Objects.requireNonNull(dao);
+        this.sessions = Objects.requireNonNull(sessions);
+    }
+
+    private HistoricalChatActionReader historical;
+    private HistoricalV4ChatActionReader historicalV4;
+    @Autowired public void setHistoricalV4Reader(HistoricalV4ChatActionReader reader) {historicalV4=Objects.requireNonNull(reader);}
+    private cn.jia.agent.service.SkillExecutionService skills;
+    @Autowired public void setSkillResults(cn.jia.agent.service.SkillExecutionService service) {skills=Objects.requireNonNull(service);}
+    @Autowired public void setHistoricalReader(HistoricalChatActionReader reader) {historical=Objects.requireNonNull(reader);}
+    private ChatInteractionStepStore deliverySteps;
+    private PersonalWorkspaceExecutionService deliveryExecutions;
+
+    @Autowired(required=false)
+    public void setExecutionDeliverySources(ChatInteractionStepStore steps, PersonalWorkspaceExecutionService executions) {
+        this.deliverySteps=Objects.requireNonNull(steps);this.deliveryExecutions=Objects.requireNonNull(executions);
+    }
+
+    private ChatDeliverySubmissionService submissions;
+    @Autowired(required=false)
+    public void setDeliverySubmissions(ChatDeliverySubmissionService service) {this.submissions=Objects.requireNonNull(service);}
+
+    private ChatDeliveryRevisionService revisions;
+    @Autowired(required=false) public void setRevisions(ChatDeliveryRevisionService value) {revisions=Objects.requireNonNull(value);}
+
+    private ChatTypedReviewContextStore reviewContexts;
+    @Autowired(required=false) public void setReviewContextStore(ChatTypedReviewContextStore value) {reviewContexts=Objects.requireNonNull(value);}
+
+    private ChatDeliveryRevisionContract.Basis reviewBasis(Map<String,Object> facts, ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Admission admission) {
+        if (!facts.containsKey("reviewBasis")) return null; // Gate-off snapshots have no review authority.
+        var basis=ChatDeliveryRevisionContract.basisJson(canonical(facts.get("reviewBasis")));
+        if(reviewContexts==null || !Objects.equals(basis,reviewContexts.require(scope,admission.requestId(),admission.requestRevision())))
+            throw persistence("Review basis differs from immutable admission");
+        if(basis!=null && (!admission.taskId().equals(basis.taskId()) || !Long.toString(admission.userMessageId()).equals(basis.sourceMessageId())
+                || !Long.toString(admission.assignmentRevision()).equals(basis.assignmentRevision()))) throw persistence("Review basis provenance differs");
+        return basis;
+    }
+
+    static boolean supportsActionFacts(Map<String, Object> facts) {
+        if (facts.containsKey("typedDeliberation") && facts.containsKey("typedInspection"))
+            throw persistence("Snapshot has conflicting typed contracts");
+        Object value = facts.get("typedDeliberation");
+        if (facts.containsKey("typedInspection")) value = map(facts.get("typedInspection")).get("discussionFacts");
+        // Facts v6 adds native capabilities; the final outcome contract remains v5.
+        return value instanceof Map<?, ?> typed && (Integer.valueOf(5).equals(typed.get("schemaVersion"))
+                || Integer.valueOf(6).equals(typed.get("schemaVersion")));
+    }
+
+    public Prepared prepare(ChatTurnEntity turn, ChatContextSnapshotEntity snapshot, String content,
+            Integer version, String rawOutcome, String rawReceipt) {
+        verifySnapshot(turn, snapshot);
+        Map<String, Object> facts = parse(snapshot.getFactsManifestJson());
+        if (!supportsActionFacts(facts)) throw invalid("Action final requires v5 or v6 snapshot facts");
+        var scope = scope(turn);
+        var admission = requireAdmission(scope, turn.getRequestId(), turn.getTurnId(), turn.getRequestRevision());
+        String taskId = taskId(facts);
+        if (!taskId.equals(admission.taskId())) throw persistence("Action admission task differs from snapshot");
+        var typed = discussion(facts, turn.getRoute());
+        Object authority = ChatMaterialsInputContract.authority(facts.get("materialsInput"));
+        if ("INSPECT".equals(turn.getRoute())) {
+            Map<String, Object> inspection = inspection(facts, admission);
+            Map<String, Object> profile = map(map(inspection.get("manifest")).get("profile"));
+            try {
+                var live = sessions.requireSingleReady(new TypedInspectionSessionRegistry.Scope(
+                        turn.getTenantId(), turn.getOwnerJiacn(), turn.getClientId()), turn.getTargetAgentId());
+                if (!canonical(profile).equals(canonical(live.manifestProfile()))) throw unavailable();
+            } catch (IllegalStateException stale) { throw unavailable(); }
+            authority = authority(inspection);
+        }
+        ChatActionFinalValidator.ValidatedFinal validated;
+        try {
+            validated = ChatActionFinalValidator.validateJson(binding(turn, taskId), typed, authority,
+                    content, version, rawOutcome, rawReceipt, reviewBasis(facts,scope,admission));
+        } catch (IllegalArgumentException bad) { throw invalid(bad.getMessage()); }
+        if ("CHAT".equals(turn.getRoute())) verifyCatalog(scope, admission.sourceCatalogJson(), validated.dispatchFacts());
+        verifyDeliveryRelation(scope,admission,facts,validated);
+        var existing = store.findOutcomeByTurn(scope, turn.getTurnId(), true);
+        if ((turn.getFinalDigest() == null) != (existing == null)) throw persistence("Action final transaction is incomplete");
+        if (existing != null) {
+            if (!validated.finalDigest().equals(existing.finalDigest()) || !validated.finalDigest().equals(turn.getFinalDigest()))
+                throw conflict("Action final already differs");
+            if (!scope.equals(existing.scope()) || !turn.getRequestId().equals(existing.requestId())
+                    || !Objects.equals(turn.getFinalMessageId(), existing.assistantMessageId()))
+                throw persistence("Action final identity differs");
+        }
+        return new Prepared(validated, scope, admission, existing);
+    }
+
+    public String outcomeId(Prepared prepared) {
+        return prepared.existing() == null ? stable("action-outcome", prepared.scope().tenantId(),
+                prepared.scope().ownerJiacn(), prepared.scope().clientId(),
+                (String) prepared.validated().binding().get("turnId")) : prepared.existing().outcomeId();
+    }
+
+    /** The caller owns message/turn/event writes; these writes must join that same transaction. */
+    @Transactional(propagation = Propagation.MANDATORY, rollbackFor = Exception.class)
+    public Map<String, Object> persist(Prepared p, long messageId, long now) {
+        if (p.existing() != null) return projection(p.existing(), p.validated());
+        var v = p.validated(); var union = v.interactionOutcome(); String id = outcomeId(p);
+        // Index immutable relations once, from the already validated final. An action
+        // candidate is NOT proof of execution completion; readers must join actual progress.
+        boolean deliveryCandidate = "CHAT".equals(v.binding().get("route"))
+                && ("ACTION_REQUEST".equals(union.kind()) || "SUBMISSION_REQUEST".equals(union.kind())
+                    || "ANSWER".equals(union.kind()) && Boolean.TRUE.equals(union.deliverable()));
+        var stored = new LinkedHashMap<String, Object>(); stored.put("schemaVersion", 5);
+        stored.put("interactionOutcome", ChatActionFinalValidator.outcomeMap(union));
+        stored.put("inspectionInputReceipt", v.inspectionInputReceipt() == null ? null
+                : TypedInspectionFinalValidator.receiptMap(v.inspectionInputReceipt()));
+        var row = new ChatTypedDeliberationStore.Outcome(id, p.scope(), p.admission().requestId(),
+                p.admission().requestRevision(), (String) v.binding().get("turnId"), p.admission().taskId(),
+                p.admission().assignmentRevision(), messageId, v.finalDigest(), union.kind(), union.text(),
+                canonical(v.binding()), canonical(ChatActionFinalValidator.factsMap(v.dispatchFacts())),
+                canonical(stored), p.admission().sourceCatalogJson(), now,
+                deliveryCandidate ? (String) v.binding().get("targetAgentId") : null,
+                deliveryCandidate && union.deliveryRelation() != null ? union.deliveryRelation().parentOutcomeId() : null);
+        if (store.insertOutcome(row) != 1) throw persistence("Unable to persist action outcome");
+        if ("CLARIFY".equals(union.kind())) {
+            var c = union.clarification();
+            if (store.insertPending(new ChatTypedDeliberationStore.PendingQuestion(stable("typed-question", id),
+                    id, p.scope(), "OPEN", 0, c.question(), canonical(c.requiredFacts()), null, null, null, now, now)) != 1)
+                throw persistence("Unable to persist action clarification");
+        }
+        if ("ACTION_REQUEST".equals(union.kind())) persistActionEvent(row, v, now);
+        if ("REVISION_REQUEST".equals(union.kind())) {
+            if(revisions==null)throw persistence("Revision consumer unavailable");
+            revisions.enqueue(row,v,now);
+        }
+        if (submissions != null && ("SUBMISSION_REQUEST".equals(union.kind()) || "ANSWER".equals(union.kind()) && Boolean.TRUE.equals(union.deliverable())))
+            submissions.enqueue(row, v, now);
+        return projection(row, v);
+    }
+
+    private static Map<String, Object> actionPayload(ChatTypedDeliberationStore.Outcome row,
+            ChatActionFinalValidator.ValidatedFinal v) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("schemaVersion", 5); payload.put("conversationId", row.scope().conversationId());
+        payload.put("conversationGeneration", Long.toString(row.scope().conversationGeneration()));
+        payload.put("requestId", row.requestId()); payload.put("requestRevision", Long.toString(row.requestRevision()));
+        payload.put("turnId", row.turnId()); payload.put("outcomeId", row.outcomeId());
+        payload.put("finalDigest", row.finalDigest()); payload.put("taskId", row.taskId());
+        payload.put("targetAgentId", v.binding().get("targetAgentId")); payload.put("actionId", v.interactionOutcome().action().actionId());
+        return Collections.unmodifiableMap(payload);
+    }
+
+    private void persistActionEvent(ChatTypedDeliberationStore.Outcome row, ChatActionFinalValidator.ValidatedFinal v, long now) {
+        var event = new ChatDispatchOutboxEntity().setEventId(ChatActionFinalValidator.actionEventId(v))
+                .setTenantId(row.scope().tenantId()).setOwnerJiacn(row.scope().ownerJiacn()).setClientId(row.scope().clientId())
+                .setTurnId(row.turnId()).setDispatchId((String)v.binding().get("dispatchId"))
+                .setEventType(ACTION_EVENT).setStatus("READY").setPayloadJson(canonical(actionPayload(row, v)))
+                .setVersion(0L).setAvailableAt(now).setAttemptCount(0).setFencingToken(0L).setCreatedAt(now).setUpdatedAt(now);
+        if (dao.insertOutbox(event) != 1) throw persistence("Unable to persist action event");
+        ChatDeliberationOutboxWakeup.afterCommit(outboxEvents, event.getAvailableAt());
+    }
+
+    /** Validate the durable event against the actual immutable final, not copied event instructions.
+     * Retained media validation uses the existing task/output locks, even though no business data is written. */
+    @Transactional(rollbackFor = Exception.class)
+    public BoundAction loadAction(ChatDispatchOutboxEntity event) {
+        if (event == null || !ACTION_EVENT.equals(event.getEventType())) throw unavailable();
+        var turn = dao.findTurn(event.getTenantId(), event.getOwnerJiacn(), event.getClientId(), event.getTurnId());
+        if (turn == null || !Objects.equals(event.getDispatchId(), turn.getDispatchId())
+                || !Objects.equals(event.getTenantId(), turn.getTenantId())
+                || !Objects.equals(event.getOwnerJiacn(), turn.getOwnerJiacn())
+                || !Objects.equals(event.getClientId(), turn.getClientId())
+                || !Objects.equals(event.getTurnId(), turn.getTurnId())) throw unavailable();
+        var scope = scope(turn);
+        var view = read(scope, turn.getRequestId(), turn.getTurnId(), turn.getRequestRevision(), turn.getRoute(), false);
+        if (view == null || !"READY".equals(view.get("state"))
+                || !"ACTION_REQUEST".equals(map(view.get("outcome")).get("kind"))) throw unavailable();
+        var row = store.findOutcomeByRequest(scope, turn.getRequestId());
+        var admission = requireAdmission(scope, turn.getRequestId(), turn.getTurnId(), turn.getRequestRevision());
+        var stored = parse(row.outcomeJson());
+        var actionSnapshot=dao.findSnapshot(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),turn.getSnapshotId());
+        Map<String, Object> inputAuthority = ChatMaterialsInputContract.authority(parse(actionSnapshot.getFactsManifestJson()).get("materialsInput"));
+        if ("INSPECT".equals(turn.getRoute())) inputAuthority = authority(
+                ChatTypedInspectionContextService.inspection(admission.sourceCatalogJson()));
+        var validated = ChatActionFinalValidator.validateJson(parse(row.bindingJson()), parse(row.factsJson()),
+                inputAuthority, row.text(), 5, canonical(stored.get("interactionOutcome")),
+                stored.get("inspectionInputReceipt") == null ? null : canonical(stored.get("inspectionInputReceipt")),
+                reviewBasis(parse(actionSnapshot.getFactsManifestJson()),scope,admission));
+        if (!ChatActionFinalValidator.actionEventId(validated).equals(event.getEventId())
+                || !canonical(actionPayload(row, validated)).equals(canonical(parse(event.getPayloadJson()))))
+            throw persistence("Action event differs from immutable final");
+        return new BoundAction(row, admission, validated);
+    }
+
+    /** Reconstruct trusted revision authority solely from immutable server rows. */
+    @Transactional(readOnly=true)
+    public ChatDeliveryRevisionService.BoundRevision loadRevision(ChatDispatchOutboxEntity event) {
+        if(event==null || !ChatDeliveryRevisionService.EVENT.equals(event.getEventType()))throw unavailable();
+        var turn=dao.findTurn(event.getTenantId(),event.getOwnerJiacn(),event.getClientId(),event.getTurnId());
+        if(turn==null || !"CHAT".equals(turn.getRoute()) || !Objects.equals(event.getDispatchId(),turn.getDispatchId())
+                || !Set.of("FINAL_PERSISTED","PUBLISHED").contains(turn.getState()))throw unavailable();
+        var scope=scope(turn);var row=store.findOutcomeByTurn(scope,turn.getTurnId(),false);
+        var admission=requireAdmission(scope,turn.getRequestId(),turn.getTurnId(),turn.getRequestRevision());
+        if(row==null || !"REVISION_REQUEST".equals(row.kind()) || !scope.equals(row.scope())
+                || !Objects.equals(turn.getFinalDigest(),row.finalDigest()) || !Objects.equals(turn.getFinalMessageId(),row.assistantMessageId()))throw unavailable();
+        var snapshot=dao.findSnapshot(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),turn.getSnapshotId());
+        verifySnapshot(turn,snapshot);var facts=parse(snapshot.getFactsManifestJson());
+        var basis=reviewBasis(facts,scope,admission);var stored=parse(row.outcomeJson());
+        if (!stored.keySet().equals(Set.of("schemaVersion", "interactionOutcome", "inspectionInputReceipt"))
+                || !Integer.valueOf(5).equals(stored.get("schemaVersion"))) throw persistence("Stored revision final is invalid");
+        // A revision may carry the same native-material proof as its original CHAT final.
+        // Replay that exact receipt; dropping it rejects valid finals and changes their digest.
+        var validated=ChatActionFinalValidator.validateJson(binding(turn,row.taskId()),discussion(facts,"CHAT"),
+                ChatMaterialsInputContract.authority(facts.get("materialsInput")),row.text(),5,
+                canonical(stored.get("interactionOutcome")),stored.get("inspectionInputReceipt") == null
+                        ? null : canonical(stored.get("inspectionInputReceipt")),basis);
+        if(!row.finalDigest().equals(validated.finalDigest()) || !"REVISION_REQUEST".equals(validated.interactionOutcome().kind())
+                || !row.requestId().equals(turn.getRequestId()) || row.requestRevision()!=turn.getRequestRevision()
+                || !admission.taskId().equals(row.taskId()) || admission.assignmentRevision()!=row.assignmentRevision()
+                || !row.bindingJson().equals(canonical(validated.binding()))
+                || !row.factsJson().equals(canonical(ChatActionFinalValidator.factsMap(validated.dispatchFacts())))
+                || !row.sourceCatalogJson().equals(admission.sourceCatalogJson()))throw unavailable();
+        verifyCatalog(scope,admission.sourceCatalogJson(),validated.dispatchFacts());
+        var bound=new ChatDeliveryRevisionService.BoundRevision(new BoundAction(row,admission,validated),basis);
+        if(!ChatDeliveryRevisionService.eventId(row).equals(event.getEventId())
+                || !canonical(ChatDeliveryRevisionService.payload(row)).equals(canonical(parse(event.getPayloadJson()))))throw unavailable();
+        return bound;
+    }
+
+    /** Returns null only for old immutable contracts; no legacy proposal is promoted to an action.
+     * Media lineage verification joins REQUIRED task/output locking; READ ONLY forbids those locks in MySQL. */
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> readActionIfPresent(ChatTypedDeliberationStore.Scope scope, String requestId,
+            String turnId, long revision, String expectedRoute) {
+        return read(scope, requestId, turnId, revision, expectedRoute, true);
+    }
+
+    private Map<String, Object> read(ChatTypedDeliberationStore.Scope scope, String requestId,
+            String turnId, long revision, String expectedRoute, boolean includeProgress) {
+        return read(scope,requestId,turnId,revision,expectedRoute,includeProgress,true);
+    }
+
+    // Chain replay validates each immutable final once, then validates retained targets iteratively.
+    private Map<String,Object> read(ChatTypedDeliberationStore.Scope scope,String requestId,
+            String turnId,long revision,String expectedRoute,boolean includeProgress,boolean verifyTargets) {
+        var turn = dao.findTurn(scope.tenantId(), scope.ownerJiacn(), scope.clientId(), turnId);
+        if (turn == null || !scope.equals(scope(turn)) || !requestId.equals(turn.getRequestId())
+                || !Objects.equals(revision, turn.getRequestRevision()) || !expectedRoute.equals(turn.getRoute())) throw unavailable();
+        var snapshot = dao.findSnapshot(scope.tenantId(), scope.ownerJiacn(), scope.clientId(), turn.getSnapshotId());
+        verifySnapshot(turn, snapshot);
+        Map<String, Object> facts = parse(snapshot.getFactsManifestJson());
+        if (!supportsActionFacts(facts)) {
+            var old=historicalV4==null?null:historicalV4.readIfV4(scope,requestId,turnId,revision,expectedRoute);
+            return old!=null?old:historical==null?null:historical.readIfV3(scope,requestId,turnId,revision,expectedRoute);
+        }
+        var admission = requireAdmission(scope, requestId, turnId, revision);
+        if (!admission.taskId().equals(taskId(facts))) throw persistence("Action admission task differs from snapshot");
+        var typed = discussion(facts, expectedRoute);
+        Map<String, Object> inspection = "INSPECT".equals(expectedRoute) ? inspection(facts, admission) : null;
+        if (inspection == null) verifyCatalog(scope, admission.sourceCatalogJson(), ChatActionOutcomeContract.facts(typed));
+        var row = store.findOutcomeByRequest(scope, requestId);
+        Map<String, Object> outcome = null;
+        ChatActionFinalValidator.ValidatedFinal validated = null;
+        if (row != null) {
+            if (!scope.equals(row.scope()) || !requestId.equals(row.requestId()) || !turnId.equals(row.turnId())
+                    || revision != row.requestRevision() || !Objects.equals(row.assistantMessageId(), turn.getFinalMessageId())
+                    || !row.finalDigest().equals(turn.getFinalDigest()) || !admission.taskId().equals(row.taskId())
+                    || admission.assignmentRevision() != row.assignmentRevision()) throw persistence("Stored action identity differs");
+            var stored = parse(row.outcomeJson());
+            if (!stored.keySet().equals(Set.of("schemaVersion", "interactionOutcome", "inspectionInputReceipt"))
+                    || !Integer.valueOf(5).equals(stored.get("schemaVersion"))) throw persistence("Stored action final is invalid");
+            try {
+                validated = ChatActionFinalValidator.validateJson(binding(turn, admission.taskId()), typed,
+                        inspection == null ? ChatMaterialsInputContract.authority(facts.get("materialsInput")) : authority(inspection), row.text(), 5,
+                        canonical(stored.get("interactionOutcome")), stored.get("inspectionInputReceipt") == null
+                                ? null : canonical(stored.get("inspectionInputReceipt")),reviewBasis(facts,scope,admission));
+            } catch (IllegalArgumentException invalid) { throw persistence("Stored action final is invalid"); }
+            if (!row.finalDigest().equals(validated.finalDigest()) || !row.kind().equals(validated.interactionOutcome().kind())
+                    || !row.bindingJson().equals(canonical(validated.binding()))
+                    || !row.factsJson().equals(canonical(ChatActionFinalValidator.factsMap(validated.dispatchFacts())))
+                    || !row.sourceCatalogJson().equals(admission.sourceCatalogJson())) throw persistence("Stored action final differs");
+            verifyDeliveryRelation(scope,admission,facts,validated,verifyTargets);
+            outcome = projection(row, validated);
+        } else if (turn.getFinalDigest() != null || turn.getFinalMessageId() != null) throw persistence("Action final transaction is incomplete");
+        var view = new LinkedHashMap<String, Object>(); view.put("schemaVersion", 5); view.put("route", expectedRoute);
+        view.put("conversationId", scope.conversationId()); view.put("conversationGeneration", Long.toString(scope.conversationGeneration()));
+        view.put("requestId", requestId); view.put("requestRevision", Long.toString(revision)); view.put("turnId", turnId);
+        view.put("state", row != null ? "READY" : Set.of("FAILED", "CANCELLED").contains(turn.getState()) ? turn.getState() : "PENDING"); view.put("outcome", outcome);
+        view.put("inspection", inspection == null ? null : inspectionView(inspection, validated));
+        view.put("actionProgress", includeProgress && row != null && "ACTION_REQUEST".equals(row.kind())
+                ? actionProgress(row, validated, admission) : null);
+        view.put("reviewProgress", includeProgress && row!=null && revisions!=null ? revisions.read(row):null);
+        view.put("submissionProgress", includeProgress && row != null && submissions != null
+                ? submissions.read(row,validated) : null);
+        return Collections.unmodifiableMap(view);
+    }
+
+    /** Mutable delivery progress is separate from the immutable model final/digest.
+     * Reads existing outbox and child facts only; never admits or retries an action. */
+    Map<String, Object> actionProgress(ChatTypedDeliberationStore.Outcome parent,
+            ChatActionFinalValidator.ValidatedFinal v, ChatTypedDeliberationStore.Admission original) {
+        var scope = parent.scope(); String actionId = ChatActionFinalValidator.actionEventId(v);
+        var event = dao.findOutboxById(scope.tenantId(), scope.ownerJiacn(), scope.clientId(), actionId);
+        if (event == null || !scope.tenantId().equals(event.getTenantId()) || !scope.ownerJiacn().equals(event.getOwnerJiacn())
+                || !scope.clientId().equals(event.getClientId()) || !actionId.equals(event.getEventId())
+                || !parent.turnId().equals(event.getTurnId()) || !v.binding().get("dispatchId").equals(event.getDispatchId())
+                || !ACTION_EVENT.equals(event.getEventType()) || event.getVersion() == null || event.getVersion() < 0
+                || !canonical(actionPayload(parent, v)).equals(canonical(parse(event.getPayloadJson()))))
+            throw persistence("Action progress identity is inconsistent");
+        var childAdmission = store.findAdmissionByKey(scope, actionId, false);
+        String state, childId = null, route = null, childVersion = null, executionId=null, phase=null, resultDigest=null, executionStateVersion=null;
+        if (childAdmission == null) {
+            state = switch (event.getStatus()) {
+                case "READY", "RETRY", "CLAIMED" -> "QUEUED";
+                case "DEAD" -> "FAILED";
+                default -> throw persistence("Settled action has no child");
+            };
+        } else {
+            route = "EXECUTE";
+            childId = childAdmission.requestId();
+            if (!"SENT".equals(event.getStatus()) || !scope.equals(childAdmission.scope())
+                    || !actionId.equals(childAdmission.idempotencyKey()) || !childId.equals(childAdmission.requestId())
+                    || !parent.outcomeId().equals(childAdmission.parentOutcomeId()) || !parent.taskId().equals(childAdmission.taskId())
+                    || parent.assignmentRevision() != childAdmission.assignmentRevision()
+                    || original.userMessageId() != childAdmission.userMessageId() || childAdmission.requestRevision() != 1
+                    || !"ADMITTED".equals(childAdmission.state()) || childAdmission.stateVersion() != 0)
+                throw persistence("Action progress child lineage is inconsistent");
+            var child = dao.findRequest(scope.tenantId(), scope.ownerJiacn(), scope.clientId(), childId);
+            if (child == null || !scope.tenantId().equals(child.getTenantId()) || !scope.ownerJiacn().equals(child.getOwnerJiacn())
+                    || !scope.clientId().equals(child.getClientId()) || !childId.equals(child.getRequestId())
+                    || !scope.conversationId().equals(child.getConversationId())
+                    || !Objects.equals(scope.conversationGeneration(), child.getConversationGeneration())
+                    || !Objects.equals(1L, child.getRequestRevision()) || !Objects.equals(original.userMessageId(), child.getUserMessageId())
+                    || child.getStateVersion() == null || child.getStateVersion() < 0)
+                throw persistence("Action progress child scope is inconsistent");
+            childVersion = Long.toString(child.getStateVersion());
+            if(deliverySteps==null||skills==null)throw persistence("Skill progress source unavailable");
+            var persisted=deliverySteps.findSteps(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),childId,1);
+            if(persisted==null||persisted.size()!=1)throw persistence("Skill step is ambiguous");
+            var step=persisted.getFirst();var link=deliverySteps.findLink(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),step.stepId());
+            if(!scope.tenantId().equals(step.tenantId())||!scope.ownerJiacn().equals(step.ownerJiacn())||!scope.clientId().equals(step.clientId())
+                    ||!childId.equals(step.requestId())||step.requestRevision()!=1||!"EXECUTE".equals(step.kind())
+                    ||!scope.conversationId().equals(step.conversationId())||scope.conversationGeneration()!=step.conversationGeneration()
+                    ||!parent.taskId().equals(step.taskId())||parent.assignmentRevision()!=step.assignmentRevision()
+                    ||!v.binding().get("targetAgentId").equals(step.targetAgentId())||link==null||!step.stepId().equals(link.stepId())
+                    ||!scope.tenantId().equals(link.tenantId())||!scope.ownerJiacn().equals(link.ownerJiacn())||!scope.clientId().equals(link.clientId()))throw persistence("Skill progress lineage differs");
+            executionId=link.executionId();
+            var resultView=skills.result(new PersonalWorkspaceExecutionService.OwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),executionId);
+            if(resultView==null||!executionId.equals(resultView.executionId()))throw persistence("Skill result lineage differs");
+            if(resultView.executionStateVersion()<0)throw persistence("Skill state version invalid");
+            executionStateVersion=Long.toString(resultView.executionStateVersion());
+            phase=resultView.phase();
+            resultDigest=resultView.resultManifest()==null?null:(String)resultView.resultManifest().get("resultDigest");
+            if(resultDigest!=null&&!resultDigest.matches("[0-9a-f]{64}"))throw persistence("Skill result digest invalid");
+            state=switch(phase) {
+                case "READY","RUNNING","RESULT_READY" -> "RUNNING";
+                case "WAITING_PROVIDER" -> "WAITING_PROVIDER";
+                case "RESULT_UNKNOWN" -> "RESULT_UNKNOWN";
+                case "ARCHIVING" -> "ARCHIVING";
+                case "COMPLETE" -> {
+                    if(!"RESULT_COMMITTED".equals(child.getAggregateState())||!"RESULT_COMMITTED".equals(step.state())
+                            ||!"RESULT_COMMITTED".equals(link.state())||!"RESULT_COMMITTED".equals(resultView.state())||resultDigest==null)
+                        throw persistence("Skill result has no committed projection");yield "COMPLETED";
+                }
+                case "FAILED" -> "FAILED";
+                case "CANCELLED" -> "CANCELLED";
+                default -> throw persistence("Skill phase unsupported");
+            };
+        }
+        var result = new LinkedHashMap<String, Object>(); result.put("actionRequestId", actionId);
+        result.put("state", state); result.put("dispatchVersion", Long.toString(event.getVersion()));
+        result.put("executionId",executionId);result.put("executionStateVersion",executionStateVersion);result.put("phase",phase);result.put("resultDigest",resultDigest);
+        result.put("childRequestId", childId); result.put("childRoute", route); result.put("childStateVersion", childVersion);
+        return Collections.unmodifiableMap(result);
+    }
+
+    /** Follow only durable clarification admissions, not conversation order or the latest answer.
+     * Every question is re-read through its actual v3 final and every answered edge is scoped CAS. */
+    Map<String,Object> clarificationDeliveryParent(ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Outcome clarification) {
+        var current=clarification;
+        Map<String,Object> basis=null;
+        var visited=new java.util.HashSet<String>();
+        while(true) {
+            if(current==null||!scope.equals(current.scope())||!"CLARIFY".equals(current.kind())
+                    ||!clarification.taskId().equals(current.taskId())
+                    ||clarification.assignmentRevision()!=current.assignmentRevision()
+                    ||!visited.add(current.outcomeId()))throw unavailable();
+            var turn=dao.findTurn(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),current.turnId());
+            if(turn==null)throw unavailable();
+            var view=read(scope,current.requestId(),current.turnId(),current.requestRevision(),turn.getRoute(),false);
+            if(view==null) {if(basis!=null)throw unavailable();return null;}
+            if(!"READY".equals(view.get("state"))
+                    ||!current.outcomeId().equals(map(view.get("outcome")).get("outcomeId"))
+                    ||!current.finalDigest().equals(map(view.get("outcome")).get("finalDigest")))throw unavailable();
+            if(!("FINAL_PERSISTED".equals(turn.getState())||"PUBLISHED".equals(turn.getState())))throw unavailable();
+            var snapshot=dao.findSnapshot(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),turn.getSnapshotId());
+            var snapshotFacts=parse(snapshot.getFactsManifestJson());
+            var facts=snapshotFacts.containsKey("typedDeliberationAdmission")
+                    ?map(snapshotFacts.get("typedDeliberationAdmission")):Map.<String,Object>of();
+            if(!facts.containsKey("deliveryParent")) {
+                if(basis!=null)throw unavailable();
+                return null; // Original unlinked clarification never acquires a delivery basis later.
+            }
+            if(!"CHAT".equals(turn.getRoute()))throw unavailable();
+            var inherited=map(facts.get("deliveryParent"));
+            if(!inherited.keySet().equals(Set.of("outcomeId","finalDigest"))
+                    ||!(inherited.get("outcomeId") instanceof String id)||id.isBlank()
+                    ||!(inherited.get("finalDigest") instanceof String digest)||!digest.matches("sha256:[0-9a-f]{64}")
+                    ||visited.contains(id)||basis!=null&&!basis.equals(inherited))throw unavailable();
+            basis=Map.copyOf(inherited);
+            var original=requireAdmission(scope,current.requestId(),current.turnId(),current.requestRevision());
+            if(!original.intent().equals(facts.get("intent"))
+                    ||!Objects.equals(original.parentOutcomeId(),facts.get("parentOutcomeId")))throw unavailable();
+            if("DISCUSSION".equals(original.intent())) {
+                if(!basis.get("outcomeId").equals(original.parentOutcomeId()))throw unavailable();
+                return basis;
+            }
+            if(!"CLARIFICATION_REPLY".equals(original.intent())
+                    ||!Objects.equals(original.pendingQuestionId(),facts.get("pendingQuestionId")))throw unavailable();
+            current=clarificationReplyParent(scope,original);
+        }
+    }
+
+    private ChatTypedDeliberationStore.Outcome clarificationReplyParent(ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Admission admission) {
+        var parent=admission.parentOutcomeId()==null?null:store.findOutcome(scope,admission.parentOutcomeId(),false);
+        if(parent==null||!scope.equals(parent.scope())||!admission.taskId().equals(parent.taskId())
+                ||admission.assignmentRevision()!=parent.assignmentRevision()||!"CLARIFY".equals(parent.kind())
+                ||admission.requestId().equals(parent.requestId()))throw unavailable();
+        var pending=store.findPendingByOutcome(scope,parent.outcomeId(),false);
+        if(pending==null||!scope.equals(pending.scope())||!parent.outcomeId().equals(pending.outcomeId())
+                ||!Objects.equals(admission.pendingQuestionId(),pending.pendingQuestionId())
+                ||!"ANSWERED".equals(pending.state())||pending.stateVersion()!=1
+                ||!admission.requestId().equals(pending.replyRequestId()))throw unavailable();
+        return parent;
+    }
+
+    private void verifyDeliveryRelation(ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Admission admission, Map<String,Object> snapshotFacts,
+            ChatActionFinalValidator.ValidatedFinal validated) {
+        verifyDeliveryRelation(scope,admission,snapshotFacts,validated,true);
+    }
+
+    private void verifyDeliveryRelation(ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Admission admission,Map<String,Object> snapshotFacts,
+            ChatActionFinalValidator.ValidatedFinal validated,boolean verifyTargets) {
+        var relation=validated.interactionOutcome().deliveryRelation(); if(relation==null)return;
+        var facts=map(snapshotFacts.get("typedDeliberationAdmission"));
+        var basis=map(facts.get("deliveryParent"));
+        if(!admission.intent().equals(facts.get("intent"))
+                ||!Objects.equals(admission.parentOutcomeId(),facts.get("parentOutcomeId"))
+                ||!basis.keySet().equals(Set.of("outcomeId","finalDigest"))
+                ||!relation.parentOutcomeId().equals(basis.get("outcomeId"))
+                ||!relation.parentFinalDigest().equals(basis.get("finalDigest")))throw invalid("ACTION_DELIVERY_PARENT_INVALID");
+        if("DISCUSSION".equals(admission.intent())) {
+            if(!relation.parentOutcomeId().equals(admission.parentOutcomeId()))throw invalid("ACTION_DELIVERY_PARENT_INVALID");
+        } else if("CLARIFICATION_REPLY".equals(admission.intent())) {
+            var clarification=clarificationReplyParent(scope,admission);
+            if(!basis.equals(clarificationDeliveryParent(scope,clarification)))throw invalid("ACTION_DELIVERY_PARENT_INVALID");
+            if(!Objects.equals(admission.pendingQuestionId(),facts.get("pendingQuestionId")))throw invalid("ACTION_DELIVERY_PARENT_INVALID");
+        } else throw invalid("ACTION_DELIVERY_PARENT_INVALID");
+        var parent=store.findOutcome(scope,relation.parentOutcomeId(),false);
+        if(parent==null||!scope.equals(parent.scope())||!admission.taskId().equals(parent.taskId())
+                ||parent.assignmentRevision()!=admission.assignmentRevision()||!Set.of("ANSWER","ACTION_REQUEST","SUBMISSION_REQUEST").contains(parent.kind())
+                ||!relation.parentFinalDigest().equals(parent.finalDigest())
+                ||admission.requestId().equals(parent.requestId()))throw unavailable();
+        var stored=parse(parent.outcomeJson());
+        if("ANSWER".equals(parent.kind())&&!Boolean.TRUE.equals(map(stored.get("interactionOutcome")).get("deliverable")))throw unavailable();
+        if("REPLACE".equals(relation.mode())&&relation.targetOutcomeId()==null&&"ACTION_REQUEST".equals(parent.kind()))
+            throw invalid("ACTION_DELIVERY_TARGET_INVALID"); // Text may replace only an exact retained text, not a whole media batch.
+        if(verifyTargets&&(relation.targetOutcomeId()!=null||"ACTION_REQUEST".equals(parent.kind())||"SUBMIT".equals(relation.mode())||"SUBMISSION_REQUEST".equals(parent.kind()))) {
+            var retained=deliveryTargets(scope,basis);
+            if(!canonical(retained).equals(canonical(facts.get("deliveryTargets"))))throw invalid("ACTION_DELIVERY_TARGET_INVALID");
+            if(relation.targetOutcomeId()!=null)verifyTargetAdvertisement(facts,relation,retained,"ACTION_REQUEST".equals(validated.interactionOutcome().kind()));
+        }
+    }
+
+    /** Original causal parent remains the CAS basis; replay exact retained texts and committed execution outputs.
+     * A textual replacement still targets only a retained text; media provenance is never planning prose.
+     * No history query, latest-answer inference or independent delivery-set state is introduced. */
+    List<Map<String,Object>> deliveryTargets(ChatTypedDeliberationStore.Scope scope,Map<String,Object> basis) {
+        if(basis==null||!basis.keySet().equals(Set.of("outcomeId","finalDigest")))throw unavailable();
+        String id=(String)basis.get("outcomeId"),digest=(String)basis.get("finalDigest");
+        var chain=new java.util.ArrayList<Map<String,Object>>();
+        var visited=new java.util.HashSet<String>();
+        var items=new java.util.HashMap<String,List<Map<String,Object>>>();
+        String task=null;long assignment=-1;
+        while(true) {
+            if(!visited.add(id))throw unavailable();
+            var row=store.findOutcome(scope,id,false);
+            if(row==null||!scope.equals(row.scope())||!digest.equals(row.finalDigest())||!Set.of("ANSWER","ACTION_REQUEST","SUBMISSION_REQUEST").contains(row.kind()))throw unavailable();
+            if(task==null){task=row.taskId();assignment=row.assignmentRevision();}
+            if(!task.equals(row.taskId())||assignment!=row.assignmentRevision())throw unavailable();
+            var turn=dao.findTurn(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),row.turnId());
+            if(turn==null||!"CHAT".equals(turn.getRoute())||!("FINAL_PERSISTED".equals(turn.getState())||"PUBLISHED".equals(turn.getState())))throw unavailable();
+            var view=read(scope,row.requestId(),row.turnId(),row.requestRevision(),"CHAT","ACTION_REQUEST".equals(row.kind()),false);
+            var text=map(view.get("outcome"));
+            if(!"READY".equals(view.get("state")))throw unavailable();
+            if("ANSWER".equals(row.kind())) {
+                if(!Boolean.TRUE.equals(text.get("deliverable")))throw unavailable();
+                items.put(row.outcomeId(),List.of(Map.of("outcomeId",text.get("outcomeId"),"finalDigest",text.get("finalDigest"),"text",text.get("text"))));
+            } else if ("SUBMISSION_REQUEST".equals(row.kind())) items.put(row.outcomeId(),List.of());
+            else items.put(row.outcomeId(),executionDeliveryTargets(scope,row,turn,view));
+            chain.add(text);
+            if(!text.containsKey("deliveryRelation"))break;
+            var relation=map(text.get("deliveryRelation"));
+            id=(String)relation.get("parentOutcomeId");digest=(String)relation.get("parentFinalDigest");
+        }
+        java.util.Collections.reverse(chain);
+        var retained=new java.util.ArrayList<Map<String,Object>>();
+        for(var text:chain) {
+            var additions=items.get((String)text.get("outcomeId"));
+            if(!text.containsKey("deliveryRelation")){if(additions.stream().anyMatch(x->x.containsKey("replaces")))throw unavailable();retained.addAll(additions);continue;}
+            var relation=map(text.get("deliveryRelation"));
+            switch((String)relation.get("mode")) {
+                case "SUBMIT" -> {
+                    if (!"SUBMISSION_REQUEST".equals(text.get("kind")) || !additions.isEmpty() || retained.isEmpty()) throw unavailable();
+                }
+                case "APPEND" -> applyExecutionReplacements(retained,additions,false);
+                case "RESET" -> applyExecutionReplacements(retained,additions,true);
+                case "REPLACE" -> {
+                    String target=(String)relation.getOrDefault("targetOutcomeId",relation.get("parentOutcomeId"));
+                    String targetDigest=(String)relation.getOrDefault("targetFinalDigest",relation.get("parentFinalDigest"));
+                    boolean media="ACTION_REQUEST".equals(text.get("kind"));
+                    if(relation.containsKey("targetOutcomeId")) {
+                        var row=store.findOutcome(scope,(String)text.get("outcomeId"),false);
+                        var turn=dao.findTurn(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),row.turnId());
+                        var snapshot=dao.findSnapshot(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),turn.getSnapshotId());
+                        verifyTargetAdvertisement(map(parse(snapshot.getFactsManifestJson()).get("typedDeliberationAdmission")),
+                                new ChatActionOutcomeContract.DeliveryRelation("REPLACE",(String)relation.get("parentOutcomeId"),(String)relation.get("parentFinalDigest"),target,targetDigest),retained,media);
+                    }
+                    replaceRetainedBatch(retained,additions,target,targetDigest,media);
+                }
+                default -> throw unavailable();
+            }
+        }
+        return List.copyOf(retained);
+    }
+
+    /** Reuse the original committed request/step/link and owner-authorized output reader.
+     * Read-only: no asset projection, workspace save, Provider, grants, or tool dispatch. */
+    private List<Map<String,Object>> executionDeliveryTargets(ChatTypedDeliberationStore.Scope scope,
+            ChatTypedDeliberationStore.Outcome row,ChatTurnEntity turn,Map<String,Object> view) {
+        if(deliverySteps==null||deliveryExecutions==null)throw unavailable();
+        var progress=map(view.get("actionProgress"));
+        if(!"COMPLETED".equals(progress.get("state"))||!"EXECUTE".equals(progress.get("childRoute"))
+                ||!(progress.get("childRequestId") instanceof String requestId))throw unavailable();
+        var steps=deliverySteps.findSteps(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),requestId,1);
+        if(steps==null||steps.size()!=1)throw unavailable();
+        var step=steps.getFirst();var link=deliverySteps.findLink(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),step.stepId());
+        if(!scope.tenantId().equals(step.tenantId())||!scope.ownerJiacn().equals(step.ownerJiacn())||!scope.clientId().equals(step.clientId())
+                ||!requestId.equals(step.requestId())||step.requestRevision()!=1||step.stepNumber()!=1
+                ||!scope.conversationId().equals(step.conversationId())||scope.conversationGeneration()!=step.conversationGeneration()
+                ||!row.taskId().equals(step.taskId())||row.assignmentRevision()!=step.assignmentRevision()
+                ||!turn.getTargetAgentId().equals(step.targetAgentId())||!"EXECUTE".equals(step.kind())||!"RESULT_COMMITTED".equals(step.state())
+                ||link==null||!scope.tenantId().equals(link.tenantId())||!scope.ownerJiacn().equals(link.ownerJiacn())
+                ||!scope.clientId().equals(link.clientId())||!step.stepId().equals(link.stepId())||!"RESULT_COMMITTED".equals(link.state()))throw unavailable();
+        var owner=new PersonalWorkspaceExecutionService.OwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn());
+        var execution=deliveryExecutions.get(owner,link.executionId());
+        if(execution==null||!link.executionId().equals(execution.executionId())||!row.taskId().equals(execution.taskId())
+                ||!scope.conversationId().equals(execution.conversationId())||!turn.getTargetAgentId().equals(execution.targetAgentId())
+                ||!"CONVERSATION".equals(execution.executionMode())||!"RESULT_COMMITTED".equals(execution.state())
+                ||execution.runId()==null||!execution.runId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}"))throw unavailable();
+        var outputs=deliveryExecutions.listConversationOutputs(owner,row.taskId(),execution.runId());
+        if(outputs==null)throw unavailable();
+        var seen=new java.util.HashSet<String>();var result=new java.util.ArrayList<Map<String,Object>>();
+        for(var output:outputs) {
+            if(output==null||!execution.executionId().equals(output.executionId())||output.outputId()==null
+                    ||!output.outputId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")||!seen.add(output.outputId())
+                    ||output.sha256()==null||!output.sha256().matches("[0-9a-f]{64}")||output.byteLength()<0
+                    ||output.contentMimeType()==null)throw unavailable();
+            var item=new LinkedHashMap<String,Object>();item.put("outcomeId",row.outcomeId());item.put("finalDigest",row.finalDigest());
+            item.put("outputSource",Map.of("requestId",requestId,"stepId",step.stepId(),"outputId",output.outputId(),"sha256",output.sha256()));
+            var replacement=output.replaces();
+            if(replacement!=null) {
+                if(replacement.requestId()==null||replacement.stepId()==null||replacement.outputId()==null||replacement.sha256()==null
+                        ||!replacement.requestId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")||requestId.equals(replacement.requestId())
+                        ||!replacement.stepId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")||!replacement.outputId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
+                        ||!replacement.sha256().matches("[0-9a-f]{64}"))throw unavailable();
+                item.put("replaces",Map.of("requestId",replacement.requestId(),"stepId",replacement.stepId(),"outputId",replacement.outputId(),"sha256",replacement.sha256()));
+            }
+            result.add(Collections.unmodifiableMap(item));
+        }
+        return List.copyOf(result);
+    }
+
+    /** Replay original output replacement metadata only against the preceding retained list.
+     * Validate a whole batch before applying it: duplicate/discarded/stale and same-batch parents fail closed.
+     * The transient replaces field is never included in the frozen advertised deliveryTargets wire. */
+    private static void applyExecutionReplacements(java.util.ArrayList<Map<String,Object>> retained,
+            List<Map<String,Object>> additions,boolean reset) {
+        var slots=new java.util.HashMap<Integer,Map<String,Object>>();
+        var appended=new java.util.ArrayList<Map<String,Object>>();
+        for(var addition:additions) {
+            var clean=new LinkedHashMap<String,Object>(addition);clean.remove("replaces");
+            Map<String,Object> frozen=Collections.unmodifiableMap(clean);
+            if(!addition.containsKey("replaces")){appended.add(frozen);continue;}
+            var replacement=map(addition.get("replaces"));int index=-1;
+            for(int n=0;n<retained.size();n++)if(replacement.equals(retained.get(n).get("outputSource"))) {
+                if(index>=0)throw unavailable();index=n;
+            }
+            if(index<0||slots.putIfAbsent(index,frozen)!=null)throw unavailable();
+        }
+        if(reset) {
+            retained.clear();
+            for(var addition:additions){var clean=new LinkedHashMap<String,Object>(addition);clean.remove("replaces");retained.add(Collections.unmodifiableMap(clean));}
+        } else {
+            for(var entry:slots.entrySet())retained.set(entry.getKey(),entry.getValue());
+            retained.addAll(appended);
+        }
+    }
+
+    // Called only after executionDeliveryTargets has verified committed outputs. No provider writes.
+    static void replaceRetainedBatch(List<Map<String,Object>> retained,List<Map<String,Object>> additions,
+            String target,String digest,boolean media) {
+        String kind=media?"outputSource":"text";
+        var slots=new java.util.ArrayList<Integer>();
+        for(int n=0;n<retained.size();n++) {
+            var item=retained.get(n);
+            if(target.equals(item.get("outcomeId"))&&digest.equals(item.get("finalDigest"))) {
+                if(!item.containsKey(kind))throw unavailable();
+                slots.add(n);
+            }
+        }
+        if(slots.isEmpty()||additions.isEmpty()||(!media&&(slots.size()!=1||additions.size()!=1))
+                ||additions.stream().anyMatch(item->!item.containsKey(kind)))throw unavailable();
+        // Explicit execution lineage, if present, may only name an output in this target batch.
+        for(var item:additions)if(item.containsKey("replaces")&&slots.stream().noneMatch(n->
+                canonical(retained.get(n).get("outputSource")).equals(canonical(item.get("replaces")))))throw unavailable();
+        var clean=additions.stream().map(item->{var copy=new LinkedHashMap<String,Object>(item);
+            copy.remove("replaces");return Collections.unmodifiableMap(copy);}).toList();
+        int insertion=slots.getFirst();
+        for(int n=slots.size()-1;n>=0;n--)retained.remove((int)slots.get(n));
+        retained.addAll(insertion,clean);
+    }
+
+    private static void verifyTargetAdvertisement(Map<String,Object> facts,
+            ChatActionOutcomeContract.DeliveryRelation relation,List<Map<String,Object>> retained,boolean media) {
+        if(!canonical(retained).equals(canonical(facts.get("deliveryTargets")))
+                ||retained.stream().noneMatch(item->item.containsKey(media?"outputSource":"text")&&relation.targetOutcomeId().equals(item.get("outcomeId"))
+                    &&relation.targetFinalDigest().equals(item.get("finalDigest"))))throw invalid("ACTION_DELIVERY_TARGET_INVALID");
+    }
+
+    private Map<String, Object> projection(ChatTypedDeliberationStore.Outcome row, ChatActionFinalValidator.ValidatedFinal v) {
+        var view = new LinkedHashMap<String, Object>(); view.put("outcomeContractVersion", 5);
+        view.put("outcomeId", row.outcomeId()); view.put("taskId", row.taskId());
+        view.put("assignmentRevision", Long.toString(row.assignmentRevision()));
+        view.put("assistantMessageId", Long.toString(row.assistantMessageId())); view.put("finalDigest", row.finalDigest());
+        view.put("kind", row.kind()); view.put("text", row.text());
+        var deliverable = v.interactionOutcome().deliverable();
+        if (deliverable != null) view.put("deliverable", deliverable);
+        if (Boolean.TRUE.equals(deliverable)) view.put("messageSource", Map.of(
+                "turnId", row.turnId(), "messageId", Long.toString(row.assistantMessageId()),
+                "snapshotId", v.binding().get("snapshotId"), "finalDigest", row.finalDigest()));
+        if (v.interactionOutcome().deliveryRelation() != null)
+            view.put("deliveryRelation",ChatActionFinalValidator.relationMap(v.interactionOutcome().deliveryRelation()));
+        Map<String, Object> clarification = null, action = null;
+        if ("CLARIFY".equals(row.kind())) {
+            var pending = store.findPendingByOutcome(row.scope(), row.outcomeId(), false);
+            var c = v.interactionOutcome().clarification();
+            if (pending == null || !row.scope().equals(pending.scope()) || !row.outcomeId().equals(pending.outcomeId())
+                    || !stable("typed-question", row.outcomeId()).equals(pending.pendingQuestionId())
+                    || !c.question().equals(pending.question()) || !canonical(c.requiredFacts()).equals(pending.requiredFactsJson())
+                    || !("OPEN".equals(pending.state()) && pending.stateVersion() == 0 && pending.replyRequestId() == null
+                    || "ANSWERED".equals(pending.state()) && pending.stateVersion() == 1 && pending.replyRequestId() != null))
+                throw persistence("Action clarification is inconsistent");
+            clarification = new LinkedHashMap<>(); clarification.put("pendingQuestionId", pending.pendingQuestionId());
+            clarification.put("state", pending.state()); clarification.put("stateVersion", Long.toString(pending.stateVersion()));
+            clarification.put("question", pending.question()); clarification.put("requiredFacts", c.requiredFacts());
+            clarification.put("replyRequestId", pending.replyRequestId());
+        }
+        if ("ACTION_REQUEST".equals(row.kind())) {
+            var a = v.interactionOutcome().action(); action = Map.of("actionRequestId", ChatActionFinalValidator.actionEventId(v),
+                    "actionId", a.actionId(), "instruction", a.instruction(), "sourceRefIds", a.sourceRefIds(), "parameters", a.parameters());
+        }
+        view.put("clarification", clarification == null ? null : Collections.unmodifiableMap(clarification)); view.put("action", action);
+        view.put("revision",v.interactionOutcome().revision()==null?null:Map.of("instruction",v.interactionOutcome().revision().instruction(),
+                "targetArtifactIds",v.interactionOutcome().revision().targetArtifactIds()));
+        return Collections.unmodifiableMap(view);
+    }
+
+    private static Map<String, Object> inspectionView(Map<String, Object> typed, ChatActionFinalValidator.ValidatedFinal v) {
+        var result = new LinkedHashMap<String, Object>(); result.put("authorizationId", typed.get("authorizationId"));
+        result.put("manifestDigest", typed.get("manifestDigest"));
+        result.put("sourceRefIds", ChatActionOutcomeContract.facts(typed.get("discussionFacts")).availableSources().stream()
+                .map(ChatActionOutcomeContract.Source::sourceRefId).toList());
+        result.put("inputSummary", v == null ? null : Map.of("inputDigest", v.inspectionInputReceipt().inputDigest(),
+                "sources", TypedInspectionFinalValidator.receiptMap(v.inspectionInputReceipt()).get("sources")));
+        return Collections.unmodifiableMap(result);
+    }
+
+    private ChatTypedDeliberationStore.Admission requireAdmission(ChatTypedDeliberationStore.Scope scope,
+            String requestId, String turnId, long revision) {
+        var admission = store.findAdmissionByRequest(scope, requestId);
+        if (admission == null) throw unavailable();
+        if (!scope.equals(admission.scope()) || !requestId.equals(admission.requestId()) || revision != admission.requestRevision()
+                || !List.of(turnId).equals(parseList(admission.turnIdsJson()))) throw persistence("Action admission differs from request");
+        return admission;
+    }
+
+    private static Map<String, Object> inspection(Map<String, Object> facts, ChatTypedDeliberationStore.Admission admission) {
+        Map<String, Object> typed;
+        try { typed = ChatTypedInspectionContextService.validateTypedInspection(facts.get("typedInspection")); }
+        catch (IllegalArgumentException invalid) { throw persistence("Action inspection snapshot is invalid"); }
+        if (!canonical(typed).equals(canonical(ChatTypedInspectionContextService.inspection(admission.sourceCatalogJson()))))
+            throw persistence("Action inspection admission differs from snapshot");
+        return typed;
+    }
+
+    private static Map<String, Object> discussion(Map<String, Object> facts, String route) {
+        if ("CHAT".equals(route) && facts.containsKey("typedDeliberation") && !facts.containsKey("typedInspection"))
+            return map(facts.get("typedDeliberation"));
+        if ("INSPECT".equals(route) && facts.containsKey("typedInspection") && !facts.containsKey("typedDeliberation"))
+            return map(map(facts.get("typedInspection")).get("discussionFacts"));
+        throw persistence("Action route differs from snapshot");
+    }
+
+    private static Map<String, Object> authority(Map<String, Object> typed) {
+        return Map.of("authorizationId", typed.get("authorizationId"), "manifestDigest", typed.get("manifestDigest"),
+                "sources", map(typed.get("manifest")).get("sources"));
+    }
+
+    private static void verifyCatalog(ChatTypedDeliberationStore.Scope scope, String json, ChatActionOutcomeContract.Facts facts) {
+        var catalog = ChatTypedDeliberationContextService.parseCatalog(json);
+        if (catalog.size() != facts.availableSources().size()) throw persistence("Action source catalogue differs");
+        var byId = new LinkedHashMap<String, Map<String, Object>>();
+        var sourceScope = new ChatTypedDeliberationContextService.Scope(scope.tenantId(), scope.ownerJiacn(), scope.clientId(),
+                scope.conversationId(), scope.conversationGeneration());
+        for (var item : catalog) {
+            Object id = item.get("sourceRefId");
+            if (!(id instanceof String sourceId) || !sourceId.equals(ChatTypedDeliberationContextService.sourceRefId(sourceScope, item))
+                    || byId.put(sourceId, item) != null) throw persistence("Action source catalogue is ambiguous");
+        }
+        for (var source : facts.availableSources()) {
+            var item = byId.remove(source.sourceRefId());
+            if (item == null || !source.kind().equals(item.get("sourceKind")) || !source.mediaType().equals(item.get("mediaType")) || !source.contentMimeType().equals(item.get("contentMimeType")))
+                throw persistence("Action source catalogue differs");
+        }
+    }
+
+    private static void verifySnapshot(ChatTurnEntity turn, ChatContextSnapshotEntity snapshot) {
+        if (snapshot == null || !Objects.equals(turn.getSnapshotId(), snapshot.getSnapshotId())
+                || !Objects.equals(turn.getTenantId(), snapshot.getTenantId()) || !Objects.equals(turn.getOwnerJiacn(), snapshot.getOwnerJiacn())
+                || !Objects.equals(turn.getClientId(), snapshot.getClientId()) || !Objects.equals(turn.getRequestId(), snapshot.getRequestId())
+                || !Objects.equals(turn.getRequestRevision(), snapshot.getRequestRevision())
+                || !Objects.equals(turn.getConversationId(), snapshot.getConversationId())
+                || !Objects.equals(turn.getConversationGeneration(), snapshot.getConversationGeneration())
+                || !Objects.equals(turn.getTargetAgentId(), snapshot.getTargetAgentId()) || !Objects.equals(turn.getRoute(), snapshot.getRoute())
+                || !Objects.equals(turn.getContextDigest(), snapshot.getContextDigest())) throw persistence("Action snapshot binding differs");
+    }
+    private static ChatTypedDeliberationStore.Scope scope(ChatTurnEntity turn) {
+        return new ChatTypedDeliberationStore.Scope(turn.getTenantId(), turn.getOwnerJiacn(), turn.getClientId(),
+                turn.getConversationId(), turn.getConversationGeneration());
+    }
+    private static Map<String, Object> binding(ChatTurnEntity turn, String taskId) {
+        var b = new LinkedHashMap<String, Object>(); b.put("tenantId", turn.getTenantId()); b.put("ownerJiacn", turn.getOwnerJiacn());
+        b.put("clientId", turn.getClientId()); b.put("conversationId", turn.getConversationId());
+        b.put("conversationGeneration", Long.toString(turn.getConversationGeneration())); b.put("requestId", turn.getRequestId());
+        b.put("requestRevision", Long.toString(turn.getRequestRevision())); b.put("turnId", turn.getTurnId());
+        b.put("dispatchId", turn.getDispatchId()); b.put("snapshotId", turn.getSnapshotId()); b.put("contextDigest", turn.getContextDigest());
+        b.put("targetAgentId", turn.getTargetAgentId()); b.put("route", turn.getRoute()); b.put("taskId", taskId); return b;
+    }
+    private static String taskId(Map<String, Object> facts) {
+        Object task = facts.get("task");
+        if (task instanceof Map<?, ?> m && m.get("id") instanceof String id && !id.isBlank()) return id;
+        throw persistence("Action task is missing");
+    }
+    @SuppressWarnings("unchecked") private static Map<String, Object> parse(String json) {
+        try { return JsonUtil.getMapper().readValue(json, Map.class); }
+        catch (RuntimeException malformed) { throw persistence("Stored action object is invalid"); }
+    }
+    @SuppressWarnings("unchecked") private static List<Object> parseList(String json) {
+        try { return JsonUtil.getMapper().readValue(json, List.class); }
+        catch (RuntimeException malformed) { throw persistence("Stored action list is invalid"); }
+    }
+    @SuppressWarnings("unchecked") private static Map<String, Object> map(Object raw) {
+        if (raw instanceof Map<?, ?> value) return (Map<String, Object>)value;
+        throw persistence("Stored action object is invalid");
+    }
+    private static String canonical(Object value) { return CanonicalContextJson.write(value); }
+    private static String stable(String prefix, String... parts) {
+        // Same immutable question-ID convention as the existing clarification CAS path.
+        try { return prefix + "_" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(String.join("\0", parts).getBytes(java.nio.charset.StandardCharsets.UTF_8))).substring(0, 40); }
+        catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
+    private static ChatDeliberationException invalid(String message) { return new ChatDeliberationException(ChatDeliberationException.Reason.INVALID_REQUEST, message); }
+    private static ChatDeliberationException persistence(String message) { return new ChatDeliberationException(ChatDeliberationException.Reason.PERSISTENCE_ERROR, message); }
+    private static ChatDeliberationException conflict(String message) { return new ChatDeliberationException(ChatDeliberationException.Reason.CONFLICT, message); }
+    private static ChatDeliberationException unavailable() { return new ChatDeliberationException(ChatDeliberationException.Reason.NOT_FOUND_OR_FORBIDDEN, "Action outcome is unavailable"); }
+}

@@ -1,0 +1,317 @@
+package cn.jia.agent.api;
+
+import cn.jia.core.security.TenantClaimPolicy;
+
+import cn.jia.agent.entity.AgentWorkItemReassignmentLeaseDTO;
+import cn.jia.agent.security.AgentRuntimeAuthentication;
+import cn.jia.agent.security.AgentRuntimeAuthenticationService;
+import cn.jia.agent.entity.AgentWorkItemReassignmentLeaseRequestDTO;
+import cn.jia.agent.entity.AgentWorkItemReassignmentRequestDTO;
+import cn.jia.agent.entity.AgentWorkItemReassignmentResultDTO;
+import cn.jia.agent.exception.AgentWorkItemReassignmentException;
+import cn.jia.agent.service.AgentWorkItemReassignmentService;
+import cn.jia.core.security.AllowSensitiveOutput;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/** E05 authenticated operator mutation and target-only command-bound lease facade. */
+@Slf4j
+@RestController
+@RequestMapping("/agent/tasks")
+public class AgentWorkItemReassignmentController {
+    static final String REASSIGN_AUTHORITY = "agent-work-item-reassign";
+    static final String CACHE_CONTROL = "private, no-store";
+    static final int MAX_BODY_BYTES = 32 * 1024;
+    private static final ObjectMapper STRICT_JSON = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .build();
+
+    private final AgentWorkItemReassignmentService service;
+
+    private final AgentRuntimeAuthenticationService runtimeAuthentication;
+    public AgentWorkItemReassignmentController(AgentWorkItemReassignmentService service,
+            AgentRuntimeAuthenticationService runtimeAuthentication) {
+        this.service = Objects.requireNonNull(service);
+        this.runtimeAuthentication = Objects.requireNonNull(runtimeAuthentication);
+    }
+
+    @PostMapping(value = "/{taskId}/work-items/{workItemId}/reassignments",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<AgentWorkItemReassignmentResultDTO>> reassign(
+            @PathVariable String taskId, @PathVariable String workItemId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            HttpServletRequest request, Authentication authentication) {
+        Principal principal = principal(authentication, true);
+        String actorAgentId = actor(request);
+        requirePath(taskId, workItemId);
+        requireIdempotencyKey(idempotencyKey);
+        AgentWorkItemReassignmentRequestDTO command = parse(
+                request, AgentWorkItemReassignmentRequestDTO.class);
+        return cn.jia.core.config.ApiJsonResponses.success(ok(service.reassign(principal.tenantId(), principal.clientId(), principal.ownerJiacn(),
+                principal.subject(), actorAgentId, taskId, workItemId,
+                idempotencyKey, command)));
+    }
+
+    @AllowSensitiveOutput(reason = "Exact target-only command-bound active lease credential readback")
+    @PostMapping(value = "/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<AgentWorkItemReassignmentLeaseDTO>> readLease(
+            @PathVariable String taskId, @PathVariable String workItemId,
+            @PathVariable String reassignmentId,
+            HttpServletRequest request, Authentication authentication) {
+        Principal principal = principal(authentication, false);
+        String actorAgentId = targetActor(request, principal);
+        requirePath(taskId, workItemId, reassignmentId);
+        // Parse servlet bytes before acquiring installation/runtime/business locks.
+        var command = parse(request, AgentWorkItemReassignmentLeaseRequestDTO.class);
+        return cn.jia.core.config.ApiJsonResponses.success(ok(nativeCommit(authentication, () -> service.readLease(principal.tenantId(), principal.clientId(), principal.ownerJiacn(), actorAgentId,
+                taskId, workItemId, reassignmentId,
+                command))));
+
+    }
+
+    @AllowSensitiveOutput(reason = "Exact target-only command-bound active lease start response")
+    @PostMapping(value = "/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease/start",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<AgentWorkItemReassignmentLeaseDTO>> startLease(
+            @PathVariable String taskId, @PathVariable String workItemId,
+            @PathVariable String reassignmentId,
+            HttpServletRequest request, Authentication authentication) {
+        Principal principal = principal(authentication, false);
+        String actorAgentId = targetActor(request, principal);
+        requirePath(taskId, workItemId, reassignmentId);
+        // Parse servlet bytes before acquiring installation/runtime/business locks.
+        var command = parse(request, AgentWorkItemReassignmentLeaseRequestDTO.class);
+        return cn.jia.core.config.ApiJsonResponses.success(ok(nativeCommit(authentication, () -> service.startLease(principal.tenantId(), principal.clientId(), principal.ownerJiacn(), actorAgentId,
+                taskId, workItemId, reassignmentId,
+                command))));
+
+    }
+
+    @AllowSensitiveOutput(reason = "Exact target-only command-bound active lease heartbeat response")
+    @PostMapping(value = "/{taskId}/work-items/{workItemId}/reassignments/{reassignmentId}/lease/heartbeat",
+            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<AgentWorkItemReassignmentLeaseDTO>> heartbeatLease(
+            @PathVariable String taskId, @PathVariable String workItemId,
+            @PathVariable String reassignmentId,
+            HttpServletRequest request, Authentication authentication) {
+        Principal principal = principal(authentication, false);
+        String actorAgentId = targetActor(request, principal);
+        requirePath(taskId, workItemId, reassignmentId);
+        // Parse servlet bytes before acquiring installation/runtime/business locks.
+        var command = parse(request, AgentWorkItemReassignmentLeaseRequestDTO.class);
+        return cn.jia.core.config.ApiJsonResponses.success(ok(nativeCommit(authentication, () -> service.heartbeatLease(principal.tenantId(), principal.clientId(), principal.ownerJiacn(), actorAgentId,
+                taskId, workItemId, reassignmentId,
+                command))));
+
+    }
+
+    private <T> T nativeCommit(Authentication authentication, java.util.function.Supplier<T> commit) {
+        if (!(authentication instanceof AgentRuntimeAuthentication)) return commit.get(); // existing scoped JWT ACL lane
+        return runtimeAuthentication.withNativeFence(authentication, commit);
+    }
+
+    @ExceptionHandler(AuthenticationFailure.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> authentication(AuthenticationFailure failure) {
+        return error(failure.forbidden ? HttpStatus.FORBIDDEN : HttpStatus.UNAUTHORIZED,
+                failure.forbidden ? "WORK_ITEM_REASSIGNMENT_FORBIDDEN"
+                        : "WORK_ITEM_REASSIGNMENT_UNAUTHENTICATED",
+                "Work item reassignment access is unavailable");
+    }
+
+    @ExceptionHandler(RequestFailure.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> badRequest(RequestFailure ignored) {
+        return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST",
+                "Invalid work item reassignment request");
+    }
+
+    @ExceptionHandler(AgentWorkItemReassignmentException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> domain(AgentWorkItemReassignmentException failure) {
+        return switch (failure.getReason()) {
+            case INVALID_REQUEST -> error(HttpStatus.BAD_REQUEST, "BAD_REQUEST",
+                    "Invalid work item reassignment request");
+            case NOT_FOUND_OR_FORBIDDEN -> error(HttpStatus.NOT_FOUND,
+                    "WORK_ITEM_REASSIGNMENT_NOT_FOUND", "Reassignment resource is unavailable");
+            case VERSION_CONFLICT -> error(HttpStatus.CONFLICT,
+                    "WORK_ITEM_REASSIGNMENT_STALE", "Task or work item state changed");
+            case IDEMPOTENCY_CONFLICT -> error(HttpStatus.CONFLICT,
+                    "WORK_ITEM_REASSIGNMENT_CONFLICT",
+                    "Idempotency key was already used differently");
+            case LEASE_NOT_EXPIRED -> error(HttpStatus.CONFLICT,
+                    "WORK_ITEM_LEASE_LIVE", "The current lease is still live");
+            case DOMAIN_ATTEMPTS_EXHAUSTED -> error(HttpStatus.CONFLICT,
+                    "WORK_ITEM_ATTEMPTS_EXHAUSTED", "No reassignment attempt remains");
+            case INVALID_SOURCE_COMMAND -> error(HttpStatus.CONFLICT,
+                    "WORK_ITEM_SOURCE_COMMAND_INVALID", "Source command is not current");
+            case TRANSPORT_DISABLED, INVALID_PERSISTED_STATE -> error(HttpStatus.SERVICE_UNAVAILABLE,
+                    "WORK_ITEM_REASSIGNMENT_UNAVAILABLE",
+                    "Work item reassignment is temporarily unavailable");
+        };
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> unexpected(Exception ignored, HttpServletRequest request) {
+        log.error("Work item reassignment failed: uri={}", request.getRequestURI());
+        return error(HttpStatus.SERVICE_UNAVAILABLE,
+                "WORK_ITEM_REASSIGNMENT_UNAVAILABLE",
+                "Work item reassignment is temporarily unavailable");
+    }
+
+    private static Principal principal(Authentication authentication, boolean requireAuthority) {
+        if (authentication instanceof AgentRuntimeAuthentication runtime && runtime.isAuthenticated()) {
+            if (requireAuthority) throw new AuthenticationFailure(true);
+            var scope = runtime.getPrincipal();
+            return new Principal(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId());
+        }
+        if (authentication == null || !authentication.isAuthenticated()
+                || !(authentication instanceof JwtAuthenticationToken jwt)) {
+            throw new AuthenticationFailure(false);
+        }
+        Map<String, Object> claims = jwt.getToken().getClaims();
+        Object owner = claims.get("jiacn");
+        Object client = claims.get("client_id");
+        Object subject = claims.get("sub");
+        if (!(owner instanceof String ownerJiacn) || !(client instanceof String clientId)
+                || !(subject instanceof String operatorSubject)
+                || !exact(ownerJiacn, 50) || !exact(clientId, 50)
+                || !exact(operatorSubject, 100)
+                || !byteExact(authentication.getName(), operatorSubject)
+                || requireAuthority && jwt.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .noneMatch(REASSIGN_AUTHORITY::equals)) {
+            throw new AuthenticationFailure(true);
+        }
+        // The resource security boundary has admitted this JWT's process tenant/client.
+        // Resolve with the shared claim policy; a declared gray tenant is never rewritten to zero.
+        try {
+            return new Principal(TenantClaimPolicy.resolve(claims), clientId, ownerJiacn, operatorSubject);
+        } catch (IllegalArgumentException denied) {
+            throw new AuthenticationFailure(true);
+        }
+    }
+
+    /** A query parameter can confirm, never select, the authenticated target. */
+    private static String targetActor(HttpServletRequest request, Principal principal) {
+        String requestedActor = actor(request);
+        if (!byteExact(requestedActor, principal.subject())) {
+            throw new AuthenticationFailure(true);
+        }
+        return principal.subject();
+    }
+
+    private static String actor(HttpServletRequest request) {
+        if (!request.getParameterMap().keySet().equals(Set.of("actorAgentId"))) {
+            throw new RequestFailure();
+        }
+        String[] values = request.getParameterValues("actorAgentId");
+        if (values == null || values.length != 1 || !exact(values[0], 100)) {
+            throw new RequestFailure();
+        }
+        return values[0];
+    }
+
+    private static void requirePath(String... values) {
+        for (String value : values) if (!exact(value, 100)) throw new RequestFailure();
+    }
+
+    private static void requireIdempotencyKey(String value) {
+        if (value == null || !value.matches("[A-Za-z0-9._~:/+\\-]{8,128}")) {
+            throw new RequestFailure();
+        }
+    }
+
+    private static <T> T parse(HttpServletRequest request, Class<T> type) {
+        byte[] body = readBounded(request);
+        try {
+            T value = STRICT_JSON.readValue(body, type);
+            if (value == null) throw new RequestFailure();
+            return value;
+        } catch (RequestFailure known) {
+            throw known;
+        } catch (Exception malformed) {
+            throw new RequestFailure();
+        }
+    }
+
+    private static byte[] readBounded(HttpServletRequest request) {
+        try {
+            byte[] data = cn.jia.core.config.ApiJsonInput.readData(request);
+            if (data.length == 0 || data.length > MAX_BODY_BYTES) throw new RequestFailure();
+            return data;
+        } catch (IOException unreadable) {
+            throw new RequestFailure();
+        }
+    }
+
+    private static boolean byteExact(String left, String right) {
+        return left != null && right != null && MessageDigest.isEqual(
+                left.getBytes(StandardCharsets.UTF_8), right.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static boolean exact(String value, int max) {
+        return value != null && !value.isEmpty() && !hasUnpairedSurrogate(value)
+                && value.equals(value.strip())
+                && value.codePointCount(0, value.length()) <= max
+                && value.chars().noneMatch(Character::isISOControl);
+    }
+
+    private static boolean hasUnpairedSurrogate(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char unit = value.charAt(index);
+            if (Character.isHighSurrogate(unit)) {
+                if (++index >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(index))) return true;
+            } else if (Character.isLowSurrogate(unit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static <T> ResponseEntity<T> ok(T body) {
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL).body(body);
+    }
+
+    private static ResponseEntity<cn.jia.core.entity.JsonResult<Void>> error(
+            HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status)
+                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
+                .contentType(new MediaType(MediaType.APPLICATION_JSON, StandardCharsets.UTF_8))
+                .body(cn.jia.core.entity.JsonResult.<Void>failure(code, message));
+    }
+
+    private record Principal(String tenantId, String clientId, String ownerJiacn, String subject) { }
+    public record ErrorBody(String code, String message) { }
+    private static final class RequestFailure extends RuntimeException { }
+    private static final class AuthenticationFailure extends RuntimeException {
+        private final boolean forbidden;
+        private AuthenticationFailure(boolean forbidden) { this.forbidden = forbidden; }
+    }
+}

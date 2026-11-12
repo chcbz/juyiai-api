@@ -1,0 +1,54 @@
+package cn.jia.user.dao;
+
+import cn.jia.core.dao.IBaseDao;
+import cn.jia.user.entity.UserEntity;
+import cn.jia.user.entity.UserVO;
+
+import java.util.Collection;
+import java.util.List;
+
+/**
+ * <p>
+ *  服务类
+ * </p>
+ *
+ * @author chc
+ * @since 2021-11-20
+ */
+public interface UserInfoDao extends IBaseDao<UserEntity> {
+    List<UserEntity> selectAll();
+
+    UserEntity selectByJiacn(String jiacn);
+
+    List<UserEntity> selectOwnIdentityByExactJiacn(String jiacn);
+
+    UserEntity selectByUsername(String username);
+
+    UserEntity selectByOpenid(String openid);
+
+    UserEntity selectByPhone(String phone);
+
+    List<UserEntity> selectByRole(Long roleId);
+
+    List<UserEntity> selectByGroup(Long groupId);
+
+    List<UserEntity> selectByOrg(Long orgId);
+
+    List<UserEntity> searchByExample(UserEntity user);
+
+    List<UserEntity> searchByExample(UserEntity user, String pointTenantId);
+
+    List<UserEntity> selectForList(UserVO user);
+
+    List<UserEntity> selectForList(UserVO user, String pointTenantId);
+
+    List<UserRelationRow> selectRelationsByUserIds(Collection<Long> userIds);
+
+    UserEntity selectSecurityById(long userId);
+
+    List<UserEntity> selectSecurityByExactJiacn(String jiacn);
+
+    int incrementAuthEpoch(long userId, long expectedEpoch);
+
+
+}

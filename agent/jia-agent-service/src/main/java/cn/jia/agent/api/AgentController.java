@@ -1,0 +1,519 @@
+package cn.jia.agent.api;
+
+import cn.jia.core.entity.JsonRequest;
+import cn.jia.core.security.TenantClaimPolicy;
+
+import cn.jia.agent.common.AgentErrorConstants;
+import cn.jia.agent.entity.AbilityCompareRequestDTO;
+import cn.jia.agent.entity.AbilityEvaluationRequestDTO;
+import cn.jia.agent.entity.AgentCapabilityDTO;
+import cn.jia.agent.entity.AgentAbilitiesUpdateDTO;
+import cn.jia.agent.entity.AgentRegisterDTO;
+import cn.jia.agent.entity.AgentRosterSearchDTO;
+import cn.jia.agent.entity.AgentStatusDTO;
+import cn.jia.agent.entity.AgentTaskAssignDTO;
+import cn.jia.agent.entity.AgentTaskCreateDTO;
+import cn.jia.agent.entity.AgentTaskExecutionGrantRevokeDTO;
+import cn.jia.agent.entity.AgentTaskNoteDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationRequestDTO;
+import cn.jia.agent.entity.AgentTaskSearchDTO;
+import cn.jia.agent.entity.DialogueRequestDTO;
+import cn.jia.agent.hosting.HostingRentApplicationException;
+import cn.jia.agent.hosting.HostingRentApplicationService;
+import cn.jia.agent.hosting.HostingRentErrors;
+import cn.jia.agent.hosting.HostingRentHttp;
+import cn.jia.agent.service.AbilityEvaluationService;
+import cn.jia.agent.service.AgentOwnerScope;
+import cn.jia.agent.service.AgentService;
+import cn.jia.agent.service.HostingRentAdmissionException;
+import cn.jia.agent.service.AgentTaskExecutionGrantException;
+import cn.jia.agent.service.AgentTaskExecutionGrantService;
+import cn.jia.agent.service.funding.FundedBountyException;
+import cn.jia.agent.service.impl.AgentServiceImpl.AgentBizException;
+import cn.jia.core.entity.JsonResult;
+import cn.jia.core.entity.JsonResultPage;
+import cn.jia.economy.exception.EconomyPostingException;
+import cn.jia.economy.hosting.HostingRentException;
+import com.github.pagehelper.PageInfo;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+@Slf4j
+@RestController
+@RequestMapping("/agent")
+public class AgentController {
+    private final AgentService agentService;
+    private final AbilityEvaluationService abilityEvaluationService;
+    private cn.jia.agent.skill.SkillRosterProjection skillRoster;
+    private HostingRentApplicationService hostingRent;
+    private AgentTaskExecutionGrantService taskExecutionGrants;
+
+    @Autowired
+    public AgentController(AgentService agentService, AbilityEvaluationService abilityEvaluationService) {
+        this.agentService = Objects.requireNonNull(agentService, "agentService");
+        this.abilityEvaluationService = Objects.requireNonNull(
+                abilityEvaluationService, "abilityEvaluationService");
+    }
+
+    @Autowired
+    public void setSkillRoster(cn.jia.agent.skill.SkillRosterProjection projection) {
+        this.skillRoster = Objects.requireNonNull(projection, "projection");
+    }
+
+    @Autowired
+    public void setHostingRent(HostingRentApplicationService hostingRent) {
+        this.hostingRent = Objects.requireNonNull(hostingRent, "hostingRent");
+    }
+
+    @Autowired
+    public void setTaskExecutionGrants(AgentTaskExecutionGrantService taskExecutionGrants) {
+        this.taskExecutionGrants = Objects.requireNonNull(taskExecutionGrants, "taskExecutionGrants");
+    }
+
+    @PostMapping("/register")
+    public Object register(@RequestBody JsonRequest<AgentRegisterDTO> protocolRequest) {
+        AgentRegisterDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(agentService.register(request));
+    }
+
+    @GetMapping("/list")
+    public Object list(@RequestParam(required = false) String status,
+            @RequestParam(required = false) String ability,
+            @RequestParam(defaultValue = "1") int pageNum,
+            @RequestParam(defaultValue = "50") int pageSize) {
+        return page(agentService.list(status, ability, pageNum, pageSize));
+    }
+
+    @GetMapping("/map")
+    public Object mapAgents() {
+        return JsonResult.success(agentService.listMapAgents());
+    }
+
+    @GetMapping("/capabilities")
+    public Object capabilities() {
+        List<AgentCapabilityDTO> capabilities = agentService.listCapabilities();
+        return JsonResult.success(capabilities);
+    }
+
+    @GetMapping("/personas/catalog")
+    public Object personaCatalog(Authentication authentication) {
+        AgentOwnerScope scope = requireJwtScope(authentication);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.success(agentService.listPersonaCatalog(
+                        scope.tenantId(), scope.clientId(), scope.ownerJiacn())));
+    }
+
+    @PostMapping("/personas/{personaCode}/bind")
+    public Object bindPersonaHttp(@PathVariable String personaCode, Authentication authentication,
+            HttpServletRequest servletRequest, @cn.jia.core.annotation.ApiJsonData @RequestBody(required = false) byte[] rawBody) {
+        var actor = HostingRentHttp.actor(authentication);
+        Map<String, String> body = HostingRentHttp.body(rawBody,
+                Set.of("mode", "hostingAction", "agentId", "quoteId", "leaseId",
+                        "expectedLeaseVersion", "expectedPlanVersion", "expectedAmountWen", "expectedPeriodSeconds"),
+                Set.of());
+        if (!"server".equals(body.get("mode")) && !"local".equals(body.get("mode"))) throw HostingRentHttp.badRequest();
+        String key = HostingRentHttp.key(servletRequest);
+        if (hostingRent == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
+        try {
+            Object receipt = hostingRent.bind(actor, personaCode, key, body);
+            return ResponseEntity.accepted().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                    .body(JsonResult.success(EconomyOperationWire.hosting(receipt)));
+        } catch (RuntimeException failure) {
+            return HostingRentErrors.response(failure);
+        }
+    }
+
+    @ExceptionHandler({HostingRentApplicationException.class, HostingRentException.class,
+            EconomyPostingException.class})
+    public Object rentFailure(RuntimeException failure) {
+        return HostingRentErrors.response(failure);
+    }
+
+    @DeleteMapping("/personas/{personaCode}/bind")
+    public Object unbindPersona(@PathVariable String personaCode, Authentication authentication,
+            @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] rawBody) {
+        var actor = HostingRentHttp.actor(authentication);
+        var body = HostingRentHttp.body(rawBody, Set.of("agentId", "leaseId"), Set.of());
+        if (hostingRent == null) throw new HostingRentApplicationException(503, "HOSTING_RENT_NOT_READY");
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.success(hostingRent.remove(actor, personaCode, HostingRentHttp.required(body, "agentId"), HostingRentHttp.required(body, "leaseId"))));
+    }
+
+    public static AgentOwnerScope requireJwtScope(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()
+                || !(authentication instanceof JwtAuthenticationToken jwt)) {
+            throw new AgentBizException(AgentErrorConstants.AGENT_FORBIDDEN,
+                    "Authenticated JWT scope is required");
+        }
+        Map<String, Object> claims = jwt.getToken().getClaims();
+        Object rawJiacn = claims.get("jiacn");
+        Object rawClientId = claims.get("client_id");
+        String tenantId;
+        try {
+            tenantId = TenantClaimPolicy.resolve(claims);
+        } catch (IllegalArgumentException invalidTenant) {
+            throw new AgentBizException(AgentErrorConstants.AGENT_FORBIDDEN,
+                    "Authenticated JWT scope is invalid");
+        }
+        if (!(rawJiacn instanceof String jiacn) || !(rawClientId instanceof String clientId)
+                || "0".equals(jiacn) || !validExactScopeComponent(jiacn)
+                || !validExactScopeComponent(clientId)) {
+            throw new AgentBizException(AgentErrorConstants.AGENT_FORBIDDEN,
+                    "Authenticated JWT scope is invalid");
+        }
+        return new AgentOwnerScope(tenantId, clientId, jiacn);
+    }
+
+    private static boolean validExactScopeComponent(String value) {
+        return value != null && !hasUnpairedSurrogate(value)
+                && value.codePointCount(0, value.length()) <= 50
+                && !value.codePoints().allMatch(AgentController::isPadding)
+                && !isPadding(value.codePointAt(0))
+                && !isPadding(value.codePointBefore(value.length()))
+                && value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static boolean isPadding(int codePoint) {
+        return Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint);
+    }
+
+    @PostMapping("/roster")
+    public Object roster(@RequestBody JsonRequest<AgentRosterSearchDTO> protocolRequest) {
+        AgentRosterSearchDTO request = protocolRequest == null ? null : protocolRequest.data();
+        int pageNum = request.getPageNum() == null ? 1 : request.getPageNum();
+        int pageSize = request.getPageSize() == null ? 50 : request.getPageSize();
+        var result=agentService.listRoster(request.getStatus(), request.getAbility(), pageNum, pageSize);
+        if (skillRoster != null) skillRoster.project(
+                org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication(), result.getList());
+        return page(result);
+    }
+
+    @GetMapping("/{agentId}")
+    public Object get(@PathVariable String agentId) {
+        var result = agentService.get(agentId);
+        if (skillRoster != null && result != null) {
+            skillRoster.project(
+                    org.springframework.security.core.context.SecurityContextHolder.getContext()
+                            .getAuthentication(), List.of(result));
+        }
+        return JsonResult.success(result);
+    }
+
+    @PutMapping("/{agentId}/abilities")
+    public Object updateAbilities(@PathVariable String agentId,
+            @RequestBody JsonRequest<AgentAbilitiesUpdateDTO> protocolRequest, Authentication authentication) {
+        try {
+            requireJwtScope(authentication);
+            return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                    .body(JsonResult.success(agentService.updateAbilities(agentId,
+                            protocolRequest == null ? null : protocolRequest.data())));
+        } catch (AgentBizException e) {
+            HttpStatus status = "AGENT_ABILITIES_CONFLICT".equals(e.getCode()) ? HttpStatus.CONFLICT
+                    : AgentErrorConstants.AGENT_FORBIDDEN.equals(e.getCode()) ? HttpStatus.FORBIDDEN
+                    : HttpStatus.INTERNAL_SERVER_ERROR;
+            return ResponseEntity.status(status).header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                    .body(JsonResult.failure(e.getCode(), "AGENT_ABILITIES_CONFLICT".equals(e.getCode())
+                            ? "本领已变更，请刷新后核对" : "无法保存本领"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                    .body(JsonResult.failure("BAD_REQUEST", "本领格式不正确"));
+        }
+    }
+
+    @PutMapping("/{agentId}/status")
+    public Object updateStatus(@PathVariable String agentId, @RequestBody JsonRequest<AgentStatusDTO> protocolRequest) {
+        AgentStatusDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(agentService.updateStatus(agentId, request));
+    }
+
+    @GetMapping("/{agentId}/tasks")
+    public Object getTasks(@PathVariable String agentId) {
+        return JsonResult.success(agentService.getAgentTasks(agentId));
+    }
+
+    @GetMapping("/personas")
+    public Object personas() {
+        return JsonResult.success(agentService.listPersonas());
+    }
+
+    @GetMapping("/persona/{name}")
+    public Object persona(@PathVariable String name) {
+        return JsonResult.success(agentService.getPersona(name));
+    }
+
+    @PostMapping("/dialogue")
+    public Object dialogue(@RequestBody JsonRequest<DialogueRequestDTO> protocolRequest) {
+        DialogueRequestDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(agentService.generateDialogue(request));
+    }
+
+    @GetMapping("/stats")
+    public Object stats(@RequestParam String agentId) {
+        return JsonResult.success(agentService.getStats(agentId));
+    }
+
+    @PostMapping("/tasks/search")
+    public Object searchTasks(@RequestBody JsonRequest<AgentTaskSearchDTO> protocolRequest) {
+        AgentTaskSearchDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return page(agentService.searchTasks(request));
+    }
+
+    @PostMapping("/tasks/status-counts")
+    public Object countTasksByStatus(@RequestBody JsonRequest<AgentTaskSearchDTO> protocolRequest) {
+        AgentTaskSearchDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(agentService.countTasksByStatus(request));
+    }
+
+    @PostMapping("/tasks")
+    public Object createTask(@RequestBody JsonRequest<AgentTaskCreateDTO> protocolRequest,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            Authentication authentication) {
+        AgentTaskCreateDTO request = protocolRequest == null ? null : protocolRequest.data();
+        var scope = requireJwtScope(authentication);
+        // An old money request must never become an ordinary task or replay a retired debit.
+        if (hasFundingFields(request)) {
+            throw new FundedBountyException(HttpStatus.GONE, "FUNDED_BOUNTY_RETIRED",
+                    "Funded bounty writes are retired; create a matter and confirm its quoted assignee");
+        }
+        return JsonResult.success(agentService.createTask(new AgentService.TaskOwnerScope(
+                scope.tenantId(), scope.clientId(), scope.ownerJiacn()), request));
+    }
+
+    @GetMapping("/tasks/{taskId}")
+    public Object getTask(@PathVariable String taskId) {
+        return JsonResult.success(agentService.getTask(taskId));
+    }
+
+    @PostMapping("/tasks/{taskId}/assign")
+    public Object assignTask(@PathVariable String taskId, @RequestBody JsonRequest<AgentTaskAssignDTO> protocolRequest,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            Authentication authentication) {
+        AgentTaskAssignDTO request = protocolRequest == null ? null : protocolRequest.data();
+        HostingRentHttp.Actor actor;
+        try { actor = HostingRentHttp.actor(authentication); }
+        catch (HostingRentApplicationException invalid) {
+            throw new AgentTaskExecutionGrantException(AgentTaskExecutionGrantException.Reason.UNAUTHENTICATED,
+                    "Authenticated assignment payer and owner are required");
+        }
+        var scope = new AgentTaskExecutionGrantService.Scope(actor.tenantId(), actor.clientId(), actor.ownerJiacn());
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.success(requireTaskExecutionGrants().assignAndGrant(
+                        scope, taskId, idempotencyKey, request, actor.actorId())));
+    }
+
+    @PostMapping("/tasks/{taskId}/execution-authorizations/{grantId}/revoke")
+    public Object revokeTaskExecutionGrant(@PathVariable String taskId, @PathVariable String grantId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestBody JsonRequest<AgentTaskExecutionGrantRevokeDTO> protocolRequest, Authentication authentication) {
+        AgentTaskExecutionGrantRevokeDTO request = protocolRequest == null ? null : protocolRequest.data();
+        if (request == null || request.getExpectedVersion() == null) {
+            throw new AgentTaskExecutionGrantException(
+                    AgentTaskExecutionGrantException.Reason.BAD_REQUEST,
+                    "expectedVersion is required");
+        }
+        return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.success(requireTaskExecutionGrants().revoke(
+                        requireTaskGrantScope(authentication), taskId, grantId, idempotencyKey,
+                        request.getExpectedVersion())));
+    }
+
+    @PostMapping("/tasks/{taskId}/team-recommendation")
+    public Object recommendTaskTeam(
+            @PathVariable String taskId,
+            @RequestBody JsonRequest<AgentTaskTeamRecommendationRequestDTO> protocolRequest,
+            Authentication authentication) {
+        AgentTaskTeamRecommendationRequestDTO request = protocolRequest == null ? null : protocolRequest.data();
+        AgentOwnerScope scope = requireJwtScope(authentication);
+        AgentTaskTeamRecommendationDTO recommendation = agentService.recommendTaskTeam(
+                scope.tenantId(), scope.clientId(), taskId, request);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.success(recommendation));
+    }
+
+    @PostMapping("/tasks/{taskId}/notes")
+    public Object addTaskNote(@PathVariable String taskId, @RequestBody JsonRequest<AgentTaskNoteDTO> protocolRequest) {
+        AgentTaskNoteDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(agentService.addTaskNote(taskId, request));
+    }
+
+    @GetMapping("/tasks/{taskId}/notes")
+    public Object listTaskNotes(@PathVariable String taskId) {
+        return JsonResult.success(agentService.listTaskNotes(taskId));
+    }
+
+    @PostMapping("/tasks/{taskId}/archive")
+    public Object archiveTask(@PathVariable String taskId) {
+        return JsonResult.success(agentService.archiveTask(taskId));
+    }
+
+    @PostMapping("/evaluate")
+    public Object evaluate(@RequestBody JsonRequest<AbilityEvaluationRequestDTO> protocolRequest) {
+        AbilityEvaluationRequestDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(abilityEvaluationService.evaluate(request));
+    }
+
+    @PostMapping("/compare")
+    public Object compare(@RequestBody JsonRequest<AbilityCompareRequestDTO> protocolRequest) {
+        AbilityCompareRequestDTO request = protocolRequest == null ? null : protocolRequest.data();
+        return JsonResult.success(abilityEvaluationService.compare(request));
+    }
+
+    @GetMapping("/evaluation/{agentName}")
+    public Object evaluationHistory(@PathVariable String agentName) {
+        return JsonResult.success(abilityEvaluationService.history(agentName));
+    }
+
+    @GetMapping("/evaluation/latest/{agentName}")
+    public Object latestEvaluation(@PathVariable String agentName) {
+        return JsonResult.success(abilityEvaluationService.latest(agentName));
+    }
+
+    @GetMapping("/evaluation/stats")
+    public Object evaluationStats() {
+        return JsonResult.success(abilityEvaluationService.stats());
+    }
+
+    @DeleteMapping("/evaluation/{id}")
+    public Object deleteEvaluation(@PathVariable Long id) {
+        abilityEvaluationService.delete(id);
+        return JsonResult.success();
+    }
+
+    @ExceptionHandler(FundedBountyException.class)
+    public ResponseEntity<JsonResult<Void>> handleFundedBountyException(
+            FundedBountyException exception, HttpServletRequest request) {
+        log.warn("Funded bounty request rejected: uri={}, code={}, retryable={}",
+                request.getRequestURI(), exception.code(), exception.retryable());
+        JsonResult<Void> result = JsonResult.failure(exception.code(), exception.getMessage());
+
+        return ResponseEntity.status(exception.status())
+                .header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(result);
+    }
+
+    @ExceptionHandler(HostingRentAdmissionException.class)
+    public ResponseEntity<JsonResult<Void>> handleHostingRentUnavailable(
+            HostingRentAdmissionException e, HttpServletRequest request) {
+        log.warn("Agent hosting rent request rejected: uri={}, code={}",
+                request.getRequestURI(), e.code());
+        JsonResult<Void> result = JsonResult.failure(e.code(), e.getMessage());
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(result);
+    }
+
+    @ExceptionHandler(AgentTaskExecutionGrantException.class)
+    public ResponseEntity<JsonResult<Void>> handleTaskExecutionGrantException(
+            AgentTaskExecutionGrantException exception, HttpServletRequest request) {
+        log.warn("Task execution grant request rejected: uri={}, code={}",
+                request.getRequestURI(), exception.code());
+        JsonResult<Void> result = JsonResult.failure(exception.code(), exception.getMessage());
+
+        return ResponseEntity.status(exception.status())
+                .header(HttpHeaders.CACHE_CONTROL, "private, no-store").body(result);
+    }
+
+    @ExceptionHandler(AgentBizException.class)
+    public ResponseEntity<JsonResult<Void>> handleAgentBizException(AgentBizException e, HttpServletRequest request) {
+        log.warn("Agent API request rejected: uri={}, code={}, message={}",
+                request.getRequestURI(), e.getCode(), e.getMessage());
+        int status = switch (e.getCode()) {
+            case AgentErrorConstants.TOKEN_INVALID -> 401;
+            case AgentErrorConstants.AGENT_FORBIDDEN -> 403;
+            case AgentErrorConstants.AGENT_NOT_FOUND, AgentErrorConstants.TASK_NOT_FOUND -> 404;
+            case AgentErrorConstants.AGENT_BUSY, AgentErrorConstants.AGENT_OFFLINE,
+                    AgentErrorConstants.PERSONA_BOUND, AgentErrorConstants.PERSONA_NOT_BINDABLE,
+                    AgentErrorConstants.TASK_STATUS_INVALID -> 409;
+            case AgentErrorConstants.AGENT_ABILITY_MISMATCH -> 422;
+            default -> 500;
+        };
+        String message = status == 500 ? "好汉操作失败，请稍后重试" : e.getMessage();
+        return ResponseEntity.status(status).header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.failure(e.getCode(), message));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<JsonResult<Void>> handleIllegalArgumentException(IllegalArgumentException e, HttpServletRequest request) {
+        log.warn("Agent API request invalid: uri={}, message={}", request.getRequestURI(), e.getMessage());
+        return ResponseEntity.badRequest().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.failure("BAD_REQUEST", "请求参数不正确"));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<JsonResult<Void>> handleException(Exception e) {
+        log.error("Agent API error", e);
+        return ResponseEntity.internalServerError().header(HttpHeaders.CACHE_CONTROL, "private, no-store")
+                .body(JsonResult.failure("AGENT_ERROR", "好汉操作失败，请稍后重试"));
+    }
+
+    private static AgentTaskExecutionGrantService.Scope requireTaskGrantScope(
+            Authentication authentication) {
+        try {
+            AgentOwnerScope scope = requireJwtScope(authentication);
+            return new AgentTaskExecutionGrantService.Scope(
+                    scope.tenantId(), scope.clientId(), scope.ownerJiacn());
+        } catch (AgentBizException invalidJwt) {
+            throw new AgentTaskExecutionGrantException(
+                    AgentTaskExecutionGrantException.Reason.UNAUTHENTICATED,
+                    "Authenticated JWT scope is required");
+        }
+    }
+
+    private AgentTaskExecutionGrantService requireTaskExecutionGrants() {
+        if (taskExecutionGrants == null) {
+            throw new AgentTaskExecutionGrantException(
+                    AgentTaskExecutionGrantException.Reason.INVALID_PERSISTED_STATE,
+                    "Task execution authorization service is unavailable");
+        }
+        return taskExecutionGrants;
+    }
+
+    private static boolean hasFundingFields(AgentTaskCreateDTO request) {
+        return request != null && (request.getGrossBountyAmountWen() != null
+                || request.getSettlementPolicy() != null
+                || request.getRequiredSkillRequirements() != null);
+    }
+
+    private static boolean hasUnpairedSurrogate(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char unit = value.charAt(index);
+            if (Character.isHighSurrogate(unit)) {
+                if (++index >= value.length() || !Character.isLowSurrogate(value.charAt(index))) return true;
+            } else if (Character.isLowSurrogate(unit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private <T> JsonResultPage<T> page(PageInfo<T> pageInfo) {
+        JsonResultPage<T> result = JsonResultPage.page(pageInfo.getList(), pageInfo.getPageNum(), pageInfo.getPageSize(), pageInfo.getTotal());
+        return result;
+    }
+}

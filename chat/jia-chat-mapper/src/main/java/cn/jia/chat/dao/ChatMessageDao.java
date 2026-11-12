@@ -1,0 +1,64 @@
+package cn.jia.chat.dao;
+
+import cn.jia.chat.entity.ChatMessageEntity;
+import cn.jia.core.dao.IBaseDao;
+
+import java.util.List;
+
+/** Chat message DAO boundary. */
+public interface ChatMessageDao extends IBaseDao<ChatMessageEntity> {
+    /** Descending, keyset-bounded display rows; scope is enforced by the mapper before LIMIT. */
+    List<ChatMessageEntity> findOwnedMessagePage(String tenantId, String ownerJiacn,
+            String clientId, String conversationId, Long beforeTime, Long beforeId, int limit);
+
+    /** Descending inclusive keyset page for reloading an evicted history window. */
+    List<ChatMessageEntity> findOwnedMessagePageAt(String tenantId, String ownerJiacn,
+            String clientId, String conversationId, Long anchorTime, Long anchorId, int limit);
+
+    /** Scoped task-thread write boundary; intentionally separate from generic conversations. */
+    int insertScoped(String tenantId, String clientId, ChatMessageEntity message);
+
+    /** Scoped stable latest-message query for task threads. */
+    List<ChatMessageEntity> findByConversationIdScoped(
+            String tenantId, String clientId, String conversationId, int limit);
+
+    default List<ChatMessageEntity> findOwnedByConversationId(String ownerJiacn, String clientId, String conversationId) {
+        return findOwnedByConversationId("0", ownerJiacn, clientId, conversationId);
+    }
+    List<ChatMessageEntity> findOwnedByConversationId(
+            String tenantId, String ownerJiacn, String clientId, String conversationId);
+
+    default List<ChatMessageEntity> findOwnedByConversationIdWithLimit(String ownerJiacn, String clientId, String conversationId, int limit) {
+        return findOwnedByConversationIdWithLimit("0", ownerJiacn, clientId, conversationId, limit);
+    }
+    List<ChatMessageEntity> findOwnedByConversationIdWithLimit(
+            String tenantId, String ownerJiacn, String clientId, String conversationId, int limit);
+
+    /** IDs only, with the same scope/order/window as the bounded history read. */
+    List<Long> findOwnedMessageIdsWithLimit(
+            String tenantId, String ownerJiacn, String clientId, String conversationId, int limit);
+
+    /** Deletes every byte-exact row for an already locked and authenticated conversation. */
+    default int deleteExactOwnedConversationMessages(String ownerJiacn, String clientId, String conversationId) {
+        return deleteExactOwnedConversationMessages("0", ownerJiacn, clientId, conversationId);
+    }
+    int deleteExactOwnedConversationMessages(
+            String tenantId, String ownerJiacn, String clientId, String conversationId);
+
+    /** Explicitly unscoped maintenance-only history query. Never expose through request paths. */
+    List<ChatMessageEntity> findByConversationIdForMaintenance(String conversationId);
+
+    List<String> findPendingConversationIds(String syncStatus, int limit, long afterId);
+
+    default int markMemorySnapshotSynced(String ownerJiacn, String clientId, String conversationId, List<Long> messageIds) {
+        return markMemorySnapshotSynced("0", ownerJiacn, clientId, conversationId, messageIds);
+    }
+    int markMemorySnapshotSynced(String tenantId, String ownerJiacn, String clientId,
+            String conversationId, List<Long> messageIds);
+
+    void updateSyncStatusByConversationId(String conversationId, String syncStatus);
+
+    List<Long> findExpiredMessageIds(long beforeTime, int limit);
+
+    List<cn.jia.chat.memory.MemoryOwner> findActiveMemoryOwners(long sinceTime);
+}

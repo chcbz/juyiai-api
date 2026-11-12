@@ -1,0 +1,198 @@
+package cn.jia.agent.api;
+
+import cn.jia.agent.config.AgentTaskEventsGate;
+import cn.jia.agent.entity.AgentTaskWorkspaceDTO;
+import cn.jia.agent.exception.AgentTaskWorkspaceException;
+import cn.jia.agent.service.AgentTaskWorkspaceService;
+import cn.jia.core.util.JsonUtil;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+/** Browser-facing C04 workspace endpoint. JWT claims are the sole scope authority. */
+@Slf4j
+@RestController
+@RequestMapping("/agent/tasks")
+@RequiredArgsConstructor
+public class AgentTaskWorkspaceController {
+    static final int MAX_SERIALIZED_BYTES = 4 * 1024 * 1024;
+    static final String CACHE_CONTROL_VALUE = "private, no-store";
+
+    private final AgentTaskWorkspaceService workspaceService;
+    private final AgentTaskEventsGate taskEventsGate;
+
+    @GetMapping(value = "/{taskId}/workspace", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<byte[]> workspace(@PathVariable String taskId,
+            HttpServletRequest request, Authentication authentication) {
+        Scope scope = requireJwtScope(authentication);
+        requireRequestId(taskId, "taskId", 100);
+        String actorAgentId = singleRequiredQuery(request, "actorAgentId");
+        requireRequestId(actorAgentId, "actorAgentId", 100);
+        if (!taskEventsGate.allows(scope.tenantId(), scope.clientId())) {
+            throw new AgentTaskWorkspaceException(
+                    AgentTaskWorkspaceException.Reason.SNAPSHOT_UNAVAILABLE);
+        }
+        AgentTaskWorkspaceDTO snapshot = workspaceService.snapshot(
+                scope.tenantId(), scope.clientId(), scope.jiacn(), taskId, actorAgentId);
+        byte[] body;
+        try {
+            body = JsonUtil.getMapper().writeValueAsBytes(snapshot);
+        } catch (Exception exception) {
+            throw new AgentTaskWorkspaceException(
+                    AgentTaskWorkspaceException.Reason.SNAPSHOT_UNAVAILABLE, exception);
+        }
+        if (body.length > MAX_SERIALIZED_BYTES) {
+            throw new AgentTaskWorkspaceException(
+                    AgentTaskWorkspaceException.Reason.SNAPSHOT_UNAVAILABLE);
+        }
+        body = cn.jia.core.config.ApiJsonResponses.rawJsonSuccess(body, request);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL_VALUE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .contentLength(body.length)
+                .body(body);
+    }
+
+    @ExceptionHandler(WorkspaceAuthenticationException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> handleAuthentication(
+            WorkspaceAuthenticationException exception) {
+        HttpStatus status = exception.forbidden ? HttpStatus.FORBIDDEN : HttpStatus.UNAUTHORIZED;
+        return error(status, exception.forbidden ? "WORKSPACE_FORBIDDEN" : "WORKSPACE_UNAUTHENTICATED",
+                exception.forbidden ? "Workspace scope is unavailable"
+                        : "Authentication is required");
+    }
+
+    @ExceptionHandler({WorkspaceRequestException.class,
+            MissingServletRequestParameterException.class,
+            MethodArgumentTypeMismatchException.class})
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> handleBadRequest(Exception ignored) {
+        return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Invalid workspace request");
+    }
+
+    @ExceptionHandler(AgentTaskWorkspaceException.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> handleWorkspaceFailure(
+            AgentTaskWorkspaceException exception) {
+        if (exception.getReason()
+                == AgentTaskWorkspaceException.Reason.NOT_FOUND_OR_FORBIDDEN) {
+            log.warn("Workspace request rejected: reason=not_found_or_forbidden");
+            return error(HttpStatus.NOT_FOUND, "TASK_WORKSPACE_NOT_FOUND",
+                    "Task workspace is not available in the requested scope");
+        }
+        log.error("Workspace request failed: reason=snapshot_unavailable");
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "TASK_WORKSPACE_UNAVAILABLE",
+                "Task workspace snapshot is temporarily unavailable");
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> handleUnexpected(Exception ignored) {
+        log.error("Workspace request failed: reason=unexpected");
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "TASK_WORKSPACE_UNAVAILABLE",
+                "Task workspace snapshot is temporarily unavailable");
+    }
+
+    private static Scope requireJwtScope(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()
+                || !(authentication instanceof JwtAuthenticationToken jwt)) {
+            throw new WorkspaceAuthenticationException(false);
+        }
+        Map<String, Object> claims = jwt.getToken().getClaims();
+        Object jiacn = claims.get("jiacn");
+        Object clientId = claims.get("client_id");
+        if (!(jiacn instanceof String owner) || !(clientId instanceof String client)
+                || !validExact(owner, 50) || !validExact(client, 50)) {
+            throw new WorkspaceAuthenticationException(true);
+        }
+        try {
+            return new Scope(cn.jia.core.security.TenantClaimPolicy.resolve(claims), owner, client);
+        } catch (IllegalArgumentException invalidTenant) {
+            throw new WorkspaceAuthenticationException(true);
+        }
+    }
+
+    private static String singleRequiredQuery(
+            HttpServletRequest request, String name) {
+        String[] values = request.getParameterValues(name);
+        if (values == null || values.length != 1) {
+            throw new WorkspaceRequestException(name);
+        }
+        return values[0];
+    }
+
+    private static void requireRequestId(String value, String name, int maxLength) {
+        if (!validExact(value, maxLength)) {
+            throw new WorkspaceRequestException(name);
+        }
+    }
+
+    private static boolean validExact(String value, int maxLength) {
+        return value != null && !hasUnpairedSurrogate(value)
+                && value.codePointCount(0, value.length()) <= maxLength
+                && !value.codePoints().allMatch(AgentTaskWorkspaceController::isPadding)
+                && !isPadding(value.codePointAt(0))
+                && !isPadding(value.codePointBefore(value.length()))
+                && value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static boolean hasUnpairedSurrogate(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char unit = value.charAt(index);
+            if (Character.isHighSurrogate(unit)) {
+                if (++index >= value.length()
+                        || !Character.isLowSurrogate(value.charAt(index))) {
+                    return true;
+                }
+            } else if (Character.isLowSurrogate(unit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isPadding(int codePoint) {
+        return Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint);
+    }
+
+    private static ResponseEntity<cn.jia.core.entity.JsonResult<Void>> error(
+            HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status)
+                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL_VALUE)
+                .contentType(new MediaType(MediaType.APPLICATION_JSON, StandardCharsets.UTF_8))
+                .body(cn.jia.core.entity.JsonResult.<Void>failure(code, message));
+    }
+
+    private record Scope(String tenantId, String jiacn, String clientId) {
+    }
+
+    public record WorkspaceError(String code, String message) {
+    }
+
+    private static final class WorkspaceAuthenticationException extends RuntimeException {
+        private final boolean forbidden;
+
+        private WorkspaceAuthenticationException(boolean forbidden) {
+            this.forbidden = forbidden;
+        }
+    }
+
+    private static final class WorkspaceRequestException extends RuntimeException {
+        private WorkspaceRequestException(String field) {
+            super(field);
+        }
+    }
+}

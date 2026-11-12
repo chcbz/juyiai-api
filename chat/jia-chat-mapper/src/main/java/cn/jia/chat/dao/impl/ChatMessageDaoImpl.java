@@ -1,0 +1,269 @@
+package cn.jia.chat.dao.impl;
+
+import cn.jia.chat.dao.ChatMessageDao;
+import cn.jia.chat.entity.ChatMessageEntity;
+import cn.jia.chat.mapper.ChatMessageMapper;
+import cn.jia.common.dao.BaseDaoImpl;
+import cn.jia.core.util.StringUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import jakarta.inject.Named;
+import lombok.extern.slf4j.Slf4j;
+
+import java.util.Collections;
+import java.util.List;
+
+/** Chat message DAO implementation. */
+@Named
+@Slf4j
+public class ChatMessageDaoImpl extends BaseDaoImpl<ChatMessageMapper, ChatMessageEntity>
+        implements ChatMessageDao {
+    @org.springframework.beans.factory.annotation.Autowired
+    private cn.jia.core.security.FixedTenantAdmissionPolicy processScope;
+
+    private LambdaQueryWrapper<ChatMessageEntity> maintenanceQuery() {
+        var query = new LambdaQueryWrapper<ChatMessageEntity>();
+        query.eq(ChatMessageEntity::getTenantId, processScope.businessTenantId())
+                .apply("CAST(tenant_id AS BINARY) = CAST({0} AS BINARY)", processScope.businessTenantId());
+        if (processScope.clientId() != null) {
+            query.eq(ChatMessageEntity::getClientId, processScope.clientId())
+                    .apply("CAST(client_id AS BINARY) = CAST({0} AS BINARY)", processScope.clientId());
+        }
+        return query;
+    }
+
+    @Override
+    public int insertScoped(String tenantId, String clientId, ChatMessageEntity message) {
+        requireScope(tenantId, clientId);
+        if (message == null) {
+            throw new IllegalArgumentException("message is required");
+        }
+        requireIdentity(message.getConversationId(), "conversationId");
+        message.setTenantId(tenantId);
+        message.setClientId(clientId);
+        return insert(message);
+    }
+
+    @Override
+    public List<ChatMessageEntity> findByConversationIdScoped(
+            String tenantId, String clientId, String conversationId, int limit) {
+        requireScope(tenantId, clientId);
+        requireIdentity(conversationId, "conversationId");
+        requireLimit(limit);
+        List<ChatMessageEntity> result = baseMapper.findExactByConversationScope(
+                tenantId, clientId, conversationId, limit);
+        if (result == null) {
+            throw new IllegalStateException("Task-thread message query returned null");
+        }
+        for (ChatMessageEntity message : result) {
+            if (message == null
+                    || !tenantId.equals(message.getTenantId())
+                    || !clientId.equals(message.getClientId())
+                    || !conversationId.equals(message.getConversationId())) {
+                throw new IllegalStateException(
+                        "Task-thread message identity does not match its exact scope");
+            }
+        }
+        Collections.reverse(result);
+        return result;
+    }
+
+    @Override
+    public List<ChatMessageEntity> findOwnedMessagePage(String tenantId, String ownerJiacn,
+            String clientId, String conversationId, Long beforeTime, Long beforeId, int limit) {
+        // Shared exact-scope SQL owns row isolation. Do not run a whole-conversation
+        // contamination COUNT or repeat per-row authorization on each display page.
+        return baseMapper.findExactOwnedMessagePage(tenantId, ownerJiacn, clientId,
+                conversationId, Long.parseLong(conversationId), beforeTime, beforeId, limit);
+    }
+
+    @Override
+    public List<ChatMessageEntity> findOwnedMessagePageAt(String tenantId, String ownerJiacn,
+            String clientId, String conversationId, Long anchorTime, Long anchorId, int limit) {
+        return baseMapper.findExactOwnedMessagePageAt(tenantId, ownerJiacn, clientId,
+                conversationId, Long.parseLong(conversationId), anchorTime, anchorId, limit);
+    }
+
+    @Override
+    public List<ChatMessageEntity> findOwnedByConversationId(
+            String tenantId, String ownerJiacn, String clientId, String conversationId) {
+        requireScope(tenantId, clientId); requireIdentity(ownerJiacn, "ownerJiacn");
+        Long numericId = parseConversationId(conversationId);
+        String canonicalId = Long.toString(numericId);
+        observeContamination(tenantId, ownerJiacn, clientId, canonicalId, numericId);
+        return requireOwnedRows(baseMapper.findExactOwnedConversationMessages(
+                        tenantId, ownerJiacn, clientId, canonicalId, numericId),
+                tenantId, ownerJiacn, clientId, canonicalId);
+    }
+
+    @Override
+    public List<ChatMessageEntity> findOwnedByConversationIdWithLimit(
+            String tenantId, String ownerJiacn, String clientId, String conversationId, int limit) {
+        requireScope(tenantId, clientId); requireIdentity(ownerJiacn, "ownerJiacn");
+        requireLimit(limit);
+        Long numericId = parseConversationId(conversationId);
+        String canonicalId = Long.toString(numericId);
+        observeContamination(tenantId, ownerJiacn, clientId, canonicalId, numericId);
+        List<ChatMessageEntity> result = requireOwnedRows(
+                baseMapper.findExactOwnedConversationMessagesWithLimit(
+                        tenantId, ownerJiacn, clientId, canonicalId, numericId, limit),
+                tenantId, ownerJiacn, clientId, canonicalId);
+        Collections.reverse(result);
+        return result;
+    }
+
+    @Override
+    public List<Long> findOwnedMessageIdsWithLimit(
+            String tenantId, String ownerJiacn, String clientId, String conversationId, int limit) {
+        requireScope(tenantId, clientId); requireIdentity(ownerJiacn, "ownerJiacn");
+        requireLimit(limit);
+        Long numericId = parseConversationId(conversationId);
+        // The shared exact-scope SQL owns isolation; no body read or row-by-row reauthorization.
+        return baseMapper.findExactOwnedConversationMessageIdsWithLimit(
+                tenantId, ownerJiacn, clientId, Long.toString(numericId), numericId, limit);
+    }
+
+    @Override
+    public int deleteExactOwnedConversationMessages(
+            String tenantId, String ownerJiacn, String clientId, String conversationId) {
+        requireScope(tenantId, clientId); requireIdentity(ownerJiacn, "ownerJiacn");
+        Long numericId = parseConversationId(conversationId);
+        String canonicalId = Long.toString(numericId);
+        return baseMapper.deleteExactOwnedConversationMessages(
+                tenantId, ownerJiacn, clientId, canonicalId, numericId);
+    }
+
+    @Override
+    public List<ChatMessageEntity> findByConversationIdForMaintenance(String conversationId) {
+        requireIdentity(conversationId, "conversationId");
+        LambdaQueryWrapper<ChatMessageEntity> wrapper = maintenanceQuery();
+        wrapper.eq(ChatMessageEntity::getConversationId, conversationId)
+                .orderByAsc(ChatMessageEntity::getCreateTime);
+        return baseMapper.selectList(wrapper);
+    }
+
+    @Override
+    public List<String> findPendingConversationIds(String syncStatus, int limit, long afterId) {
+        requireLimit(limit);
+        if (afterId < 0 || !"PENDING".equals(syncStatus)) {
+            throw new IllegalArgumentException("Invalid memory scan cursor/status");
+        }
+        return baseMapper.findPendingMemoryConversations(processScope.businessTenantId(), processScope.clientId(), syncStatus, limit, afterId);
+    }
+
+    @Override
+    public int markMemorySnapshotSynced(String tenantId, String ownerJiacn, String clientId,
+            String conversationId, List<Long> messageIds) {
+        requireScope(tenantId, clientId); requireIdentity(ownerJiacn, "ownerJiacn");
+        long id = parseConversationId(conversationId);
+        if (messageIds == null || messageIds.isEmpty()
+                || messageIds.stream().anyMatch(value -> value == null || value <= 0)) {
+            throw new IllegalArgumentException("A non-empty persisted message snapshot is required");
+        }
+        return baseMapper.markMemorySnapshotSynced(tenantId, ownerJiacn, clientId, conversationId, id, messageIds);
+    }
+
+    @Override
+    public void updateSyncStatusByConversationId(String conversationId, String syncStatus) {
+        LambdaQueryWrapper<ChatMessageEntity> wrapper = maintenanceQuery();
+        wrapper.eq(ChatMessageEntity::getConversationId, conversationId);
+        List<ChatMessageEntity> list = baseMapper.selectList(wrapper);
+        if (list != null && !list.isEmpty()) {
+            list.forEach(entity -> entity.setSyncStatus(syncStatus));
+            updateBatchById(list);
+        }
+    }
+
+    @Override
+    public List<Long> findExpiredMessageIds(long beforeTime, int limit) {
+        LambdaQueryWrapper<ChatMessageEntity> wrapper = maintenanceQuery();
+        wrapper.lt(ChatMessageEntity::getCreateTime, beforeTime)
+                .select(ChatMessageEntity::getId)
+                .orderByAsc(ChatMessageEntity::getId)
+                .last("LIMIT " + limit);
+        List<ChatMessageEntity> list = baseMapper.selectList(wrapper);
+        return list == null || list.isEmpty()
+                ? Collections.emptyList()
+                : list.stream().map(ChatMessageEntity::getId).toList();
+    }
+
+    @Override
+    public List<cn.jia.chat.memory.MemoryOwner> findActiveMemoryOwners(long sinceTime) {
+        return baseMapper.findActiveMemoryOwners(processScope.businessTenantId(), processScope.clientId(), sinceTime);
+    }
+
+    /**
+     * A historical row outside this conversation owner's scope must never make the
+     * authenticated owner's exact-scoped history unreadable. The subsequent select is
+     * still byte-exact on owner, client, tenant, and conversation ID, so this observation
+     * does not relax isolation or expose the conflicting row.
+     */
+    private void observeContamination(
+            String tenantId, String ownerJiacn, String clientId, String conversationId, Long numericId) {
+        try {
+            int contaminated = baseMapper.countContaminatedOwnedConversationMessages(
+                    tenantId, ownerJiacn, clientId, conversationId, numericId);
+            if (contaminated > 0) {
+                log.warn("Ignoring out-of-scope historical message rows while returning exact-scoped conversation messages. conversationId={}, rows={}",
+                        conversationId, contaminated);
+            }
+        } catch (RuntimeException exception) {
+            // Diagnostics must not become a second availability gate. The actual message
+            // query below remains the authority and retains its exact owner scope.
+            log.warn("Unable to inspect historical message scope anomaly; continuing with exact-scoped message query. conversationId={}",
+                    conversationId, exception);
+        }
+    }
+
+    private List<ChatMessageEntity> requireOwnedRows(
+            List<ChatMessageEntity> result,
+            String tenantId,
+            String ownerJiacn,
+            String clientId,
+            String conversationId) {
+        if (result == null) {
+            throw new IllegalStateException("Owned conversation message query returned null");
+        }
+        for (ChatMessageEntity message : result) {
+            if (message == null
+                    || !ownerJiacn.equals(message.getJiacn())
+                    || !clientId.equals(message.getClientId())
+                    || !conversationId.equals(message.getConversationId())
+                    || !tenantId.equals(message.getTenantId())) {
+                throw new IllegalStateException(
+                        "Conversation message identity does not match its owner scope");
+            }
+        }
+        return result;
+    }
+
+    private Long parseConversationId(String conversationId) {
+        requireIdentity(conversationId, "conversationId");
+        try {
+            long id = Long.parseLong(conversationId);
+            if (id <= 0 || !Long.toString(id).equals(conversationId)) {
+                throw new IllegalArgumentException("conversationId is invalid");
+            }
+            return id;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("conversationId is invalid");
+        }
+    }
+
+    private void requireScope(String tenantId, String clientId) {
+        requireIdentity(tenantId, "tenantId");
+        requireIdentity(clientId, "clientId");
+    }
+
+    private void requireIdentity(String value, String field) {
+        if (StringUtil.isBlank(value) || !value.equals(value.strip())
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException(field + " is invalid");
+        }
+    }
+
+    private void requireLimit(int limit) {
+        if (limit < 1 || limit > 500) {
+            throw new IllegalArgumentException("limit must be between 1 and 500");
+        }
+    }
+}

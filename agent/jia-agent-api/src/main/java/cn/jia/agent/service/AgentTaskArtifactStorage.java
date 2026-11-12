@@ -1,0 +1,47 @@
+package cn.jia.agent.service;
+
+/**
+ * Private content-addressed storage used by task artifacts. Implementations must derive every
+ * object location from the exact tenant/client/task scope and must never accept a filesystem path
+ * or an outbound URL from an artifact producer.
+ */
+public interface AgentTaskArtifactStorage {
+    StoredObject store(Scope scope, byte[] content, String mimeType);
+
+    /** Stream an exact-length upload without buffering the file. Caller owns the input stream. */
+    StoredObject storeStream(Scope scope, java.io.InputStream content, long byteLength, String mimeType);
+
+    /** Verify before returning; the caller must close the returned file descriptor. */
+    java.io.InputStream openStream(Scope scope, String storageUri, String expectedSha256,
+            long expectedByteLength, String expectedMimeType);
+
+    /** Verify scope, length and digest before copying any bytes. Caller owns the output stream. */
+    void copyTo(Scope scope, String storageUri, String expectedSha256,
+            long expectedByteLength, String expectedMimeType, java.io.OutputStream output);
+
+
+    StoredContent read(Scope scope, String storageUri, String expectedSha256,
+            long expectedByteLength, String expectedMimeType);
+
+    boolean owns(String storageUri);
+
+    boolean matches(Scope scope, String storageUri, String expectedSha256);
+
+    record Scope(String tenantId, String clientId, String ownerJiacn, String taskId) {
+    }
+
+    record StoredObject(String storageUri, String sha256, long byteLength,
+            String mimeType, boolean newlyCreated) {
+    }
+
+    record StoredContent(byte[] content, String sha256, long byteLength, String mimeType) {
+        public StoredContent {
+            content = content == null ? null : content.clone();
+        }
+
+        @Override
+        public byte[] content() {
+            return content == null ? null : content.clone();
+        }
+    }
+}

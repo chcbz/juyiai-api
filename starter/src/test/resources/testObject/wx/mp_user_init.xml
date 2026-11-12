@@ -1,0 +1,7 @@
+<dataset>
+    <wx_mp_user ID="2" CLIENT_ID="fixture-client_id-1" APPID="fixture-appid-8" SUBSCRIBE="1"
+                OPEN_ID="fixture-jiacn-2" JIACN="fixture-jiacn-2" SEX="1" NICKNAME="陈惠超"
+                HEAD_IMG_URL="https://example.com/fixture-9.png"
+                CITY="东莞" COUNTRY="中国" PROVINCE="广东" SUBSCRIBE_ITEMS="vote" STATUS="1" CREATE_TIME="1595131250"
+                UPDATE_TIME="20200723010937"/>
+</dataset>

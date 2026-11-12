@@ -1,0 +1,11 @@
+{
+  "jiacn": "fixture-jiacn-2",
+  "type": 3,
+  "period": 2,
+  "crond": "0 0 8 10 * ?",
+  "name": "住房公积金",
+  "description": "",
+  "lunar": 0,
+  "amount": 123,
+  "remind": 1
+}

@@ -1,0 +1,21 @@
+{
+  "clientId": "fixture-client_id-1",
+  "token": "fixture-token-10",
+  "accessToken": "",
+  "encodingaeskey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "level": "2",
+  "name": "饭粒保",
+  "account": "fixture-token-10",
+  "original": "fixture-original-11",
+  "signature": "",
+  "country": "",
+  "province": "",
+  "city": "",
+  "username": "fixture@example.com",
+  "password": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "appid": "fixture-appid-8",
+  "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "styleid": "1",
+  "subscribeurl": "",
+  "authRefreshToken": ""
+}

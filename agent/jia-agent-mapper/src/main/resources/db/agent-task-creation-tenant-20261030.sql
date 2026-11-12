@@ -1,0 +1,3 @@
+-- CHECK-only historical migration retired on 2026-11-02.
+-- Rules are documented in docs/interface-catalog/database-check-rules-20261102.md.
+-- Existing databases use explicit, catalog-pinned CHECK removal; no startup DDL.

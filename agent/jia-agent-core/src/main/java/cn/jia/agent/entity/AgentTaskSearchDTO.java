@@ -1,0 +1,22 @@
+package cn.jia.agent.entity;
+
+import lombok.Data;
+
+import java.io.Serial;
+import java.io.Serializable;
+
+@Data
+public class AgentTaskSearchDTO implements Serializable {
+    private String phase;
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    private String status;
+    private String ability;
+    /** Exact actual assignee ID; optional and independent of ability. */
+    private String assignedAgentId;
+    private String keyword;
+    private Integer pageNum = 1;
+    private Integer pageSize = 20;
+}

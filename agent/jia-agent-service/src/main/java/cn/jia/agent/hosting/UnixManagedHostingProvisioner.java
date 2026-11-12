@@ -1,0 +1,485 @@
+package cn.jia.agent.hosting;
+
+import cn.jia.agent.config.AgentHostingRentProperties;
+import cn.jia.agent.config.ManagedHostingAdapterProperties;
+import cn.jia.agent.security.AgentRuntimeAuthenticationService;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.json.JsonMapper;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
+
+/** Runtime hosting v1 only. No retired broker, credentials, arbitrary paths or public callback. */
+@Component
+public final class UnixManagedHostingProvisioner implements ManagedHostingProvisioner {
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(UnixManagedHostingProvisioner.class);
+    static final String PROTOCOL = "runtime-hosting-v1";
+    private static final long MAX_SAFE_INTEGER = 9_007_199_254_740_991L;
+    private static final int MAX_FRAME = 16384;
+    private static final JsonMapper JSON = JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
+    private final AgentHostingRentProperties rent;
+    private final ManagedHostingAdapterProperties config;
+    private final ManagedHostingCredentials credentials;
+    private final HostingControlChannel channel;
+    private final AgentRuntimeAuthenticationService sessions;
+    public UnixManagedHostingProvisioner(AgentHostingRentProperties rent, ManagedHostingAdapterProperties config,
+            ManagedHostingCredentials credentials, AgentRuntimeAuthenticationService sessions, HostingControlChannel channel) {
+        this.rent = rent; this.config = config; this.credentials = credentials; this.sessions = sessions; this.channel = channel;
+    }
+    @Override public boolean available() { return rent.configured() && channel.available() && credentials.available(); }
+    @Override public boolean availableFor(String tenantId, String clientId, String ownerJiacn) {
+        return available() && channel.availableFor(tenantId, clientId, ownerJiacn);
+    }
+    @Override public boolean probeCapabilities(String tenantId, String clientId, String ownerJiacn) {
+        return probeCapabilities(tenantId, clientId, ownerJiacn, null);
+    }
+    @Override public boolean probeCapabilities(String tenantId, String clientId, String ownerJiacn, String existingAgentId) {
+        outsideTransaction();
+        if (!availableFor(tenantId, clientId, ownerJiacn)) return false;
+        String requestId = java.util.UUID.randomUUID().toString();
+        try {
+            var request = new LinkedHashMap<String, Object>();
+            request.put("protocol", PROTOCOL); request.put("method", "capabilities");
+            request.put("tenantId", tenantId); request.put("clientId", clientId); request.put("ownerJiacn", ownerJiacn);
+            String preferredHost = null;
+            if (existingAgentId != null) {
+                var routeRequest = new LinkedHashMap<String, Object>(request);
+                routeRequest.put("canonicalAgentId", existingAgentId);
+                preferredHost = channel.target(routeRequest, null).hostId();
+            }
+            var response = exchange(request, requestId, preferredHost);
+            return response != null && response.keySet().equals(Set.of("protocol", "method", "tenantId", "clientId", "ownerJiacn", "available", "hostId"))
+                    && echoes(request, response) && response.get("available") instanceof Boolean canCreate
+                    && (existingAgentId != null || canCreate) && exact(response.get("hostId"), 100);
+        } catch (Exception unavailable) {
+            LOG.warn("Managed capability unavailable requestId={} stage=capabilities errorCode=HOSTING_EXCHANGE_UNAVAILABLE causeClass={}", requestId, unavailable.getClass().getSimpleName());
+            return false;
+        }
+    }
+    @Override public String deploymentMode(String tenantId, String clientId, String ownerJiacn, String hostId) {
+        if (!availableFor(tenantId, clientId, ownerJiacn)) return null;
+        try { return channel.deploymentMode(tenantId, clientId, ownerJiacn, hostId); }
+        catch (IOException unavailable) { return null; }
+    }
+    @Override public SkillInventory inventory(String tenantId, String clientId, String ownerJiacn, String agentId) {
+        outsideTransaction();
+        if (!availableFor(tenantId, clientId, ownerJiacn)) return null;
+        var request = new LinkedHashMap<String, Object>();
+        request.put("protocol", PROTOCOL); request.put("method", "inventory");
+        request.put("tenantId", tenantId); request.put("clientId", clientId);
+        request.put("ownerJiacn", ownerJiacn); request.put("canonicalAgentId", agentId);
+        try { return decodeInventory(request, exchange(request)); }
+        catch (Exception uncertain) { return null; }
+    }
+    static SkillInventory decodeInventory(Map<String, Object> request, Map<String, Object> response) {
+        if (response == null || !echoes(request, response) || !"1".equals(response.get("inventoryVersion"))
+                || !exact(response.get("hostId"), 100) || !digest(response.get("inventorySha256"))
+                || !(response.get("skills") instanceof java.util.List<?> rows)
+                || !String.valueOf(rows.size()).equals(response.get("installedSkillCount"))) return null;
+        var skills = new java.util.ArrayList<InstalledSkill>();
+        var canonical = new java.util.ArrayList<Map<String, Object>>();
+        String previous = null;
+        for (Object value : rows) {
+            if (!(value instanceof Map<?, ?> row) || !(row.get("skillKey") instanceof String key)
+                    || !exact(key, 100) || previous != null && previous.compareTo(key) >= 0
+                    || !("MANAGED".equals(row.get("source")) || "NATIVE".equals(row.get("source"))) || !digest(row.get("revision")) || !(row.get("enabled") instanceof Boolean enabled)) return null;
+            previous = key;
+            ManagedSkillReference installation = null;
+            if ("MANAGED".equals(row.get("source"))) {
+                if (!(row.get("installation") instanceof Map<?, ?> ref)
+                        || !exact(ref.get("skillInstallationId"), 100) || !exact(ref.get("productVersionId"), 100)
+                        || !exact(ref.get("skillVersion"), 100) || !digest(ref.get("packageSha256"))
+                        || !("INSTRUCTION".equals(ref.get("kind")) ? ref.get("manifestSha256") == null
+                            : "EXECUTABLE".equals(ref.get("kind")) && digest(ref.get("manifestSha256")))) return null;
+                installation = new ManagedSkillReference((String) ref.get("skillInstallationId"), (String) ref.get("productVersionId"),
+                        (String) ref.get("skillVersion"), (String) ref.get("kind"), (String) ref.get("packageSha256"), (String) ref.get("manifestSha256"));
+            } else if (row.get("installation") != null) return null;
+            var skill = new InstalledSkill(key, (String) row.get("source"), (String) row.get("revision"), enabled, installation);
+            skills.add(skill);
+            // Field order is the shared inventory-v1 digest contract, not Map iteration order.
+            var item = new LinkedHashMap<String, Object>();
+            item.put("skillKey", key); item.put("source", skill.source()); item.put("revision", skill.revision());
+            item.put("enabled", skill.enabled());
+            Map<String, Object> reference = null;
+            if (installation != null) {
+                reference = new LinkedHashMap<>(); reference.put("skillInstallationId", installation.skillInstallationId());
+                reference.put("productVersionId", installation.productVersionId()); reference.put("skillVersion", installation.skillVersion());
+                reference.put("kind", installation.kind()); reference.put("packageSha256", installation.packageSha256());
+                reference.put("manifestSha256", installation.manifestSha256());
+            }
+            item.put("installation", reference);
+            canonical.add(item);
+        }
+        try {
+            String actual = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(JSON.writeValueAsBytes(canonical)));
+            if (!actual.equals(response.get("inventorySha256"))) return null;
+            return new SkillInventory((String) response.get("hostId"), (String) response.get("inventorySha256"), skills, JSON.writeValueAsString(canonical));
+        } catch (Exception invalid) { return null; }
+    }
+    @Override public Observation prepareAndObserve(Preparation p) {
+        outsideTransaction();
+        if (!validPreparation(p) || !availableFor(p.tenantId(), p.clientId(), p.ownerJiacn())) return unknown(p);
+        try {
+            if (p.operationId().equals(p.intentId()) && !validQuotedInventory(p.quotedInventory())) return unknown(p);
+            var prepared = exchange(request(p, "prepare", null));
+            var rejected = decodeRejected(p, prepared);
+            if (rejected.outcome() == Outcome.FAILED_NO_EFFECT) return rejected;
+            Candidate candidate = decodePrepared(p, prepared);
+            if (candidate == null) return unknown(p);
+            credentials.ensureInstallation(p, candidate); // DB-only atomic authorization/linkage, committed before ensure.
+            var observed = exchange(request(p, "observe", candidate), java.util.UUID.randomUUID().toString(), candidate.hostId());
+            Observation proof = trustedObservation(p, candidate, "observe", observed);
+            if (proof.outcome() == Outcome.SERVICE_READY || recoveryRequired(observed)) return proof;
+            return trustedObservation(p, candidate, "ensure", exchange(request(p, "ensure", candidate), java.util.UUID.randomUUID().toString(), candidate.hostId()));
+        } catch (Exception uncertain) {
+            // Lost prepare/enroll/ensure response remains UNKNOWN. No new key/order/refund/reenrollment.
+            return unknown(p);
+        }
+    }
+    @Override public boolean adoptExisting(Preparation initial, Candidate existing) {
+        outsideTransaction();
+        if (!validPreparation(initial) || !initial.intentId().equals(initial.operationId())
+                || initial.quotedInventory() != null || existing == null || !installation(existing.installationId())
+                || !digest(existing.manifestSha256()) || existing.provisionGeneration() != 1
+                || !exact(existing.hostId(), 100) || existing.enrollmentSecretSha256() != null || existing.enrollmentExpiresAt() != 0
+                || !availableFor(initial.tenantId(), initial.clientId(), initial.ownerJiacn())) return false;
+        try {
+            var request = request(initial, "adopt", existing);
+            return decodeHandover(request, existing, exchange(request, java.util.UUID.randomUUID().toString(), existing.hostId()), "ADOPTED");
+        } catch (Exception uncertain) { return false; }
+    }
+    @Override public CurrentOperation currentOperation(Preparation initial) {
+        outsideTransaction();
+        if (!validPreparation(initial) || !initial.intentId().equals(initial.operationId())
+                || !availableFor(initial.tenantId(), initial.clientId(), initial.ownerJiacn())) return null;
+        try { return decodeCurrent(initial, exchange(request(initial, "current", null))); }
+        catch (Exception uncertain) { return null; }
+    }
+    static CurrentOperation decodeCurrent(Preparation initial, Map<String, Object> response) {
+        if (!validPreparation(initial) || !initial.intentId().equals(initial.operationId()) || response == null) return null;
+        var expected = request(initial, "current", null);
+        var allowed = new java.util.HashSet<>(expected.keySet());
+        allowed.addAll(Set.of("outcome", "installationId", "manifestSha256", "provisionGeneration", "hostId"));
+        if (!response.keySet().equals(allowed) || !"CURRENT".equals(response.get("outcome"))
+                || !installation(response.get("installationId")) || !digest(response.get("manifestSha256"))
+                || integral(response.get("provisionGeneration")) <= 0 || !exact(response.get("hostId"), 100)) return null;
+        for (String field : Set.of("protocol", "method", "tenantId", "clientId", "ownerJiacn", "canonicalAgentId",
+                "bindingId", "leaseId", "initialIntentId", "reservedAt"))
+            if (!Objects.equals(expected.get(field), response.get(field))) return null;
+        if (!(response.get("operationId") instanceof String operationId)) return null;
+        Long validUntil = response.get("validUntil") == null ? null : integral(response.get("validUntil"));
+        var active = new Preparation(initial.tenantId(), initial.clientId(), initial.ownerJiacn(), initial.agentId(),
+                initial.intentId(), initial.leaseId(), initial.bindingId(), initial.reservedAt(), operationId,
+                integral(response.get("requestedAt")), validUntil);
+        if (!validPreparation(active) || !echoes(association(active), response)) return null;
+        long generation = integral(response.get("provisionGeneration"));
+        if (active.operationId().equals(active.intentId()) ? generation != 1 : generation <= 1) return null;
+        // Enrollment fields are deliberately absent: lookup must never authorize/reenroll an installation.
+        return new CurrentOperation(active, new Candidate((String) response.get("installationId"),
+                (String) response.get("manifestSha256"), null, 0, generation, (String) response.get("hostId")));
+    }
+    @Override public boolean quiesce(Preparation p, Candidate candidate, String handoverId) {
+        return handover(p, candidate, handoverId, "quiesce", "QUIESCED");
+    }
+    @Override public boolean flushEvidence(Preparation p, Candidate candidate, String handoverId) {
+        return handover(p, candidate, handoverId, "evidence", "EVIDENCE_ACCEPTED");
+    }
+    @Override public boolean cleanup(Preparation p, Candidate candidate, String handoverId) {
+        return handover(p, candidate, handoverId, "cleanup", "CLEANED");
+    }
+    private boolean handover(Preparation p, Candidate candidate, String handoverId, String method, String outcome) {
+        outsideTransaction();
+        if (!validPreparation(p) || candidate == null || !exact(handoverId, 100)
+                || !availableFor(p.tenantId(), p.clientId(), p.ownerJiacn())) return false;
+        try {
+            var request = handoverRequest(p, candidate, handoverId, method);
+            return decodeHandover(request, candidate, exchange(request, java.util.UUID.randomUUID().toString(), candidate.hostId()), outcome);
+        } catch (Exception uncertain) {
+            // Same relationship/operation retry only. A missing receipt never advances cleanup.
+            return false;
+        }
+    }
+    static Map<String, Object> quiesceRequest(Preparation p, Candidate candidate, String handoverId) {
+        return handoverRequest(p, candidate, handoverId, "quiesce");
+    }
+    static Map<String, Object> handoverRequest(Preparation p, Candidate candidate, String handoverId, String method) {
+        if (!exact(handoverId, 100) || !Set.of("quiesce", "evidence", "cleanup").contains(method)) throw new IllegalArgumentException("Invalid handover request");
+        var request = request(p, method, candidate);
+        request.put("handoverId", handoverId);
+        return request;
+    }
+    static boolean decodeQuiesced(Map<String, Object> request, Candidate candidate, Map<String, Object> response) {
+        return decodeHandover(request, candidate, response, "QUIESCED");
+    }
+    static boolean decodeHandover(Map<String, Object> request, Candidate candidate, Map<String, Object> response, String outcome) {
+        if (response == null) return false;
+        var allowed = new java.util.HashSet<>(request.keySet());
+        allowed.addAll(Set.of("outcome", "hostId"));
+        return response.keySet().equals(allowed) && echoes(request, response)
+                && candidate.hostId().equals(response.get("hostId")) && outcome.equals(response.get("outcome"));
+    }
+    private static boolean recoveryRequired(Map<String, Object> response) {
+        return response != null && "RECOVERY_REQUIRED".equals(response.get("outcome"));
+    }
+    private Observation trustedObservation(Preparation p, Candidate candidate, String method, Map<String, Object> response) {
+        Observation observation = decode(p, candidate, method, response);
+        if (observation.outcome() != Outcome.SERVICE_READY) return observation;
+        var proof = sessions.currentRegisteredProof(p.tenantId(), p.clientId(), p.agentId());
+        if (proof == null || proof.scope() == null || !p.tenantId().equals(proof.scope().tenantId())
+                || !p.clientId().equals(proof.scope().clientId()) || !p.agentId().equals(proof.scope().agentId())
+                || !p.ownerJiacn().equals(proof.scope().ownerJiacn()) || !candidate.installationId().equals(proof.installationId())
+                || !candidate.hostId().equals(proof.hostId()) || !Objects.equals(response.get("runtimeInstanceId"), proof.scope().runtimeInstanceId())
+                || integral(response.get("sessionGeneration")) != proof.sessionGeneration()) return unknown(p);
+        return observation;
+    }
+    static Map<String, Object> request(Preparation p, String method, Candidate candidate) {
+        if (!validPreparation(p) || !Set.of("adopt", "prepare", "ensure", "observe", "current", "quiesce", "evidence", "cleanup").contains(method)
+                || !Set.of("prepare", "current").contains(method) && candidate == null) throw new IllegalArgumentException("Invalid hosting control request");
+        Map<String, Object> request = association(p);
+        request.put("protocol", PROTOCOL); request.put("method", method);
+        if ("prepare".equals(method) && p.operationId().equals(p.intentId()) && p.quotedInventory() != null) {
+            if (!validQuotedInventory(p.quotedInventory())) throw new IllegalArgumentException("Invalid quoted inventory");
+            request.put("quotedInventory", Map.of("hostId", p.quotedInventory().hostId(), "inventorySha256", p.quotedInventory().inventorySha256()));
+        }
+        if (!Set.of("prepare", "current").contains(method)) {
+            request.put("installationId", candidate.installationId()); request.put("manifestSha256", candidate.manifestSha256());
+            request.put("provisionGeneration", candidate.provisionGeneration());
+        }
+        return request;
+    }
+    private static Map<String, Object> association(Preparation p) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("tenantId", p.tenantId()); fields.put("clientId", p.clientId()); fields.put("ownerJiacn", p.ownerJiacn());
+        fields.put("canonicalAgentId", p.agentId()); fields.put("initialIntentId", p.intentId()); fields.put("leaseId", p.leaseId());
+        fields.put("bindingId", p.bindingId()); fields.put("reservedAt", p.reservedAt()); fields.put("operationId", p.operationId());
+        fields.put("operationKind", p.operationId().equals(p.intentId()) ? "INITIAL" : "REPROVISION");
+        fields.put("requestedAt", p.requestedAt()); fields.put("validUntil", p.validUntil());
+        return fields;
+    }
+    private static boolean validQuotedInventory(QuotedInventory inventory) {
+        return inventory != null && exact(inventory.hostId(), 100) && digest(inventory.inventorySha256());
+    }
+    /** Only a durable, exact prepare rejection is proof of no candidate/enrollment effect. */
+    static Observation decodeRejected(Preparation p, Map<String, Object> response) {
+        if (!validPreparation(p) || !p.operationId().equals(p.intentId()) || !validQuotedInventory(p.quotedInventory()) || response == null)
+            return unknown(p);
+        var expected = request(p, "prepare", null);
+        var allowed = new java.util.HashSet<>(expected.keySet());
+        allowed.addAll(Set.of("outcome", "reasonCode", "evidenceRef", "hostId"));
+        if (!response.keySet().equals(allowed) || !echoes(expected, response)
+                || !p.quotedInventory().hostId().equals(response.get("hostId"))
+                || !"FAILED_NO_EFFECT".equals(response.get("outcome")) || !"HOSTING_INVENTORY_CHANGED".equals(response.get("reasonCode"))
+                || !digest(response.get("evidenceRef"))) return unknown(p);
+        return new Observation(p, Outcome.FAILED_NO_EFFECT, (String) response.get("evidenceRef"));
+    }
+    static Candidate decodePrepared(Preparation p, Map<String, Object> response) {
+        if (!validPreparation(p) || response == null) return null;
+        var expected = request(p, "prepare", null);
+        var allowed = new java.util.HashSet<>(expected.keySet());
+        allowed.addAll(Set.of("outcome", "installationId", "manifest", "manifestSha256", "enrollmentSecretSha256",
+                "enrollmentExpiresAt", "provisionGeneration", "hostId"));
+        boolean existingWithoutEnrollment = !p.operationId().equals(p.intentId())
+                && response.get("enrollmentSecretSha256") == null && response.get("enrollmentExpiresAt") == null;
+        if (!response.keySet().equals(allowed) || !echoes(expected, response) || !"PREPARED".equals(response.get("outcome"))
+                || !installation(response.get("installationId")) || !digest(response.get("manifestSha256"))
+                || !existingWithoutEnrollment && (!digest(response.get("enrollmentSecretSha256")) || integral(response.get("enrollmentExpiresAt")) <= 0)
+                || integral(response.get("provisionGeneration")) <= 0 || !exact(response.get("hostId"), 100)) return null;
+        if (p.operationId().equals(p.intentId()) && (integral(response.get("provisionGeneration")) != 1
+                || !validQuotedInventory(p.quotedInventory()) || !p.quotedInventory().hostId().equals(response.get("hostId")))) return null;
+        if (!(response.get("manifest") instanceof Map<?, ?> manifest)
+                || !manifest.keySet().equals(Set.of("runtimeProtocolVersion", "manifestVersion", "installationId",
+                        "tenantId", "clientId", "canonicalAgentId", "manifestSha256"))
+                || !"v1".equals(manifest.get("runtimeProtocolVersion")) || !"1".equals(manifest.get("manifestVersion"))
+                || !response.get("installationId").equals(manifest.get("installationId"))
+                || !p.tenantId().equals(manifest.get("tenantId")) || !p.clientId().equals(manifest.get("clientId"))
+                || !p.agentId().equals(manifest.get("canonicalAgentId"))
+                || !("sha256:" + response.get("manifestSha256")).equals(manifest.get("manifestSha256"))) return null;
+        try {
+            Map<String, Object> unsigned = new TreeMap<>();
+            manifest.forEach((key, value) -> { if (!"manifestSha256".equals(key)) unsigned.put((String) key, value); });
+            String computed = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(JSON.writeValueAsString(unsigned).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            if (!computed.equals(response.get("manifestSha256"))) return null;
+        } catch (Exception invalidManifest) { return null; }
+        return new Candidate((String) response.get("installationId"), (String) response.get("manifestSha256"),
+                (String) response.get("enrollmentSecretSha256"), existingWithoutEnrollment ? 0 : integral(response.get("enrollmentExpiresAt")),
+                integral(response.get("provisionGeneration")), (String) response.get("hostId"));
+    }
+    static Observation decode(Preparation p, Candidate candidate, String method, Map<String, Object> response) {
+        if (candidate == null || response == null || !validPreparation(p)) return unknown(p);
+        var expected = request(p, method, candidate);
+        var allowed = new java.util.HashSet<>(expected.keySet());
+        allowed.addAll(Set.of("outcome", "hostId", "runtimeInstanceId", "sessionGeneration", "serviceReadyAt", "registeredAt",
+                "executorReady", "durableReady", "evidenceRef"));
+        if (!response.keySet().equals(allowed) || !echoes(expected, response) || !candidate.hostId().equals(response.get("hostId"))
+                || !"SERVICE_READY".equals(response.get("outcome")) || !exact(response.get("runtimeInstanceId"), 100)
+                || p.agentId().equals(response.get("runtimeInstanceId")) || integral(response.get("sessionGeneration")) <= 0
+                || !Boolean.TRUE.equals(response.get("executorReady")) || !Boolean.TRUE.equals(response.get("durableReady"))
+                || !exact(response.get("evidenceRef"), 100)) return unknown(p);
+        long readyAt = integral(response.get("serviceReadyAt")), registeredAt = integral(response.get("registeredAt"));
+        if (registeredAt < p.requestedAt() || readyAt < registeredAt || readyAt > System.currentTimeMillis()
+                || p.validUntil() != null && readyAt >= p.validUntil()) return unknown(p);
+        return new Observation(p, Outcome.SERVICE_READY, (String) response.get("evidenceRef"), readyAt);
+    }
+    private static boolean echoes(Map<String, Object> expected, Map<String, Object> response) {
+        return expected.entrySet().stream().allMatch(e -> response.containsKey(e.getKey())
+                && (e.getValue() instanceof Number n ? integral(response.get(e.getKey())) == n.longValue()
+                    : Objects.equals(e.getValue(), response.get(e.getKey()))));
+    }
+    private static boolean validPreparation(Preparation p) {
+        return p != null && exact(p.tenantId(), 50) && exact(p.clientId(), 50) && exact(p.ownerJiacn(), 50)
+                && !"*".equals(p.ownerJiacn()) && exact(p.agentId(), 100) && exact(p.intentId(), 100) && exact(p.leaseId(), 100)
+                && p.bindingId() != null && p.bindingId().matches("[1-9][0-9]{0,18}") && exact(p.operationId(), 100)
+                && integral(p.reservedAt()) > 0 && integral(p.requestedAt()) >= p.reservedAt()
+                && (p.operationId().equals(p.intentId()) ? p.validUntil() == null && p.requestedAt() == p.reservedAt()
+                    : p.validUntil() != null && integral(p.validUntil()) > p.requestedAt());
+    }
+    private static long integral(Object value) {
+        if (!(value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long)) return -1;
+        long number = ((Number) value).longValue();
+        return number >= 0 && number <= MAX_SAFE_INTEGER ? number : -1;
+    }
+    private static boolean exact(Object value, int max) {
+        return value instanceof String s && !s.isBlank() && s.equals(s.strip()) && s.length() <= max
+                && s.chars().noneMatch(c -> Character.isISOControl(c) || Character.isSurrogate((char)c));
+    }
+    private static boolean digest(Object value) { return value instanceof String s && s.matches("[0-9a-f]{64}"); }
+    private static boolean installation(Object value) { return value instanceof String s && s.matches("rti_[0-9a-f]{32}"); }
+
+    Map<String, Object> exchange(Map<String, Object> request) throws IOException {
+        return exchange(request, java.util.UUID.randomUUID().toString());
+    }
+    Map<String, Object> exchange(Map<String, Object> request, String requestId) throws IOException {
+        return exchange(request, requestId, null);
+    }
+    Map<String, Object> exchange(Map<String, Object> request, String requestId, String preferredHost) throws IOException {
+        outsideTransaction();
+        var target = channel.target(request, preferredHost);
+        var message = cn.jia.core.entity.ProtocolMessage.event(requestId, "hosting." + request.get("method"),
+                java.util.UUID.randomUUID().toString(), hostingData(request));
+        byte[] frame = (JSON.writeValueAsString(message) + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (frame.length > MAX_FRAME) throw new IOException("Managed frame too large");
+        int timeoutMs = ("inventory".equals(request.get("method")) || "prepare".equals(request.get("method")) && request.containsKey("quotedInventory"))
+                ? config.inventoryTimeoutMs() : config.timeoutMs();
+        if (target.remote() != null) {
+            var response = hostingResponse(message, JSON.readValue(channel.exchange(target, frame, timeoutMs), new TypeReference<Map<String, Object>>() { }));
+            if (!target.hostId().equals(response.get("hostId"))) throw new IOException("HOSTING_HOST_MISMATCH");
+            return response;
+        }
+        Path socket = Path.of(config.socketPath());
+        validateSocket(socket, config.runnerUid(), config.socketGroupGid());
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        try (SocketChannel channel = SocketChannel.open(StandardProtocolFamily.UNIX); Selector selector = Selector.open()) {
+            channel.configureBlocking(false);
+            if (!channel.connect(UnixDomainSocketAddress.of(socket))) {
+                while (!channel.finishConnect()) await(channel, selector, SelectionKey.OP_CONNECT, deadline);
+            }
+            ByteBuffer out = ByteBuffer.wrap(frame);
+            while (out.hasRemaining()) {
+                if (channel.write(out) == 0) await(channel, selector, SelectionKey.OP_WRITE, deadline);
+                checkDeadline(deadline);
+            }
+            ByteArrayOutputStream response = new ByteArrayOutputStream();
+            ByteBuffer buffer = ByteBuffer.allocate(2048);
+            while (true) {
+                int count = channel.read(buffer);
+                if (count < 0) throw new IOException("Incomplete managed response");
+                if (count == 0) { await(channel, selector, SelectionKey.OP_READ, deadline); continue; }
+                checkDeadline(deadline);
+                buffer.flip();
+                while (buffer.hasRemaining()) {
+                    byte value = buffer.get();
+                    if (value == '\n') {
+                        if (buffer.hasRemaining()) throw new IOException("Multiple managed frames");
+                        var decoded = hostingResponse(message, JSON.readValue(response.toByteArray(), new TypeReference<Map<String, Object>>() { }));
+                        if (!target.hostId().equals(decoded.get("hostId"))) throw new IOException("HOSTING_HOST_MISMATCH");
+                        return decoded;
+                    }
+                    if (response.size() >= MAX_FRAME) throw new IOException("Managed response too large");
+                    response.write(value);
+                }
+                buffer.clear();
+            }
+        }
+    }
+    static Map<String, Object> hostingData(Map<String, Object> internal) {
+        Map<String, Object> data = new LinkedHashMap<>(internal);
+        data.remove("protocol"); data.remove("method");
+        if (data.containsKey("validUntil")) data.put("validUntilAt", data.remove("validUntil"));
+        if (data.containsKey("installationId")) data.put("runtimeInstallationId", data.remove("installationId"));
+        if (data.containsKey("provisionGeneration")) data.put("provisionGeneration", String.valueOf(data.get("provisionGeneration")));
+        return data;
+    }
+    static Map<String, Object> hostingResponse(cn.jia.core.entity.ProtocolMessage<?> request,
+            Map<String, Object> response) throws IOException {
+        if (response == null || !response.keySet().equals(Set.of("protocolVersion", "requestId", "messageType", "messageId", "correlationId", "code", "msg", "data"))
+                || !(response.get("protocolVersion") instanceof Integer version) || version != 1
+                || !request.requestId().equals(response.get("requestId"))
+                || !(request.messageType() + ".result").equals(response.get("messageType"))
+                || !request.messageId().equals(response.get("correlationId"))
+                || !(response.get("messageId") instanceof String id) || id.isBlank() || id.codePoints().anyMatch(Character::isISOControl)
+                || !(response.get("msg") instanceof String) || !"E0".equals(response.get("code"))
+                || !(response.get("data") instanceof Map<?, ?> raw)) throw new IOException("HOSTING_REPLY_INVALID_OR_REJECTED");
+        Map<String, Object> data = new LinkedHashMap<>();
+        for (var entry : raw.entrySet()) {
+            if (!(entry.getKey() instanceof String key) || Set.of("protocol", "method", "installationId", "validUntil").contains(key))
+                throw new IOException("HOSTING_REPLY_FIELD_FORBIDDEN");
+            data.put(key, entry.getValue());
+        }
+        if (data.containsKey("validUntilAt")) data.put("validUntil", data.remove("validUntilAt"));
+        if (data.containsKey("runtimeInstallationId")) data.put("installationId", data.remove("runtimeInstallationId"));
+        for (String field : new String[]{"provisionGeneration", "sessionGeneration"}) {
+            if (!data.containsKey(field)) continue;
+            if (!(data.get(field) instanceof String value) || !value.matches("[1-9][0-9]*")) throw new IOException("HOSTING_VERSION_INVALID");
+            try { data.put(field, Long.parseLong(value)); } catch (NumberFormatException invalid) { throw new IOException("HOSTING_VERSION_INVALID"); }
+        }
+        data.put("protocol", PROTOCOL); data.put("method", request.messageType().substring("hosting.".length()));
+        return data;
+    }
+    static void validateSocket(Path socket, long runnerUid, long trustedGid) throws IOException {
+        Path parent = socket.getParent();
+        if (parent == null || !parent.equals(parent.toRealPath()) || Files.isSymbolicLink(socket)) throw new IOException("Unsafe managed socket path");
+        var root = Files.readAttributes(parent, "unix:mode,uid,gid", LinkOption.NOFOLLOW_LINKS);
+        var node = Files.readAttributes(socket, "unix:mode,uid,gid", LinkOption.NOFOLLOW_LINKS);
+        int mode = ((Number) node.get("mode")).intValue();
+        if (((Number) root.get("gid")).longValue() != trustedGid || ((Number) node.get("gid")).longValue() != trustedGid
+                || ((Number) root.get("uid")).longValue() != runnerUid || ((Number) node.get("uid")).longValue() != runnerUid
+                || (((Number) root.get("mode")).intValue() & 0027) != 0
+                || (mode & 0170000) != 0140000 || (mode & 0117) != 0) throw new IOException("Unsafe managed socket permissions");
+    }
+    private static void await(SocketChannel channel, Selector selector, int operation, long deadline) throws IOException {
+        checkDeadline(deadline);
+        channel.register(selector, operation);
+        selector.select(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        selector.selectedKeys().clear();
+        checkDeadline(deadline);
+    }
+    private static void checkDeadline(long deadline) throws IOException {
+        if (System.nanoTime() >= deadline) throw new java.net.SocketTimeoutException("Managed channel deadline");
+    }
+    private static void outsideTransaction() {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Managed I/O inside transaction");
+    }
+    private static Observation unknown(Preparation p) { return new Observation(p, Outcome.UNKNOWN, null); }
+}

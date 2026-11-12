@@ -1,0 +1,15 @@
+dependencies {
+    api project(':isp:jia-isp-api')
+    api project(':oauth:jia-oauth-api')
+    implementation project(':common:jia-common-service')
+    implementation project(':isp:jia-isp-mapper')
+    implementation(libs.spring.ldap)
+    implementation(libs.ganymed.ssh2)
+    implementation(libs.mvel)
+    testImplementation project(':common:jia-common-test')
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-isp-service'

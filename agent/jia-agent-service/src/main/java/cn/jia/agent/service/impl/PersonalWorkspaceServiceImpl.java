@@ -1,0 +1,372 @@
+package cn.jia.agent.service.impl;
+
+import cn.jia.agent.dao.PersonalWorkspaceDao;
+import cn.jia.agent.entity.PersonalWorkspaceFileEntity;
+import cn.jia.agent.entity.PersonalWorkspaceOperationEntity;
+import cn.jia.agent.entity.PersonalWorkspaceVersionEntity;
+import cn.jia.agent.entity.PersonalWorkspaceViews;
+import cn.jia.agent.exception.PersonalWorkspaceException;
+import cn.jia.agent.service.PersonalWorkspaceService;
+import cn.jia.agent.service.PersonalWorkspaceStorage;
+import jakarta.inject.Inject;
+import jakarta.inject.Named;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+
+/** Owner-scoped workspace API; browser-created files are marked with USER_UPLOAD provenance. */
+@Named
+public class PersonalWorkspaceServiceImpl implements PersonalWorkspaceService {
+    private static final Set<String> PREVIEW_MIME_TYPES = Set.of("image/png", "image/jpeg", "image/webp", "image/gif",
+            "image/bmp", "image/tiff", "image/heic", "image/heif", "image/avif",
+            "audio/mpeg", "audio/ogg", "audio/wav", "audio/mp4", "audio/webm",
+            "text/plain", "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    private static final int PAGE_SIZE = 50;
+    private final PersonalWorkspaceDao dao;
+    private final PersonalWorkspaceStorage storage;
+    private final PersonalWorkspaceWriteService writes;
+    private final PersonalWorkspacePreviewRenderer previewRenderer = new PersonalWorkspacePreviewRenderer();
+
+    private final cn.jia.agent.service.AgentTaskArtifactContentService artifactContents;
+
+    public PersonalWorkspaceServiceImpl(PersonalWorkspaceDao dao, PersonalWorkspaceStorage storage,
+            PersonalWorkspaceWriteService writes) { this(dao, storage, writes, null); }
+
+    @Inject public PersonalWorkspaceServiceImpl(PersonalWorkspaceDao dao, PersonalWorkspaceStorage storage,
+            PersonalWorkspaceWriteService writes, cn.jia.agent.service.AgentTaskArtifactContentService artifactContents) {
+        this.dao=dao; this.storage=storage; this.writes=writes; this.artifactContents=artifactContents;
+    }
+
+    @Override public PersonalWorkspaceViews.ListView list(Scope scope, ListQuery query) {
+        validateScope(scope); query= query == null ? new ListQuery(null,null,null,null) : query;
+        String q=blankToNull(query.q()); if(q!=null) text(q,100);
+        String family=blankToNull(query.mediaFamily()); if(family!=null && !Set.of("IMAGE","AUDIO","TEXT","DOCUMENT","SPREADSHEET","PRESENTATION","PDF").contains(family)) bad();
+        String state=blankToNull(query.state()); if(state==null) state="ACTIVE"; if(!Set.of("ACTIVE","TRASHED").contains(state)) bad();
+        Cursor cursor=parseCursor(query.cursor()); List<PersonalWorkspaceFileEntity> rows=dao.listFiles(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),q,family,state,cursor==null?null:cursor.createdAt(),cursor==null?null:cursor.fileId(),PAGE_SIZE+1);
+        boolean more=rows.size()>PAGE_SIZE; if(more) rows=rows.subList(0,PAGE_SIZE); String next=more?cursor(rows.get(rows.size()-1)):null;
+        return new PersonalWorkspaceViews.ListView(rows.stream().map(this::view).toList(),next);
+    }
+    @Override public PersonalWorkspaceViews.FileDetailView get(Scope scope,String fileId){
+        PersonalWorkspaceFileEntity file=file(scope,fileId); List<PersonalWorkspaceViews.VersionView> versions=versions(scope,fileId);
+        PersonalWorkspaceViews.VersionView latest=versions.stream().filter(v->v.version()==file.getLatestVersion()).findFirst().orElseThrow(()->new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT));
+        return new PersonalWorkspaceViews.FileDetailView(view(file),latest,versions,List.of(),List.of());
+    }
+    @Override public List<PersonalWorkspaceViews.VersionView> versions(Scope scope,String fileId){ file(scope,fileId); return dao.listVersions(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),fileId,100).stream().map(this::version).toList(); }
+    @Override public PersonalWorkspaceViews.VersionPage versionsPage(Scope scope, String fileId, String cursor) {
+        file(scope, fileId);
+        Integer before = null;
+        if (cursor != null) {
+            try {
+                byte[] decoded = Base64.getUrlDecoder().decode(cursor);
+                if (!Base64.getUrlEncoder().withoutPadding().encodeToString(decoded).equals(cursor)) bad();
+                String[] parts = new String(decoded, StandardCharsets.UTF_8).split("\\n", -1);
+                if (parts.length != 2 || !fileId.equals(parts[0]) || !parts[1].matches("[1-9][0-9]*")) bad();
+                before = Integer.valueOf(parts[1]);
+            } catch (IllegalArgumentException invalid) { bad(); }
+        }
+        var rows = dao.listVersionsBefore(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), fileId, before);
+        boolean more = rows.size() > 100;
+        if (more) rows = rows.subList(0, 100);
+        String next = more ? Base64.getUrlEncoder().withoutPadding().encodeToString((fileId + "\n" + rows.getLast().getVersion()).getBytes(StandardCharsets.UTF_8)) : null;
+        return new PersonalWorkspaceViews.VersionPage(rows.stream().map(this::version).toList(), next, more);
+    }
+    @Override public PersonalWorkspaceViews.UploadView create(Scope scope,UploadCommand command){
+        validateScope(scope); ValidUpload valid=validate(command); String requestHash=hash("CREATE",valid);
+        PersonalWorkspaceWriteService.Claim claim=writes.claim(writeScope(scope),"CREATE",valid.key(),requestHash);
+        if(!claim.claimed()) return completedUpload(scope,claim.operation());
+        String fileId="pws_"+UUID.randomUUID().toString().replace("-","");
+        try{
+            PersonalWorkspaceStorage.StoredObject stored=storeUpload(scope,valid); long now=System.currentTimeMillis();
+            PersonalWorkspaceFileEntity file=new PersonalWorkspaceFileEntity().setFileId(fileId).setOwnerJiacn(scope.ownerJiacn()).setSourceKind("UPLOAD").setOriginKind("USER_UPLOAD").setDisplayName(valid.displayName()).setMediaFamily(family(valid.mime())).setState("ACTIVE").setMetadataRevision(1L).setLatestVersion(1).setCreatedAt(now);
+            file.setTenantId(scope.tenantId()); file.setClientId(scope.clientId());
+            PersonalWorkspaceVersionEntity version=new PersonalWorkspaceVersionEntity().setFileId(fileId).setOwnerJiacn(scope.ownerJiacn()).setVersion(1).setOriginalFilename(valid.filename()).setContentMimeType(valid.mime()).setByteLength(stored.byteLength()).setContentHash(stored.sha256()).setStorageUri(stored.storageUri()).setCreatedAt(now);
+            version.setTenantId(scope.tenantId()); version.setClientId(scope.clientId());
+            writes.completeCreate(writeScope(scope),claim.operation(),file,version); return new PersonalWorkspaceViews.UploadView(operation(claim.operation()),view(file),version(version));
+        } catch (RuntimeException failure) { writes.fail(writeScope(scope),claim.operation(),reason(failure)); throw failure; }
+    }
+    /** Internal archive: a chat caller has already resolved the owner-scoped committed source.
+     * Keep the source identity/revision and actual digest in the idempotency fingerprint so a
+     * reused key cannot silently archive another draft. The existing private store deduplicates
+     * bytes within the owner scope; this operation creates only the requested personal file.
+     */
+    @Override public PersonalWorkspaceViews.UploadView archiveConversationAsset(Scope scope,
+            ConversationArchiveCommand command) {
+        validateScope(scope);
+        if (command == null || command.revision() < 1
+                || command.assetId() == null || !command.assetId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
+                || command.sha256() == null || !command.sha256().matches("[0-9a-f]{64}")) bad();
+        ValidUpload valid = validate(new UploadCommand(command.idempotency(), command.displayName(),
+                command.filename(), command.contentMimeType(), command.source(), command.byteLength()));
+        if (!command.sha256().equals(valid.sha256())) bad();
+        String requestHash = hash("ARCHIVE_ASSET", command.assetId(), Long.toString(command.revision()),
+                command.sha256(), valid.key(), valid.displayName(), valid.filename(), valid.mime());
+        return archiveGeneratedFile(scope, valid, command.sha256(), "ARCHIVE_ASSET", requestHash);
+    }
+
+    /** Explicit browser action: a task file is not personal material until requested.
+     * Exact owner ACL and content integrity belong to the existing artifact read boundary.
+     * A stable source key makes network retries and repeated clicks return the same file.
+     */
+    @Override public PersonalWorkspaceViews.UploadView archiveTaskArtifact(Scope scope, TaskArtifactArchiveCommand command) {
+        validateScope(scope);
+        if (command == null || command.artifactVersion() < 1 || command.contentSha256() == null
+                || !command.contentSha256().matches("[0-9a-f]{64}")) bad();
+        text(command.taskId(),100); text(command.artifactId(),100);
+        String sourceKey=hash((command.taskId()+"\n"+command.artifactId()+"\n"+command.artifactVersion()).getBytes(StandardCharsets.UTF_8));
+        if(command.idempotency()==null || !("task-artifact-"+sourceKey).equals(command.idempotency().key())) bad();
+        try (var content=artifactContents.openContentForTaskOwner(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
+                command.taskId(),command.artifactId(),command.artifactVersion())) {
+            if (!command.contentSha256().equals(content.sha256()))
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.IDEMPOTENCY_CONFLICT);
+            UploadSource source=() -> artifactContents.openContentForTaskOwner(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
+                    command.taskId(),command.artifactId(),command.artifactVersion()).content();
+            ValidUpload valid=validate(new UploadCommand(new Idempotency("task-artifact-"+sourceKey),
+                    command.filename(),command.filename(),content.contentMimeType(),source,content.byteLength()));
+            if (!command.contentSha256().equals(valid.sha256()))
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            return archiveGeneratedFile(scope,valid,command.contentSha256(),"ARCHIVE_ARTIFACT",
+                    hash("ARCHIVE_ARTIFACT",sourceKey,command.contentSha256(),valid.filename()));
+        } catch (java.io.IOException failure) {
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE);
+        }
+    }
+
+    private PersonalWorkspaceViews.UploadView archiveGeneratedFile(Scope scope, ValidUpload valid,
+            String expectedSha256, String operationType, String requestHash) {
+        PersonalWorkspaceWriteService.Claim claim = writes.claim(writeScope(scope), operationType,
+                valid.key(), requestHash);
+        if (!claim.claimed()) return completedUpload(scope, claim.operation());
+        String fileId = "pws_" + UUID.randomUUID().toString().replace("-", "");
+        try {
+            PersonalWorkspaceStorage.StoredObject stored = storeUpload(scope, valid);
+            if (!expectedSha256.equals(stored.sha256())
+                    || valid.byteLength() != stored.byteLength())
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            long now = System.currentTimeMillis();
+            PersonalWorkspaceFileEntity file = new PersonalWorkspaceFileEntity().setFileId(fileId)
+                    .setOwnerJiacn(scope.ownerJiacn()).setSourceKind("UPLOAD")
+                    .setOriginKind("AGENT_DELIVERY").setDisplayName(valid.displayName())
+                    .setMediaFamily(family(valid.mime())).setState("ACTIVE")
+                    .setMetadataRevision(1L).setLatestVersion(1).setCreatedAt(now);
+            file.setTenantId(scope.tenantId()); file.setClientId(scope.clientId());
+            PersonalWorkspaceVersionEntity version = new PersonalWorkspaceVersionEntity()
+                    .setFileId(fileId).setOwnerJiacn(scope.ownerJiacn()).setVersion(1)
+                    .setOriginalFilename(valid.filename()).setContentMimeType(valid.mime())
+                    .setByteLength(stored.byteLength()).setContentHash(stored.sha256())
+                    .setStorageUri(stored.storageUri()).setCreatedAt(now);
+            version.setTenantId(scope.tenantId()); version.setClientId(scope.clientId());
+            writes.completeCreate(writeScope(scope), claim.operation(), file, version);
+            return new PersonalWorkspaceViews.UploadView(operation(claim.operation()), view(file), version(version));
+        } catch (RuntimeException failure) {
+            writes.fail(writeScope(scope), claim.operation(), reason(failure));
+            throw failure;
+        }
+    }
+    /** Internal archive of bytes derived from a server-locked Chat message snapshot. */
+    @Override public PersonalWorkspaceViews.UploadView archiveConversationText(Scope scope,
+            ConversationTextArchiveCommand command) {
+        validateScope(scope);
+        if (command == null || command.sourceSnapshotKey() == null
+                || !command.sourceSnapshotKey().matches("[0-9a-f]{64}")
+                || command.sha256() == null || !command.sha256().matches("[0-9a-f]{64}")) bad();
+        ValidUpload valid = validate(new UploadCommand(command.idempotency(), command.displayName(),
+                command.filename(), "text/plain", command.content()));
+        requireStrictUtf8(command.content());
+        if (!command.sha256().equals(valid.sha256())) bad();
+        String requestHash = hash("ARCHIVE_TEXT", command.sourceSnapshotKey(), command.sha256(),
+                valid.key(), valid.displayName(), valid.filename(), valid.mime());
+        PersonalWorkspaceWriteService.Claim claim = writes.claim(writeScope(scope), "ARCHIVE_TEXT",
+                valid.key(), requestHash);
+        if (!claim.claimed()) return completedUpload(scope, claim.operation());
+        String fileId = "pws_" + UUID.randomUUID().toString().replace("-", "");
+        try {
+            PersonalWorkspaceStorage.StoredObject stored = storeUpload(scope, valid);
+            if (!command.sha256().equals(stored.sha256())
+                    || valid.byteLength() != stored.byteLength()
+                    || !"text/plain".equals(stored.mimeType()))
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            long now = System.currentTimeMillis();
+            PersonalWorkspaceFileEntity file = new PersonalWorkspaceFileEntity().setFileId(fileId)
+                    .setOwnerJiacn(scope.ownerJiacn()).setSourceKind("UPLOAD")
+                    .setOriginKind("AGENT_DELIVERY").setDisplayName(valid.displayName())
+                    .setMediaFamily("TEXT").setState("ACTIVE").setMetadataRevision(1L)
+                    .setLatestVersion(1).setCreatedAt(now);
+            file.setTenantId(scope.tenantId()); file.setClientId(scope.clientId());
+            PersonalWorkspaceVersionEntity version = new PersonalWorkspaceVersionEntity()
+                    .setFileId(fileId).setOwnerJiacn(scope.ownerJiacn()).setVersion(1)
+                    .setOriginalFilename(valid.filename()).setContentMimeType("text/plain")
+                    .setByteLength(stored.byteLength()).setContentHash(stored.sha256())
+                    .setStorageUri(stored.storageUri()).setCreatedAt(now);
+            version.setTenantId(scope.tenantId()); version.setClientId(scope.clientId());
+            writes.completeCreate(writeScope(scope), claim.operation(), file, version);
+            return new PersonalWorkspaceViews.UploadView(operation(claim.operation()), view(file), version(version));
+        } catch (RuntimeException failure) {
+            writes.fail(writeScope(scope), claim.operation(), reason(failure));
+            throw failure;
+        }
+    }
+    @Override public PersonalWorkspaceViews.UploadView appendVersion(Scope scope,String fileId,UploadCommand command,int expectedPreviousVersion){
+        PersonalWorkspaceFileEntity old=file(scope,fileId); if(!"ACTIVE".equals(old.getState())||expectedPreviousVersion<1) bad(); ValidUpload valid=validate(command); String requestHash=hash("APPEND",valid,fileId,String.valueOf(expectedPreviousVersion));
+        PersonalWorkspaceWriteService.Claim claim=writes.claim(writeScope(scope),"APPEND",valid.key(),requestHash); if(!claim.claimed())return completedUpload(scope,claim.operation());
+        try { PersonalWorkspaceStorage.StoredObject stored=storeUpload(scope,valid); int next=Math.addExact(expectedPreviousVersion,1); long now=System.currentTimeMillis();
+            PersonalWorkspaceVersionEntity version=new PersonalWorkspaceVersionEntity().setFileId(fileId).setOwnerJiacn(scope.ownerJiacn()).setVersion(next).setOriginalFilename(valid.filename()).setContentMimeType(valid.mime()).setByteLength(stored.byteLength()).setContentHash(stored.sha256()).setStorageUri(stored.storageUri()).setCreatedAt(now);
+            version.setTenantId(scope.tenantId()); version.setClientId(scope.clientId());
+            PersonalWorkspaceFileEntity file=writes.completeAppend(writeScope(scope),claim.operation(),fileId,expectedPreviousVersion,version); return new PersonalWorkspaceViews.UploadView(operation(claim.operation()),view(file),version(version));
+        } catch(RuntimeException failure){writes.fail(writeScope(scope),claim.operation(),reason(failure));throw failure;}
+    }
+    @Override public PersonalWorkspaceViews.FileView rename(Scope scope,String fileId,String displayName,String ifMatch,Idempotency idempotency){
+        validateScope(scope); file(scope,fileId); text(displayName,255); String key=key(idempotency); PersonalWorkspaceWriteService.Claim c=writes.claim(writeScope(scope),"RENAME",key,hash("RENAME",fileId,displayName,ifMatch)); if(!c.claimed())return completedFile(scope,c.operation()); try{return view(writes.rename(writeScope(scope),c.operation(),fileId,displayName,ifMatch));}catch(RuntimeException f){writes.fail(writeScope(scope),c.operation(),reason(f));throw f;}}
+    @Override public PersonalWorkspaceViews.FileView trash(Scope scope,String fileId,long impactRevision,boolean acknowledge,String ifMatch,Idempotency idempotency){
+        validateScope(scope); file(scope,fileId); String key=key(idempotency); PersonalWorkspaceWriteService.Claim c=writes.claim(writeScope(scope),"TRASH",key,hash("TRASH",fileId,String.valueOf(impactRevision),String.valueOf(acknowledge),ifMatch)); if(!c.claimed())return completedFile(scope,c.operation()); try{return view(writes.trash(writeScope(scope),c.operation(),fileId,impactRevision,acknowledge,ifMatch));}catch(RuntimeException f){writes.fail(writeScope(scope),c.operation(),reason(f));throw f;}}
+    @Override public PersonalWorkspaceViews.FileView restore(Scope scope,String fileId,String ifMatch,Idempotency idempotency){
+        validateScope(scope); file(scope,fileId); String key=key(idempotency); PersonalWorkspaceWriteService.Claim c=writes.claim(writeScope(scope),"RESTORE",key,hash("RESTORE",fileId,ifMatch)); if(!c.claimed())return completedFile(scope,c.operation()); try{return view(writes.restore(writeScope(scope),c.operation(),fileId,ifMatch));}catch(RuntimeException f){writes.fail(writeScope(scope),c.operation(),reason(f));throw f;}}
+    @Override public Download download(Scope scope, String fileId, int version) {
+        var source = versionEntity(scope, fileId, version);
+        var storageScope = storageScope(scope);
+        String uri = source.getStorageUri(), hash = source.getContentHash(), mime = source.getContentMimeType();
+        long length = source.getByteLength();
+        return new Download(source.getOriginalFilename(), mime, length,
+                storage.openStream(storageScope, uri, hash, length, mime));
+    }
+    @Override public Content readContent(Scope scope,String fileId,int version){PersonalWorkspaceVersionEntity v=versionEntity(scope,fileId,version);PersonalWorkspaceStorage.StoredContent c=storage.read(storageScope(scope),v.getStorageUri(),v.getContentHash(),v.getByteLength(),v.getContentMimeType());return new Content(v.getOriginalFilename(),v.getContentMimeType(),c.content());}
+    @Override public PersonalWorkspaceViews.PreviewView preview(Scope scope,String fileId,int version){return renderPreview(scope,fileId,version).rendered().view();}
+    @Override public Content readPreviewPart(Scope scope,String fileId,int version,String partId){
+        PersonalWorkspaceVersionEntity sourceVersion=versionEntity(scope,fileId,version);
+        id(partId,"partId",100);
+        LoadedPreview loaded=renderPreview(scope,sourceVersion);
+        PersonalWorkspaceViews.PreviewPart part=loaded.rendered().view().parts().stream()
+                .filter(candidate->candidate.partId().equals(partId)).findFirst().orElse(null);
+        if(part==null){
+            if(PersonalWorkspacePreviewRenderer.CONTENT_PART_ID.equals(partId)
+                    &&"UNSUPPORTED".equals(loaded.rendered().view().state()))
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.UNSUPPORTED);
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
+        }
+        if(!"READY".equals(loaded.rendered().view().state()))
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.UNSUPPORTED);
+        try{
+            byte[] bytes=loaded.rendered().partBytes(partId);
+            if(bytes==null)throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            return new Content(loaded.version().getOriginalFilename(),part.contentMimeType(),bytes);
+        }catch(PersonalWorkspacePreviewRenderer.PreviewPartReadException failure){
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+        }
+    }
+    @Override public PersonalWorkspaceViews.UsageView usage(Scope scope,String fileId){
+        validateScope(scope); id(fileId,"fileId",100);
+        var snapshot = dao.findUsage(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), fileId);
+        if (snapshot == null) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
+        return new PersonalWorkspaceViews.UsageView(snapshot.fileId(), snapshot.impactRevision(),
+                new PersonalWorkspaceViews.UsageCounts(snapshot.taskReferences(),
+                        snapshot.conversationReferences(), snapshot.activeInputGrants()));
+    }
+
+    @Override public PersonalWorkspaceViews.OperationView operation(Scope scope,String operationId){validateScope(scope);PersonalWorkspaceOperationEntity o=dao.findOperation(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),operationId);if(o==null)throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);return operation(o);}
+
+    private LoadedPreview renderPreview(Scope scope,String fileId,int version){return renderPreview(scope,versionEntity(scope,fileId,version));}
+    private LoadedPreview renderPreview(Scope scope,PersonalWorkspaceVersionEntity v){
+        if ("text/plain".equals(v.getContentMimeType())) {
+            // The existing 200k-code-point preview is a projection, not a file-size limit.
+            // UTF-8 uses at most four bytes per code point; one extra point preserves
+            // the renderer's truncation flag without materializing the whole file.
+            int prefixBytes = 4 * (PersonalWorkspacePreviewRenderer.MAX_TEXT_CODE_POINTS + 1);
+            try (var source = storage.openStream(storageScope(scope), v.getStorageUri(),
+                    v.getContentHash(), v.getByteLength(), v.getContentMimeType())) {
+                return new LoadedPreview(v, previewRenderer.render(v.getContentMimeType(),
+                        source.readNBytes(prefixBytes)));
+            } catch (java.io.IOException failure) {
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            }
+        }
+        PersonalWorkspaceStorage.StoredContent source=storage.read(storageScope(scope),v.getStorageUri(),v.getContentHash(),v.getByteLength(),v.getContentMimeType());
+        return new LoadedPreview(v,previewRenderer.render(v.getContentMimeType(),source.content()));
+    }
+    private PersonalWorkspaceViews.UploadView completedUpload(Scope s,PersonalWorkspaceOperationEntity o){if("PROCESSING".equals(o.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.PROCESSING);if(!"COMMITTED".equals(o.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.OPERATION_FAILED);PersonalWorkspaceFileEntity f=file(s,o.getFileId());PersonalWorkspaceVersionEntity v=versionEntity(s,o.getFileId(),o.getFileVersion());return new PersonalWorkspaceViews.UploadView(operation(o),view(f),version(v));}
+    private PersonalWorkspaceViews.FileView completedFile(Scope s,PersonalWorkspaceOperationEntity o){if("PROCESSING".equals(o.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.PROCESSING);if(!"COMMITTED".equals(o.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.OPERATION_FAILED);return view(file(s,o.getFileId()));}
+    private PersonalWorkspaceFileEntity file(Scope s,String id){validateScope(s);id(id,"fileId",100);PersonalWorkspaceFileEntity f=dao.findFile(s.tenantId(),s.clientId(),s.ownerJiacn(),id);if(f==null)throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);return f;}
+    private PersonalWorkspaceVersionEntity versionEntity(Scope s,String id,int n){file(s,id);if(n<1)bad();PersonalWorkspaceVersionEntity v=dao.findVersion(s.tenantId(),s.clientId(),s.ownerJiacn(),id,n);if(v==null)throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);return v;}
+    private PersonalWorkspaceViews.FileView view(PersonalWorkspaceFileEntity f){return new PersonalWorkspaceViews.FileView(f.getFileId(),f.getSourceKind(),f.getOriginKind(),f.getDisplayName(),f.getMediaFamily(),f.getState(),f.getMetadataRevision(),f.getLatestVersion(),f.getCreatedAt(),new PersonalWorkspaceViews.Capabilities("AVAILABLE","AVAILABLE","UNVERIFIED",previewCapability(f),"AVAILABLE"));}
+    private static String previewCapability(PersonalWorkspaceFileEntity f){return Set.of("IMAGE","AUDIO","TEXT","DOCUMENT","SPREADSHEET","PDF").contains(f.getMediaFamily())?"AVAILABLE":"UNSUPPORTED";}
+    private PersonalWorkspaceViews.VersionView version(PersonalWorkspaceVersionEntity v){return new PersonalWorkspaceViews.VersionView(v.getFileId(),v.getVersion(),v.getOriginalFilename(),v.getContentMimeType(),v.getByteLength(),v.getContentHash(),v.getCreatedAt(),PREVIEW_MIME_TYPES.contains(v.getContentMimeType())?"READY":"UNSUPPORTED");}
+    private static PersonalWorkspaceViews.OperationView operation(PersonalWorkspaceOperationEntity o){return new PersonalWorkspaceViews.OperationView(o.getOperationId(),o.getState(),o.getFileId(),o.getFileVersion(),o.getErrorCode());}
+    private static PersonalWorkspaceWriteService.Scope writeScope(Scope s){return new PersonalWorkspaceWriteService.Scope(s.tenantId(),s.clientId(),s.ownerJiacn());}
+    private static PersonalWorkspaceStorage.Scope storageScope(Scope s){return new PersonalWorkspaceStorage.Scope(s.tenantId(),s.clientId(),s.ownerJiacn());}
+    private static ValidUpload validate(UploadCommand c) {
+        if (c == null) bad();
+        String key = key(c.idempotency()); String mime = lower(c.contentMimeType());
+        if (mime == null || mime.isBlank()) mime = "application/octet-stream";
+        if (!mime.matches("[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}")) bad();
+        String name = filename(c.originalFilename()); String display = blankToNull(c.displayName());
+        if (display == null) display = name; text(display, 255);
+        if (c.source() == null || c.byteLength() <= 0) bad();
+        try (var input = c.source().open()) {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] buffer = new byte[8192]; long count = 0;
+            for (int n; (n = input.read(buffer)) != -1;) {
+                if (n > c.byteLength() - count) bad();
+                count += n; digest.update(buffer, 0, n);
+            }
+            if (count != c.byteLength()) bad();
+            return new ValidUpload(key, display, name, mime, c.source(), count,
+                    HexFormat.of().formatHex(digest.digest()));
+        } catch (java.io.IOException failure) {
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE, failure);
+        } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+    }
+    private PersonalWorkspaceStorage.StoredObject storeUpload(Scope scope, ValidUpload upload) {
+        try (var input = upload.source().open()) {
+            var stored = storage.storeStream(storageScope(scope), input, upload.byteLength(), upload.mime());
+            // Detect a source changed between idempotency hashing and the actual immutable write.
+            if (stored.byteLength() != upload.byteLength() || !stored.sha256().equals(upload.sha256())
+                    || !stored.mimeType().equals(upload.mime()))
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT);
+            return stored;
+        } catch (java.io.IOException failure) {
+            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE, failure);
+        }
+    }
+    private static String filename(String raw){text(raw,255);if(raw.contains("/")||raw.indexOf('\\')>=0||raw.equals(".")||raw.equals(".."))bad();return raw;}
+    private static String family(String mime){if(mime.startsWith("image/"))return "IMAGE";if(mime.startsWith("audio/"))return "AUDIO";if("text/plain".equals(mime))return "TEXT";if("application/pdf".equals(mime))return "PDF";if(mime.contains("spreadsheet"))return "SPREADSHEET";if(mime.contains("presentation")||"application/vnd.ms-powerpoint".equals(mime))return "PRESENTATION";return "DOCUMENT";}
+    private static String key(Idempotency i){if(i==null)bad();id(i.key(),"Idempotency-Key",100);return i.key();}
+    private static void validateScope(Scope s){if(s==null)bad();id(s.tenantId(),"tenantId",50);id(s.clientId(),"clientId",50);id(s.ownerJiacn(),"owner",50);if("0".equals(s.ownerJiacn()))bad();}
+    private static void id(String value,String name,int max){if(value==null||value.isBlank()||!value.equals(value.strip())||value.codePointCount(0,value.length())>max||value.chars().anyMatch(Character::isISOControl))bad();}
+    private static void text(String value,int max){id(value,"text",max);}
+    private static String lower(String v){if(v==null)return null;String mime=v.split(";",2)[0].trim().toLowerCase(Locale.ROOT);return switch(mime){case "image/jpg","image/pjpeg" -> "image/jpeg";case "image/x-png" -> "image/png";case "image/x-ms-bmp" -> "image/bmp";case "image/x-tiff" -> "image/tiff";default -> mime;};}
+    private static String blankToNull(String value){return value==null||value.isBlank()?null:value;}
+    private static void requireStrictUtf8(byte[] bytes) {
+        try {
+            String decoded = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes)).toString();
+            byte[] encoded = decoded.getBytes(StandardCharsets.UTF_8);
+            if (!java.util.Arrays.equals(bytes, encoded)) bad();
+        } catch (CharacterCodingException malformed) {
+            bad();
+        }
+    }
+    private static String hash(String... values){try{MessageDigest d=MessageDigest.getInstance("SHA-256");for(String v:values){byte[]b=Objects.requireNonNullElse(v,"").getBytes(StandardCharsets.UTF_8);d.update(ByteBuffer.allocate(4).putInt(b.length).array());d.update(b);}return HexFormat.of().formatHex(d.digest());}catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
+    private static String hash(byte[] bytes){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Objects.requireNonNull(bytes,"bytes")));}catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
+    private static String hash(String type,ValidUpload v,String... rest){List<String> p=new ArrayList<>();p.add(type);p.add(v.key());p.add(v.displayName());p.add(v.filename());p.add(v.mime());p.add(v.sha256());p.addAll(List.of(rest));return hash(p.toArray(String[]::new));}
+    private static String reason(RuntimeException f){return f instanceof PersonalWorkspaceException p?p.getReason().name():"STORAGE_UNAVAILABLE";}
+    private static String cursor(PersonalWorkspaceFileEntity f){return Base64.getUrlEncoder().withoutPadding().encodeToString((f.getCreatedAt()+"\n"+f.getFileId()).getBytes(StandardCharsets.UTF_8));}
+    private static Cursor parseCursor(String value){if(value==null||value.isBlank())return null;try{String s=new String(Base64.getUrlDecoder().decode(value),StandardCharsets.UTF_8);String[]p=s.split("\\n",-1);if(p.length!=2)bad();long t=Long.parseLong(p[0]);id(p[1],"cursor",100);return new Cursor(t,p[1]);}catch(IllegalArgumentException e){bad();return null;}}
+    private static void bad(){throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.BAD_REQUEST);}
+    private record LoadedPreview(PersonalWorkspaceVersionEntity version,PersonalWorkspacePreviewRenderer.RenderedPreview rendered) { }
+    private record ValidUpload(String key,String displayName,String filename,String mime,UploadSource source,long byteLength,String sha256) { }
+    private record Cursor(long createdAt,String fileId) { }
+}

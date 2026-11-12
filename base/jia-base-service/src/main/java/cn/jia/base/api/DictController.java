@@ -1,0 +1,124 @@
+package cn.jia.base.api;
+
+import cn.jia.core.entity.JsonRequest;
+
+import cn.jia.base.entity.DictEntity;
+import cn.jia.base.service.impl.DictServiceImpl;
+import cn.jia.core.entity.JsonRequestPage;
+import cn.jia.core.entity.JsonResult;
+import cn.jia.core.entity.JsonResultPage;
+import cn.jia.core.util.CollectionUtil;
+import cn.jia.core.util.DateUtil;
+import com.github.pagehelper.PageInfo;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/dict")
+public class DictController {
+
+    @Autowired
+    private DictServiceImpl dictService;
+
+    /**
+     * 根据类型获取数据字典列表
+     *
+     * @param id
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-get')")
+    @RequestMapping(value = "/get", method = RequestMethod.GET)
+    public Object find(@RequestParam(name = "id") Long id) {
+        DictEntity dict = dictService.get(id);
+        return JsonResult.success(dict);
+    }
+
+    /**
+     * 创建数据字典
+     *
+     * @param dict
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-create')")
+    @RequestMapping(value = "/create", method = RequestMethod.POST)
+    public Object create(@RequestBody JsonRequest<DictEntity> protocolRequest) {
+        DictEntity dict = protocolRequest == null ? null : protocolRequest.data();
+        dictService.create(dict);
+        return JsonResult.success();
+    }
+
+    /**
+     * 更新数据字典信息
+     *
+     * @param dict
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-update')")
+    @RequestMapping(value = "/update", method = RequestMethod.POST)
+    public Object update(@RequestBody JsonRequest<DictEntity> protocolRequest) {
+        DictEntity dict = protocolRequest == null ? null : protocolRequest.data();
+        dictService.update(dict);
+        return JsonResult.success();
+    }
+
+    /**
+     * 数据字典列表
+     *
+     * @param page
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-list')")
+    @RequestMapping(value = "/list", method = RequestMethod.POST)
+    public Object list(@RequestBody JsonRequest<JsonRequestPage<DictEntity>> protocolRequest) {
+        JsonRequestPage<DictEntity> page = protocolRequest == null ? null : protocolRequest.data();
+        PageInfo<DictEntity> dictList = dictService.findPage(page.getSearch(), page.getPageNum(), page.getPageSize(), page.getOrderBy());
+        JsonResultPage<DictEntity> result = JsonResultPage.page(dictList.getList(), dictList.getPageNum(), dictList.getPageSize(), dictList.getTotal());
+        return result;
+    }
+
+    /**
+     * *
+     *
+     * @param id
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-delete')")
+    @RequestMapping(value = "/delete", method = RequestMethod.DELETE)
+    public Object delete(@RequestParam("id") Long id) {
+        dictService.delete(id);
+        return JsonResult.success();
+    }
+
+    /**
+     * 获取当前语言下的所有数据字典
+     *
+     * @return
+     */
+    @PreAuthorize("hasAuthority('dict-locale')")
+    @RequestMapping(value = "/locale", method = RequestMethod.GET)
+    public Object locale() {
+        return JsonResult.success(dictService.selectAll(LocaleContextHolder.getLocale().toString()));
+    }
+
+    /**
+     * 清除缓存
+     *
+     * @return
+     */
+    @RequestMapping(value = "/cleanCache", method = RequestMethod.POST)
+    public Object cleanCache() {
+        List<DictEntity> dictList = dictService.selectAll(LocaleContextHolder.getLocale().toString());
+        if (CollectionUtil.isNotNullOrEmpty(dictList)) {
+            DictEntity dict = dictList.get(0);
+            DictEntity upDict = new DictEntity();
+            upDict.setId(dict.getId());
+            upDict.setUpdateTime(DateUtil.nowTime());
+            dictService.update(upDict);
+        }
+        return JsonResult.success();
+    }
+}

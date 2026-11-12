@@ -1,0 +1,107 @@
+package cn.jia.agent.service;
+
+import cn.jia.agent.entity.AgentCapabilityDTO;
+import cn.jia.agent.entity.AgentAbilitiesUpdateDTO;
+import cn.jia.agent.entity.AgentPersonaEntity;
+import cn.jia.agent.entity.AgentRegisterDTO;
+import cn.jia.agent.entity.AgentRegisterResultDTO;
+import cn.jia.agent.entity.AgentRuntimeDTO;
+import cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO;
+import cn.jia.agent.entity.AgentStatusDTO;
+import cn.jia.agent.entity.AgentTaskCreateDTO;
+import cn.jia.agent.entity.AgentTaskDTO;
+import cn.jia.agent.entity.AgentTaskCountsDTO;
+import cn.jia.agent.entity.AgentTaskNoteDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationRequestDTO;
+import cn.jia.agent.entity.AgentTaskSearchDTO;
+import cn.jia.agent.entity.DialogueRequestDTO;
+import com.github.pagehelper.PageInfo;
+
+import java.util.List;
+
+public interface AgentService {
+    void requireHostingNewWork(String tenantId, String clientId, String canonicalAgentId);
+
+    AgentRegisterResultDTO register(AgentRegisterDTO request);
+
+    PageInfo<AgentRuntimeDTO> list(String status, String ability, int pageNum, int pageSize);
+
+    PageInfo<AgentRuntimeDTO> listRoster(String status, String ability, int pageNum, int pageSize);
+
+    List<AgentRuntimeDTO> listMapAgents();
+
+    List<AgentCapabilityDTO> listCapabilities();
+
+    List<AgentRuntimeDTO> listPersonaCatalog(String tenantId, String clientId, String ownerJiacn);
+
+    AgentRuntimeDTO bindPersona(String tenantId, String clientId, String ownerJiacn, String personaCode);
+
+    AgentRuntimeDTO requireApiKeyOwnedAgent(String clientId, String jiacn, String agentId);
+
+    /** Same ownership authority and capability projection, without unused task/statistics enrichment. */
+    AgentRuntimeDTO requireOwnedAgentCapabilities(String tenantId, String clientId, String jiacn, String agentId);
+
+    /** Owner-scoped recommendation inputs only; does not load assignment/funding detail. */
+    AgentTaskDTO getTaskRecommendationInput(String taskId);
+
+    /**
+     * Read-only exact-scope ownership proof for roster/get projection. This does not authorize
+     * task, economy, hosting, skill, or any other mutation.
+     */
+    AgentRuntimeDTO requireRosterOwnedAgent(
+            String tenantId, String clientId, String jiacn, String agentId);
+
+    AgentRuntimeDTO requireApiKeyOwnedAgentForUpdate(String clientId, String jiacn, String agentId);
+
+    /** Exact admitted environment, identity/binding and runtime ownership under the existing locks. */
+    AgentRuntimeDTO requireApiKeyOwnedAgentForUpdate(
+            String tenantId, String clientId, String jiacn, String agentId);
+
+    AgentRuntimeDTO get(String agentId);
+
+    AgentRuntimeDTO updateStatus(String agentId, AgentStatusDTO request);
+
+    AgentRuntimeDTO updateAbilities(String agentId, AgentAbilitiesUpdateDTO request);
+
+    List<AgentTaskDTO> getAgentTasks(String agentId);
+
+    List<AgentPersonaEntity> listPersonas();
+
+    AgentPersonaEntity getPersona(String name);
+
+    String generateDialogue(DialogueRequestDTO request);
+
+    AgentRuntimeDTO getStats(String agentId);
+
+    PageInfo<AgentTaskDTO> searchTasks(AgentTaskSearchDTO request);
+
+    AgentTaskCountsDTO countTasksByStatus(AgentTaskSearchDTO request);
+
+    /** Trusted boundary scope; never deserialize this context from task request fields. */
+    record TaskOwnerScope(String tenantId, String clientId, String ownerJiacn) { }
+
+    AgentTaskDTO createTask(TaskOwnerScope scope, AgentTaskCreateDTO request);
+
+    AgentTaskDTO getTask(TaskOwnerScope scope, String taskId);
+
+    AgentTaskDTO getTask(String taskId);
+
+    List<String> listTaskMemberAgentIds(String tenantId, String clientId, String taskId);
+
+    /** Returns only canonical members currently allowed to append task conversation messages. */
+    List<String> listTaskWritableMemberAgentIds(String tenantId, String clientId, String taskId);
+
+    /** All task-authorized candidates, unranked; never truncates using the retired single-assignee score. */
+    List<AgentTaskAssigneeCandidateDTO> listTaskAssigneeCandidates(String taskId);
+
+    AgentTaskTeamRecommendationDTO recommendTaskTeam(
+            String tenantId, String clientId, String taskId,
+            AgentTaskTeamRecommendationRequestDTO request);
+
+    AgentTaskNoteDTO addTaskNote(String taskId, AgentTaskNoteDTO request);
+
+    List<AgentTaskNoteDTO> listTaskNotes(String taskId);
+
+    AgentTaskDTO archiveTask(String taskId);
+}

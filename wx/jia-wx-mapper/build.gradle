@@ -1,0 +1,23 @@
+dependencies {
+    implementation libs.spring.jdbc
+    api project(':wx:jia-wx-api')
+    api project(':common:jia-common-mapper')
+    testImplementation project(':common:jia-common-test')
+    testImplementation project(':common:jia-common-service')
+    testImplementation project(':base:jia-base-api')
+    testImplementation project(':user:jia-user-api')
+    testImplementation project(':oauth:jia-oauth-api')
+    testImplementation project(':isp:jia-isp-api')
+    testImplementation project(':dwz:jia-dwz-api')
+    testImplementation project(':point:jia-point-api')
+    testImplementation project(':kefu:jia-kefu-api')
+    testImplementation project(':material:jia-material-api')
+    testImplementation project(':sms:jia-sms-api')
+    testImplementation libs.mybatis.plus.generator
+    testImplementation libs.spring.boot.starter.freemarker
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-wx-mapper'

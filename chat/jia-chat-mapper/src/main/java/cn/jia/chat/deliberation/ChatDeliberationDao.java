@@ -1,0 +1,41 @@
+package cn.jia.chat.deliberation;
+
+import java.util.List;
+
+public interface ChatDeliberationDao {
+    /** Ordered candidates only; caller locks conversation then each turn beneath the task root. */
+    List<ChatTurnEntity> findTaskDiscussions(String tenantId, String ownerJiacn, String clientId, String taskId);
+    Long nextOutboxDue(String tenantId, String clientId, long now);
+    int insertSnapshot(ChatContextSnapshotEntity entity);
+    int insertRequest(ChatRequestEntity entity);
+    int insertTurn(ChatTurnEntity entity);
+    int insertOutbox(ChatDispatchOutboxEntity entity);
+    int insertEvent(ChatConversationEventEntity entity);
+    ChatRequestEntity lockRequest(String tenantId, String ownerJiacn, String clientId, String requestId, long revision);
+    ChatRequestEntity findRequest(String tenantId, String ownerJiacn, String clientId, String requestId);
+    List<ChatTurnEntity> findTurnsByRequest(String tenantId, String ownerJiacn, String clientId, String requestId);
+    ChatTurnEntity findTurn(String tenantId, String ownerJiacn, String clientId, String turnId);
+    ChatTurnEntity lockTurn(String tenantId, String ownerJiacn, String clientId, String turnId);
+    ChatContextSnapshotEntity findSnapshot(String tenantId, String ownerJiacn, String clientId, String snapshotId);
+    ChatDispatchOutboxEntity lockOutbox(String tenantId, String ownerJiacn, String clientId, String turnId, String eventType);
+    ChatDispatchOutboxEntity findOutboxById(String tenantId, String ownerJiacn, String clientId, String eventId);
+    ChatDispatchOutboxEntity lockOutboxById(String tenantId, String ownerJiacn, String clientId, String eventId);
+    ChatDispatchOutboxEntity lockOutboxByDispatch(String tenantId, String ownerJiacn, String clientId, String dispatchId);
+    List<ChatDispatchOutboxEntity> findDueOutboxInTenant(String tenantId, long now, int limit);
+    List<ChatDispatchOutboxEntity> findDueOutboxInScope(String tenantId, String clientId, long now, int limit);
+    List<ChatConversationEventEntity> replayEvents(String tenantId, String ownerJiacn, String clientId,
+            String conversationId, long generation, long afterSequence, long throughSequence, int limit);
+    /** Accepted deltas of one locked turn, in their durable order. */
+    List<ChatConversationEventEntity> turnDeltas(ChatTurnEntity turn);
+    long eventHighWatermark(String tenantId, String ownerJiacn, String clientId,
+            String conversationId, long generation);
+    int persistFinal(ChatTurnEntity turn, String finalDigest, long finalMessageId, long now);
+    int updateTurnState(ChatTurnEntity turn, String state, String terminalReason, long now);
+    int publishFinal(ChatTurnEntity turn, long now);
+    int updateOutbox(ChatDispatchOutboxEntity outbox, String status, long now);
+    int claimOutbox(ChatDispatchOutboxEntity outbox, String leaseOwner, long leaseUntil, long fencingToken, long now);
+    int renewOutbox(ChatDispatchOutboxEntity outbox, long leaseUntil, long now);
+    int settleOutbox(ChatDispatchOutboxEntity outbox, String status, Long availableAt, String lastError, Long sentAt, long now);
+    int acknowledgeOutbox(ChatDispatchOutboxEntity outbox, long now);
+    int updateRequestState(ChatRequestEntity request, String state, long now);
+}

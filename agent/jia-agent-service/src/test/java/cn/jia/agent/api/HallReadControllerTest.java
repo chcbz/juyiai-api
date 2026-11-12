@@ -1,0 +1,84 @@
+package cn.jia.agent.api;
+
+import cn.jia.agent.service.HallReadService;
+import cn.jia.agent.service.HallRequestDraftService.OwnerScope;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import static org.mockito.Mockito.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+class HallReadControllerTest {
+    private HallReadService service;
+    private MockMvc mvc;
+    @BeforeEach void setUp() {
+        service = mock(HallReadService.class);
+        mvc = MockMvcBuilders.standaloneSetup(new HallReadController(service))
+                .setControllerAdvice(new cn.jia.core.config.ApiEnvelopeAdvice(),new cn.jia.core.config.ExceptionHandlerAdvice()).addFilters(new cn.jia.core.filter.RequestIdFilter(),new HallRequestDraftCacheControlFilter()).build();
+    }
+    @Test void overviewContractHasExplicitSourceFailuresAndNullCount() throws Exception {
+        var source = new HallReadService.SourceStatus("error", "HALL_SOURCE_UNAVAILABLE");
+        var section = new HallReadService.Section("error", Map.of("private", new HallReadService.Partition(
+                List.of(), "error", null, null, "HALL_SOURCE_UNAVAILABLE")));
+        when(service.overview(new OwnerScope("0", "client-a", "owner-a")))
+                .thenReturn(new HallReadService.Overview(1, Map.of("recent", section, "needsAction", section),
+                        Map.of("recent", Map.of("private", source), "needsAction", Map.of("private", source)), 1000));
+        mvc.perform(get("/agent/hall/overview").principal(jwt("owner-a", "client-a")))
+                .andExpect(status().isOk()).andExpect(header().string(HttpHeaders.CACHE_CONTROL, "private, no-store"))
+                .andExpect(jsonPath("$.data.schemaVersion").value(1))
+                .andExpect(jsonPath("$.data.sections.recent.partitions.private.status").value("error"))
+                .andExpect(jsonPath("$.data.sourceStatus.recent.private.errorCode").value("HALL_SOURCE_UNAVAILABLE"))
+                .andExpect(jsonPath("$.data.sections.recent.partitions.private.count").value(org.hamcrest.Matchers.nullValue()));
+    }
+    @Test void authScopeAndUnknownOrDuplicateQueryParametersAreRejected() throws Exception {
+        mvc.perform(get("/agent/hall/overview")).andExpect(status().isUnauthorized())
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "private, no-store"));
+        mvc.perform(get("/agent/hall/overview").principal(jwt("0", "client-a"))).andExpect(status().isForbidden());
+        mvc.perform(get("/agent/hall/overview?q=filter").principal(jwt("owner-a", "client-a"))).andExpect(status().isBadRequest());
+        mvc.perform(get("/agent/hall/items?ownerJiacn=other").principal(jwt("owner-a", "client-a"))).andExpect(status().isBadRequest());
+        mvc.perform(get("/agent/hall/items?kind=private&kind=task").principal(jwt("owner-a", "client-a"))).andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+    }
+    @Test void itemQueryIsForwardedExactlyAndPrivateArchiveReturnsItsPartition() throws Exception {
+        var scope = new OwnerScope("0", "client-a", "owner-a");
+        var section = new HallReadService.Section("complete", Map.of("private",
+                new HallReadService.Partition(List.of(), "complete", null, null, null)));
+        when(service.items(scope, "private", "archive", null, null))
+                .thenReturn(new HallReadService.Items(1,"private","archive","",section,
+                        Map.of("private",new HallReadService.SourceStatus("complete",null)),1000));
+        mvc.perform(get("/agent/hall/items?kind=private&view=archive").principal(jwt("owner-a", "client-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.view").value("archive"))
+                .andExpect(jsonPath("$.data.section.partitions.private.status").value("complete"));
+        verify(service).items(scope, "private", "archive", null, null);
+    }
+    @Test void jwtClaimsWithoutAuthenticationCannotReadOverviewOrItems() throws Exception {
+        JwtAuthenticationToken unauthenticated = jwt("owner-a", "client-a");
+        unauthenticated.setAuthenticated(false);
+        for (String route : List.of("/agent/hall/overview", "/agent/hall/items?kind=private")) {
+            mvc.perform(get(route).principal(unauthenticated))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.code").value("HALL_UNAUTHENTICATED"))
+                    .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "private, no-store"));
+        }
+        verifyNoInteractions(service);
+    }
+    private static JwtAuthenticationToken jwt(String owner, String client) {
+        JwtAuthenticationToken authentication = new JwtAuthenticationToken(
+                Jwt.withTokenValue("fixture").claim("tenant_id", "0").header("alg", "none")
+                        .subject(owner).claim("jiacn", owner).claim("client_id", client)
+                        .issuedAt(Instant.ofEpochSecond(1)).expiresAt(Instant.ofEpochSecond(2)).build());
+        // Standalone MVC receives the post-authentication principal; no decoder/filter runs here.
+        // The single-argument constructor alone intentionally does not authenticate a JWT.
+        authentication.setAuthenticated(true);
+        return authentication;
+    }
+}

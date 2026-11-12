@@ -1,0 +1,155 @@
+package cn.jia.agent.api;
+
+import cn.jia.agent.entity.PersonalWorkspaceViews;
+import cn.jia.agent.service.PersonalWorkspaceService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+
+import java.time.Instant;
+import java.util.List;
+
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+class PersonalWorkspaceControllerPreviewTest {
+    private static final String CLIENT = "client-a";
+    private static final String OWNER = "owner-a";
+    private static final String FILE = "file-a";
+
+    private PersonalWorkspaceService service;
+    private MockMvc mvc;
+
+    @BeforeEach
+    void setUp() {
+        service = mock(PersonalWorkspaceService.class);
+        mvc = MockMvcBuilders.standaloneSetup(new PersonalWorkspaceController(service)).build();
+    }
+
+    @Test
+    void trustedTenantIsNotOverriddenByUploadParameters() throws Exception {
+        var token = Jwt.withTokenValue("fixture").header("alg", "none")
+                .claim("jiacn", OWNER).claim("client_id", CLIENT).claim("tenant_id", "1").build();
+        mvc.perform(multipart("/agent/personal-workspace/files")
+                .file(new MockMultipartFile("file", "note.txt", "text/plain", new byte[]{1}))
+                .param("tenant_id", "0").param("tenantId", "0")
+                .header("Idempotency-Key", "gray-upload")
+                .principal(new JwtAuthenticationToken(token, List.of())))
+                .andExpect(status().isCreated());
+        verify(service).create(org.mockito.ArgumentMatchers.eq(
+                new PersonalWorkspaceService.Scope("1", CLIENT, OWNER)), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void invalidOrConflictingTenantClaimsNeverReachTheService() throws Exception {
+        for (String tenant : new String[]{"", " 1", "1\n"}) {
+            var token = Jwt.withTokenValue("fixture").header("alg", "none")
+                    .claim("jiacn", OWNER).claim("client_id", CLIENT).claim("tenant_id", tenant).build();
+            mvc.perform(get("/agent/personal-workspace/files/" + FILE)
+                    .principal(new JwtAuthenticationToken(token, List.of())))
+                    .andExpect(status().isNotFound());
+        }
+        var conflicting = Jwt.withTokenValue("fixture").header("alg", "none")
+                .claim("jiacn", OWNER).claim("client_id", CLIENT)
+                .claim("tenant_id", "1").claim("tenantId", "0").build();
+        mvc.perform(get("/agent/personal-workspace/files/" + FILE)
+                .principal(new JwtAuthenticationToken(conflicting, List.of())))
+                .andExpect(status().isNotFound());
+        org.mockito.Mockito.verifyNoInteractions(service);
+    }
+
+    @Test
+    void arbitraryUploadMimeIsPreservedAndUnknownMissingMimeUsesOctetStream() throws Exception {
+        String[][] cases = {{"README", null, "application/octet-stream"},
+                {"data.custom", "application/octet-stream", "application/octet-stream"},
+                {"page.html", "text/html", "text/html"}, {"renamed.mp3", "video/mp4", "video/mp4"}};
+        for (int i = 0; i < cases.length; i++) {
+            String[] item = cases[i];
+            mvc.perform(multipart("/agent/personal-workspace/files")
+                    .file(new MockMultipartFile("file", item[0], item[1], new byte[]{1, 2, 3}))
+                    .header("Idempotency-Key", "arbitrary-" + i).principal(jwt()))
+                    .andExpect(status().isCreated());
+            verify(service).create(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.argThat(
+                    command -> item[0].equals(command.originalFilename()) && item[2].equals(command.contentMimeType())));
+        }
+    }
+
+    @Test
+    void uploadInfersTextMimeWhenBrowserMultipartMetadataIsMissing() throws Exception {
+        PersonalWorkspaceService.Scope scope = new PersonalWorkspaceService.Scope("0", CLIENT, OWNER);
+        MockMultipartFile text = new MockMultipartFile("file", "notes.txt", null,
+                "portable text".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        mvc.perform(multipart("/agent/personal-workspace/files")
+                        .file(text)
+                        .header("Idempotency-Key", "text-upload-key")
+                        .principal(jwt()))
+                .andExpect(status().isCreated());
+
+        verify(service).create(org.mockito.ArgumentMatchers.eq(scope),
+                org.mockito.ArgumentMatchers.argThat(command -> command != null
+                        && "notes.txt".equals(command.originalFilename())
+                        && "text/plain".equals(command.contentMimeType())
+                        && "text-upload-key".equals(command.idempotency().key())));
+    }
+
+    @Test
+    void previewMetadataRequiresExplicitPartsOptInAndKeepsLegacyCatalogByDefault()
+            throws Exception {
+        PersonalWorkspaceViews.PreviewView multipart = new PersonalWorkspaceViews.PreviewView(
+                "READY",
+                List.of(
+                        new PersonalWorkspaceViews.PreviewPart("slide-1", "image/png"),
+                        new PersonalWorkspaceViews.PreviewPart("slide-2", "image/png"),
+                        new PersonalWorkspaceViews.PreviewPart("content", "text/plain")),
+                false, null);
+        PersonalWorkspaceService.Scope scope =
+                new PersonalWorkspaceService.Scope("0", CLIENT, OWNER);
+        when(service.preview(scope, FILE, 1)).thenReturn(multipart);
+
+        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
+                        FILE, 1).principal(jwt()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.parts.length()").value(3))
+                .andExpect(jsonPath("$.data.parts[0].partId").value("slide-1"))
+                .andExpect(jsonPath("$.data.parts[0].contentMimeType").value("image/png"));
+
+        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
+                        FILE, 1).queryParam("view", "parts").principal(jwt()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.parts.length()").value(3))
+                .andExpect(jsonPath("$.data.parts[0].partId").value("slide-1"))
+                .andExpect(jsonPath("$.data.parts[1].partId").value("slide-2"))
+                .andExpect(jsonPath("$.data.parts[2].partId").value("content"));
+
+        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
+                        FILE, 1).queryParam("view", "legacy").principal(jwt()))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
+                        FILE, 1).queryParam("view", "parts")
+                        .queryParam("actorAgentId", "foreign").principal(jwt()))
+                .andExpect(status().isBadRequest());
+
+        verify(service, times(2)).preview(scope, FILE, 1);
+    }
+
+    private static JwtAuthenticationToken jwt() {
+        Jwt token = Jwt.withTokenValue("token").claim("tenant_id", "0")
+                .header("alg", "none")
+                .claim("jiacn", OWNER)
+                .claim("client_id", CLIENT)
+                .claim("sub", "subject-a")
+                .issuedAt(Instant.now()).expiresAt(Instant.now().plusSeconds(60)).build();
+        return new JwtAuthenticationToken(token, List.of());
+    }
+}

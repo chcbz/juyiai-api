@@ -1,0 +1,28 @@
+-- W06 immutable successful preview settlement only. Held/refunded remain W04 funding projections.
+CREATE TABLE IF NOT EXISTS agent_task_bounty_settlement (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  tenant_id VARCHAR(50) NOT NULL,
+  client_id VARCHAR(50) NOT NULL,
+  principal_type VARCHAR(20) NOT NULL,
+  principal_id VARCHAR(100) NOT NULL,
+  idempotency_key VARBINARY(36) NOT NULL,
+  request_hash BINARY(32) NOT NULL,
+  task_id VARCHAR(100) NOT NULL,
+  quote_id VARCHAR(100) NOT NULL,
+  agent_id VARCHAR(100) NOT NULL,
+  escrow_id VARCHAR(100) NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  gross_wen BIGINT NOT NULL,
+  actual_compute_wen BIGINT NOT NULL,
+  platform_fee_wen BIGINT NOT NULL,
+  agent_payout_wen BIGINT NOT NULL,
+  refunded_wen BIGINT NOT NULL,
+  task_version BIGINT NOT NULL,
+  funding_version BIGINT NOT NULL,
+  escrow_version BIGINT NOT NULL,
+  settled_at BIGINT NOT NULL,
+  transaction_ids TEXT NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_bounty_settlement_task (tenant_id,client_id,task_id),
+  UNIQUE KEY uk_bounty_settlement_actor_key (tenant_id,client_id,principal_type,principal_id,idempotency_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

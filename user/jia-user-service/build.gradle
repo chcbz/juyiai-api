@@ -1,0 +1,24 @@
+dependencies {
+    api project(':base:jia-base-api')
+    api project(':user:jia-user-api')
+    implementation project(':point:jia-point-api')
+    api project(':isp:jia-isp-api')
+    api project(':sms:jia-sms-api')
+    implementation project(':common:jia-common-service')
+    implementation project(':user:jia-user-mapper')
+    compileOnly(libs.spring.redis)
+    compileOnly(libs.jodd)
+    compileOnly(libs.spring.security.config)
+    compileOnly(libs.spring.security.web)
+    testImplementation project(':common:jia-common-test')
+    testImplementation(libs.spring.ldap)
+    testImplementation(libs.jodd)
+    testImplementation(libs.spring.security.config)
+    testImplementation(libs.spring.security.web)
+    testImplementation(libs.jackson.databind)
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-user-service'

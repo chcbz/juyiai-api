@@ -1,0 +1,38 @@
+-- Additive Chat-side operation journal. Source bytes remain in the existing private workspace root.
+CREATE TABLE IF NOT EXISTS chat_conversation_archive_operation (
+  operation_id VARCHAR(64) NOT NULL,
+  tenant_id VARCHAR(50) NOT NULL,
+  owner_jiacn VARCHAR(50) NOT NULL,
+  client_id VARCHAR(50) NOT NULL,
+  conversation_id VARCHAR(100) NOT NULL,
+  conversation_generation BIGINT DEFAULT NULL,
+  idempotency_key VARCHAR(160) NOT NULL,
+  request_sha256 CHAR(64) NOT NULL,
+  source_kind VARCHAR(20) NOT NULL DEFAULT 'assetRef',
+  asset_id VARCHAR(64) DEFAULT NULL,
+  asset_revision BIGINT DEFAULT NULL,
+  message_id VARCHAR(20) DEFAULT NULL,
+  message_revision BIGINT DEFAULT NULL,
+  selection_start_code_point INT DEFAULT NULL,
+  selection_end_code_point INT DEFAULT NULL,
+  source_sha256 CHAR(64) DEFAULT NULL,
+  source_snapshot_key CHAR(64) DEFAULT NULL,
+  source_text TEXT NULL,
+  state VARCHAR(20) NOT NULL,
+  workspace_operation_id VARCHAR(100) DEFAULT NULL,
+  file_id VARCHAR(100) DEFAULT NULL,
+  file_version INT DEFAULT NULL,
+  error_code VARCHAR(64) DEFAULT NULL,
+  message VARCHAR(255) DEFAULT NULL,
+  row_revision BIGINT NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  PRIMARY KEY (operation_id),
+  UNIQUE KEY uk_chat_archive_key (tenant_id,owner_jiacn,client_id,idempotency_key),
+  UNIQUE KEY uk_chat_archive_source (tenant_id,owner_jiacn,client_id,asset_id,asset_revision),
+  UNIQUE KEY uk_chat_archive_source_snapshot
+    (tenant_id,owner_jiacn,client_id,source_snapshot_key),
+  UNIQUE KEY uk_chat_archive_workspace (tenant_id,owner_jiacn,client_id,workspace_operation_id),
+  KEY idx_chat_archive_conversation
+    (tenant_id,owner_jiacn,client_id,conversation_id,updated_at,operation_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

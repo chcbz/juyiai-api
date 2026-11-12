@@ -1,0 +1,140 @@
+package cn.jia.agent.dao.impl;
+
+import cn.jia.agent.dao.AgentRuntimeDao;
+import cn.jia.agent.common.AgentConstants;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.mapper.AgentRuntimeMapper;
+import cn.jia.common.dao.BaseDaoImpl;
+import cn.jia.core.util.StringUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import jakarta.inject.Named;
+
+import java.util.List;
+
+@Named
+public class AgentRuntimeDaoImpl extends BaseDaoImpl<AgentRuntimeMapper, AgentRuntimeEntity> implements AgentRuntimeDao {
+    @jakarta.inject.Inject
+    private cn.jia.core.security.FixedTenantAdmissionPolicy partition;
+
+    private LambdaQueryWrapper<AgentRuntimeEntity> presencePartition() {
+        var query = new LambdaQueryWrapper<AgentRuntimeEntity>()
+                .eq(AgentRuntimeEntity::getTenantId, partition.businessTenantId())
+                .apply("BINARY tenant_id=BINARY {0}", partition.businessTenantId());
+        if (partition.clientId() != null) query.eq(AgentRuntimeEntity::getClientId, partition.clientId())
+                .apply("BINARY client_id=BINARY {0}", partition.clientId());
+        return query;
+    }
+
+    @Override
+    public int updateRegistration(AgentRuntimeEntity entity) {
+        // The service holds the authorized runtime row lock. Include nullable model in this
+        // existing write; ordinary updateById deliberately does not update that field.
+        return baseMapper.update(entity, new com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<AgentRuntimeEntity>()
+                .eq(AgentRuntimeEntity::getId, entity.getId())
+                .set(AgentRuntimeEntity::getExecutionModel, entity.getExecutionModel()));
+    }
+
+    @Override
+    public AgentRuntimeEntity findInScope(String tenantId, String clientId, String agentId) {
+        requireExactId(tenantId, "tenantId"); requireExactId(clientId, "clientId"); requireExactId(agentId, "agentId");
+        return baseMapper.findInScope(tenantId, clientId, agentId);
+    }
+
+    @Override
+    public AgentRuntimeEntity lockInScope(String tenantId, String clientId, String agentId) {
+        requireExactId(tenantId, "tenantId"); requireExactId(clientId, "clientId"); requireExactId(agentId, "agentId");
+        return baseMapper.lockInScope(tenantId, clientId, agentId);
+    }
+
+    @Override
+    public AgentRuntimeEntity findByAgentId(String agentId) {
+        requireExactId(agentId, "agentId");
+        return baseMapper.findExactByAgentId(agentId);
+    }
+
+    @Override
+    public AgentRuntimeEntity findByAgentIdForUpdate(String agentId) {
+        requireExactId(agentId, "agentId");
+        return baseMapper.findExactByAgentIdForUpdate(agentId);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findByAgentIds(java.util.Set<String> agentIds) {
+        if (agentIds.isEmpty()) return List.of();
+        return baseMapper.selectList(presencePartition()
+                .in(AgentRuntimeEntity::getAgentId, agentIds));
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findByStatusAndAbility(String status, String ability) {
+        LambdaQueryWrapper<AgentRuntimeEntity> wrapper = new LambdaQueryWrapper<>();
+        if (!StringUtil.isBlank(status)) {
+            wrapper.eq(AgentRuntimeEntity::getStatus, status);
+        }
+        if (!StringUtil.isBlank(ability)) {
+            wrapper.like(AgentRuntimeEntity::getAbilities, "\"" + ability + "\"");
+        }
+        wrapper.orderByDesc(AgentRuntimeEntity::getLastSeenAt);
+        return baseMapper.selectList(wrapper);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findRosterByOwner(String tenantId, String clientId, String jiacn, String status, String ability) {
+        requireExactId(tenantId, "tenantId");
+        requireExactId(clientId, "clientId");
+        requireExactId(jiacn, "jiacn");
+        return baseMapper.findActiveRosterByOwner(tenantId, clientId, jiacn, status, ability);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findCandidateRosterByOwner(String tenantId, String clientId, String jiacn) {
+        requireExactId(tenantId, "tenantId");
+        requireExactId(clientId, "clientId");
+        requireExactId(jiacn, "jiacn");
+        return baseMapper.findCandidateRosterByOwner(tenantId, clientId, jiacn);
+    }
+
+    @Override
+    public int attachReleasedBinding(long runtimeId, long bindingId, String ownerJiacn, long attachedAt) {
+        return baseMapper.attachReleasedBinding(runtimeId, bindingId, ownerJiacn, attachedAt);
+    }
+
+    @Override
+    public int clearBindingAfterUnbind(long runtimeId, String agentId, long bindingId,
+            String clientId, String ownerJiacn, long detachedAt) {
+        if (runtimeId <= 0 || bindingId <= 0 || detachedAt <= 0) {
+            throw new IllegalArgumentException("runtime detach coordinates are invalid");
+        }
+        requireExactId(agentId, "agentId");
+        requireExactId(clientId, "clientId");
+        requireExactId(ownerJiacn, "ownerJiacn");
+        return baseMapper.clearBindingAfterUnbind(
+                runtimeId, agentId, bindingId, clientId, ownerJiacn, detachedAt);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findMapVisible(String tenantId, String clientId) {
+        requireExactId(tenantId, "tenantId");
+        requireExactId(clientId, "clientId");
+        return baseMapper.findMapVisibleByExactClient(tenantId, clientId);
+    }
+
+    @Override
+    public List<AgentRuntimeEntity> findHeartbeatTimedOut(long cutoffTime) {
+        return baseMapper.selectList(presencePartition()
+                .ne(AgentRuntimeEntity::getStatus, "offline")
+                .ne(AgentRuntimeEntity::getAgentId, AgentConstants.BUILTIN_SONGJIANG_AGENT_ID)
+                .and(wrapper -> wrapper
+                        .isNull(AgentRuntimeEntity::getLastSeenAt)
+                        .or()
+                        .lt(AgentRuntimeEntity::getLastSeenAt, cutoffTime))
+                .orderByAsc(AgentRuntimeEntity::getLastSeenAt));
+    }
+    private void requireExactId(String value, String field) {
+        if (StringUtil.isBlank(value) || !value.equals(value.strip())
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException(field + " is invalid");
+        }
+    }
+
+}

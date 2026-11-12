@@ -1,0 +1,3486 @@
+package cn.jia.agent.service.impl;
+
+import cn.jia.agent.common.AgentConstants;
+import cn.jia.agent.common.AgentErrorConstants;
+import cn.jia.agent.common.TaskEventPayload;
+import cn.jia.agent.common.TaskEventType;
+import cn.jia.agent.config.AgentSceneFeatureFlags;
+import cn.jia.agent.dao.AgentPersonaBindingDao;
+import cn.jia.agent.dao.AgentPersonaDao;
+import cn.jia.agent.dao.AgentRuntimeDao;
+import cn.jia.agent.dao.AgentTaskMemberDao;
+import cn.jia.agent.dao.AgentTaskMetaDao;
+import cn.jia.agent.dao.AgentTaskNoteDao;
+import cn.jia.agent.dao.DialogueTemplateDao;
+import cn.jia.agent.entity.AgentCapabilityDTO;
+import cn.jia.agent.entity.AgentAbilitiesUpdateDTO;
+import cn.jia.agent.entity.AgentIdentityRegistryEntity;
+import cn.jia.agent.entity.AgentPersonaBindingEntity;
+import cn.jia.agent.entity.AgentPersonaEntity;
+import cn.jia.agent.entity.AgentRegisterDTO;
+import cn.jia.agent.entity.AgentRegisterResultDTO;
+import cn.jia.agent.entity.AgentRuntimeDTO;
+import cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.entity.AgentSceneStateDTO;
+import cn.jia.agent.entity.AgentStatsDTO;
+import cn.jia.agent.entity.AgentStatusDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationDTO;
+import cn.jia.agent.entity.AgentTaskTeamRecommendationRequestDTO;
+import cn.jia.agent.entity.AgentTaskEventWriteCommand;
+import cn.jia.agent.entity.AgentTaskCreateDTO;
+import cn.jia.agent.entity.AgentTaskDTO;
+import cn.jia.agent.entity.AgentTaskMemberEntity;
+import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.entity.AgentTaskNoteDTO;
+import cn.jia.agent.entity.AgentTaskNoteEntity;
+import cn.jia.agent.entity.AgentTaskSearchDTO;
+import cn.jia.agent.entity.DialogueRequestDTO;
+import cn.jia.agent.entity.DialogueTemplateEntity;
+import cn.jia.task.entity.TaskPlanEntity;
+import cn.jia.agent.event.AgentEventPublisher;
+import cn.jia.agent.mapper.AgentPersonaCatalogBindingRow;
+import cn.jia.agent.mapper.AgentTaskSearchRow;
+import cn.jia.agent.mapper.AgentTaskStatsRow;
+import cn.jia.agent.mapper.AgentTaskStatusCountRow;
+import cn.jia.agent.mapper.AgentTaskStatsScope;
+import cn.jia.agent.service.AgentIdentityService;
+import cn.jia.agent.service.AgentSceneService;
+import cn.jia.agent.service.AgentScopePublicationCoordinator;
+import cn.jia.agent.service.AgentTaskEventWriter;
+import cn.jia.agent.service.AgentTaskMutationTransaction;
+import cn.jia.agent.service.AgentTaskRequirementSnapshotService;
+import cn.jia.core.context.EsContext;
+import cn.jia.core.context.EsContextHolder;
+import cn.jia.core.util.JsonUtil;
+import cn.jia.oauth.service.ApiKeyService;
+import cn.jia.task.service.TaskService;
+import com.github.pagehelper.Page;
+import com.github.pagehelper.PageHelper;
+import com.github.pagehelper.PageInfo;
+import cn.jia.test.BaseMockTest;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.Mock;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
+
+class AgentServiceImplTest extends BaseMockTest {
+    @Mock
+    AgentRuntimeDao agentRuntimeDao;
+    @Mock
+    AgentIdentityService agentIdentityService;
+    @Mock
+    AgentPersonaDao agentPersonaDao;
+    @Mock
+    AgentPersonaBindingDao agentPersonaBindingDao;
+    @Mock
+    AgentTaskMetaDao agentTaskMetaDao;
+    @Mock
+    AgentTaskMemberDao agentTaskMemberDao;
+    @Mock
+    AgentLegacyTaskCompatibilityService legacyTaskCompatibilityService;
+    @Mock
+    AgentTaskNoteDao agentTaskNoteDao;
+    @Mock
+    DialogueTemplateDao dialogueTemplateDao;
+    @Mock
+    ObjectProvider<AgentEventPublisher> eventPublisherProvider;
+    @Mock
+    ObjectProvider<TaskService> taskServiceProvider;
+    @Mock
+    ObjectProvider<ApiKeyService> apiKeyServiceProvider;
+    @Mock
+    ObjectProvider<AgentSceneService> sceneServiceProvider;
+    @Mock
+    ApiKeyService apiKeyService;
+    @Mock
+    TaskService taskService;
+    @Mock
+    AgentEventPublisher eventPublisher;
+    @Mock
+    AgentSceneService sceneService;
+    AgentScopePublicationCoordinator scopePublicationCoordinator;
+    @Mock
+    AgentTaskMutationTransaction mutationTransaction;
+    @Mock
+    AgentTaskEventWriter taskEventWriter;
+    @Mock
+    AgentCommandTransportCapture commandTransportCapture;
+    private final AtomicReference<AgentTaskMetaEntity> lastInsertedTask = new AtomicReference<>();
+    AgentServiceImpl agentService;
+    @Mock
+    cn.jia.agent.service.AgentExternalServicePolicyService externalServicePolicies;
+
+    @BeforeEach
+    void setUpAgentService() {
+        SecurityContextHolder.clearContext();
+        EsContext strictTaskContext = new EsContext();
+        strictTaskContext.setTenantId("0");
+        strictTaskContext.setJiacn("jiacn");
+        strictTaskContext.setClientId("fixture-client_id-1");
+        EsContextHolder.setContext(strictTaskContext);
+        scopePublicationCoordinator = new AgentScopePublicationCoordinator();
+        org.mockito.Mockito.lenient().when(agentPersonaBindingDao.insert(any(AgentPersonaBindingEntity.class)))
+                .thenAnswer(invocation -> {
+                    AgentPersonaBindingEntity binding = invocation.getArgument(0);
+                    if (binding.getId() == null) {
+                        binding.setId(1L);
+                    }
+                    return 1;
+                });
+        org.mockito.Mockito.lenient().when(agentIdentityService.provisionOpaqueIdentity(
+                        any(AgentPersonaBindingEntity.class), any(String.class)))
+                .thenAnswer(invocation -> identity(invocation.<AgentPersonaBindingEntity>getArgument(0),
+                        AgentConstants.IDENTITY_STATUS_PROVISIONED));
+        agentService = new AgentServiceImpl(agentRuntimeDao, agentIdentityService, agentPersonaDao, agentPersonaBindingDao, agentTaskMetaDao,
+                agentTaskMemberDao, legacyTaskCompatibilityService, agentTaskNoteDao, dialogueTemplateDao, eventPublisherProvider, taskServiceProvider,
+                apiKeyServiceProvider, sceneServiceProvider, scopePublicationCoordinator,
+                new AgentSceneFeatureFlags(true, true), mutationTransaction, taskEventWriter,
+                new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null));
+        agentService.setExternalServicePolicies(externalServicePolicies);
+        AgentTaskRequirementSnapshotService snapshots = mock(AgentTaskRequirementSnapshotService.class);
+        agentService.setRequirementSnapshots(snapshots);
+        org.mockito.Mockito.lenient().when(snapshots.captureOnCreate(any(),anyString(),anyString(),any()))
+                .thenAnswer(i -> {
+                    var scope=(cn.jia.agent.service.AgentTaskExecutionGrantService.Scope)i.getArgument(0);
+                    return new AgentTaskRequirementSnapshotService.Snapshot(
+                            scope.tenantId(),scope.clientId(),scope.ownerJiacn(),i.getArgument(1),
+                            1L,i.getArgument(2),i.getArgument(3),"a".repeat(64),"CREATE");
+                });
+        org.mockito.Mockito.lenient().when(legacyTaskCompatibilityService.resolveAgentIds(
+                        any(), any(), any(), any()))
+                .thenAnswer(invocation -> List.copyOf(invocation.<List<String>>getArgument(3)));
+        org.mockito.Mockito.lenient().when(legacyTaskCompatibilityService.resolveAgentId(
+                        any(), any(), any(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(3));
+        org.mockito.Mockito.lenient().when(mutationTransaction.executeWithLockedTaskRootInOwnerScope(
+                        anyString(), anyString(), anyString(), anyString(), any()))
+                .thenAnswer(invocation -> {
+                    AgentTaskMetaEntity root = agentTaskMetaDao.findByTaskIdInOwnerScope(
+                            invocation.getArgument(0), invocation.getArgument(1),
+                            invocation.getArgument(2), invocation.getArgument(3));
+                    AgentTaskMutationTransaction.LockedTaskMutation<?> mutation = invocation.getArgument(4);
+                    return mutation.apply(root);
+                });
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.updateStatusByVersionInOwnerScope(
+                        anyString(), anyString(), anyString(), anyString(), anyLong(),
+                        anyString(), any(), any(), any()))
+                .thenReturn(1);
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.reserveOpenTaskRootInOwnerScope(
+                        anyString(), anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(1);
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.rekeyReservedTaskRootInOwnerScope(
+                        anyString(), anyString(), anyString(), anyString(), anyString(), anyLong()))
+                .thenReturn(1);
+        org.mockito.Mockito.lenient().when(mutationTransaction.executeAfterTaskRootReservationInOwnerScope(
+                        anyString(), anyString(), anyString(), anyString(), any(), any()))
+                .thenAnswer(invocation -> {
+                    AgentTaskMutationTransaction.TaskRootReservation reservation = invocation.getArgument(4);
+                    boolean created = reservation.reserve() == 1;
+                    AgentTaskMetaEntity root = lastInsertedTask.get();
+                    if (root == null) {
+                        root = agentTaskMetaDao.findByTaskIdInOwnerScope(
+                                invocation.getArgument(0), invocation.getArgument(1),
+                                invocation.getArgument(2), invocation.getArgument(3));
+                    }
+                    AgentTaskMutationTransaction.ReservedTaskMutation<?> mutation = invocation.getArgument(5);
+                    return mutation.apply(root, created);
+                });
+        org.mockito.Mockito.lenient().when(legacyTaskCompatibilityService.assignResolved(
+                        any(), any(), any(), any(), any(), anyBoolean(),
+                        any(AgentLegacyTaskCompatibilityService.AssignmentPrecommitValidator.class)))
+                .thenAnswer(invocation -> {
+                    List<String> ids = invocation.getArgument(4);
+                    AgentTaskMetaEntity lockedTask = agentTaskMetaDao.findByTaskIdInOwnerScope(
+                            invocation.getArgument(0), invocation.getArgument(1),
+                            invocation.getArgument(2), invocation.getArgument(3));
+                    AgentLegacyTaskCompatibilityService.AssignmentPrecommitValidator validator =
+                            invocation.getArgument(6);
+                    validator.validate(lockedTask, ids);
+                    return new AgentLegacyTaskCompatibilityService.AssignOutcome(
+                            ids, true, "evt-task-assigned", 1_000L);
+                });
+        org.mockito.Mockito.lenient().when(agentRuntimeDao.updateById(any())).thenReturn(1);
+        org.mockito.Mockito.lenient().when(agentIdentityService.lockActiveCanonicalAgentIdsInScope(
+                        any(), any(), any(), any()))
+                .thenAnswer(invocation -> List.copyOf(invocation.<List<String>>getArgument(3)));
+        org.mockito.Mockito.lenient().when(agentRuntimeDao.findByAgentIdForUpdate(any()))
+                .thenAnswer(invocation -> agentRuntimeDao.findByAgentId(invocation.getArgument(0)));
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.insert(any(AgentTaskMetaEntity.class)))
+                .thenAnswer(invocation -> {
+                    AgentTaskMetaEntity meta = invocation.getArgument(0);
+                    if (meta.getId() == null) meta.setId(1L);
+                    if (meta.getCreateTime() == null) meta.setCreateTime(1_000L);
+                    if (meta.getUpdateTime() == null) meta.setUpdateTime(1_000L);
+                    lastInsertedTask.set(meta);
+                    return 1;
+                });
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.updateById(any())).thenReturn(1);
+        org.mockito.Mockito.lenient().when(agentTaskNoteDao.insert(any(AgentTaskNoteEntity.class)))
+                .thenAnswer(invocation -> {
+                    AgentTaskNoteEntity note = invocation.getArgument(0);
+                    if (note.getId() == null) note.setId(1L);
+                    return 1;
+                });
+    }
+
+    @Test
+    void legacyTaskLookupUsesProcessTenantNotMutableContextTenant() {
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "fixture-client_id-1"));
+        EsContextHolder.getContext().setTenantId("0");
+        assertThrows(AgentServiceImpl.AgentBizException.class, () -> agentService.getTask("gray-task"));
+        verify(agentTaskMetaDao).findByTaskIdInOwnerScope("1", "fixture-client_id-1", "jiacn", "gray-task");
+        verify(agentTaskMetaDao, never()).findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "gray-task");
+    }
+
+    @Test
+    void productionTaskLookupCannotBeRedirectedByContextTenant() {
+        EsContextHolder.getContext().setTenantId("1");
+        assertThrows(AgentServiceImpl.AgentBizException.class, () -> agentService.getTask("production-task"));
+        verify(agentTaskMetaDao).findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "production-task");
+        verify(agentTaskMetaDao, never()).findByTaskIdInOwnerScope("1", "fixture-client_id-1", "jiacn", "production-task");
+    }
+
+    @Test
+    void legacyExplicitOwnershipProofRetainsFlagsWithoutMatchingAmbientContext() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setTenantId("0");
+        runtime.setAgentId("agent-owned");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("tenant-a");
+        runtime.setStatus(AgentConstants.STATUS_ONLINE);
+        runtime.setBindingId(1L);
+        when(agentRuntimeDao.findByAgentId("agent-owned")).thenReturn(runtime);
+        AgentPersonaBindingEntity active = binding("agent-owned", "wuyong");
+        active.setClientId("client-a");
+        active.setJiacn("tenant-a");
+        AgentIdentityRegistryEntity identity = identity(active, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        when(agentIdentityService.requireCanonicalAgentIdInScope(
+                "0", "client-a", "tenant-a", "agent-owned")).thenReturn("agent-owned");
+        when(agentIdentityService.requireActiveIdentityForBinding(
+                "0", "client-a", "tenant-a", 1L, "agent-owned")).thenReturn(identity);
+        AgentTaskMetaEntity completed = scopedTaskRow("task-completed", "0", "client-a");
+        completed.setOwnerJiacn("tenant-a");
+        completed.setAssignedAgentId("agent-owned");
+        completed.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        when(agentTaskMetaDao.findByAgentInOwnerScope(
+                "0", "client-a", "tenant-a", "agent-owned", 500))
+                .thenReturn(List.of(completed));
+
+        AgentRuntimeDTO read = agentService.requireApiKeyOwnedAgent(
+                "client-a", "tenant-a", "agent-owned");
+        AgentRuntimeDTO forUpdate = agentService.requireApiKeyOwnedAgentForUpdate(
+                "client-a", "tenant-a", "agent-owned");
+
+        assertEquals("agent-owned", read.getAgentId());
+        assertTrue(read.getBoundToMe());
+        assertTrue(read.getCanOperate());
+        assertEquals(1, read.getStats().getCompletedTaskCount());
+        assertTrue(forUpdate.getBoundToMe());
+        assertTrue(forUpdate.getCanOperate());
+        assertEquals(1, forUpdate.getStats().getCompletedTaskCount());
+        verify(agentTaskMetaDao, times(2)).findByAgentInOwnerScope(
+                "0", "client-a", "tenant-a", "agent-owned", 500);
+    }
+
+    @Test
+    void rosterOwnedAgentSupportsExactTenantOneReadProof() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setTenantId("1");
+        runtime.setAgentId("agent-owned");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setStatus(AgentConstants.STATUS_ONLINE);
+        runtime.setBindingId(1L);
+        runtime.setPersonaCode("wuyong");
+        when(agentRuntimeDao.findByAgentId("agent-owned")).thenReturn(runtime);
+        AgentPersonaBindingEntity active = binding("agent-owned", "wuyong");
+        active.setTenantId("1");
+        active.setClientId("client-a");
+        active.setJiacn("owner-a");
+        AgentIdentityRegistryEntity identity = identity(active, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        when(agentIdentityService.requireCanonicalAgentIdInScope(
+                "1", "client-a", "owner-a", "agent-owned")).thenReturn("agent-owned");
+        when(agentIdentityService.requireActiveIdentityForBinding(
+                "1", "client-a", "owner-a", 1L, "agent-owned")).thenReturn(identity);
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.findByAgentInOwnerScope(
+                anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("legacy statistics unavailable"));
+
+        AgentRuntimeDTO result = agentService.requireRosterOwnedAgent(
+                "1", "client-a", "owner-a", "agent-owned");
+
+        assertEquals("agent-owned", result.getAgentId());
+        assertEquals("owner-a", result.getOwnerJiacn());
+        assertEquals(Boolean.FALSE, result.getSystemAgent());
+        assertEquals(Boolean.TRUE, result.getBoundToMe());
+        assertEquals(Boolean.TRUE, result.getCanOperate());
+        assertNull(result.getStats());
+        verifyNoInteractions(agentPersonaDao);
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneCapabilitiesUsePublicSongjiangWhenLegacyPersonaDaoIsUnavailable() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "吴用", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        runtime.setTenantId("1");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setBindingId(1L);
+        runtime.setPersonaCode("wuyong");
+        runtime.setPersonaName("吴用");
+        when(agentRuntimeDao.findRosterByOwner(
+                "1", "client-a", "owner-a", null, null)).thenReturn(List.of(runtime));
+
+        List<AgentCapabilityDTO> result = agentService.listCapabilities();
+
+        assertEquals(2, result.size());
+        assertEquals("agent-owned", result.getFirst().getAgentId());
+        assertEquals(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID, result.getLast().getAgentId());
+        assertTrue(result.getLast().getRoles().contains("leader"));
+        verify(agentPersonaDao).findCatalogPersona("1", "client-a", "wuyong");
+        verifyNoMoreInteractions(agentPersonaDao);
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneBuiltinGetUsesPublicSongjiangWhenLegacyPersonaDaoIsUnavailable() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentRuntimeEntity system = new AgentRuntimeEntity();
+        system.setTenantId("0");
+        system.setAgentId(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID);
+        system.setPersonaCode(AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE);
+        system.setPersonaName("宋江");
+        system.setStatus(AgentConstants.STATUS_ONLINE);
+        when(agentRuntimeDao.findByAgentId(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID))
+                .thenReturn(system);
+
+        AgentRuntimeDTO result = agentService.get(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID);
+
+        assertEquals("及时雨", result.getTitle());
+        assertTrue(result.getSystemAgent());
+        assertEquals(0, result.getStats().getCompletedTaskCount());
+        verifyNoInteractions(agentPersonaDao, agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneRegisterPublicationUsesPublicSongjiangWhenLegacyPersonaDaoIsUnavailable() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentPersonaBindingEntity active = binding("agent-owned", "wuyong");
+        active.setTenantId("1");
+        active.setClientId("client-a");
+        active.setJiacn("owner-a");
+        AgentIdentityRegistryEntity identity = identity(
+                active, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "吴用", AgentConstants.STATUS_OFFLINE, "[\"planning\"]");
+        runtime.setId(5L);
+        runtime.setTenantId("1");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setBindingId(active.getId());
+        runtime.setPersonaCode("wuyong");
+        runtime.setPersonaName("吴用");
+        runtime.setRuntimeInstallationId("review-inst");
+        runtime.setRuntimeHostId("review-host");
+        runtime.setRuntimeInstanceId("review-instance");
+        runtime.setRuntimeSessionGeneration(1L);
+        runtime.setTokenHash("urs1:isolated");
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "1", "client-a", "owner-a", "agent-owned")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(active);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenReturn(identity);
+        when(agentRuntimeDao.lockInScope("1", "client-a", "agent-owned")).thenReturn(runtime);
+        when(agentRuntimeDao.findByAgentId("agent-owned")).thenReturn(runtime);
+        when(agentRuntimeDao.findRosterByOwner(
+                "1", "client-a", "owner-a", null, null)).thenReturn(List.of(runtime));
+        when(agentPersonaDao.findCatalogPersona("1", "client-a", "wuyong"))
+                .thenReturn(null);
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-owned");
+
+        AgentRegisterResultDTO result = agentService.register(request);
+
+        assertEquals("agent-owned", result.getAgentId());
+        assertEquals(AgentConstants.STATUS_ONLINE, result.getStatus());
+        // Admission, status projection and capability projection use the scoped catalog.
+        verify(agentPersonaDao, times(3)).findCatalogPersona("1", "client-a", "wuyong");
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneGetUsesPublicStaticStatsWithoutLegacyMetadataOrTasks() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "吴用", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        runtime.setTenantId("1");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setBindingId(1L);
+        runtime.setPersonaCode("wuyong");
+        runtime.setPersonaName("吴用");
+        when(agentRuntimeDao.findByAgentId("agent-owned")).thenReturn(runtime);
+        AgentPersonaBindingEntity active = binding("agent-owned", "wuyong");
+        active.setTenantId("1");
+        active.setClientId("client-a");
+        active.setJiacn("owner-a");
+        AgentIdentityRegistryEntity identity = identity(active, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        when(agentIdentityService.requireCanonicalAgentIdInScope(
+                "1", "client-a", "owner-a", "agent-owned")).thenReturn("agent-owned");
+        when(agentIdentityService.requireActiveIdentityForBinding(
+                "1", "client-a", "owner-a", 1L, "agent-owned")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(active);
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.findByAgentInOwnerScope(
+                anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("legacy statistics unavailable"));
+
+        AgentRuntimeDTO result = agentService.get("agent-owned");
+
+        assertEquals(Boolean.TRUE, result.getBoundToMe());
+        assertEquals(Boolean.TRUE, result.getCanOperate());
+        assertEquals("智多星", result.getTitle());
+        assertNotNull(result.getStats().getPower());
+        assertEquals(0, result.getStats().getCompletedTaskCount());
+        assertEquals(0, result.getStats().getFailedTaskCount());
+        verify(agentPersonaDao).findCatalogPersona("1", "client-a", "wuyong");
+        verifyNoMoreInteractions(agentPersonaDao);
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneRosterBatchUsesPublicStaticStatsWithoutTaskAggregation() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "吴用", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        runtime.setTenantId("1");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setBindingId(1L);
+        runtime.setPersonaCode("wuyong");
+        runtime.setPersonaName("吴用");
+        when(agentRuntimeDao.findRosterByOwner(
+                "1", "client-a", "owner-a", null, null)).thenReturn(List.of(runtime));
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.findStatsByAgents(any()))
+                .thenThrow(new IllegalStateException("legacy statistics unavailable"));
+
+        PageInfo<AgentRuntimeDTO> result = agentService.listRoster(null, null, 1, 50);
+
+        AgentRuntimeDTO projected = result.getList().getFirst();
+        assertEquals("智多星", projected.getTitle());
+        assertNotNull(projected.getStats().getPower());
+        assertEquals(0, projected.getStats().getCompletedTaskCount());
+        assertEquals(0, projected.getStats().getFailedTaskCount());
+        verify(agentPersonaDao).findCatalogProjection("1", "client-a");
+        verifyNoMoreInteractions(agentPersonaDao);
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneMapBatchUsesPublicStaticStatsWithoutTaskAggregation() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "吴用", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        runtime.setTenantId("1");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setBindingId(1L);
+        runtime.setPersonaCode("wuyong");
+        runtime.setPersonaName("吴用");
+        when(agentRuntimeDao.findMapVisible("1", "client-a")).thenReturn(List.of(runtime));
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.findStatsByAgents(any()))
+                .thenThrow(new IllegalStateException("legacy statistics unavailable"));
+
+        List<AgentRuntimeDTO> result = agentService.listMapAgents();
+
+        AgentRuntimeDTO projected = result.getFirst();
+        assertEquals("agent-owned", projected.getAgentId());
+        assertEquals(Boolean.TRUE, projected.getBoundToMe());
+        assertEquals(Boolean.TRUE, projected.getCanOperate());
+        assertEquals("智多星", projected.getTitle());
+        assertNotNull(projected.getStats().getPower());
+        assertEquals(0, projected.getStats().getCompletedTaskCount());
+        assertEquals(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID, result.getLast().getAgentId());
+        verify(agentPersonaDao).findCatalogProjection("1", "client-a");
+        verifyNoMoreInteractions(agentPersonaDao);
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void tenantOneLocalBindFullDtoDoesNotReadLegacyTaskStats() {
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("1", "client-a"));
+        context.setTenantId("1");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        when(agentPersonaDao.findCatalogPersona("1", "client-a", "wuyong"))
+                .thenReturn(null);
+        org.mockito.Mockito.lenient().when(agentTaskMetaDao.findByAgentInOwnerScope(
+                anyString(), anyString(), anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("legacy statistics unavailable"));
+
+        AgentRuntimeDTO result = agentService.bindPersona(
+                "1", "client-a", "owner-a", "wuyong");
+
+        assertEquals("智多星", result.getTitle());
+        assertEquals(Boolean.TRUE, result.getBoundToMe());
+        assertEquals(Boolean.TRUE, result.getCanOperate());
+        assertEquals(0, result.getStats().getCompletedTaskCount());
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @ParameterizedTest
+    @MethodSource("foreignRosterScopes")
+    void rosterOwnedAgentRejectsForeignTenantClientOrOwner(
+            String tenantId, String clientId, String ownerJiacn) {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setTenantId("1");
+        runtime.setAgentId("agent-owned");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("owner-a");
+        runtime.setStatus(AgentConstants.STATUS_ONLINE);
+        runtime.setBindingId(1L);
+        when(agentRuntimeDao.findByAgentId("agent-owned")).thenReturn(runtime);
+        AgentPersonaBindingEntity active = binding("agent-owned", "wuyong");
+        active.setTenantId("1");
+        active.setClientId("client-a");
+        active.setJiacn("owner-a");
+        AgentIdentityRegistryEntity identity = identity(active, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        when(agentIdentityService.requireCanonicalAgentIdInScope(
+                tenantId, clientId, ownerJiacn, "agent-owned")).thenReturn("agent-owned");
+        when(agentIdentityService.requireActiveIdentityForBinding(
+                tenantId, clientId, ownerJiacn, 1L, "agent-owned")).thenReturn(identity);
+
+        AgentServiceImpl.AgentBizException denied = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.requireRosterOwnedAgent(
+                        tenantId, clientId, ownerJiacn, "agent-owned"));
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, denied.getCode());
+    }
+
+    static Stream<Arguments> foreignRosterScopes() {
+        return Stream.of(
+                Arguments.of("2", "client-a", "owner-a"),
+                Arguments.of("1", "client-b", "owner-a"),
+                Arguments.of("1", "client-a", "owner-b"));
+    }
+
+    @Test
+    void apiKeyOwnedAgentRejectsOtherClientOrTenantWithoutBindingLookup() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-other-scope");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("tenant-a");
+        runtime.setStatus(AgentConstants.STATUS_ONLINE);
+        when(agentRuntimeDao.findByAgentId("agent-other-scope")).thenReturn(runtime);
+
+        for (String[] scope : List.of(
+                new String[]{"client-b", "tenant-a"},
+                new String[]{"client-a", "tenant-b"})) {
+            AgentServiceImpl.AgentBizException denied = assertThrows(
+                    AgentServiceImpl.AgentBizException.class,
+                    () -> agentService.requireApiKeyOwnedAgent(
+                            scope[0], scope[1], "agent-other-scope"));
+            assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, denied.getCode());
+        }
+        verify(agentPersonaBindingDao, never())
+                .findActiveByClientJiacnAndAgentId(any(), any(), any());
+    }
+
+    @Test
+    void apiKeyOwnedAgentRejectsSystemAgentBeforeRuntimeLookup() {
+        AgentServiceImpl.AgentBizException denied = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.requireApiKeyOwnedAgent(
+                        "client-a", "tenant-a", AgentConstants.BUILTIN_SONGJIANG_AGENT_ID));
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, denied.getCode());
+        verify(agentRuntimeDao, never()).findByAgentId(any());
+        verify(agentPersonaBindingDao, never())
+                .findActiveByClientJiacnAndAgentId(any(), any(), any());
+    }
+
+    @Test
+    void apiKeyOwnedAgentRejectsMissingOrInactiveBinding() {
+        AgentRuntimeEntity runtime = new AgentRuntimeEntity();
+        runtime.setAgentId("agent-unbound");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("tenant-a");
+        runtime.setStatus(AgentConstants.STATUS_ONLINE);
+        runtime.setBindingId(1L);
+        when(agentRuntimeDao.findByAgentId("agent-unbound")).thenReturn(runtime);
+        when(agentIdentityService.requireActiveIdentityForBinding(
+                "0", "client-a", "tenant-a", 1L, "agent-unbound"))
+                .thenThrow(new AgentServiceImpl.AgentBizException(
+                        AgentErrorConstants.AGENT_FORBIDDEN, "binding inactive"));
+
+        AgentServiceImpl.AgentBizException denied = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.requireApiKeyOwnedAgent(
+                        "client-a", "tenant-a", "agent-unbound"));
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, denied.getCode());
+    }
+
+    @Test
+    void registerCreatesOnlineAgentAndPublishesStatus() {
+        AgentPersonaBindingEntity binding = binding("agent-001", "wuyong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        AgentPersonaEntity persona = persona("wuyong", "吴用", "智多星");
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-001")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenAnswer(invocation -> {
+            identity.setLifecycleStatus(AgentConstants.IDENTITY_STATUS_ACTIVE);
+            return identity;
+        });
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona);
+        AtomicReference<AgentRuntimeEntity> committedRuntime = new AtomicReference<>();
+        when(agentRuntimeDao.findByAgentId("agent-001"))
+                .thenAnswer(invocation -> committedRuntime.get());
+        org.mockito.Mockito.doAnswer(invocation -> {
+            AgentRuntimeEntity inserted = invocation.getArgument(0);
+            committedRuntime.set(inserted);
+            return 1;
+        }).when(agentRuntimeDao).updateRegistration(any(AgentRuntimeEntity.class));
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+
+        var sessionClaim = claimedRuntime("agent-001");
+        sessionClaim.setName("吴用");
+        sessionClaim.setPersonaCode("wuyong");
+        org.mockito.Mockito.doReturn(sessionClaim).when(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-001");
+        request.setEndpoint("wss://example.com/openclaw/agent-001");
+        request.setExecutionModel("fixture-execution/v2");
+
+        AgentRegisterResultDTO result = agentService.register(request);
+
+        assertEquals("agent-001", result.getAgentId());
+        assertEquals(AgentConstants.STATUS_ONLINE, result.getStatus());
+        assertNull(result.getToken());
+
+        ArgumentCaptor<AgentRuntimeEntity> entityCaptor = ArgumentCaptor.forClass(AgentRuntimeEntity.class);
+        verify(agentRuntimeDao).updateRegistration(entityCaptor.capture());
+        AgentRuntimeEntity saved = entityCaptor.getValue();
+        assertEquals("fixture-execution/v2", saved.getExecutionModel());
+        assertEquals("agent-001", saved.getAgentId());
+        assertEquals("吴用", saved.getName());
+        assertEquals("wuyong", saved.getPersonaCode());
+        assertEquals("jiacn", saved.getOwnerJiacn());
+        assertEquals("fixture-client_id-1", saved.getClientId());
+        assertEquals(AgentConstants.STATUS_ONLINE, saved.getStatus());
+        assertNotNull(saved.getLastSeenAt());
+        assertNotNull(saved.getTokenHash());
+
+        ArgumentCaptor<AgentRuntimeDTO> eventCaptor = ArgumentCaptor.forClass(AgentRuntimeDTO.class);
+        verify(eventPublisher).publishAgentStatus(eq("fixture-client_id-1"), eq("jiacn"), eventCaptor.capture());
+        assertEquals("agent-001", eventCaptor.getValue().getAgentId());
+        assertEquals(AgentConstants.STATUS_ONLINE, eventCaptor.getValue().getStatus());
+    }
+
+    @Test
+    void registerPreservesUserMaintainedProfile() {
+        AgentPersonaBindingEntity binding = binding("agent-001", "wuyong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        AgentPersonaEntity persona = persona("wuyong", "吴用", "智多星");
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-001")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenReturn(identity);
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona);
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(null);
+
+        var sessionClaim = claimedRuntime("agent-001");
+        sessionClaim.setAbilities("[]");
+        sessionClaim.setName("本人维护名称");
+        sessionClaim.setAvatar("user-avatar");
+        sessionClaim.setPersonaCode("wuyong");
+        sessionClaim.setPersonaName("本人角色名");
+        org.mockito.Mockito.doReturn(sessionClaim).when(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-001");
+
+        agentService.register(request);
+
+        ArgumentCaptor<AgentRuntimeEntity> captor = ArgumentCaptor.forClass(AgentRuntimeEntity.class);
+        verify(agentRuntimeDao).updateRegistration(captor.capture());
+        assertEquals("[]", captor.getValue().getAbilities());
+        assertEquals("本人维护名称", captor.getValue().getName());
+        assertEquals("user-avatar", captor.getValue().getAvatar());
+        assertEquals("本人角色名", captor.getValue().getPersonaName());
+    }
+
+    @Test
+    void registrationPreservesExplicitlyEmptyAbilities() {
+        AgentPersonaBindingEntity binding = binding("agent-001", "wuyong");
+        AgentIdentityRegistryEntity identity = identity(
+                binding, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        AgentPersonaEntity persona = persona("wuyong", "吴用", "智多星");
+        persona.setAbilities("[\"planning\",\"research\"]");
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-001")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenReturn(identity);
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona);
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(null);
+
+        var sessionClaim = claimedRuntime("agent-001");
+        sessionClaim.setAbilities("[]");
+        sessionClaim.setExecutionModel("old-model");
+        sessionClaim.setName("本人维护名称");
+        sessionClaim.setAvatar("user-avatar");
+        sessionClaim.setPersonaCode("wuyong");
+        sessionClaim.setPersonaName("本人角色名");
+        org.mockito.Mockito.doReturn(sessionClaim).when(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-001");
+        agentService.register(request);
+
+        ArgumentCaptor<AgentRuntimeEntity> captor = ArgumentCaptor.forClass(AgentRuntimeEntity.class);
+        verify(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        verify(agentRuntimeDao).updateRegistration(captor.capture());
+        assertEquals("[]", captor.getValue().getAbilities());
+        assertNull(captor.getValue().getExecutionModel());
+    }
+
+    @Test
+    void registerWithoutAbilitiesPreservesLockedCurrentRuntimeSnapshot() {
+        AgentPersonaBindingEntity binding = binding("agent-001", "wuyong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        AgentPersonaEntity persona = persona("wuyong", "吴用", "智多星");
+        AgentRuntimeEntity stale = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_OFFLINE, "[\"stale-skill\"]");
+        stale.setId(98L);
+        stale.setPersonaCode("wuyong");
+        AgentRuntimeEntity lockedCurrent = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_OFFLINE, "[\"current-skill\"]");
+        lockedCurrent.setId(99L);
+        lockedCurrent.setPersonaCode("wuyong");
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-001")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenReturn(identity);
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona);
+        org.mockito.Mockito.doReturn(lockedCurrent).when(agentRuntimeDao)
+                .lockInScope("0", "fixture-client_id-1", "agent-001");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(lockedCurrent);
+
+        claim(lockedCurrent);
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-001");
+        agentService.register(request);
+
+        assertEquals("[\"current-skill\"]", lockedCurrent.getAbilities());
+        assertEquals("[\"stale-skill\"]", stale.getAbilities());
+        verify(agentRuntimeDao).findByAgentId("agent-001");
+        verify(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        verify(agentRuntimeDao).updateRegistration(lockedCurrent);
+        org.mockito.InOrder lockOrder = org.mockito.Mockito.inOrder(
+                agentIdentityService, agentRuntimeDao);
+        lockOrder.verify(agentIdentityService).activateForFirstRegistration(identity);
+        lockOrder.verify(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        lockOrder.verify(agentRuntimeDao).updateRegistration(lockedCurrent);
+        lockOrder.verify(agentRuntimeDao).findByAgentId("agent-001");
+    }
+
+    @Test
+    void registrationAndStatusDtosContainOnlyRuntimeFields() throws Exception {
+        var mapper = JsonUtil.getMapper();
+        assertEquals(java.util.Set.of("agentId", "endpoint", "executionModel"),
+                mapper.convertValue(new AgentRegisterDTO(), java.util.Map.class).keySet());
+        assertEquals(java.util.Set.of("status", "currentTaskId", "currentTaskTitle", "errorMessage"),
+                mapper.convertValue(new AgentStatusDTO(), java.util.Map.class).keySet());
+    }
+
+    @Test
+    void presencePreservesUserAbilities() {
+        AgentRuntimeEntity existing = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"old-skill\"]");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+
+        AgentStatusDTO status = new AgentStatusDTO();
+        status.setStatus(AgentConstants.STATUS_ONLINE);
+
+        AgentRuntimeDTO result = agentService.updateStatus("agent-001", status);
+
+        assertEquals("[\"old-skill\"]", existing.getAbilities());
+        assertEquals(List.of("old-skill"), result.getAbilities());
+        verify(agentRuntimeDao).updateById(existing);
+    }
+
+    @Test
+    void repeatedPresenceCannotClearUserAbilities() {
+        AgentRuntimeEntity existing = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"old-skill\"]");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+
+        AgentStatusDTO missing = new AgentStatusDTO();
+        missing.setStatus(AgentConstants.STATUS_ONLINE);
+        assertEquals(List.of("old-skill"), agentService.updateStatus("agent-001", missing).getAbilities());
+
+        AgentStatusDTO clear = new AgentStatusDTO();
+        clear.setStatus(AgentConstants.STATUS_ONLINE);
+        assertEquals(List.of("old-skill"), agentService.updateStatus("agent-001", clear).getAbilities());
+        assertEquals("[\"old-skill\"]", existing.getAbilities());
+    }
+
+    @Test
+    void presenceStatusAndCapabilitiesPublishOnlyAfterCommit() {
+        AgentRuntimeEntity existing = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+        AgentStatusDTO status = new AgentStatusDTO();
+        status.setStatus(AgentConstants.STATUS_ONLINE);
+
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            agentService.updateStatus("agent-001", status);
+            verify(agentRuntimeDao, never()).findRosterByOwner(
+                    "0", "fixture-client_id-1", "jiacn", null, null);
+            verify(eventPublisher, never()).publishAgentStatus(any(), any(), any());
+            verify(eventPublisher, never()).publishCapabilityIndex(any(), any(), any());
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit);
+            verify(agentRuntimeDao).findRosterByOwner(
+                    "0", "fixture-client_id-1", "jiacn", null, null);
+            verify(eventPublisher).publishAgentStatus(
+                    eq("fixture-client_id-1"), eq("jiacn"), any(AgentRuntimeDTO.class));
+            verify(eventPublisher).publishCapabilityIndex(
+                    eq("fixture-client_id-1"), eq("jiacn"), any());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
+    void delayedPresenceCallbackPublishesCurrentOfflineInsideScopeInsteadOfCapturedOnline() {
+        AgentRuntimeEntity updating = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_OFFLINE, "[\"planning\"]");
+        AgentRuntimeEntity committedOffline = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_OFFLINE, "[\"current-offline\"]");
+        committedOffline.setEndpoint("offline-after-unbind");
+        AtomicReference<AgentRuntimeEntity> committedRuntime = new AtomicReference<>(updating);
+        AtomicBoolean insideScope = new AtomicBoolean(false);
+        AgentScopePublicationCoordinator coordinated = coordinatedPublication(insideScope);
+        agentService = newAgentService(coordinated, new AgentSceneFeatureFlags(true, true));
+        org.mockito.Mockito.doReturn(updating).when(agentRuntimeDao)
+                .findByAgentIdForUpdate("agent-001");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenAnswer(invocation -> {
+            assertTrue(insideScope.get(), "committed reread must run inside the exact-scope lock");
+            return committedRuntime.get();
+        });
+        when(agentRuntimeDao.findRosterByOwner("0", "fixture-client_id-1", "jiacn", null, null))
+                .thenReturn(List.of(committedOffline));
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+        AgentStatusDTO status = new AgentStatusDTO();
+        status.setStatus(AgentConstants.STATUS_ONLINE);
+
+        List<TransactionSynchronization> delayedCallbacks;
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            AgentRuntimeDTO result = agentService.updateStatus("agent-001", status);
+            assertEquals(AgentConstants.STATUS_ONLINE, result.getStatus());
+            delayedCallbacks = List.copyOf(TransactionSynchronizationManager.getSynchronizations());
+            verify(agentRuntimeDao, never()).findByAgentId("agent-001");
+            verify(coordinated, never()).execute(any(), any(), any(Runnable.class));
+            verify(eventPublisher, never()).publishAgentStatus(any(), any(), any());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+
+        committedRuntime.set(committedOffline);
+        AgentRuntimeDTO alreadyPublishedOffline = new AgentRuntimeDTO();
+        alreadyPublishedOffline.setAgentId("agent-001");
+        alreadyPublishedOffline.setStatus(AgentConstants.STATUS_OFFLINE);
+        alreadyPublishedOffline.setEndpoint("offline-after-unbind");
+        coordinated.execute("fixture-client_id-1", "jiacn", () -> eventPublisher.publishAgentStatus(
+                "fixture-client_id-1", "jiacn", alreadyPublishedOffline));
+        delayedCallbacks.forEach(TransactionSynchronization::afterCommit);
+
+        ArgumentCaptor<AgentRuntimeDTO> publications = ArgumentCaptor.forClass(AgentRuntimeDTO.class);
+        verify(eventPublisher, times(2)).publishAgentStatus(
+                eq("fixture-client_id-1"), eq("jiacn"), publications.capture());
+        assertEquals(List.of(AgentConstants.STATUS_OFFLINE, AgentConstants.STATUS_OFFLINE),
+                publications.getAllValues().stream().map(AgentRuntimeDTO::getStatus).toList());
+        assertEquals("offline-after-unbind", publications.getAllValues().get(1).getEndpoint());
+        assertFalse(publications.getAllValues().stream()
+                .anyMatch(runtime -> AgentConstants.STATUS_ONLINE.equals(runtime.getStatus())));
+        verify(agentRuntimeDao).findByAgentId("agent-001");
+        verify(eventPublisher).publishCapabilityIndex(eq("fixture-client_id-1"), eq("jiacn"), any());
+    }
+
+    @Test
+    void delayedRegisterCallbackRereadsInsideScopeAndSkipsMismatchedBinding() {
+        AgentPersonaBindingEntity binding = binding("agent-001", "wuyong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        AgentRuntimeEntity replacedBinding = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_OFFLINE, "[\"replacement\"]");
+        replacedBinding.setBindingId(2L);
+        AtomicBoolean insideScope = new AtomicBoolean(false);
+        AgentScopePublicationCoordinator coordinated = coordinatedPublication(insideScope);
+        agentService = newAgentService(coordinated, new AgentSceneFeatureFlags(true, true));
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-001")).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenReturn(identity);
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona("wuyong", "吴用", "智多星"));
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenAnswer(invocation -> {
+            assertTrue(insideScope.get(), "committed reread must run inside the exact-scope lock");
+            return replacedBinding;
+        });
+        org.mockito.Mockito.lenient().when(eventPublisherProvider.getIfAvailable())
+                .thenReturn(eventPublisher);
+        var sessionClaim = claimedRuntime("agent-001");
+        sessionClaim.setName("吴用");
+        sessionClaim.setPersonaCode("wuyong");
+        org.mockito.Mockito.doReturn(sessionClaim).when(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", "agent-001");
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId("agent-001");
+
+        List<TransactionSynchronization> delayedCallbacks;
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            AgentRegisterResultDTO result = agentService.register(request);
+            assertEquals(AgentConstants.STATUS_ONLINE, result.getStatus());
+            delayedCallbacks = List.copyOf(TransactionSynchronizationManager.getSynchronizations());
+            verify(agentRuntimeDao, never()).findByAgentId("agent-001");
+            verify(coordinated, never()).execute(any(), any(), any(Runnable.class));
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+
+        delayedCallbacks.forEach(TransactionSynchronization::afterCommit);
+
+        verify(agentRuntimeDao).findByAgentId("agent-001");
+        verify(eventPublisher, never()).publishAgentStatus(any(), any(), any());
+        verify(eventPublisher, never()).publishCapabilityIndex(any(), any(), any());
+        verify(agentRuntimeDao, never()).findRosterByOwner(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void userAbilityEditRejectsControlCharactersAndOversizedInputs() {
+        AgentRuntimeEntity existing = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"old-skill\"]");
+        org.mockito.Mockito.lenient().when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+
+        AgentAbilitiesUpdateDTO c1 = new AgentAbilitiesUpdateDTO();
+        c1.setExpectedAbilities(java.util.List.copyOf(List.of("old-skill")));
+        c1.setAbilities(List.of("review" + (char) 0x85));
+        IllegalArgumentException controlFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> agentService.updateAbilities("agent-001", c1));
+        assertEquals("ability must not contain control characters", controlFailure.getMessage());
+
+        AgentAbilitiesUpdateDTO tooMany = new AgentAbilitiesUpdateDTO();
+        tooMany.setExpectedAbilities(java.util.List.copyOf(List.of("old-skill")));
+        tooMany.setAbilities(java.util.stream.IntStream.range(0, 129)
+                .mapToObj(index -> "ability-" + index)
+                .toList());
+        IllegalArgumentException countFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> agentService.updateAbilities("agent-001", tooMany));
+        assertEquals("abilities must contain at most 128 items", countFailure.getMessage());
+
+        AgentAbilitiesUpdateDTO tooLong = new AgentAbilitiesUpdateDTO();
+        tooLong.setExpectedAbilities(java.util.List.copyOf(List.of("old-skill")));
+        tooLong.setAbilities(List.of("x".repeat(101)));
+        IllegalArgumentException lengthFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> agentService.updateAbilities("agent-001", tooLong));
+        assertEquals("ability must contain at most 100 characters", lengthFailure.getMessage());
+
+        verify(agentRuntimeDao, never()).updateById(existing);
+    }
+
+    @Test
+    void userAbilityEditAcceptsExactly128ItemsAnd100Characters() {
+        AgentRuntimeEntity existing = ownedAgent(
+                "agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+        List<String> abilities = new java.util.ArrayList<>(java.util.stream.IntStream.range(0, 127)
+                .mapToObj(index -> "ability-" + index)
+                .toList());
+        abilities.add("x".repeat(100));
+        AgentAbilitiesUpdateDTO status = new AgentAbilitiesUpdateDTO();
+        status.setExpectedAbilities(java.util.List.copyOf(List.of()));
+        status.setAbilities(abilities);
+
+        AgentRuntimeDTO result = agentService.updateAbilities("agent-001", status);
+
+        assertEquals(128, result.getAbilities().size());
+        assertEquals(100, result.getAbilities().get(result.getAbilities().size() - 1).length());
+        verify(agentRuntimeDao).updateById(existing);
+    }
+
+    @Test
+    void userAbilitiesSavePreservesRuntimeStatusAndRejectsStaleSnapshot() {
+        AgentRuntimeEntity existing = ownedAgent("agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"old\"]");
+        existing.setId(99L);
+        existing.setCurrentTaskId("task-1");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+        AgentAbilitiesUpdateDTO request = new AgentAbilitiesUpdateDTO();
+        request.setExpectedAbilities(List.of("old"));
+        request.setAbilities(List.of(" research ", "RESEARCH"));
+        AgentRuntimeDTO result = agentService.updateAbilities("agent-001", request);
+        assertEquals(List.of("research"), result.getAbilities());
+        assertEquals("task-1", existing.getCurrentTaskId());
+        assertEquals(AgentConstants.STATUS_ONLINE, existing.getStatus());
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.updateAbilities("agent-001", request));
+        assertEquals("[\"research\"]", existing.getAbilities());
+    }
+
+    @Test
+    void userAbilitiesRejectsForeignRuntimeAndSystemAgentWithoutWrites() {
+        AgentRuntimeEntity existing = ownedAgent("agent-001", "吴用", "online", "[]");
+        existing.setOwnerJiacn("other-owner");
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+        AgentAbilitiesUpdateDTO request = new AgentAbilitiesUpdateDTO();
+        request.setExpectedAbilities(List.of());
+        request.setAbilities(List.of("research"));
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.updateAbilities("agent-001", request));
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.updateAbilities(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID, request));
+        verify(agentRuntimeDao, never()).updateById(any(AgentRuntimeEntity.class));
+    }
+
+    @Test
+    void userAbilitiesCanBeCleared() {
+        AgentRuntimeEntity existing = ownedAgent("agent-001", "吴用", AgentConstants.STATUS_ONLINE, "[\"old\"]");
+        existing.setId(99L);
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(existing);
+        AgentAbilitiesUpdateDTO request = new AgentAbilitiesUpdateDTO();
+        request.setExpectedAbilities(List.of("old"));
+        request.setAbilities(List.of());
+        assertTrue(agentService.updateAbilities("agent-001", request).getAbilities().isEmpty());
+        assertEquals("[]", existing.getAbilities());
+    }
+
+    @Test
+    void explicitCreationRejectsGrayAndPlaceholderOwnerBeforeMutation() {
+        for (var scope : java.util.Arrays.asList(null,
+                new cn.jia.agent.service.AgentService.TaskOwnerScope("1", "fixture-client_id-1", "jiacn"),
+                new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "0"))) {
+            assertThrows(AgentServiceImpl.AgentBizException.class,
+                    () -> agentService.createTask(scope, new AgentTaskCreateDTO()));
+        }
+        verify(agentTaskMetaDao, never()).insert(any(AgentTaskMetaEntity.class));
+        verify(taskService, never()).create(any());
+        verify(taskEventWriter, never()).append(any());
+    }
+
+    @Test
+    void createTaskCreatesTaskPlanAndOpenAgentTaskMeta() {
+        EsContextHolder.clearContext();
+        when(taskServiceProvider.getIfAvailable()).thenReturn(taskService);
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+
+        AgentTaskCreateDTO request = new AgentTaskCreateDTO();
+        request.setTitle("Inspect archive search with a title that exceeds task plan name");
+        request.setDescription("Verify library retrieval");
+        request.setRequiredAbilities(List.of("research", "debug"));
+        request.setReward(30);
+
+        AgentTaskDTO result = agentService.createTask(new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn"), request);
+
+        assertEquals(AgentConstants.TASK_STATUS_OPEN, result.getStatus());
+        assertEquals("Inspect archive search with a title that exceeds task plan name", result.getTitle());
+        assertEquals(List.of("research", "debug"), result.getRequiredAbilities());
+
+        ArgumentCaptor<TaskPlanEntity> planCaptor = ArgumentCaptor.forClass(TaskPlanEntity.class);
+        verify(taskService).create(planCaptor.capture());
+        assertEquals(30, planCaptor.getValue().getName().length());
+        assertEquals("Inspect archive search with a ", planCaptor.getValue().getName());
+        assertEquals("Verify library retrieval", planCaptor.getValue().getDescription());
+        assertEquals("jiacn", planCaptor.getValue().getJiacn());
+        assertEquals("0", planCaptor.getValue().getTenantId());
+        assertEquals("fixture-client_id-1", planCaptor.getValue().getClientId());
+
+        ArgumentCaptor<AgentTaskMetaEntity> metaCaptor = ArgumentCaptor.forClass(AgentTaskMetaEntity.class);
+        verify(agentTaskMetaDao).insert(metaCaptor.capture());
+        assertEquals(AgentConstants.TASK_STATUS_OPEN, metaCaptor.getValue().getRewardStatus());
+        assertEquals("0", metaCaptor.getValue().getTenantId());
+        assertEquals("fixture-client_id-1", metaCaptor.getValue().getClientId());
+        ArgumentCaptor<AgentTaskDTO> eventTaskCaptor = ArgumentCaptor.forClass(AgentTaskDTO.class);
+        verify(eventPublisher).publishTaskEvent(eq("task_created"), eventTaskCaptor.capture());
+        assertEquals("0", eventTaskCaptor.getValue().getTenantId());
+        assertEquals("fixture-client_id-1", eventTaskCaptor.getValue().getClientId());
+        ArgumentCaptor<AgentTaskEventWriteCommand> persistent =
+                ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+        verify(taskEventWriter).append(persistent.capture());
+        assertEquals(TaskEventType.TASK_CREATED, persistent.getValue().getEventType());
+        assertEquals(TaskEventType.ActorType.SYSTEM, persistent.getValue().getActorType());
+    }
+
+    @Test
+    void createReservesScopedRootBeforeTaskPlanAndPublishesOnlyAfterCommit() {
+        when(taskServiceProvider.getIfAvailable()).thenReturn(taskService);
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+        doAnswer(invocation -> {
+            invocation.<TaskPlanEntity>getArgument(0).setId(42L);
+            return invocation.getArgument(0);
+        }).when(taskService).create(any(TaskPlanEntity.class));
+        AgentTaskCreateDTO request = new AgentTaskCreateDTO();
+        request.setTitle("root first");
+
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            AgentTaskDTO result = agentService.createTask(new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn"), request);
+
+            InOrder order = inOrder(agentTaskMetaDao, taskService, taskEventWriter);
+            order.verify(agentTaskMetaDao).insert(any(AgentTaskMetaEntity.class));
+            order.verify(taskService).create(any(TaskPlanEntity.class));
+            order.verify(taskEventWriter).append(any());
+            verify(agentTaskMetaDao).rekeyReservedTaskRootInOwnerScope(
+                    eq("0"), eq("fixture-client_id-1"), eq("jiacn"), any(), eq("42"), anyLong());
+            assertEquals("42", result.getId());
+            verify(eventPublisher, never()).publishTaskEvent(any(), any());
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit);
+            verify(eventPublisher).publishTaskEvent(eq("task_created"), any());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
+    void createPlanIdCollisionFailsClosedBeforeEventOrPublisher() {
+        when(taskServiceProvider.getIfAvailable()).thenReturn(taskService);
+        doAnswer(invocation -> {
+            invocation.<TaskPlanEntity>getArgument(0).setId(42L);
+            return invocation.getArgument(0);
+        }).when(taskService).create(any(TaskPlanEntity.class));
+        AgentTaskMetaEntity existing = new AgentTaskMetaEntity()
+                .setId(42L).setTaskId("42")
+                .setRewardStatus(AgentConstants.TASK_STATUS_OPEN)
+                .setTaskVersion(9L).setCurrentEventVersion(7L);
+        existing.setTenantId("0"); existing.setOwnerJiacn("jiacn");
+        existing.setClientId("fixture-client_id-1");
+        when(agentTaskMetaDao.findByTaskIdForUpdateInOwnerScope("0", "fixture-client_id-1", "jiacn", "42"))
+                .thenReturn(existing);
+        AgentTaskCreateDTO request = new AgentTaskCreateDTO();
+        request.setTitle("collision");
+
+        assertThrows(IllegalStateException.class, () -> agentService.createTask(new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn"), request));
+
+        verify(agentTaskMetaDao, never()).deleteReservedTaskRoot(any(), any(), any());
+        verify(agentTaskMetaDao, never()).rekeyReservedTaskRootInOwnerScope(
+                any(), any(), any(), any(), any(), anyLong());
+        verify(taskEventWriter, never()).append(any());
+        verify(eventPublisherProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void duplicateCreateRootWithoutOriginalSnapshotFailsClosedAndAllocatesNoPersistentEvent() {
+        org.mockito.Mockito.doAnswer(invocation -> {
+            String reservedTaskId = invocation.getArgument(3);
+            AgentTaskMetaEntity existing = new AgentTaskMetaEntity()
+                    .setId(7L).setTaskId(reservedTaskId)
+                    .setRewardStatus(AgentConstants.TASK_STATUS_OPEN)
+                    .setTaskVersion(0L).setCurrentEventVersion(4L);
+            existing.setTenantId("0"); existing.setOwnerJiacn("jiacn");
+            existing.setClientId("fixture-client_id-1");
+            AgentTaskMutationTransaction.ReservedTaskMutation<?> mutation =
+                    invocation.getArgument(5);
+            return mutation.apply(existing, false);
+        }).when(mutationTransaction).executeAfterTaskRootReservationInOwnerScope(
+                any(), any(), any(), any(), any(), any());
+
+        AgentTaskCreateDTO request = new AgentTaskCreateDTO();
+        request.setTitle("duplicate");
+        assertThrows(IllegalStateException.class, () -> agentService.createTask(new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn"), request));
+
+        verify(taskService, never()).create(any());
+        verify(taskEventWriter, never()).append(any());
+        verify(eventPublisherProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void resolvesScopedTaskMembersAndUsesLegacyAssigneesOnlyWhenMemberRowsAreAbsent() {
+        AgentTaskMemberEntity active = taskMember(
+                "0", "fixture-client_id-1", "task-1", "agent-active", "working");
+        AgentTaskMemberEntity left = taskMember(
+                "0", "fixture-client_id-1", "task-1", "agent-left", "left");
+        when(agentTaskMemberDao.listByTask("0", "fixture-client_id-1", "jiacn", "task-1"))
+                .thenReturn(List.of(active, left));
+
+        assertEquals(List.of("agent-active"),
+                agentService.listTaskMemberAgentIds("0", "fixture-client_id-1", "task-1"));
+        verify(agentTaskMetaDao, never()).findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-1");
+
+        AgentTaskMetaEntity legacy = new AgentTaskMetaEntity();
+        legacy.setAssignedAgentId("[\"agent-one\",\"agent-two\"]");
+        when(agentTaskMemberDao.listByTask("0", "fixture-client_id-1", "jiacn", "task-legacy"))
+                .thenReturn(List.of());
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-legacy")).thenReturn(legacy);
+
+        assertEquals(List.of("agent-one", "agent-two"),
+                agentService.listTaskMemberAgentIds("0", "fixture-client_id-1", "task-legacy"));
+    }
+
+    @Test
+    void writableTaskMembersExcludeInvitedAndTerminalReadOnlyStatuses() {
+        AgentTaskMetaEntity task = scopedTaskRow("task-write", "0", "fixture-client_id-1");
+        task.setOwnerJiacn("jiacn");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-write"))
+                .thenReturn(task);
+        when(agentTaskMemberDao.listByTask("0", "fixture-client_id-1", "jiacn", "task-write"))
+                .thenReturn(List.of(
+                        taskMember("0", "fixture-client_id-1", "task-write", "accepted", "accepted"),
+                        taskMember("0", "fixture-client_id-1", "task-write", "working", "working"),
+                        taskMember("0", "fixture-client_id-1", "task-write", "blocked", "blocked"),
+                        taskMember("0", "fixture-client_id-1", "task-write", "invited", "invited"),
+                        taskMember("0", "fixture-client_id-1", "task-write", "done", "done"),
+                        taskMember("0", "fixture-client_id-1", "task-write", "failed", "failed")));
+
+        assertEquals(List.of("accepted", "working", "blocked"),
+                agentService.listTaskWritableMemberAgentIds(
+                        "0", "fixture-client_id-1", "task-write"));
+    }
+
+    @Test
+    void dialoguePublishesSemanticDiscussionMovementForMatchingRosterAgent() {
+        AgentRuntimeEntity agent = runtimeAgent(
+                "agent-wuyong", "Wu Yong", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        agent.setPersonaCode("wuyong");
+        agent.setPersonaName("Wu Yong");
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1")).thenReturn(List.of(persona("wuyong", "Wu Yong", "Strategist")));
+        when(agentRuntimeDao.findRosterByOwner("fixture-client_id-1", "jiacn", null, null))
+                .thenReturn(List.of(agent));
+        when(sceneServiceProvider.getIfAvailable()).thenReturn(sceneService);
+        DialogueTemplateEntity template = new DialogueTemplateEntity();
+        template.setContent("Discuss the plan");
+        when(dialogueTemplateDao.findByPersonaAndType("Wu Yong", "DISCUSSION"))
+                .thenReturn(List.of(template));
+        DialogueRequestDTO request = new DialogueRequestDTO();
+        request.setPersonaName("Wu Yong");
+        request.setDialogueType("DISCUSSION");
+
+        assertEquals("Discuss the plan", agentService.generateDialogue(request));
+
+        ArgumentCaptor<AgentSceneStateDTO> stateCaptor = ArgumentCaptor.forClass(AgentSceneStateDTO.class);
+        verify(sceneService).upsertState(eq("juyiting-main"), stateCaptor.capture());
+        AgentSceneStateDTO state = stateCaptor.getValue();
+        assertEquals("agent-wuyong", state.getAgentId());
+        assertEquals("moving_to_discussion", state.getBehavior());
+        assertEquals("council-table", state.getTargetRegionId());
+        assertEquals("discussion", state.getRelatedType());
+        assertTrue(state.getRelatedId().matches("dlg-[0-9a-f]{32}"));
+        assertTrue(state.getRelatedId().length() <= 40);
+        assertTrue(state.getExpiresAt() > state.getExpectedArrivalAt());
+    }
+
+    @Test
+    void chatPublishesAllowlistedSemanticTypeWithOpaqueBoundedRelatedId() {
+        AgentRuntimeEntity agent = runtimeAgent(
+                "agent-wuyong", "Wu Yong", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        agent.setPersonaCode("wuyong");
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1")).thenReturn(List.of(persona("wuyong", "Wu Yong", "Strategist")));
+        when(agentRuntimeDao.findRosterByOwner("fixture-client_id-1", "jiacn", null, null))
+                .thenReturn(List.of(agent));
+        when(sceneServiceProvider.getIfAvailable()).thenReturn(sceneService);
+        when(dialogueTemplateDao.findByPersonaAndType("Wu Yong", "CHAT")).thenReturn(List.of());
+        DialogueRequestDTO request = new DialogueRequestDTO();
+        request.setPersonaName("Wu Yong");
+        request.setDialogueType("CHAT");
+
+        assertEquals("今日聚义厅中，正好议事。", agentService.generateDialogue(request));
+
+        ArgumentCaptor<AgentSceneStateDTO> stateCaptor = ArgumentCaptor.forClass(AgentSceneStateDTO.class);
+        verify(sceneService).upsertState(eq("juyiting-main"), stateCaptor.capture());
+        AgentSceneStateDTO state = stateCaptor.getValue();
+        assertEquals("chat", state.getRelatedType());
+        assertTrue(state.getRelatedId().matches("dlg-[0-9a-f]{32}"));
+        assertTrue(state.getRelatedId().length() <= 40);
+    }
+
+    @Test
+    void rawOrExtendedDialogueTypeIsNeverPersistedAsSceneMetadata() {
+        String sensitiveType = "DISCUSSION-secret-token-" + "x".repeat(500);
+        DialogueTemplateEntity template = new DialogueTemplateEntity();
+        template.setContent("Core dialogue still succeeds");
+        when(dialogueTemplateDao.findByPersonaAndType("Wu Yong", sensitiveType)).thenReturn(List.of(template));
+        DialogueRequestDTO request = new DialogueRequestDTO();
+        request.setPersonaName("Wu Yong");
+        request.setDialogueType(sensitiveType);
+
+        assertEquals("Core dialogue still succeeds", agentService.generateDialogue(request));
+
+        verify(sceneService, never()).upsertState(any(), any());
+    }
+
+    @Test
+    void ambiguousDiscussionPersonaSkipsScenePublicationWithoutFailingDialogue() {
+        AgentPersonaEntity persona = persona("wuyong", "Wu Yong", "Strategist");
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1")).thenReturn(List.of(persona));
+        AgentRuntimeEntity first = runtimeAgent("agent-wuyong-1", "Wu Yong 1", AgentConstants.STATUS_ONLINE, "[]");
+        first.setPersonaCode("wuyong");
+        AgentRuntimeEntity second = runtimeAgent("agent-wuyong-2", "Wu Yong 2", AgentConstants.STATUS_ONLINE, "[]");
+        second.setPersonaCode("wuyong");
+        when(agentRuntimeDao.findRosterByOwner("fixture-client_id-1", "jiacn", null, null))
+                .thenReturn(List.of(first, second));
+        when(sceneServiceProvider.getIfAvailable()).thenReturn(sceneService);
+        DialogueTemplateEntity template = new DialogueTemplateEntity();
+        template.setContent("Ambiguous roster dialogue");
+        when(dialogueTemplateDao.findByPersonaAndType("Wu Yong", "DISCUSSION")).thenReturn(List.of(template));
+        DialogueRequestDTO request = new DialogueRequestDTO();
+        request.setPersonaName("Wu Yong");
+        request.setDialogueType("DISCUSSION");
+
+        assertEquals("Ambiguous roster dialogue", agentService.generateDialogue(request));
+
+        verify(sceneService, never()).upsertState(any(), any());
+    }
+
+    @Test
+    void listCapabilitiesIncludesOwnedAgentsAndSongjiangLeaderProfile() {
+        AgentRuntimeEntity wuYong = new AgentRuntimeEntity();
+        wuYong.setAgentId("agent-wuyong");
+        wuYong.setName("吴用");
+        wuYong.setTenantId("0");
+        wuYong.setPersonaCode("wuyong");
+        wuYong.setStatus(AgentConstants.STATUS_ONLINE);
+        wuYong.setAbilities("[\"planning\",\"analysis\"]");
+        wuYong.setClientId("fixture-client_id-1");
+        wuYong.setOwnerJiacn("jiacn");
+
+        AgentPersonaEntity songjiang = persona("songjiang", "宋江", "及时雨");
+        songjiang.setSystemAgent(true);
+        songjiang.setAbilities("[\"coordination\",\"dispatch\",\"planning\",\"briefing\"]");
+
+        when(agentRuntimeDao.findRosterByOwner("0", "fixture-client_id-1", "jiacn", null, null)).thenReturn(List.of(wuYong));
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona("wuyong", "吴用", "智多星"));
+
+        var result = agentService.listCapabilities();
+
+        assertEquals(2, result.size());
+        assertEquals("agent-wuyong", result.get(0).getAgentId());
+        assertTrue(result.get(0).getRoles().contains("planner"));
+        assertEquals(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID, result.get(1).getAgentId());
+        assertTrue(result.get(1).getRoles().contains("leader"));
+        assertEquals("宋江首领负责议事、拆解、派令、追踪和复盘。", result.get(1).getCollaborationHint());
+    }
+
+
+    @Test
+    void personaCatalogDisclosesOnlyExactOwnerBindingAndTreatsForeignOwnerAsUnbound() {
+        AgentPersonaEntity persona = persona("lujunyi", "卢俊义", "玉麒麟");
+        persona.setTenantId("0");
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1"))
+                .thenReturn(List.of(persona));
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn")).thenReturn(List.of());
+
+        List<AgentRuntimeDTO> result = agentService.listPersonaCatalog(
+                "0", "fixture-client_id-1", "jiacn");
+
+        assertEquals(108, result.size());
+        AgentRuntimeDTO dto = result.stream().filter(item -> "lujunyi".equals(item.getPersonaCode())).findFirst().orElseThrow();
+        assertEquals("lujunyi", dto.getPersonaCode());
+        assertNull(dto.getAgentId());
+        assertNull(dto.getOwnerJiacn());
+        assertFalse(dto.getBound());
+        assertFalse(dto.getBoundToMe());
+        assertTrue(dto.getCanBind());
+        assertEquals(AgentConstants.STATUS_OFFLINE, dto.getStatus());
+        verify(agentPersonaBindingDao).findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn");
+        verify(agentPersonaBindingDao, never()).findActiveByClientAndPersona(any(), any());
+        verify(agentIdentityService, never()).requireRegistrationIdentityInScope(any(), any(), any(), any());
+        verify(agentRuntimeDao, never()).findByAgentId(any());
+    }
+
+    @Test
+    void personaCatalogExactOwnerBindingIsBoundAndCannotBindAgain() {
+        AgentPersonaEntity persona = persona("lujunyi", "卢俊义", "玉麒麟");
+        persona.setTenantId("0");
+        AgentPersonaBindingEntity binding = binding(
+                "agt_0123456789abcdef0123456789abcdef", "lujunyi");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        AgentRuntimeEntity runtime = runtimeAgent(
+                identity.getCanonicalAgentId(), "卢俊义", AgentConstants.STATUS_ONLINE,
+                "[\"runtime-skill\"]");
+        runtime.setId(20L);
+        runtime.setTenantId("0"); runtime.setOwnerJiacn("jiacn");
+        runtime.setClientId("fixture-client_id-1");
+        runtime.setOwnerJiacn("jiacn");
+        runtime.setBindingId(binding.getId());
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1"))
+                .thenReturn(List.of(persona));
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(catalogOverlay(binding, identity, runtime)));
+
+        AgentRuntimeDTO dto = agentService.listPersonaCatalog(
+                "0", "fixture-client_id-1", "jiacn").stream()
+                .filter(item -> "lujunyi".equals(item.getPersonaCode())).findFirst().orElseThrow();
+
+        assertEquals(identity.getCanonicalAgentId(), dto.getAgentId());
+        assertNull(dto.getOwnerJiacn(), "catalog discloses binding capability, not owner identity");
+        assertTrue(dto.getBound());
+        assertTrue(dto.getBoundToMe());
+        assertFalse(dto.getCanBind());
+        assertTrue(dto.getCanOperate());
+        assertEquals(List.of("runtime-skill"), dto.getAbilities());
+        verify(agentIdentityService, never()).requireRegistrationIdentityInScope(any(), any(), any(), any());
+        verify(agentRuntimeDao, never()).findByAgentId(any());
+    }
+
+    @Test
+    void personaCatalogCachesOnlyMetadataAndOverlaysFreshBindingStateOnEveryRequest() {
+        AgentPersonaEntity persona = persona("linchong", "林冲", "豹子头");
+        persona.setTenantId("0");
+        persona.setPower(88);
+        AgentPersonaBindingEntity binding = binding(
+                "agt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "linchong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1"))
+                .thenReturn(List.of(persona));
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(), List.of(catalogOverlay(binding, identity, null)));
+
+        AgentRuntimeDTO first = agentService.listPersonaCatalog(
+                "0", "fixture-client_id-1", "jiacn").stream()
+                .filter(item -> "linchong".equals(item.getPersonaCode())).findFirst().orElseThrow();
+        first.setName("poisoned");
+        first.setAbilities(List.of("poisoned"));
+        first.getStats().setPower(999);
+        AgentRuntimeDTO second = agentService.listPersonaCatalog(
+                "0", "fixture-client_id-1", "jiacn").stream()
+                .filter(item -> "linchong".equals(item.getPersonaCode())).findFirst().orElseThrow();
+
+        assertEquals("林冲", second.getName());
+        assertEquals(List.of("planning", "research"), second.getAbilities());
+        assertEquals(88, second.getStats().getPower());
+        assertFalse(first.getBound());
+        assertTrue(second.getBound());
+        assertEquals(identity.getCanonicalAgentId(), second.getAgentId());
+        verify(agentPersonaDao, times(1)).findCatalogProjection("0", "fixture-client_id-1");
+        verify(agentPersonaBindingDao, times(2)).findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn");
+    }
+
+    @Test
+    void personaCatalogFailsClosedOnCrossScopeOrIncompleteUserOverlay() {
+        AgentPersonaEntity persona = persona("linchong", "林冲", "豹子头");
+        persona.setTenantId("0");
+        AgentPersonaBindingEntity binding = binding(
+                "agt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "linchong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        AgentPersonaCatalogBindingRow escaped = catalogOverlay(binding, identity, null);
+        escaped.setIdentityClientId("Client-A");
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1"))
+                .thenReturn(List.of(persona));
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn")).thenReturn(List.of(escaped));
+
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.listPersonaCatalog("0", "fixture-client_id-1", "jiacn"));
+    }
+
+    @Test
+    void personaCatalogFailsClosedOnUnknownBindingPersonaOrInvalidRuntimeStatus() {
+        AgentPersonaEntity persona = persona("linchong", "林冲", "豹子头");
+        persona.setTenantId("0");
+        AgentPersonaBindingEntity binding = binding(
+                "agt_cccccccccccccccccccccccccccccccc", "unknown-private-persona");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        AgentPersonaCatalogBindingRow unknownPersona = catalogOverlay(binding, identity, null);
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1"))
+                .thenReturn(List.of(persona));
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn")).thenReturn(List.of(unknownPersona));
+
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.listPersonaCatalog("0", "fixture-client_id-1", "jiacn"));
+
+        AgentRuntimeEntity runtime = runtimeAgent(
+                identity.getCanonicalAgentId(), "吴用", "tampered", "[]");
+        runtime.setTenantId("0"); runtime.setOwnerJiacn("jiacn");
+        runtime.setClientId("fixture-client_id-1");
+        runtime.setOwnerJiacn("jiacn");
+        runtime.setBindingId(binding.getId());
+        binding.setPersonaCode("linchong");
+        AgentPersonaCatalogBindingRow invalidRuntime = catalogOverlay(binding, identity, runtime);
+        when(agentPersonaBindingDao.findCatalogOverlay(
+                "0", "fixture-client_id-1", "jiacn")).thenReturn(List.of(invalidRuntime));
+
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.listPersonaCatalog("0", "fixture-client_id-1", "jiacn"));
+    }
+
+    @Test
+    void newPersonaBindingIssuesOpaqueIdentityInsteadOfLegacyJytId() {
+        AgentPersonaEntity persona = persona("wuyong", "吴用", "智多星");
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona);
+
+        AgentRuntimeDTO result = agentService.bindPersona("0", "fixture-client_id-1", "jiacn", "wuyong");
+
+        assertTrue(result.getAgentId().matches("agt_[0-9a-f]{32}"));
+        assertTrue(!result.getAgentId().startsWith("jyt-"));
+        ArgumentCaptor<AgentPersonaBindingEntity> bindingCaptor =
+                ArgumentCaptor.forClass(AgentPersonaBindingEntity.class);
+        // Active persona uniqueness is tenant/client/persona, not owner/persona.
+        verify(agentPersonaBindingDao).findActiveByTenantClientAndPersonaForUpdate(
+                "0", "fixture-client_id-1", "wuyong");
+        verify(agentPersonaBindingDao).insert(bindingCaptor.capture());
+        AgentPersonaBindingEntity binding = bindingCaptor.getValue();
+        assertEquals("0", binding.getTenantId());
+        assertEquals("jiacn", binding.getJiacn());
+        assertEquals("fixture-client_id-1", binding.getClientId());
+        assertEquals(result.getAgentId(), binding.getAgentId());
+        verify(agentIdentityService).provisionOpaqueIdentity(
+                eq(binding), eq("A08 persona bind: wuyong"));
+    }
+
+    @Test
+    void legacyAliasRegistrationReturnsCanonicalIdAndPersistsCanonicalRuntime() {
+        String legacy = "jyt-client-a-wuyong";
+        String canonical = "agt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        AgentPersonaBindingEntity binding = binding(legacy, "wuyong");
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_PROVISIONED);
+        identity.setCanonicalAgentId(canonical);
+        identity.setCanonicalType(AgentConstants.IDENTITY_TYPE_OPAQUE);
+        when(agentIdentityService.requireRegistrationIdentityInScope(
+                "0", "fixture-client_id-1", "jiacn", legacy)).thenReturn(identity);
+        when(agentIdentityService.requireActiveBinding(identity, legacy)).thenReturn(binding);
+        when(agentIdentityService.activateForFirstRegistration(identity)).thenAnswer(invocation -> {
+            identity.setLifecycleStatus(AgentConstants.IDENTITY_STATUS_ACTIVE);
+            return identity;
+        });
+        when(agentPersonaDao.findCatalogPersona("0", "fixture-client_id-1", "wuyong")).thenReturn(persona("wuyong", "吴用", "智多星"));
+
+        var sessionClaim = claimedRuntime(canonical);
+        org.mockito.Mockito.doReturn(sessionClaim).when(agentRuntimeDao).lockInScope("0", "fixture-client_id-1", canonical);
+        AgentRegisterDTO request = new AgentRegisterDTO();
+        request.setAgentId(legacy);
+        AgentRegisterResultDTO result = agentService.register(request);
+
+        assertEquals(canonical, result.getAgentId());
+        ArgumentCaptor<AgentRuntimeEntity> runtimeCaptor = ArgumentCaptor.forClass(AgentRuntimeEntity.class);
+        verify(agentRuntimeDao).updateRegistration(runtimeCaptor.capture());
+        assertEquals(canonical, runtimeCaptor.getValue().getAgentId());
+        assertEquals(binding.getId(), runtimeCaptor.getValue().getBindingId());
+    }
+
+    private void wireAssigneeCandidates(List<AgentRuntimeEntity> agents) {
+        var items = agents.stream().map(agent -> new cn.jia.agent.entity.AgentTaskTargetSummaryDTO(
+                agent.getAgentId(), agent.getName(), null, true, agent.getStatus())).toList();
+        when(externalServicePolicies.recommendationCandidates(any(), org.mockito.ArgumentMatchers.eq("task-001")))
+                .thenReturn(items.stream().map(t->new AgentTaskAssigneeCandidateDTO(t,List.of(),"jiacn")).toList());
+        for (var agent : agents) when(agentRuntimeDao.findByAgentId(agent.getAgentId())).thenReturn(agent);
+    }
+
+    @Test
+    void listTaskAssigneeCandidatesPreservesAuthorityWithoutScoring() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(0L);
+        meta.setRequiredAbilities("[\"planning\"]");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+
+        AgentRuntimeEntity planner = ownedAgent("agent-wuyong", "吴用", AgentConstants.STATUS_ONLINE,
+                "[\"planning\",\"analysis\"]");
+        AgentRuntimeEntity executor = ownedAgent("agent-linchong", "林冲", AgentConstants.STATUS_ONLINE,
+                "[\"execution\"]");
+        AgentRuntimeEntity busyPlanner = ownedAgent("agent-busy", "忙碌好汉", AgentConstants.STATUS_BUSY,
+                "[\"planning\"]");
+        AgentRuntimeEntity offlinePlanner = ownedAgent("agent-offline", "离线好汉", AgentConstants.STATUS_OFFLINE,
+                "[\"planning\"]");
+        AgentRuntimeEntity erroredPlanner = ownedAgent("agent-error", "故障好汉", AgentConstants.STATUS_ERROR,
+                "[\"planning\"]");
+        wireAssigneeCandidates(List.of(executor, offlinePlanner, erroredPlanner, busyPlanner, planner));
+
+        List<AgentTaskAssigneeCandidateDTO> result = agentService.listTaskAssigneeCandidates("task-001");
+
+        assertEquals(5, result.size());
+        assertEquals(List.of("agent-linchong", "agent-offline", "agent-error", "agent-busy", "agent-wuyong"),
+                result.stream().map(c -> c.target().agentId()).toList());
+        assertTrue(result.stream().allMatch(agent -> agent.target().isMine()));
+        assertEquals("jiacn", result.getFirst().skillProviderOwnerJiacn());
+        assertEquals(List.of("planning", "analysis"), result.stream().filter(c -> "agent-wuyong".equals(c.target().agentId())).findFirst().orElseThrow().abilities());
+        verify(agentTaskMetaDao, never()).findByAgentInOwnerScope(anyString(), anyString(), anyString(), anyString(), anyInt());
+        verify(externalServicePolicies, never()).assignedTarget(any(), anyString());
+        verify(externalServicePolicies).recommendationCandidates(any(), org.mockito.ArgumentMatchers.eq("task-001"));
+        verify(agentRuntimeDao, never()).findRosterByOwner("0", "fixture-client_id-1", "jiacn", null, null);
+    }
+
+    @Test
+    void recommendationTaskInputUsesOwnerAuthorityWithoutAssignmentOrFundingProjection() {
+        var meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-001"); meta.setTenantId("0"); meta.setClientId("fixture-client_id-1");
+        meta.setOwnerJiacn("jiacn"); meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(9L); meta.setRequiredAbilities("[\"analysis\"]");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001")).thenReturn(meta);
+        var input = agentService.getTaskRecommendationInput("task-001");
+        assertEquals("9", input.getTaskVersion());
+        assertEquals("task-001", input.getTitle());
+        assertEquals(List.of("analysis"), input.getRequiredAbilities());
+        verifyNoInteractions(externalServicePolicies, agentTaskMemberDao);
+    }
+
+    @Test
+    void recommendationInputStillRejectsTaskOutsideOwnerScope() {
+        assertThrows(AgentServiceImpl.AgentBizException.class, () -> agentService.getTaskRecommendationInput("not-owned"));
+        verifyNoInteractions(externalServicePolicies);
+    }
+
+    @Test
+    void listTaskAssigneeCandidatesPreservesPublicOrder() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(0L);
+        meta.setRequiredAbilities("[\"planning\",\"execution\"]");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+        AgentRuntimeEntity planner = ownedAgent("agent-wuyong", "吴用", AgentConstants.STATUS_ONLINE,
+                "[\"planning\"]");
+        AgentRuntimeEntity executor = ownedAgent("agent-linchong", "林冲", AgentConstants.STATUS_ONLINE,
+                "[\"execution\"]");
+        wireAssigneeCandidates(List.of(planner, executor));
+
+        List<AgentTaskAssigneeCandidateDTO> result = agentService.listTaskAssigneeCandidates("task-001");
+
+        assertEquals(2, result.size());
+        assertTrue(result.stream().allMatch(candidate -> candidate.target().isMine()));
+        assertEquals(List.of("agent-wuyong", "agent-linchong"), result.stream()
+                .map(c -> c.target().agentId()).toList());
+    }
+
+    @Test
+    void taskAssigneeCandidatePagesAreNotTruncatedAndExternalPrivacyIsPreserved() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L); meta.setTaskId("task-001"); meta.setTenantId("0"); meta.setClientId("fixture-client_id-1");
+        meta.setOwnerJiacn("jiacn"); meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN); meta.setTaskVersion(0L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001")).thenReturn(meta);
+        var first = java.util.stream.IntStream.range(0, 5).mapToObj(i -> new cn.jia.agent.entity.AgentTaskTargetSummaryDTO(
+                "external-" + i, "External " + i, "Provider", false, "online")).toList();
+        var last = new cn.jia.agent.entity.AgentTaskTargetSummaryDTO("external-5", "External 5", "Provider", false, "online");
+        var authorized = new java.util.ArrayList<AgentTaskAssigneeCandidateDTO>();
+        for(var item:first)authorized.add(new AgentTaskAssigneeCandidateDTO(item,List.of(),"provider-owner"));
+        authorized.add(new AgentTaskAssigneeCandidateDTO(last,List.of(),"provider-owner"));
+        when(externalServicePolicies.recommendationCandidates(any(), org.mockito.ArgumentMatchers.eq("task-001"))).thenReturn(authorized);
+        var result = agentService.listTaskAssigneeCandidates("task-001");
+        assertEquals(6, result.size());
+        assertTrue(result.stream().allMatch(agent -> agent.abilities().isEmpty() && !agent.target().isMine()));
+        assertEquals("Provider", result.getFirst().target().providerDisplayName());
+        verify(agentRuntimeDao, never()).findByAgentId("external-5");
+    }
+
+    @Test
+    void recommendTaskTeamUsesExactScopeAndOnlyEligibleCandidates() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-team");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(7L);
+        meta.setRequiredAbilities("[\"backend\",\"frontend\"]");
+        meta.setRiskLevel("high");
+        meta.setMaxAgents(2);
+        meta.setReviewRequired(true);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-team"))
+                .thenReturn(meta);
+
+        AgentRuntimeEntity producer = ownedAgent(
+                "agent-producer", "产出者", AgentConstants.STATUS_ONLINE,
+                "[\"backend\",\"frontend\",\"execution\"]");
+        AgentRuntimeEntity reviewer = ownedAgent(
+                "agent-reviewer", "复核者", AgentConstants.STATUS_ONLINE,
+                "[\"backend\",\"review\"]");
+        AgentRuntimeEntity busyFrontend = ownedAgent(
+                "agent-busy", "忙碌者", AgentConstants.STATUS_BUSY,
+                "[\"frontend\",\"review\"]");
+        when(agentRuntimeDao.findCandidateRosterByOwner("fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(reviewer, busyFrontend, producer, producer));
+
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(3);
+        request.setBudgetUnits(2);
+        request.setHighRisk(true);
+        AgentTaskTeamRecommendationDTO result = agentService.recommendTaskTeam(
+                "0", "fixture-client_id-1", "task-team", request);
+
+        assertEquals("TASK_REQUIRED_ABILITIES", result.getRequirementSource());
+        assertEquals("7", result.getTaskVersion());
+        assertEquals("high", result.getRiskLevel());
+        assertTrue(result.getHighRisk());
+        assertTrue(result.getTaskReviewRequired());
+        assertEquals(3, result.getRequestedMaxTeamSize());
+        assertEquals(2, result.getTaskMaxAgents());
+        assertEquals(2, result.getMaxTeamSize());
+        assertEquals(List.of("backend", "frontend"), result.getCoveredAbilities());
+        assertEquals(List.of(), result.getMissingAbilities());
+        assertEquals(List.of("agent-producer", "agent-reviewer"), result.getMembers().stream()
+                .map(member -> member.getAgentId()).toList());
+        assertEquals(List.of("PRODUCER", "REVIEWER"), result.getMembers().stream()
+                .map(member -> member.getRole()).toList());
+        assertTrue(result.getIndependentReviewerRequired());
+        assertTrue(result.getIndependentReviewerSatisfied());
+        assertTrue(result.getConstraintsSatisfied());
+        assertTrue(result.getReadyForConfirmation());
+        assertTrue(result.getPreviewOnly());
+        assertFalse(result.getAutoDispatchAllowed());
+        assertEquals("NON_MONETARY_TEAM_SLOT", result.getCostModel());
+        assertFalse(result.getMonetaryCostKnown());
+        assertEquals(2, result.getTotalCostUnits());
+        assertEquals(List.of("RECOMMENDATION_PREVIEW_ONLY"), result.getAutoDispatchReasons());
+        assertEquals(List.of("agent-producer"), result.getDuplicateCandidateAgentIds());
+        assertEquals(3, result.getCandidates().size());
+        var busyView = result.getCandidates().stream()
+                .filter(candidate -> "agent-busy".equals(candidate.getAgentId()))
+                .findFirst().orElseThrow();
+        assertFalse(busyView.getEligible());
+        assertFalse(busyView.getSelected());
+        assertEquals(List.of(AgentErrorConstants.AGENT_BUSY), busyView.getExclusionReasons());
+        verify(agentTaskMetaDao).findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-team");
+        verify(agentRuntimeDao).findCandidateRosterByOwner("fixture-client_id-1", "jiacn");
+        verify(agentRuntimeDao, never()).findRosterByOwner(any(), any(), any(), any(), any());
+        verify(legacyTaskCompatibilityService, never()).assignResolved(
+                any(), any(), any(), any(), any(), anyBoolean(),
+                any(AgentLegacyTaskCompatibilityService.AssignmentPrecommitValidator.class));
+    }
+
+    @Test
+    void recommendTaskTeamRequiresExplicitRiskBeforeAnyRead() {
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(1);
+        request.setBudgetUnits(0);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-team", request));
+
+        assertEquals("highRisk must be explicitly provided", failure.getMessage());
+        verify(agentTaskMetaDao, never()).findByTaskIdInOwnerScope(any(), any(), any(), any());
+        verify(agentRuntimeDao, never()).findCandidateRosterByOwner(any(), any());
+    }
+
+    @Test
+    void recommendTaskTeamCannotDowngradeAuthoritativeHighRisk() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-high-risk");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setTaskVersion(1L);
+        meta.setRequiredAbilities("[\"backend\"]");
+        meta.setRiskLevel("high");
+        meta.setMaxAgents(2);
+        meta.setReviewRequired(true);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-high-risk")).thenReturn(meta);
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(2);
+        request.setBudgetUnits(2);
+        request.setHighRisk(false);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-high-risk", request));
+
+        assertEquals("highRisk does not match authoritative task riskLevel",
+                failure.getMessage());
+        verify(agentRuntimeDao, never()).findCandidateRosterByOwner(any(), any());
+    }
+
+    @Test
+    void recommendTaskTeamFailsClosedOnInvalidAuthoritativeConstraints() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-invalid-constraints");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setTaskVersion(1L);
+        meta.setRequiredAbilities("[\"backend\"]");
+        meta.setRiskLevel("HIGH");
+        meta.setMaxAgents(2);
+        meta.setReviewRequired(false);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-invalid-constraints")).thenReturn(meta);
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(2);
+        request.setBudgetUnits(2);
+        request.setHighRisk(false);
+
+        IllegalArgumentException invalidRisk = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-invalid-constraints", request));
+        assertEquals("Persisted task riskLevel is invalid", invalidRisk.getMessage());
+
+        meta.setRiskLevel("low");
+        meta.setReviewRequired(null);
+        IllegalArgumentException invalidReview = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-invalid-constraints", request));
+        assertEquals("Persisted task reviewRequired is invalid", invalidReview.getMessage());
+
+        meta.setReviewRequired(false);
+        meta.setMaxAgents(null);
+        IllegalArgumentException invalidMaxAgents = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-invalid-constraints", request));
+        assertEquals("Persisted task maxAgents is invalid", invalidMaxAgents.getMessage());
+        verify(agentTaskMetaDao, times(3)).findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-invalid-constraints");
+        verify(agentRuntimeDao, never()).findCandidateRosterByOwner(any(), any());
+    }
+
+    @Test
+    void recommendTaskTeamAcceptsZeroSlotBudgetButReturnsBlockedPreview() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-zero-budget");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setTaskVersion(1L);
+        meta.setRequiredAbilities("[\"backend\"]");
+        meta.setRiskLevel("low");
+        meta.setMaxAgents(1);
+        meta.setReviewRequired(false);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-zero-budget")).thenReturn(meta);
+        // ownedAgent also stubs persona lookup; complete that before opening the roster stub.
+        AgentRuntimeEntity backendAgent = ownedAgent(
+                "agent-back", "后端", AgentConstants.STATUS_ONLINE, "[\"backend\"]");
+        when(agentRuntimeDao.findCandidateRosterByOwner("fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(backendAgent));
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(1);
+        request.setBudgetUnits(0);
+        request.setHighRisk(false);
+
+        AgentTaskTeamRecommendationDTO result = agentService.recommendTaskTeam(
+                "0", "fixture-client_id-1", "task-zero-budget", request);
+
+        assertEquals(0, result.getTotalCostUnits());
+        assertEquals(List.of(), result.getMembers());
+        assertEquals(List.of("backend"), result.getMissingAbilities());
+        assertTrue(result.getBlockingReasons().contains("NO_ELIGIBLE_PRODUCER"));
+        assertTrue(result.getBlockingReasons().contains("BUDGET_LIMIT_REACHED"));
+        assertFalse(result.getConstraintsSatisfied());
+        assertFalse(result.getReadyForConfirmation());
+        assertFalse(result.getAutoDispatchAllowed());
+    }
+
+    @Test
+    void recommendTaskTeamReportsGapsAndNeverAssigns() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-gap");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(2L);
+        meta.setRequiredAbilities("[\"backend\",\"frontend\"]");
+        meta.setRiskLevel("low");
+        meta.setMaxAgents(1);
+        meta.setReviewRequired(false);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-gap"))
+                .thenReturn(meta);
+        AgentRuntimeEntity backend = ownedAgent(
+                "agent-back", "后端", AgentConstants.STATUS_ONLINE, "[\"backend\"]");
+        AgentRuntimeEntity busyFrontend = ownedAgent(
+                "agent-front", "前端", AgentConstants.STATUS_BUSY, "[\"frontend\"]");
+        when(agentRuntimeDao.findCandidateRosterByOwner("fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(backend, busyFrontend));
+
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(1);
+        request.setBudgetUnits(1);
+        request.setHighRisk(false);
+        AgentTaskTeamRecommendationDTO result = agentService.recommendTaskTeam(
+                "0", "fixture-client_id-1", "task-gap", request);
+
+        assertEquals(List.of("backend"), result.getCoveredAbilities());
+        assertEquals(List.of("frontend"), result.getMissingAbilities());
+        assertFalse(result.getConstraintsSatisfied());
+        assertFalse(result.getReadyForConfirmation());
+        assertFalse(result.getAutoDispatchAllowed());
+        assertTrue(result.getBlockingReasons().contains("ABILITY_COVERAGE_INCOMPLETE"));
+        assertTrue(result.getBlockingReasons().contains(
+                "NO_ELIGIBLE_CANDIDATE_FOR_MISSING_ABILITIES"));
+        assertTrue(result.getAutoDispatchReasons().contains("RECOMMENDATION_PREVIEW_ONLY"));
+        assertTrue(result.getAutoDispatchReasons().contains("ABILITY_COVERAGE_INCOMPLETE"));
+        verify(legacyTaskCompatibilityService, never()).assignResolved(
+                any(), any(), any(), any(), any(), anyBoolean(),
+                any(AgentLegacyTaskCompatibilityService.AssignmentPrecommitValidator.class));
+        verify(agentRuntimeDao, never()).updateById(any());
+        verify(agentTaskMetaDao, never()).updateById(any());
+        verifyNoInteractions(taskEventWriter, eventPublisherProvider,
+                taskServiceProvider, apiKeyServiceProvider);
+    }
+
+    @Test
+    void recommendTaskTeamRejectsCandidateOutsideExactScope() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-scope");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(1L);
+        meta.setRequiredAbilities("[\"backend\"]");
+        meta.setRiskLevel("low");
+        meta.setMaxAgents(1);
+        meta.setReviewRequired(false);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-scope"))
+                .thenReturn(meta);
+        AgentRuntimeEntity foreign = ownedAgent(
+                "agent-foreign", "越界", AgentConstants.STATUS_ONLINE, "[\"backend\"]");
+        foreign.setOwnerJiacn("Juyiting");
+        when(agentRuntimeDao.findCandidateRosterByOwner("fixture-client_id-1", "jiacn"))
+                .thenReturn(List.of(foreign));
+        AgentTaskTeamRecommendationRequestDTO request = new AgentTaskTeamRecommendationRequestDTO();
+        request.setMaxTeamSize(1);
+        request.setBudgetUnits(1);
+        request.setHighRisk(false);
+
+        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                () -> agentService.recommendTaskTeam(
+                        "0", "fixture-client_id-1", "task-scope", request));
+
+        assertEquals("Persisted recommendation candidate is outside the byte-exact scope",
+                failure.getMessage());
+        verify(legacyTaskCompatibilityService, never()).assignResolved(
+                any(), any(), any(), any(), any(), anyBoolean(),
+                any(AgentLegacyTaskCompatibilityService.AssignmentPrecommitValidator.class));
+    }
+
+    @Test
+    void archiveTaskMarksTaskArchivedWithoutUpdatingAgentRuntime() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        meta.setTaskVersion(2L);
+        meta.setAssignedAgentId("agent-wuyong");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-wuyong", "Wu Yong", AgentConstants.STATUS_ONLINE, "[\"planning\"]");
+        agent.setPersonaCode("wuyong");
+        when(agentRuntimeDao.findByAgentId("agent-wuyong")).thenReturn(agent);
+        when(sceneServiceProvider.getIfAvailable()).thenReturn(sceneService);
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+
+        AgentTaskDTO result = agentService.archiveTask("task-001");
+
+        assertEquals(AgentConstants.TASK_STATUS_ARCHIVED, result.getStatus());
+        verify(agentTaskMetaDao).updateStatusByVersionInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-001", 2L,
+                AgentConstants.TASK_STATUS_ARCHIVED, null, null, null);
+        verify(agentTaskMetaDao, never()).updateById(any());
+        verify(agentRuntimeDao, never()).updateById(any());
+        verify(eventPublisher).publishTaskEvent(eq("task_archived"), any(AgentTaskDTO.class));
+        ArgumentCaptor<AgentTaskEventWriteCommand> persistent =
+                ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+        verify(taskEventWriter).append(persistent.capture());
+        assertEquals(TaskEventType.TASK_ARCHIVED, persistent.getValue().getEventType());
+        ArgumentCaptor<AgentSceneStateDTO> stateCaptor = ArgumentCaptor.forClass(AgentSceneStateDTO.class);
+        verify(sceneService).upsertState(eq("juyiting-main"), stateCaptor.capture());
+        AgentSceneStateDTO state = stateCaptor.getValue();
+        assertEquals("returning_home", state.getBehavior());
+        assertEquals("main-seat", state.getTargetRegionId());
+        assertEquals("task-001", state.getRelatedId());
+        assertTrue(state.getExpiresAt() > state.getExpectedArrivalAt());
+    }
+
+    @Test
+    void archiveUsesTerminalStateMachineCasVersionedEventAndAfterCommitNotification() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_FAILED);
+        meta.setTaskVersion(5L);
+        meta.setCurrentEventVersion(2L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+        when(eventPublisherProvider.getIfAvailable()).thenReturn(eventPublisher);
+
+        TransactionSynchronizationManager.initSynchronization();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+        try {
+            AgentTaskDTO result = agentService.archiveTask("task-001");
+
+            assertEquals(AgentConstants.TASK_STATUS_ARCHIVED, result.getStatus());
+            assertEquals(6L, meta.getTaskVersion());
+            verify(agentTaskMetaDao).updateStatusByVersionInOwnerScope(
+                    "0", "fixture-client_id-1", "jiacn", "task-001", 5L,
+                    AgentConstants.TASK_STATUS_ARCHIVED, null, null, null);
+            verify(agentTaskMetaDao, never()).updateById(any());
+            ArgumentCaptor<AgentTaskEventWriteCommand> event =
+                    ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+            verify(taskEventWriter).append(event.capture());
+            Map<String, Object> payload = JsonUtil.jsonToMap(event.getValue().getEventJson());
+            assertEquals(5L, ((Number) payload.get("expectedVersion")).longValue());
+            assertEquals(6L, ((Number) payload.get("resultVersion")).longValue());
+            verify(eventPublisher, never()).publishTaskEvent(any(), any());
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(TransactionSynchronization::afterCommit);
+            verify(eventPublisher).publishTaskEvent(eq("task_archived"), any());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+            TransactionSynchronizationManager.setActualTransactionActive(false);
+        }
+    }
+
+    @Test
+    void archiveAllowsCredentialLikeTaskIdWithoutLeakingFailureSecret() {
+        String taskId = "task-authorization-api_key-api-key";
+        String rawFailure = "Authorization: Bearer archive-secret";
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId(taskId);
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_FAILED);
+        meta.setFailureReason(rawFailure);
+        meta.setTaskVersion(5L);
+        meta.setCurrentEventVersion(2L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", taskId))
+                .thenReturn(meta);
+
+        AgentTaskDTO result = agentService.archiveTask(taskId);
+
+        assertEquals(AgentConstants.TASK_STATUS_ARCHIVED, result.getStatus());
+        ArgumentCaptor<AgentTaskEventWriteCommand> event =
+                ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+        verify(taskEventWriter).append(event.capture());
+        assertTrue(event.getValue().getEventJson().contains(taskId));
+        assertFalse(event.getValue().getEventJson().contains(rawFailure));
+        assertFalse(event.getValue().getEventJson().contains("archive-secret"));
+    }
+
+    @Test
+    void archiveRejectsMaxTaskVersionBeforeCasEventOrPublisher() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-max-version");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        meta.setTaskVersion(Long.MAX_VALUE);
+        meta.setCurrentEventVersion(2L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-max-version")).thenReturn(meta);
+
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.archiveTask("task-max-version"));
+
+        verify(agentTaskMetaDao, never()).updateStatusByVersionInOwnerScope(
+                anyString(), anyString(), anyString(), anyString(), anyLong(),
+                anyString(), any(), any(), any());
+        verify(taskEventWriter, never()).append(any());
+        verify(eventPublisherProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void archiveRejectsNonterminalStatesAndCasConflictWithoutEventOrNotification() {
+        for (String status : List.of(
+                AgentConstants.TASK_STATUS_OPEN, AgentConstants.TASK_STATUS_ASSIGNED,
+                AgentConstants.TASK_STATUS_RUNNING, "INVALID")) {
+            org.mockito.Mockito.clearInvocations(
+                    agentTaskMetaDao, taskEventWriter, eventPublisher, eventPublisherProvider);
+            AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+            meta.setId(1L);
+            meta.setTaskId("task-001");
+            meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+            meta.setClientId("fixture-client_id-1");
+            meta.setRewardStatus(status);
+            meta.setTaskVersion(3L);
+            when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                    .thenReturn(meta);
+
+            assertThrows(AgentServiceImpl.AgentBizException.class,
+                    () -> agentService.archiveTask("task-001"));
+            verify(agentTaskMetaDao, never()).updateStatusByVersionInOwnerScope(
+                    anyString(), anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), any(), any(), any());
+            verify(taskEventWriter, never()).append(any());
+            verify(eventPublisher, never()).publishTaskEvent(any(), any());
+        }
+
+        org.mockito.Mockito.clearInvocations(
+                agentTaskMetaDao, taskEventWriter, eventPublisher, eventPublisherProvider);
+        AgentTaskMetaEntity terminal = new AgentTaskMetaEntity();
+        terminal.setId(1L);
+        terminal.setTaskId("task-001");
+        terminal.setTenantId("0"); terminal.setOwnerJiacn("jiacn");
+        terminal.setClientId("fixture-client_id-1");
+        terminal.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        terminal.setTaskVersion(3L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(terminal);
+        when(agentTaskMetaDao.updateStatusByVersionInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-001", 3L,
+                AgentConstants.TASK_STATUS_ARCHIVED, null, null, null)).thenReturn(0);
+
+        assertThrows(AgentServiceImpl.AgentBizException.class,
+                () -> agentService.archiveTask("task-001"));
+        verify(taskEventWriter, never()).append(any());
+        verify(eventPublisher, never()).publishTaskEvent(any(), any());
+    }
+
+    @Test
+    void addTaskNoteStoresNoteAndListTaskNotesReturnsSavedNotes() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setId(1L);
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setTaskVersion(0L);
+        meta.setCurrentEventVersion(0L);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+
+        AgentTaskNoteDTO request = new AgentTaskNoteDTO();
+        request.setAuthorId("chcbz");
+        request.setAuthorType("user");
+        request.setNoteType("summary");
+        request.setContent("接口联调完成，后续观察藏经阁入库。");
+
+        AgentTaskNoteDTO created = agentService.addTaskNote("task-001", request);
+
+        ArgumentCaptor<AgentTaskNoteEntity> noteCaptor = ArgumentCaptor.forClass(AgentTaskNoteEntity.class);
+        verify(agentTaskNoteDao).insert(noteCaptor.capture());
+        AgentTaskNoteEntity saved = noteCaptor.getValue();
+        assertEquals("task-001", saved.getTaskId());
+        assertEquals("0", saved.getTenantId());
+        assertEquals("jiacn", saved.getOwnerJiacn());
+        assertEquals("chcbz", saved.getAuthorId());
+        assertEquals("user", saved.getAuthorType());
+        assertEquals("summary", saved.getNoteType());
+        assertEquals("接口联调完成，后续观察藏经阁入库。", saved.getContent());
+        assertNotNull(saved.getCreatedAt());
+        assertEquals(saved.getCreatedAt(), created.getCreatedAt());
+        ArgumentCaptor<AgentTaskEventWriteCommand> persistent =
+                ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+        verify(taskEventWriter).append(persistent.capture());
+        assertEquals(TaskEventType.PROGRESS_REPORTED, persistent.getValue().getEventType());
+        assertTrue(persistent.getValue().getEventJson().contains("contentSha256"));
+        assertTrue(persistent.getValue().getEventJson().contains("contentByteLength"));
+        assertTrue(!persistent.getValue().getEventJson().contains(request.getContent()));
+
+        AgentTaskNoteEntity oldNote = new AgentTaskNoteEntity();
+        oldNote.setTaskId("task-001");
+        oldNote.setAuthorId("wuyong");
+        oldNote.setAuthorType("agent");
+        oldNote.setNoteType("report");
+        oldNote.setContent("先前纪要");
+        oldNote.setCreatedAt(100L);
+
+        AgentTaskNoteEntity newNote = new AgentTaskNoteEntity();
+        newNote.setTaskId("task-001");
+        newNote.setAuthorId("chcbz");
+        newNote.setAuthorType("user");
+        newNote.setNoteType("summary");
+        newNote.setContent("最新纪要");
+        newNote.setCreatedAt(200L);
+        when(agentTaskNoteDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001")).thenReturn(List.of(oldNote, newNote));
+
+        List<AgentTaskNoteDTO> notes = agentService.listTaskNotes("task-001");
+
+        assertEquals(2, notes.size());
+        assertEquals("先前纪要", notes.get(0).getContent());
+        assertEquals("最新纪要", notes.get(1).getContent());
+        verify(agentTaskNoteDao).findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-001");
+    }
+
+    @Test
+    void taskReadRejectsCrossOwnerProjectionBeforeReturningData() {
+        AgentTaskMetaEntity foreign = scopedTaskRow("task-foreign-owner", "0", "fixture-client_id-1");
+        foreign.setOwnerJiacn("other-owner");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-foreign-owner"))
+                .thenReturn(foreign);
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> agentService.getTask("task-foreign-owner"));
+
+        assertTrue(failure.getMessage().contains("authenticated owner scope"));
+        verify(agentTaskMetaDao).findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-foreign-owner");
+        verify(agentTaskNoteDao, never()).findByTaskIdInOwnerScope(
+                anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void repeatedNotesUseDistinctEventIdsAndOnlyFrozenPayloadKeys() throws Exception {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity()
+                .setId(1L).setTaskId("task-001")
+                .setTaskVersion(0L).setCurrentEventVersion(0L);
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+        java.util.concurrent.atomic.AtomicLong ids = new java.util.concurrent.atomic.AtomicLong();
+        when(agentTaskNoteDao.insert(any(AgentTaskNoteEntity.class))).thenAnswer(invocation -> {
+            invocation.<AgentTaskNoteEntity>getArgument(0).setId(ids.incrementAndGet());
+            return 1;
+        });
+
+        for (String content : List.of("first secret note", "second secret note")) {
+            AgentTaskNoteDTO note = new AgentTaskNoteDTO();
+            note.setNoteType("summary");
+            note.setContent(content);
+            agentService.addTaskNote("task-001", note);
+        }
+
+        ArgumentCaptor<AgentTaskEventWriteCommand> events =
+                ArgumentCaptor.forClass(AgentTaskEventWriteCommand.class);
+        verify(taskEventWriter, times(2)).append(events.capture());
+        assertTrue(!events.getAllValues().get(0).getEventId()
+                .equals(events.getAllValues().get(1).getEventId()));
+        for (AgentTaskEventWriteCommand event : events.getAllValues()) {
+            Map<?, ?> payload = JsonUtil.getMapper().readValue(event.getEventJson(), Map.class);
+            assertEquals(Set.of(
+                            TaskEventPayload.Key.NOTE_ID,
+                            TaskEventPayload.Key.NOTE_TYPE,
+                            TaskEventPayload.Key.CONTENT_SHA256,
+                            TaskEventPayload.Key.CONTENT_BYTE_LENGTH),
+                    payload.keySet());
+            assertTrue(!event.getEventJson().contains("secret note"));
+        }
+    }
+
+    @Test
+    void searchTasksUsesFixedTenantAndAuthenticatedOwnerForEachExactScope() {
+        AgentTaskSearchRow firstScope = searchRow(
+                "task-owner-a", "0", "Client-A", "Owner-A", AgentConstants.TASK_STATUS_OPEN);
+        AgentTaskSearchRow secondScope = searchRow(
+                "task-owner-b", "0", "client-a", "owner-a", AgentConstants.TASK_STATUS_RUNNING);
+
+        when(agentTaskMetaDao.countSearch("0", "Client-A", "Owner-A", null, null, null, null, null))
+                .thenReturn(1L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "Client-A", "Owner-A", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(firstScope));
+        when(agentTaskMetaDao.countSearch("0", "client-a", "owner-a", null, null, null, null, null))
+                .thenReturn(1L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(secondScope));
+
+        authenticateTaskScope("Owner-A", "Client-A");
+        PageInfo<AgentTaskDTO> first = agentService.searchTasks(new AgentTaskSearchDTO());
+        authenticateTaskScope("owner-a", "client-a");
+        PageInfo<AgentTaskDTO> second = agentService.searchTasks(new AgentTaskSearchDTO());
+
+        assertEquals(List.of("task-owner-a"),
+                first.getList().stream().map(AgentTaskDTO::getId).toList());
+        assertEquals(List.of("task-owner-b"),
+                second.getList().stream().map(AgentTaskDTO::getId).toList());
+        verify(agentTaskMetaDao).searchPage(
+                "0", "Client-A", "Owner-A", null, null, null, 0L, 20, null, null);
+        verify(agentTaskMetaDao).searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null);
+    }
+
+    @Test
+    void countTasksByStatusUsesFixedTenantAndAuthenticatedOwner() {
+        when(agentTaskMetaDao.countSearchByStatus(
+                "0", "Client-A", "Owner-A", null, null, null))
+                .thenReturn(List.of(statusCount("0", "Client-A", "Owner-A",
+                        AgentConstants.TASK_STATUS_ASSIGNED, 1L)));
+        when(agentTaskMetaDao.countSearchByStatus(
+                "0", "client-a", "owner-a", null, null, null))
+                .thenReturn(List.of(statusCount("0", "client-a", "owner-a",
+                        AgentConstants.TASK_STATUS_COMPLETED, 1L)));
+
+        authenticateTaskScope("Owner-A", "Client-A");
+        var first = agentService.countTasksByStatus(new AgentTaskSearchDTO());
+        authenticateTaskScope("owner-a", "client-a");
+        var second = agentService.countTasksByStatus(new AgentTaskSearchDTO());
+
+        assertEquals("1", first.rawStatusCounts().get("total"));
+        assertEquals("1", first.rawStatusCounts().get(AgentConstants.TASK_STATUS_ASSIGNED));
+        assertEquals("0", first.rawStatusCounts().get(AgentConstants.TASK_STATUS_COMPLETED));
+        assertEquals("1", second.rawStatusCounts().get("total"));
+        assertEquals("0", second.rawStatusCounts().get(AgentConstants.TASK_STATUS_ASSIGNED));
+        assertEquals("1", second.rawStatusCounts().get(AgentConstants.TASK_STATUS_COMPLETED));
+    }
+
+    @Test
+    void phaseFilterAndRawStatusAreMutuallyExclusiveAndUnknownPhasesFailBeforeStorage() {
+        authenticateTaskScope("Owner-A", "Client-A");
+        AgentTaskSearchDTO filters = new AgentTaskSearchDTO();
+        filters.setPhase("IN_PROGRESS"); filters.setStatus("running");
+        assertThrows(IllegalArgumentException.class, () -> agentService.searchTasks(filters));
+        assertThrows(IllegalArgumentException.class, () -> agentService.countTasksByStatus(filters));
+        filters.setStatus(null); filters.setPhase("claimed");
+        assertThrows(IllegalArgumentException.class, () -> agentService.searchTasks(filters));
+        verifyNoInteractions(agentTaskMetaDao);
+    }
+
+    @Test
+    void phaseCountsKeepBigintPrecisionAndAggregateRawStagesOnTheSameScope() {
+        authenticateTaskScope("Owner-A", "Client-A");
+        long large = 9007199254740993L;
+        when(agentTaskMetaDao.countSearchByStatus("0", "Client-A", "Owner-A", null, null, null))
+                .thenReturn(List.of(statusCount("0", "Client-A", "Owner-A", "assigned", large),
+                        statusCount("0", "Client-A", "Owner-A", "running", 2L)));
+        var result = agentService.countTasksByStatus(new AgentTaskSearchDTO());
+        assertEquals("9007199254740995", result.phaseCounts().get("IN_PROGRESS"));
+        assertEquals("9007199254740995", result.phaseCounts().get("total"));
+        assertEquals("9007199254740993", result.rawStatusCounts().get("assigned"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidTaskScopeAuthentications")
+    void taskSearchAndCountsRejectInvalidAuthenticationBeforeDao(
+            String caseName, Authentication authentication) {
+        EsContext poisoned = new EsContext();
+        poisoned.setJiacn("cookie-owner");
+        poisoned.setClientId("cookie-client");
+        EsContextHolder.setContext(poisoned);
+        SecurityContextHolder.getContext().setAuthentication(authentication);
+
+        AgentServiceImpl.AgentBizException searchFailure = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.searchTasks(new AgentTaskSearchDTO()));
+        AgentServiceImpl.AgentBizException countFailure = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.countTasksByStatus(new AgentTaskSearchDTO()));
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, searchFailure.getCode());
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, countFailure.getCode());
+        verify(agentTaskMetaDao, never()).countSearch(
+                any(), any(), any(), any(), any(), any(), any(), any());
+        verify(agentTaskMetaDao, never()).countSearchByStatus(
+                any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void searchTasksRejectsRowsOutsideAuthenticatedOwnerScope() {
+        AgentTaskSearchRow valid = searchRow(
+                "valid-task", "0", "client-a", "owner-a", AgentConstants.TASK_STATUS_OPEN);
+        AgentTaskSearchRow contaminated = searchRow(
+                "contaminated-task", "0", "client-a", "owner-b", AgentConstants.TASK_STATUS_OPEN);
+        when(agentTaskMetaDao.countSearch("0", "client-a", "owner-a", null, null, null, null, null))
+                .thenReturn(2L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(valid, contaminated));
+        authenticateTaskScope("owner-a", "client-a");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.searchTasks(new AgentTaskSearchDTO()));
+        verify(agentTaskMetaDao, never()).findSearchMembers(any(), any(), any(), any());
+    }
+
+    @Test
+    void searchTasksRejectsCrossOwnerMemberAndRuntimeRows() {
+        AgentTaskSearchRow task = searchRow(
+                "task-1", "0", "client-a", "owner-a", AgentConstants.TASK_STATUS_OPEN);
+        when(agentTaskMetaDao.countSearch("0", "client-a", "owner-a", null, null, null, null, null))
+                .thenReturn(1L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(task));
+        when(agentTaskMetaDao.findSearchMembers(
+                "0", "client-a", "owner-a", List.of("task-1")))
+                .thenReturn(List.of(taskMember(
+                        "0", "client-a", "owner-b", "task-1", "agent-a", "accepted")));
+        authenticateTaskScope("owner-a", "client-a");
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.searchTasks(new AgentTaskSearchDTO()));
+        verify(agentTaskMetaDao, never()).findSearchRuntimes(any(), any(), any(), any());
+
+        org.mockito.Mockito.reset(agentTaskMetaDao);
+        when(agentTaskMetaDao.countSearch("0", "client-a", "owner-a", null, null, null, null, null))
+                .thenReturn(1L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(task));
+        when(agentTaskMetaDao.findSearchMembers(
+                "0", "client-a", "owner-a", List.of("task-1")))
+                .thenReturn(List.of(taskMember(
+                        "0", "client-a", "owner-a", "task-1", "agent-a", "accepted")));
+        AgentRuntimeEntity foreign = runtimeAgent("agent-a", "foreign", AgentConstants.STATUS_ONLINE, "[]");
+        foreign.setTenantId("0");
+        foreign.setClientId("client-a");
+        foreign.setOwnerJiacn("owner-b");
+        when(agentTaskMetaDao.findSearchRuntimes(
+                "0", "client-a", "owner-a", List.of("agent-a")))
+                .thenReturn(List.of(foreign));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.searchTasks(new AgentTaskSearchDTO()));
+    }
+
+    @Test
+    void searchTasksUsesFundingProjectionOnlyWithinOwnerScope() {
+        @SuppressWarnings("unchecked")
+        ObjectProvider<cn.jia.agent.service.funding.FundedBountyService> previewProvider =
+                org.mockito.Mockito.mock(ObjectProvider.class);
+        cn.jia.agent.service.funding.FundedBountyService previewService =
+                org.mockito.Mockito.mock(cn.jia.agent.service.funding.FundedBountyService.class);
+        when(previewProvider.getIfAvailable()).thenReturn(previewService);
+        agentService.configureFundedBountyService(previewProvider);
+
+        AgentTaskSearchRow task = searchRow(
+                "task-funded", "0", "client-a", "owner-a", AgentConstants.TASK_STATUS_OPEN);
+        when(agentTaskMetaDao.countSearch("0", "client-a", "owner-a", null, null, null, null, null))
+                .thenReturn(1L);
+        when(agentTaskMetaDao.searchPageWithFunding(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null))
+                .thenReturn(List.of(task));
+        authenticateTaskScope("owner-a", "client-a");
+
+        assertEquals(1, agentService.searchTasks(new AgentTaskSearchDTO()).getList().size());
+        verify(agentTaskMetaDao).searchPageWithFunding(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null);
+        verify(agentTaskMetaDao, never()).searchPage(
+                "0", "client-a", "owner-a", null, null, null, 0L, 20, null, null);
+    }
+
+    @Test
+    void assignedAgentIdReachesTotalPageAndStatusCountsWithoutNameOrAbilityMatching() {
+        authenticateTaskScope("juyiting", "fixture-client_id-1");
+        AgentTaskSearchDTO request = new AgentTaskSearchDTO();
+        request.setAssignedAgentId("Agent-Exact");
+        request.setKeyword(" 榜文 ");
+        request.setPhase("IN_PROGRESS");
+        when(agentTaskMetaDao.countSearch("0", "fixture-client_id-1", "juyiting", null,
+                null, "榜文", "IN_PROGRESS", "Agent-Exact")).thenReturn(31L);
+        when(agentTaskMetaDao.searchPage("0", "fixture-client_id-1", "juyiting", null,
+                null, "榜文", 0L, 20, "IN_PROGRESS", "Agent-Exact")).thenReturn(List.of());
+        assertEquals(31L, agentService.searchTasks(request).getTotal());
+        agentService.countTasksByStatus(request);
+        verify(agentTaskMetaDao).countSearch("0", "fixture-client_id-1", "juyiting", null,
+                null, "榜文", "IN_PROGRESS", "Agent-Exact");
+        verify(agentTaskMetaDao).searchPage("0", "fixture-client_id-1", "juyiting", null,
+                null, "榜文", 0L, 20, "IN_PROGRESS", "Agent-Exact");
+        verify(agentTaskMetaDao).countSearchByStatus("0", "fixture-client_id-1", "juyiting",
+                null, "榜文", "Agent-Exact");
+    }
+
+    @Test
+    void searchTasksUsesDatabaseFilteringPaginationAndOwnerScopedBatchReads() {
+        AgentTaskSearchRow first = searchRow(
+                "1", "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN);
+        first.setPlanTitle("夜探祝家庄榜文");
+        first.setPlanDescription("先探路，再回厅前公议");
+        first.setRequiredAbilities("[\"planning\"]");
+        AgentTaskSearchRow second = searchRow(
+                "2", "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN);
+        second.setPlanTitle("巡山榜文");
+        second.setRequiredAbilities("[\"planning\"]");
+
+        AgentTaskMemberEntity memberOne = taskMember(
+                "0", "fixture-client_id-1", "juyiting", "1", "agent-wuyong", "accepted");
+        AgentTaskMemberEntity memberTwo = taskMember(
+                "0", "fixture-client_id-1", "juyiting", "2", "agent-linchong", "working");
+        AgentRuntimeEntity wuYong = runtimeAgent(
+                "agent-wuyong", "吴用", AgentConstants.STATUS_ONLINE, "[]");
+        wuYong.setTenantId("0"); wuYong.setClientId("fixture-client_id-1"); wuYong.setOwnerJiacn("juyiting");
+        AgentRuntimeEntity linChong = runtimeAgent(
+                "agent-linchong", "林冲", AgentConstants.STATUS_BUSY, "[]");
+        linChong.setTenantId("0"); linChong.setClientId("fixture-client_id-1"); linChong.setOwnerJiacn("juyiting");
+
+        when(agentTaskMetaDao.countSearch(
+                "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN,
+                "planning", "榜文", null, null))
+                .thenReturn(502L);
+        when(agentTaskMetaDao.searchPage(
+                "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN,
+                "planning", "榜文", 500L, 500, null, null))
+                .thenReturn(List.of(first, second));
+        when(agentTaskMetaDao.findSearchMembers(
+                "0", "fixture-client_id-1", "juyiting", List.of("1", "2")))
+                .thenReturn(List.of(memberOne, memberTwo));
+        when(agentTaskMetaDao.findSearchRuntimes(
+                "0", "fixture-client_id-1", "juyiting", List.of("agent-wuyong", "agent-linchong")))
+                .thenReturn(List.of(wuYong, linChong));
+        authenticateTaskScope("juyiting", "fixture-client_id-1");
+
+        AgentTaskSearchDTO request = new AgentTaskSearchDTO();
+        request.setStatus(AgentConstants.TASK_STATUS_OPEN);
+        request.setAbility("planning");
+        request.setKeyword(" 榜文 ");
+        request.setPageNum(2);
+        request.setPageSize(9999);
+
+        PageInfo<AgentTaskDTO> result = agentService.searchTasks(request);
+
+        assertEquals(502L, result.getTotal());
+        assertEquals(2, result.getPageNum());
+        assertEquals(500, result.getPageSize());
+        assertEquals(List.of("1", "2"),
+                result.getList().stream().map(AgentTaskDTO::getId).toList());
+        assertEquals("夜探祝家庄榜文", result.getList().getFirst().getTitle());
+        assertEquals("吴用", result.getList().getFirst().getAssignedAgentName());
+        verify(agentTaskMetaDao).countSearch(
+                "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN,
+                "planning", "榜文", null, null);
+        verify(agentTaskMetaDao).searchPage(
+                "0", "fixture-client_id-1", "juyiting", AgentConstants.TASK_STATUS_OPEN,
+                "planning", "榜文", 500L, 500, null, null);
+        verify(agentTaskMetaDao).findSearchMembers(
+                "0", "fixture-client_id-1", "juyiting", List.of("1", "2"));
+        verify(agentTaskMetaDao).findSearchRuntimes(
+                "0", "fixture-client_id-1", "juyiting", List.of("agent-wuyong", "agent-linchong"));
+        verify(agentTaskMemberDao, never()).listByTask(any(), any(), any(), any());
+        verify(agentRuntimeDao, never()).findByAgentId(any());
+        verify(taskService, never()).get(anyLong());
+        verify(taskServiceProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void mapUsesThreeFixedBatchReadsForHundredAgents() {
+        List<AgentRuntimeEntity> runtimes = new java.util.ArrayList<>();
+        List<AgentPersonaEntity> personas = new java.util.ArrayList<>();
+        for (int index = 0; index < 100; index++) {
+            String agentId = "agent-map-" + index;
+            String personaCode = "persona-map-" + index;
+            AgentRuntimeEntity runtime = runtimeAgent(
+                    agentId, "Map Agent " + index, AgentConstants.STATUS_ONLINE, "[]");
+            runtime.setPersonaCode(personaCode);
+            runtime.setPersonaName("Map Persona " + index);
+            runtime.setClientId("fixture-client_id-1");
+            runtime.setOwnerJiacn(index % 2 == 0 ? "juyiting" : "tenant-b");
+            runtime.setBindingId((long) index + 1);
+            runtimes.add(runtime);
+            personas.add(persona(personaCode, "Map Persona " + index, "Map Title " + index));
+        }
+        AgentPersonaEntity songjiang = persona(
+                AgentConstants.BUILTIN_SONGJIANG_PERSONA_CODE, "宋江", "及时雨");
+        songjiang.setSystemAgent(true);
+        personas.add(songjiang);
+        when(agentRuntimeDao.findMapVisible("0", "fixture-client_id-1")).thenReturn(runtimes);
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1")).thenReturn(personas);
+        when(agentTaskMetaDao.findStatsByAgents(any())).thenAnswer(invocation ->
+                invocation.<List<AgentTaskStatsScope>>getArgument(0).stream()
+                        .map(scope -> taskStats(scope, 2, 1, 1, 1, 12))
+                        .toList());
+
+        List<AgentRuntimeDTO> result = agentService.listMapAgents();
+
+        assertEquals(101, result.size());
+        assertEquals(List.of("agent-map-0", "agent-map-1", "agent-map-2"), result.stream()
+                .limit(3).map(AgentRuntimeDTO::getAgentId).toList());
+        assertEquals(1, result.getFirst().getStats().getCompletedTaskCount());
+        assertEquals(12L, result.getFirst().getStats().getAverageDurationSeconds());
+        assertEquals(AgentConstants.BUILTIN_SONGJIANG_AGENT_ID, result.getLast().getAgentId());
+        verify(agentRuntimeDao, times(1)).findMapVisible("0", "fixture-client_id-1");
+        verify(agentPersonaDao, times(1)).findCatalogProjection("0", "fixture-client_id-1");
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<AgentTaskStatsScope>> scopes = ArgumentCaptor.forClass(List.class);
+        verify(agentTaskMetaDao, times(1)).findStatsByAgents(scopes.capture());
+        assertEquals(100, scopes.getValue().size());
+        assertEquals("0", scopes.getValue().get(0).getTenantId());
+        assertEquals("0", scopes.getValue().get(1).getTenantId());
+        verify(agentTaskMetaDao, never()).findByAgentId(any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void mapRejectsSameAgentIdRowFromForeignTenantBeforeEnrichment() {
+        AgentRuntimeEntity tenantA = runtimeAgent(
+                "shared-agent", "Tenant A Agent", AgentConstants.STATUS_ONLINE, "[]");
+        tenantA.setTenantId("tenant-a");
+        tenantA.setClientId("client-a");
+        tenantA.setOwnerJiacn("owner-a");
+        tenantA.setBindingId(1L);
+        AgentRuntimeEntity tenantB = runtimeAgent(
+                "shared-agent", "Tenant B Agent", AgentConstants.STATUS_BUSY, "[]");
+        tenantB.setTenantId("tenant-b");
+        tenantB.setClientId("client-a");
+        tenantB.setOwnerJiacn("owner-b");
+        tenantB.setBindingId(2L);
+        EsContext context = new EsContext();
+        agentService.configureProcessTenant(new cn.jia.core.security.FixedTenantAdmissionPolicy("tenant-a", "client-a"));
+        context.setTenantId("tenant-a");
+        context.setClientId("client-a");
+        context.setJiacn("owner-a");
+        EsContextHolder.setContext(context);
+        when(agentRuntimeDao.findMapVisible("tenant-a", "client-a"))
+                .thenReturn(List.of(tenantA, tenantB));
+
+        AgentServiceImpl.AgentBizException failure = assertThrows(
+                AgentServiceImpl.AgentBizException.class, agentService::listMapAgents);
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, failure.getCode());
+        verifyNoInteractions(agentPersonaDao, agentTaskMetaDao);
+    }
+
+    @Test
+    void rosterUsesThreeFixedBatchReadsForHundredAgentsAndPreservesOrder() {
+        List<AgentRuntimeEntity> runtimes = new java.util.ArrayList<>();
+        List<AgentPersonaEntity> personas = new java.util.ArrayList<>();
+        for (int index = 0; index < 100; index++) {
+            String agentId = String.format("agent-roster-%03d", index);
+            String personaCode = String.format("persona-roster-%03d", index);
+            AgentRuntimeEntity runtime = runtimeAgent(
+                    agentId, "Roster Agent " + index, AgentConstants.STATUS_OFFLINE, "[]");
+            runtime.setPersonaCode(personaCode);
+            runtime.setPersonaName("Roster Persona " + index);
+            runtime.setClientId("fixture-client_id-1");
+            runtime.setOwnerJiacn("jiacn");
+            runtime.setBindingId((long) index + 1);
+            runtimes.add(runtime);
+            personas.add(persona(personaCode,
+                    "Roster Persona " + index, "Roster Title " + index));
+        }
+        when(agentRuntimeDao.findRosterByOwner(
+                "0", "fixture-client_id-1", "jiacn", AgentConstants.STATUS_OFFLINE, "planning"))
+                .thenReturn(runtimes);
+        when(agentPersonaDao.findCatalogProjection("0", "fixture-client_id-1")).thenReturn(personas);
+        when(agentTaskMetaDao.findStatsByAgents(any())).thenAnswer(invocation ->
+                invocation.<List<AgentTaskStatsScope>>getArgument(0).stream()
+                        .map(scope -> taskStats(scope, 3, 2, 1, 2, 30))
+                        .toList());
+
+        try {
+            PageInfo<AgentRuntimeDTO> result = agentService.listRoster(
+                    AgentConstants.STATUS_OFFLINE, "planning", 1, 100);
+
+            assertEquals(100, result.getList().size());
+            assertEquals("agent-roster-000", result.getList().getFirst().getAgentId());
+            assertEquals("agent-roster-099", result.getList().getLast().getAgentId());
+            assertEquals(2, result.getList().getFirst().getStats().getCompletedTaskCount());
+            assertEquals(15L, result.getList().getFirst().getStats().getAverageDurationSeconds());
+            verify(agentRuntimeDao, times(1)).findRosterByOwner(
+                    "0", "fixture-client_id-1", "jiacn", AgentConstants.STATUS_OFFLINE, "planning");
+            verify(agentPersonaDao, times(1)).findCatalogProjection("0", "fixture-client_id-1");
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<AgentTaskStatsScope>> scopes = ArgumentCaptor.forClass(List.class);
+            verify(agentTaskMetaDao, times(1)).findStatsByAgents(scopes.capture());
+            assertEquals(100, scopes.getValue().size());
+            assertTrue(scopes.getValue().stream().allMatch(scope ->
+                    "0".equals(scope.getTenantId())
+                            && "fixture-client_id-1".equals(scope.getClientId())));
+                    verify(agentTaskMetaDao, never()).findByAgentId(any(), any(), any(), anyInt());
+        } finally {
+            PageHelper.clearPage();
+        }
+    }
+
+    @Test
+    void rosterRejectsCaseVariantClientRowsBeforeAnyEnrichmentQuery() {
+        AgentRuntimeEntity leaked = runtimeAgent(
+                "agent-case-variant", "Case Variant", AgentConstants.STATUS_ONLINE, "[]");
+        leaked.setClientId("JIA_CLIENT");
+        leaked.setOwnerJiacn("juyiting");
+        leaked.setBindingId(1L);
+        when(agentRuntimeDao.findRosterByOwner(
+                "0", "fixture-client_id-1", "jiacn", null, null)).thenReturn(List.of(leaked));
+
+        AgentServiceImpl.AgentBizException failure = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.listRoster(null, null, 1, 50));
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, failure.getCode());
+        verify(agentPersonaDao, never()).findCatalogProjection(anyString(), anyString());
+        verify(agentTaskMetaDao, never()).findStatsByAgents(any());
+    }
+
+    @Test
+    void rosterRejectsCaseVariantOwnerRowsBeforeAnyEnrichmentQuery() {
+        AgentRuntimeEntity leaked = runtimeAgent(
+                "agent-owner-variant", "Owner Variant", AgentConstants.STATUS_ONLINE, "[]");
+        leaked.setClientId("fixture-client_id-1");
+        leaked.setOwnerJiacn("JUYITING");
+        leaked.setBindingId(1L);
+        when(agentRuntimeDao.findRosterByOwner(
+                "0", "fixture-client_id-1", "jiacn", null, null)).thenReturn(List.of(leaked));
+
+        AgentServiceImpl.AgentBizException failure = assertThrows(
+                AgentServiceImpl.AgentBizException.class,
+                () -> agentService.listRoster(null, null, 1, 50));
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, failure.getCode());
+        verify(agentPersonaDao, never()).findCatalogProjection(anyString(), anyString());
+        verify(agentTaskMetaDao, never()).findStatsByAgents(any());
+    }
+
+    @Test
+    void mapRejectsCaseVariantClientRowsBeforeAnyEnrichmentQuery() {
+        AgentRuntimeEntity leaked = runtimeAgent(
+                "agent-map-client-variant", "Map Client Variant",
+                AgentConstants.STATUS_ONLINE, "[]");
+        leaked.setClientId("CLIENT-A");
+        leaked.setOwnerJiacn("tenant-a");
+        leaked.setBindingId(1L);
+        EsContext context = new EsContext();
+        context.setClientId("client-a");
+        context.setJiacn("tenant-a");
+        EsContextHolder.setContext(context);
+        when(agentRuntimeDao.findMapVisible("0", "client-a")).thenReturn(List.of(leaked));
+
+        AgentServiceImpl.AgentBizException failure = assertThrows(
+                AgentServiceImpl.AgentBizException.class, agentService::listMapAgents);
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, failure.getCode());
+        verify(agentPersonaDao, never()).findCatalogProjection(anyString(), anyString());
+        verify(agentTaskMetaDao, never()).findStatsByAgents(any());
+    }
+
+    @Test
+    void mapRejectsDuplicateTaskStatsForSameByteExactScope() {
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "Owned", AgentConstants.STATUS_ONLINE, "[]");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("tenant-a");
+        runtime.setBindingId(1L);
+        EsContext context = new EsContext();
+        context.setClientId("client-a");
+        context.setJiacn("tenant-a");
+        EsContextHolder.setContext(context);
+        when(agentRuntimeDao.findMapVisible("0", "client-a")).thenReturn(List.of(runtime));
+        when(agentPersonaDao.findCatalogProjection("0", "client-a")).thenReturn(List.of());
+        AgentTaskStatsScope scope = new AgentTaskStatsScope(
+                "0", "client-a", "agent-owned");
+        when(agentTaskMetaDao.findStatsByAgents(any())).thenReturn(List.of(
+                taskStats(scope, 1, 1, 0, 1, 10),
+                taskStats(scope, 1, 1, 0, 1, 10)));
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class, agentService::listMapAgents);
+
+        assertTrue(failure.getMessage().contains("duplicate byte-exact scope"));
+    }
+
+    @Test
+    void mapRejectsTaskStatsFromDifferentTenantOrClient() {
+        AgentRuntimeEntity runtime = runtimeAgent(
+                "agent-owned", "Owned", AgentConstants.STATUS_ONLINE, "[]");
+        runtime.setClientId("client-a");
+        runtime.setOwnerJiacn("tenant-a");
+        runtime.setBindingId(1L);
+        EsContext context = new EsContext();
+        context.setClientId("client-a");
+        context.setJiacn("tenant-a");
+        EsContextHolder.setContext(context);
+        when(agentRuntimeDao.findMapVisible("0", "client-a")).thenReturn(List.of(runtime));
+        when(agentPersonaDao.findCatalogProjection("0", "client-a")).thenReturn(List.of());
+        AgentTaskStatsScope foreignScope = new AgentTaskStatsScope(
+                "0", "client-b", "agent-owned");
+        when(agentTaskMetaDao.findStatsByAgents(any())).thenReturn(List.of(
+                taskStats(foreignScope, 1, 1, 0, 0, 0)));
+
+        AgentServiceImpl.AgentBizException failure = assertThrows(
+                AgentServiceImpl.AgentBizException.class, agentService::listMapAgents);
+
+        assertEquals(AgentErrorConstants.AGENT_FORBIDDEN, failure.getCode());
+    }
+
+    @Test
+    void listRosterReturnsOnlyCurrentOwnedBindingsAsOperable() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-001", "Wu Yong", AgentConstants.STATUS_OFFLINE, "[\"planning\"]");
+        when(agentRuntimeDao.findRosterByOwner(
+                "0", "fixture-client_id-1", "jiacn", AgentConstants.STATUS_OFFLINE, "planning"))
+                .thenReturn(List.of(agent));
+
+        PageInfo<AgentRuntimeDTO> page = agentService.listRoster(
+                AgentConstants.STATUS_OFFLINE, "planning", 1, 20);
+
+        assertEquals(1, page.getTotal());
+        assertEquals(1, page.getList().size());
+        AgentRuntimeDTO result = page.getList().getFirst();
+        assertEquals("agent-001", result.getAgentId());
+        assertEquals(AgentConstants.STATUS_OFFLINE, result.getStatus());
+        assertTrue(result.getBound());
+        assertTrue(result.getBoundToMe());
+        assertTrue(result.getCanOperate());
+        verify(agentIdentityService, never()).requireActiveIdentityForBinding(
+                anyString(), anyString(), anyString(), anyLong(), anyString());
+        verify(agentIdentityService, never()).requireActiveBinding(any(), any());
+        verify(eventPublisherProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void listRosterPreservesPageHelperMetadataDuringDtoConversion() {
+        AgentRuntimeEntity first = ownedAgent(
+                "agent-003", "Lin Chong", AgentConstants.STATUS_OFFLINE, "[\"combat\"]");
+        AgentRuntimeEntity second = ownedAgent(
+                "agent-004", "Lu Zhishen", AgentConstants.STATUS_OFFLINE, "[\"combat\"]");
+        Page<AgentRuntimeEntity> persistedPage = new Page<>(2, 2);
+        persistedPage.setTotal(5L);
+        persistedPage.add(first);
+        persistedPage.add(second);
+        when(agentRuntimeDao.findRosterByOwner(
+                "0", "fixture-client_id-1", "jiacn", AgentConstants.STATUS_OFFLINE, "combat"))
+                .thenReturn(persistedPage);
+
+        try {
+            PageInfo<AgentRuntimeDTO> page = agentService.listRoster(
+                    AgentConstants.STATUS_OFFLINE, "combat", 2, 2);
+
+            assertEquals(5L, page.getTotal());
+            assertEquals(2, page.getPageNum());
+            assertEquals(2, page.getPageSize());
+            assertEquals(3, page.getPages());
+            assertEquals(List.of("agent-003", "agent-004"), page.getList().stream()
+                    .map(AgentRuntimeDTO::getAgentId)
+                    .toList());
+        } finally {
+            PageHelper.clearPage();
+        }
+    }
+
+    @Test
+    void secondaryMemberCanListTaskWhenCompatibilityColumnStoresOnlyPrimary() {
+        AgentRuntimeEntity secondary = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[\"execution\"]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(secondary);
+        AgentTaskMemberEntity membership = new AgentTaskMemberEntity();
+        membership.setTenantId("0"); membership.setOwnerJiacn("jiacn");
+        membership.setClientId("fixture-client_id-1");
+        membership.setTaskId("task-001");
+        membership.setAgentId("agent-linchong");
+        membership.setMemberStatus("working");
+        when(agentTaskMemberDao.listByAgent(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", null, 500))
+                .thenReturn(List.of(membership));
+        AgentTaskMemberEntity primary = taskMember(
+                "0", "fixture-client_id-1", "task-001", "agent-wuyong", "working");
+        when(agentTaskMemberDao.listByTask("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(List.of(primary, membership));
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setTaskId("task-001");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_RUNNING);
+        meta.setAssignedAgentId("agent-wuyong");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(meta);
+
+        List<AgentTaskDTO> result = agentService.getAgentTasks("agent-linchong");
+
+        assertEquals(1, result.size());
+        assertEquals(List.of("agent-wuyong", "agent-linchong"),
+                result.getFirst().getAssignedAgentIds());
+        verify(agentTaskMetaDao, never()).findByAgentId("0", "fixture-client_id-1", "agent-linchong", 500);
+    }
+
+
+    @Test
+    void legacyTaskFallbackPushesExactScopeAndAgentIntoBoundedDaoQuery() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(agent);
+        AgentTaskMetaEntity task = new AgentTaskMetaEntity();
+        task.setId(1L);
+        task.setTaskId("task-legacy");
+        task.setTenantId("0"); task.setOwnerJiacn("jiacn");
+        task.setClientId("fixture-client_id-1");
+        task.setAssignedAgentId("agent-linchong");
+        task.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        when(agentTaskMetaDao.findByAgentInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", 500))
+                .thenReturn(List.of(task));
+
+        List<AgentTaskDTO> result = agentService.getAgentTasks("agent-linchong");
+
+        assertEquals(1, result.size());
+        assertEquals("task-legacy", result.getFirst().getId());
+        verify(agentTaskMetaDao).findByAgentInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", 500);
+    }
+
+    @Test
+    void legacyTaskFallbackTruncationFailsClosed() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(agent);
+        AgentTaskMetaEntity task = new AgentTaskMetaEntity();
+        task.setTaskId("task-legacy");
+        task.setTenantId("0"); task.setOwnerJiacn("jiacn");
+        task.setClientId("fixture-client_id-1");
+        task.setAssignedAgentId("agent-linchong");
+        when(agentTaskMetaDao.findByAgentInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", 500))
+                .thenReturn(java.util.Collections.nCopies(500, task));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.getAgentTasks("agent-linchong"));
+    }
+
+    @Test
+    void legacyTaskFallbackRejectsScopeAgentAndTaskIdDrift() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(agent);
+        AgentTaskMetaEntity drifted = new AgentTaskMetaEntity();
+        drifted.setTaskId("task-legacy ");
+        drifted.setTenantId("JUYITING");
+        drifted.setClientId("fixture-client_id-1");
+        drifted.setAssignedAgentId("agent-wuyong");
+        when(agentTaskMetaDao.findByAgentInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", 500))
+                .thenReturn(List.of(drifted));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.getAgentTasks("agent-linchong"));
+    }
+
+    @Test
+    void memberTaskProjectionFailsClosedWhenScopedTaskIsMissing() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(agent);
+        AgentTaskMemberEntity membership = taskMember(
+                "0", "fixture-client_id-1", "task-missing", "agent-linchong", "working");
+        when(agentTaskMemberDao.listByAgent(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", null, 500))
+                .thenReturn(List.of(membership));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.getAgentTasks("agent-linchong"));
+        verify(agentTaskMetaDao, never()).findByAgentId("0", "fixture-client_id-1", "agent-linchong", 500);
+    }
+
+    @Test
+    void agentTaskMembershipSnapshotTruncationFailsClosed() {
+        AgentRuntimeEntity agent = ownedAgent(
+                "agent-linchong", "Lin Chong", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-linchong")).thenReturn(agent);
+        List<AgentTaskMemberEntity> memberships = java.util.stream.IntStream.range(0, 500)
+                .mapToObj(index -> taskMember(
+                        "0", "fixture-client_id-1", "task-" + index,
+                        "agent-linchong", "working"))
+                .toList();
+        when(agentTaskMemberDao.listByAgent(
+                "0", "fixture-client_id-1", "jiacn", "agent-linchong", null, 500))
+                .thenReturn(memberships);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> agentService.getAgentTasks("agent-linchong"));
+        verify(agentTaskMetaDao, never()).findByTaskIdInOwnerScope(any(), any(), any(), any());
+    }
+
+    @Test
+    void explicitTaskReceiptProjectionUsesOwnerScopeWithoutThreadContext() {
+        var meta = new AgentTaskMetaEntity();
+        meta.setTaskId("explicit-task");
+        meta.setTenantId("0");
+        meta.setClientId("fixture-client_id-1");
+        meta.setOwnerJiacn("jiacn");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "explicit-task")).thenReturn(meta);
+        EsContextHolder.clearContext();
+        var scope = new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn");
+        assertEquals("explicit-task", agentService.getTask(scope, "explicit-task").getId());
+        verify(agentTaskMemberDao).listByTask("0", "fixture-client_id-1", "jiacn", "explicit-task");
+        meta.setOwnerJiacn("foreign-owner");
+        assertThrows(IllegalArgumentException.class, () -> agentService.getTask(scope, "explicit-task"));
+        verifyNoInteractions(taskEventWriter);
+    }
+
+    @Test
+    void numericTaskPlanProjectionUsesRootOwnerScopeAndNeverUnscopedGet() {
+        var meta = new AgentTaskMetaEntity();
+        meta.setTaskId("42");
+        meta.setTenantId("0");
+        meta.setClientId("fixture-client_id-1");
+        meta.setOwnerJiacn("jiacn");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "42"))
+                .thenReturn(meta);
+        when(taskServiceProvider.getIfAvailable()).thenReturn(taskService);
+        var plan = new TaskPlanEntity();
+        plan.setName("scoped title");
+        plan.setDescription("scoped description");
+        when(taskService.getInOwnerScope("0", "fixture-client_id-1", "jiacn", 42L))
+                .thenReturn(plan).thenReturn(null);
+        EsContextHolder.clearContext();
+        var scope = new cn.jia.agent.service.AgentService.TaskOwnerScope("0", "fixture-client_id-1", "jiacn");
+        var projected = agentService.getTask(scope, "42");
+        assertEquals("scoped title", projected.getTitle());
+        assertEquals("scoped description", projected.getDescription());
+        var absent = agentService.getTask(scope, "42");
+        assertEquals("42", absent.getTitle());
+        assertNull(absent.getDescription());
+        verify(taskService, times(2)).getInOwnerScope("0", "fixture-client_id-1", "jiacn", 42L);
+        verify(taskService, never()).get(any());
+    }
+
+    @Test
+    void getTaskProjectsExactStoredCoordinatorWithoutInferringOrWriting() {
+        AgentTaskMetaEntity meta = new AgentTaskMetaEntity();
+        meta.setTaskId("task-coordinator");
+        meta.setTenantId("0"); meta.setOwnerJiacn("jiacn");
+        meta.setClientId("fixture-client_id-1");
+        meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        meta.setTaskVersion(4L);
+        meta.setCoordinatorAgentId("agent-coordinator");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-coordinator")).thenReturn(meta);
+
+        AgentTaskDTO task = agentService.getTask("task-coordinator");
+
+        assertEquals("agent-coordinator", task.getCoordinatorAgentId());
+        assertEquals(List.of(), task.getAssignedAgentIds());
+        // Existing getTask reads the root and rechecks scope while projecting memberships.
+        verify(agentTaskMetaDao, times(2)).findByTaskIdInOwnerScope(
+                "0", "fixture-client_id-1", "jiacn", "task-coordinator");
+        verify(agentTaskMetaDao, never()).updateById(any());
+        verify(agentRuntimeDao, never()).updateById(any());
+        verifyNoInteractions(taskEventWriter, eventPublisherProvider, apiKeyServiceProvider);
+    }
+
+    @Test
+    void scopedTaskProjectionRejectsCaseDriftFromPersistence() {
+        AgentTaskMetaEntity drifted = new AgentTaskMetaEntity();
+        drifted.setTaskId("task-001");
+        drifted.setTenantId("JUYITING");
+        drifted.setClientId("fixture-client_id-1");
+        when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001"))
+                .thenReturn(drifted);
+
+        assertThrows(IllegalArgumentException.class, () -> agentService.getTask("task-001"));
+    }
+
+    @Test
+    void getStatsBuildsTaskCountersAndAverageDuration() {
+        AgentRuntimeEntity agent = new AgentRuntimeEntity();
+        agent.setAgentId("agent-001");
+        agent.setName("Wu Yong");
+        agent.setStatus(AgentConstants.STATUS_ONLINE);
+        markOwned(agent);
+        when(agentRuntimeDao.findByAgentId("agent-001")).thenReturn(agent);
+
+        AgentTaskMetaEntity completed = new AgentTaskMetaEntity();
+        completed.setTaskId("task-001");
+        completed.setTenantId("0"); completed.setOwnerJiacn("jiacn");
+        completed.setClientId("fixture-client_id-1");
+        completed.setAssignedAgentId("agent-001");
+        completed.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        completed.setStartedAt(1_000L);
+        completed.setCompletedAt(61_000L);
+
+        AgentTaskMetaEntity failed = new AgentTaskMetaEntity();
+        failed.setTaskId("task-002");
+        failed.setTenantId("0"); failed.setOwnerJiacn("jiacn");
+        failed.setClientId("fixture-client_id-1");
+        failed.setAssignedAgentId("agent-001");
+        failed.setRewardStatus(AgentConstants.TASK_STATUS_FAILED);
+        when(agentTaskMetaDao.findByAgentInOwnerScope("0", "fixture-client_id-1", "jiacn", "agent-001", 500))
+                .thenReturn(List.of(completed, failed));
+
+        AgentRuntimeDTO result = agentService.getStats("agent-001");
+
+        AgentStatsDTO stats = result.getStats();
+        assertEquals(1, stats.getCompletedTaskCount());
+        assertEquals(1, stats.getFailedTaskCount());
+        assertEquals(60L, stats.getAverageDurationSeconds());
+    }
+
+    @Test
+    void getStatsRejectsForeignOwnerBeforeReturningTaskCounters() {
+        AgentRuntimeEntity agent = ownedAgent("agent-stats", "Agent", AgentConstants.STATUS_ONLINE, "[]");
+        when(agentRuntimeDao.findByAgentId("agent-stats")).thenReturn(agent);
+        AgentTaskMetaEntity foreign = scopedTaskRow("foreign-task", "0", "fixture-client_id-1");
+        foreign.setOwnerJiacn("other-owner");
+        foreign.setAssignedAgentId("agent-stats");
+        foreign.setRewardStatus(AgentConstants.TASK_STATUS_COMPLETED);
+        when(agentTaskMetaDao.findByAgentInOwnerScope("0", "fixture-client_id-1", "jiacn", "agent-stats", 500))
+                .thenReturn(List.of(foreign));
+
+        assertThrows(IllegalArgumentException.class, () -> agentService.getStats("agent-stats"));
+        verifyNoInteractions(taskEventWriter, eventPublisherProvider);
+    }
+
+    private static Stream<Arguments> invalidTaskScopeAuthentications() {
+        Stream.Builder<Arguments> cases = Stream.builder();
+        cases.add(Arguments.of("no authentication", (Authentication) null));
+        cases.add(Arguments.of("authenticated non-JWT",
+                new UsernamePasswordAuthenticationToken("user", "credential", List.of())));
+        cases.add(Arguments.of("missing jiacn", taskScopeAuthentication(null, "client-a")));
+        cases.add(Arguments.of("missing client_id", taskScopeAuthentication("tenant-a", null)));
+        cases.add(Arguments.of("non-String jiacn", taskScopeAuthentication(7L, "client-a")));
+        cases.add(Arguments.of("non-String client_id",
+                taskScopeAuthentication("tenant-a", Boolean.TRUE)));
+        cases.add(Arguments.of("jiacn contains U+0000 control",
+                taskScopeAuthentication("tenant" + (char) 0x0000 + "-a", "client-a")));
+        cases.add(Arguments.of("client_id contains U+000A control",
+                taskScopeAuthentication("tenant-a", "client" + (char) 0x000A + "-a")));
+        for (int codeUnit : new int[]{0xD800, 0xDC00}) {
+            String surrogate = String.valueOf((char) codeUnit);
+            String label = String.format("U+%04X", codeUnit);
+            cases.add(Arguments.of("jiacn contains unpaired " + label,
+                    taskScopeAuthentication("tenant-" + surrogate, "client-a")));
+            cases.add(Arguments.of("client_id contains unpaired " + label,
+                    taskScopeAuthentication("tenant-a", "client-" + surrogate)));
+        }
+        for (int codePoint : new int[]{0x0020, 0x00A0, 0x2007, 0x202F}) {
+            String padding = new String(Character.toChars(codePoint));
+            String label = String.format("U+%04X", codePoint);
+            cases.add(Arguments.of("jiacn leading " + label,
+                    taskScopeAuthentication(padding + "tenant-a", "client-a")));
+            cases.add(Arguments.of("jiacn trailing " + label,
+                    taskScopeAuthentication("tenant-a" + padding, "client-a")));
+            cases.add(Arguments.of("client_id leading " + label,
+                    taskScopeAuthentication("tenant-a", padding + "client-a")));
+            cases.add(Arguments.of("client_id trailing " + label,
+                    taskScopeAuthentication("tenant-a", "client-a" + padding)));
+        }
+        cases.add(Arguments.of("legacy jiacn zero",
+                taskScopeAuthentication("0", "client-a")));
+        cases.add(Arguments.of("legacy client_id zero",
+                taskScopeAuthentication("tenant-a", "0")));
+        return cases.build();
+    }
+
+    private static Stream<Arguments> contaminatedTaskRows() {
+        return Stream.of(
+                Arguments.of("foreign tenant", "tenant-b", "client-a"),
+                Arguments.of("foreign client", "tenant-a", "client-b"),
+                Arguments.of("tenant case drift", "Tenant-A", "client-a"),
+                Arguments.of("client case drift", "tenant-a", "Client-A"),
+                Arguments.of("leading padded tenant", " tenant-a", "client-a"),
+                Arguments.of("trailing padded tenant", "tenant-a ", "client-a"),
+                Arguments.of("leading padded client", "tenant-a", " client-a"),
+                Arguments.of("trailing padded client", "tenant-a", "client-a "));
+    }
+
+    private static JwtAuthenticationToken taskScopeAuthentication(
+            Object tenantClaim, Object clientClaim) {
+        Jwt.Builder builder = Jwt.withTokenValue("task-search-token").claim("tenant_id", "0")
+                .header("alg", "none")
+                .issuedAt(Instant.now())
+                .expiresAt(Instant.now().plusSeconds(60));
+        if (tenantClaim != null) {
+            builder.claim("jiacn", tenantClaim);
+        }
+        if (clientClaim != null) {
+            builder.claim("client_id", clientClaim);
+        }
+        return new JwtAuthenticationToken(builder.build(), List.of());
+    }
+
+    private static AgentTaskSearchRow searchRow(
+            String taskId, String tenantId, String clientId, String ownerJiacn, String status) {
+        AgentTaskSearchRow task = new AgentTaskSearchRow();
+        task.setTaskId(taskId);
+        task.setTenantId(tenantId);
+        task.setClientId(clientId);
+        task.setOwnerJiacn(ownerJiacn);
+        task.setRewardStatus(status);
+        task.setPhase(testTaskPhase(status));
+        task.setFundingPresent(0);
+        return task;
+    }
+
+    private static String testTaskPhase(String status) {
+        return switch (status) {
+            case "open" -> "PENDING_ASSIGNMENT";
+            case "planning", "assigned", "running", "blocked" -> "IN_PROGRESS";
+            case "reviewing" -> "PENDING_ACCEPTANCE";
+            case "completed" -> "COMPLETED";
+            case "cancelled", "failed", "archived" -> "HISTORY";
+            default -> "UNKNOWN";
+        };
+    }
+
+    private static AgentTaskStatusCountRow statusCount(
+            String tenantId, String clientId, String ownerJiacn, String status, long count) {
+        AgentTaskStatusCountRow row = new AgentTaskStatusCountRow();
+        row.setTenantId(tenantId);
+        row.setClientId(clientId);
+        row.setOwnerJiacn(ownerJiacn);
+        row.setStatus(status);
+        row.setPhase(testTaskPhase(status));
+        row.setTaskCount(count);
+        return row;
+    }
+
+    private static AgentTaskMetaEntity scopedTaskRow(
+            String taskId, String tenantId, String clientId) {
+        AgentTaskMetaEntity task = new AgentTaskMetaEntity();
+        task.setTaskId(taskId);
+        task.setTenantId(tenantId);
+        task.setClientId(clientId);
+        task.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
+        return task;
+    }
+
+    private void authenticateTaskScope(String tenantId, String clientId) {
+        SecurityContextHolder.getContext().setAuthentication(
+                taskScopeAuthentication(tenantId, clientId));
+    }
+
+    private AgentTaskMemberEntity taskMember(
+            String tenantId, String clientId, String taskId, String agentId, String status) {
+        return taskMember(tenantId, clientId, "jiacn", taskId, agentId, status);
+    }
+
+    private AgentTaskMemberEntity taskMember(
+            String tenantId, String clientId, String ownerJiacn, String taskId, String agentId,
+            String status) {
+        AgentTaskMemberEntity member = new AgentTaskMemberEntity();
+        member.setTenantId(tenantId);
+        member.setClientId(clientId);
+        member.setOwnerJiacn(ownerJiacn);
+        member.setTaskId(taskId);
+        member.setAgentId(agentId);
+        member.setMemberStatus(status);
+        member.setMemberRole("worker");
+        member.setAssignmentSource("manual");
+        return member;
+    }
+
+    private AgentServiceImpl newAgentService(
+            AgentScopePublicationCoordinator coordinator, AgentSceneFeatureFlags featureFlags) {
+        return new AgentServiceImpl(agentRuntimeDao, agentIdentityService, agentPersonaDao,
+                agentPersonaBindingDao, agentTaskMetaDao, agentTaskMemberDao,
+                legacyTaskCompatibilityService, agentTaskNoteDao, dialogueTemplateDao,
+                eventPublisherProvider, taskServiceProvider, apiKeyServiceProvider,
+                sceneServiceProvider, coordinator, featureFlags, mutationTransaction, taskEventWriter,
+                new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null));
+    }
+
+    private AgentScopePublicationCoordinator coordinatedPublication(AtomicBoolean insideScope) {
+        AgentScopePublicationCoordinator coordinator =
+                org.mockito.Mockito.mock(AgentScopePublicationCoordinator.class);
+        doAnswer(invocation -> {
+            assertFalse(insideScope.get(), "scope publication must not reenter the same test lock");
+            insideScope.set(true);
+            try {
+                invocation.<Runnable>getArgument(2).run();
+            } finally {
+                insideScope.set(false);
+            }
+            return null;
+        }).when(coordinator).execute(
+                eq("fixture-client_id-1"), eq("jiacn"), any(Runnable.class));
+        return coordinator;
+    }
+
+    private AgentRuntimeEntity ownedAgent(String agentId, String name, String status, String abilities) {
+        AgentRuntimeEntity agent = runtimeAgent(agentId, name, status, abilities);
+        markOwned(agent);
+        return agent;
+    }
+
+    private AgentRuntimeEntity claimedRuntime(String agentId) {
+        AgentRuntimeEntity runtime = ownedAgent(agentId, agentId, "offline", null);
+        runtime.setId(99L); runtime.setTenantId("0"); claim(runtime); return runtime;
+    }
+    private void claim(AgentRuntimeEntity runtime) {
+        runtime.setRuntimeInstallationId("rti_" + "1".repeat(32)).setRuntimeHostId("host")
+                .setRuntimeInstanceId("boot").setRuntimeSessionGeneration(1L)
+                .setTokenHash("urs1:" + "a".repeat(64) + ":1:0");
+    }
+
+    private AgentRuntimeEntity runtimeAgent(String agentId, String name, String status, String abilities) {
+        AgentRuntimeEntity agent = new AgentRuntimeEntity();
+        agent.setTenantId("0");
+        agent.setAgentId(agentId);
+        agent.setName(name);
+        agent.setPersonaCode("wuyong");
+        agent.setStatus(status);
+        agent.setAbilities(abilities);
+        return agent;
+    }
+
+    private AgentTaskStatsRow taskStats(AgentTaskStatsScope scope, long taskCount,
+            long completedCount, long failedCount, long durationCount, long durationSeconds) {
+        AgentTaskStatsRow row = new AgentTaskStatsRow();
+        row.setTenantId(scope.getTenantId());
+        row.setClientId(scope.getClientId());
+        row.setAgentId(scope.getAgentId());
+        row.setTaskCount(taskCount);
+        row.setCompletedTaskCount(completedCount);
+        row.setFailedTaskCount(failedCount);
+        row.setCompletedDurationCount(durationCount);
+        row.setCompletedDurationSeconds(durationSeconds);
+        return row;
+    }
+
+    private AgentPersonaBindingEntity binding(String agentId, String personaCode) {
+        AgentPersonaBindingEntity binding = new AgentPersonaBindingEntity();
+        binding.setId(1L);
+        binding.setClientId("fixture-client_id-1");
+        binding.setTenantId("0");
+        binding.setJiacn("jiacn");
+        binding.setAgentId(agentId);
+        binding.setPersonaCode(personaCode);
+        binding.setStatus(AgentConstants.BINDING_STATUS_ACTIVE);
+        return binding;
+    }
+
+    private AgentIdentityRegistryEntity identity(AgentPersonaBindingEntity binding, String lifecycle) {
+        AgentIdentityRegistryEntity identity = new AgentIdentityRegistryEntity();
+        identity.setId(10L);
+        identity.setCanonicalAgentId(binding.getAgentId());
+        identity.setCanonicalType(binding.getAgentId().matches("agt_[0-9a-f]{32}")
+                ? AgentConstants.IDENTITY_TYPE_OPAQUE
+                : AgentConstants.IDENTITY_TYPE_LEGACY_CANONICAL);
+        identity.setLifecycleStatus(lifecycle);
+        identity.setTenantId(binding.getTenantId());
+        identity.setClientId(binding.getClientId());
+        identity.setOwnerJiacn(binding.getJiacn());
+        identity.setBindingId(binding.getId());
+        identity.setAuditReason("test");
+        return identity;
+    }
+
+    private AgentPersonaCatalogBindingRow catalogOverlay(
+            AgentPersonaBindingEntity binding, AgentIdentityRegistryEntity identity,
+            AgentRuntimeEntity runtime) {
+        AgentPersonaCatalogBindingRow row = new AgentPersonaCatalogBindingRow();
+        row.setBindingId(binding.getId());
+        row.setBindingTenantId(binding.getTenantId());
+        row.setBindingClientId(binding.getClientId());
+        row.setBindingOwnerJiacn(binding.getJiacn());
+        row.setPersonaCode(binding.getPersonaCode());
+        row.setBindingAgentId(binding.getAgentId());
+        row.setBindingStatus(binding.getStatus());
+        row.setIdentityId(identity.getId());
+        row.setIdentityBindingId(identity.getBindingId());
+        row.setIdentityTenantId(identity.getTenantId());
+        row.setIdentityClientId(identity.getClientId());
+        row.setIdentityOwnerJiacn(identity.getOwnerJiacn());
+        row.setCanonicalAgentId(identity.getCanonicalAgentId());
+        row.setCanonicalType(identity.getCanonicalType());
+        row.setLifecycleStatus(identity.getLifecycleStatus());
+        row.setAgentReferenceValid(true);
+        if (runtime != null) {
+            row.setRuntimeId(runtime.getId() == null ? 20L : runtime.getId());
+            row.setRuntimeTenantId(runtime.getTenantId());
+            row.setRuntimeClientId(runtime.getClientId());
+            row.setRuntimeOwnerJiacn(runtime.getOwnerJiacn());
+            row.setRuntimeBindingId(runtime.getBindingId());
+            row.setRuntimeAgentId(runtime.getAgentId());
+            row.setRuntimeAbilities(runtime.getAbilities());
+            row.setRuntimeStatus(runtime.getStatus());
+        }
+        return row;
+    }
+
+    private AgentPersonaEntity persona(String code, String name, String title) {
+        AgentPersonaEntity persona = new AgentPersonaEntity();
+        persona.setTenantId("0");
+        persona.setPersonaCode(code);
+        persona.setName(name);
+        persona.setTitle(title);
+        persona.setAbilities("[\"planning\",\"research\"]");
+        persona.setActive(true);
+        persona.setSystemAgent(false);
+        return persona;
+    }
+
+    private void markOwned(AgentRuntimeEntity agent) {
+        agent.setTenantId("0");
+        agent.setClientId("fixture-client_id-1");
+        agent.setOwnerJiacn("jiacn");
+        agent.setBindingId(1L);
+        AgentPersonaBindingEntity binding = binding(
+                agent.getAgentId(), agent.getPersonaCode() == null ? agent.getAgentId() : agent.getPersonaCode());
+        AgentIdentityRegistryEntity identity = identity(binding, AgentConstants.IDENTITY_STATUS_ACTIVE);
+        org.mockito.Mockito.lenient().when(agentIdentityService.requireCanonicalAgentIdInScope(
+                "0", "fixture-client_id-1", "jiacn", agent.getAgentId())).thenReturn(agent.getAgentId());
+        org.mockito.Mockito.lenient().when(agentIdentityService.requireActiveIdentityForBinding(
+                "0", "fixture-client_id-1", "jiacn", 1L, agent.getAgentId())).thenReturn(identity);
+        org.mockito.Mockito.lenient().when(agentIdentityService.requireActiveBinding(identity, null)).thenReturn(binding);
+    }
+
+}

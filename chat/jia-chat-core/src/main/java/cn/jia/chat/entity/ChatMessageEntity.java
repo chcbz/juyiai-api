@@ -1,0 +1,68 @@
+package cn.jia.chat.entity;
+
+import cn.jia.chat.serialization.ExactLongIdSerializer;
+import tools.jackson.databind.annotation.JsonSerialize;
+import cn.jia.core.entity.BaseEntity;
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.TableField;
+import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.experimental.Accessors;
+
+import java.io.Serial;
+
+/**
+ * <p>
+ * 聊天消息
+ * </p>
+ *
+ * @author chc
+ * @since 2026-04-19
+ */
+@Data
+@EqualsAndHashCode(callSuper = true)
+@Accessors(chain = true)
+@TableName("chat_message")
+@Schema(name = "ChatMessage对象", description = "聊天消息")
+public class ChatMessageEntity extends BaseEntity {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
+
+    @TableId(value = "id", type = IdType.AUTO)
+    @JsonSerialize(using = ExactLongIdSerializer.class)
+    private Long id;
+
+    @Schema(description = "会话ID")
+    private String conversationId;
+
+    @Schema(description = "消息类型（USER/ASSISTANT/SYSTEM）")
+    private String messageType;
+
+    @Schema(description = "消息内容")
+    private String content;
+
+    @Schema(description = "消息元数据（JSON格式）")
+    private String metadata;
+
+    @Schema(description = "用户ID（冗余字段，便于长效记忆汇总）")
+    private String jiacn;
+
+    @Schema(description = "同步状态（PENDING-待同步/SYNCED-已同步）")
+    private String syncStatus;
+
+    @Schema(description = "会话类型（normal-普通/juyiting-聚义厅）")
+    @TableField("conversation_type")
+    private String conversationType;
+
+    @Schema(description = "发送者类型（user/agent/system）")
+    @TableField("sender_type")
+    private String senderType;
+
+    @Schema(description = "发送者名称（用户昵称或Agent名称）")
+    @TableField("sender_name")
+    private String senderName;
+}

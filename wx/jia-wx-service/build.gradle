@@ -1,0 +1,64 @@
+dependencies {
+    api project(':base:jia-base-api')
+    api project(':wx:jia-wx-api')
+    api project(':user:jia-user-api')
+    api project(':isp:jia-isp-api')
+    api project(':dwz:jia-dwz-api')
+    api project(':point:jia-point-api')
+    api project(':kefu:jia-kefu-api')
+    api project(':material:jia-material-api')
+    implementation project(':common:jia-common-service')
+    implementation project(':task:jia-task-api')
+    implementation project(':wx:jia-wx-mapper')
+    implementation(libs.weixin.java.mp)
+    implementation(libs.weixin.java.pay)
+    implementation(libs.zxing.javase)
+    implementation(libs.spring.redis)
+    testImplementation project(':common:jia-common-test')
+    testRuntimeOnly libs.mysql
+    testAnnotationProcessor libs.lombok
+    testImplementation libs.lombok
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-wx-service'
+
+// Unified scheduling contracts use the shared private MySQL fixture, not agent business services.
+def scheduledNoticeSourceSet = sourceSets.create('scheduledNoticeRegression') {
+    java.srcDir 'src/test/java'
+    java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+    java.include 'cn/jia/wx/schedule/WxScheduledNoticeKeyTest.java'
+    java.include 'cn/jia/wx/schedule/WxScheduledNoticeStoreMySqlTest.java'
+    java.include 'cn/jia/wx/schedule/WxSubscriptionScopeMySqlTest.java'
+    java.include 'cn/jia/wx/schedule/WxRecipientScopeMySqlTest.java'
+    java.include 'cn/jia/wx/schedule/WxMaterialScopeMySqlTest.java'
+    java.include 'cn/jia/wx/schedule/WxSchedulingTransactionMySqlTest.java'
+    java.include 'cn/jia/wx/schedule/WxScheduleTest.java'
+    java.include 'cn/jia/wx/schedule/WxNoticeDispatchTest.java'
+    java.include 'cn/jia/wx/dailyvote/WxDailyVoteKeysTest.java'
+    java.include 'cn/jia/wx/api/WxMpControllerDailyVoteTest.java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(scheduledNoticeSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(scheduledNoticeSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+dependencies {
+    add(scheduledNoticeSourceSet.implementationConfigurationName, project(':kefu:jia-kefu-mapper'))
+    add(scheduledNoticeSourceSet.implementationConfigurationName, project(':material:jia-material-mapper'))
+    add(scheduledNoticeSourceSet.implementationConfigurationName, project(':task:jia-task-service'))
+    add(scheduledNoticeSourceSet.implementationConfigurationName, project(':task:jia-task-mapper'))
+}
+tasks.register('scheduledNoticeRegression', Test) {
+    group = 'verification'
+    description = 'Durable WeChat notice receipts and exact scoped subscription discovery (no external sends).'
+    dependsOn tasks.named(scheduledNoticeSourceSet.classesTaskName)
+    testClassesDirs = scheduledNoticeSourceSet.output.classesDirs
+    classpath = scheduledNoticeSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+}

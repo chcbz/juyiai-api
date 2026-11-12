@@ -1,0 +1,346 @@
+package cn.jia.agent.service.impl;
+
+import cn.jia.agent.common.AgentProtocolConstants;
+import cn.jia.agent.entity.AgentCommandDraft;
+import cn.jia.agent.entity.AgentHallCommandContext;
+import cn.jia.agent.entity.AgentHallCommandPayload;
+import cn.jia.agent.entity.AgentTaskInvitePayload;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.util.HexFormat;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class AgentCommandCanonicalCodecTest {
+    private static final String OWNER = "owner-a";
+    @Test
+    void ownerScopedTaskInviteGoldenBytesAndHashesRemainByteExact() {
+        AgentCommandDraft draft = taskInviteDraft("Task One");
+        byte[] business = AgentCommandCanonicalCodec.businessBytes(draft);
+        byte[] wire = AgentCommandCanonicalCodec.wireBytes(
+                draft, "00000000-0000-0000-0000-000000000001");
+        String businessJson = new String(business, StandardCharsets.UTF_8);
+        String wireJson = new String(wire, StandardCharsets.UTF_8);
+
+        assertEquals("cmd_task_invite_48fd2df4b311274ef95da131d557a01ae9fd2c0879cbb6938a38137b6990263d",
+                draft.commandId());
+        assertEquals("15481daedf9e4f907d809a02f8723ee9f6a85b2b44a8e204fbd18f73b2020a27",
+                HexFormat.of().formatHex(AgentCommandCanonicalCodec.sha256(business)));
+        assertEquals("616a0c99e6d63f651d2bd8d359a0a5e4e3bf839ff44d0f142fa9698db9c907e2",
+                HexFormat.of().formatHex(AgentCommandCanonicalCodec.sha256(wire)));
+        assertTrue(businessJson.startsWith("{\"schemaVersion\":1,\"commandId\":"));
+        assertFalse(businessJson.contains("messageId"));
+        assertFalse(businessJson.contains("messageType"));
+        assertFalse(businessJson.contains("\"attempt\""));
+        assertFalse(businessJson.contains("\"intentId\""));
+        assertTrue(wireJson.startsWith(
+                "{\"schemaVersion\":1,\"messageType\":\"command.dispatch\",\"messageId\":"));
+        assertEquals(1, occurrences(wireJson, "\"messageType\":\"command.dispatch\""));
+        assertTrue(wireJson.contains("\"workItemId\":null"));
+        assertTrue(wireJson.indexOf("\"attempt\":1") < wireJson.indexOf("\"payload\":"));
+        AgentTaskInvitePayload payload = assertInstanceOf(
+                AgentTaskInvitePayload.class, draft.payload());
+        assertEquals(List.of("analysis", "planning"), payload.requiredAbilities());
+        assertEquals(List.of("agent-1", "agent-2"), payload.collaboratorAgentIds());
+        assertArrayEquals(business,
+                AgentCommandCanonicalCodec.businessBytes(
+                        AgentCommandCanonicalCodec.decodeBusinessBytes(business)));
+    }
+
+    @Test
+    void ownerScopedHallGoldenIdentityTtlAndTypedPayloadAreFrozen() {
+        AgentCommandDraft draft = hallDraft(
+                "execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                1000L, "执行当前工作项并回报结果", "evt-1", canonicalContext());
+        byte[] business = AgentCommandCanonicalCodec.businessBytes(draft);
+        String json = new String(business, StandardCharsets.UTF_8);
+
+        assertEquals("cmd_hall_action_2895c72623ccc4e6941b2829ae835c56a73bbf98404d12b571c6abbf349265bd",
+                draft.commandId());
+        assertEquals("c1435930d10282655531a9fa339b1fca9471641d8235c3e730fe161f859a682b",
+                HexFormat.of().formatHex(AgentCommandCanonicalCodec.sha256(business)));
+        assertEquals("task-1", draft.correlationId());
+        assertEquals("evt-1", draft.causationId());
+        assertEquals(AgentCommandCanonicalCodec.HALL_COMMAND_TTL_MILLIS,
+                draft.expiresAt() - draft.issuedAt());
+        assertTrue(json.indexOf("\"expiresAt\":3601000") < json.indexOf("\"intentId\":"));
+        assertTrue(json.indexOf("\"intentId\":\"intent-1\"") < json.indexOf("\"payload\":"));
+        AgentCommandDraft decoded = AgentCommandCanonicalCodec.decodeBusinessBytes(business);
+        assertEquals(draft, decoded);
+        assertInstanceOf(AgentHallCommandPayload.class, decoded.payload());
+    }
+
+    @Test
+    void acceptsEveryFrozenHallCommandTypeIncludingIntentScopedTaskInvite() {
+        List<ActionType> allowlist = List.of(
+                new ActionType("task_briefing", AgentProtocolConstants.COMMAND_TASK_INVITE),
+                new ActionType("task_invite", AgentProtocolConstants.COMMAND_TASK_INVITE),
+                new ActionType("execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE),
+                new ActionType("resume", AgentProtocolConstants.COMMAND_WORK_ITEM_RESUME),
+                new ActionType("cancel", AgentProtocolConstants.COMMAND_WORK_ITEM_CANCEL),
+                new ActionType("ask_help", AgentProtocolConstants.COMMAND_REQUEST_RESPOND),
+                new ActionType("review", AgentProtocolConstants.COMMAND_REVIEW_EXECUTE),
+                new ActionType("request_report", AgentProtocolConstants.COMMAND_CONTEXT_REFRESH));
+
+        for (ActionType item : allowlist) {
+            AgentCommandDraft draft = hallDraft(
+                    item.actionType(), item.commandType(), 1000L,
+                    "执行该聚义厅动作并回报结果", null, null);
+            byte[] bytes = AgentCommandCanonicalCodec.businessBytes(draft);
+            AgentCommandDraft decoded = AgentCommandCanonicalCodec.decodeBusinessBytes(bytes);
+            assertEquals(item.commandType(), decoded.commandType());
+            assertEquals("intent-1", decoded.causationId());
+            assertInstanceOf(AgentHallCommandPayload.class, decoded.payload());
+        }
+    }
+
+    @Test
+    void hallTaskBriefingUsesTaskInviteTypeWithoutChangingLegacyInviteIdentity() {
+        AgentCommandDraft hall = hallDraft(
+                "task_briefing", AgentProtocolConstants.COMMAND_TASK_INVITE,
+                1000L, "请阅读任务简报并确认职责", null, null);
+        byte[] bytes = AgentCommandCanonicalCodec.businessBytes(hall);
+        AgentCommandDraft decoded = AgentCommandCanonicalCodec.decodeBusinessBytes(bytes);
+
+        assertTrue(hall.commandId().startsWith(
+                AgentCommandCanonicalCodec.HALL_COMMAND_ID_PREFIX));
+        assertFalse(hall.commandId().startsWith(
+                AgentCommandCanonicalCodec.TASK_INVITE_COMMAND_ID_PREFIX));
+        assertEquals(AgentProtocolConstants.COMMAND_TASK_INVITE, decoded.commandType());
+        assertEquals("intent-1", decoded.intentId());
+        assertInstanceOf(AgentHallCommandPayload.class, decoded.payload());
+        assertEquals("task_briefing",
+                ((AgentHallCommandPayload) decoded.payload()).actionType());
+        assertEquals(taskInviteCommandId(), taskInviteDraft("Task One").commandId());
+    }
+
+    @Test
+    void e05WireCarriesOnlyVersionedNonSecretReassignmentBinding() {
+        AgentCommandDraft draft = e05Draft("5", "cmd_hall_action_" + "a".repeat(64),
+                "rsn_" + "c".repeat(64));
+        byte[] business = AgentCommandCanonicalCodec.businessBytes(draft);
+        byte[] wire = AgentCommandCanonicalCodec.wireBytes(
+                draft, "00000000-0000-0000-0000-000000000005");
+        String wireJson = new String(wire, StandardCharsets.UTF_8);
+
+        assertEquals(draft, AgentCommandCanonicalCodec.decodeBusinessBytes(business));
+        assertTrue(wireJson.contains("\"bindingVersion\":\"e05-reassignment-v1\""));
+        assertTrue(wireJson.contains("\"reassignmentId\":\"rsn_" + "c".repeat(64) + "\""));
+        assertTrue(wireJson.contains("\"contextVersion\":\"5\""));
+        assertTrue(wireJson.contains("\"referenceIds\":[\"cmd_hall_action_"
+                + "a".repeat(64) + "\"]"));
+        assertFalse(wireJson.toLowerCase(java.util.Locale.ROOT).contains("bearer"));
+        assertFalse(wireJson.contains("leaseToken"));
+        assertFalse(wireJson.contains("apiKey"));
+    }
+
+    @Test
+    void unifiedRuntimeDispatchFixtureIsGeneratedByTheRealCanonicalCodec() throws Exception {
+        byte[] actual = AgentCommandCanonicalCodec.wireBytes(
+                e05Draft("5", "cmd_hall_action_" + "a".repeat(64), "rsn_" + "c".repeat(64)),
+                "00000000-0000-0000-0000-000000000005");
+        try (var fixture = getClass().getResourceAsStream(
+                "/ur02/command-dispatch-e05.canonical.redacted.json")) {
+            org.junit.jupiter.api.Assertions.assertNotNull(fixture);
+            assertArrayEquals(actual, fixture.readAllBytes());
+        }
+        assertEquals("057a4626387846f4bf420cab046d7d0bb4d12cdae6569e90839af00161cbd5a3",
+                HexFormat.of().formatHex(AgentCommandCanonicalCodec.sha256(actual)));
+        String json = new String(actual, StandardCharsets.UTF_8);
+        assertTrue(json.contains("\"targetAgentId\":\"agt_" + "b".repeat(32) + "\""));
+        assertTrue(json.contains("\"expiresAt\":3601000"));
+        assertFalse(json.contains("canonicalAgentId"));
+        assertFalse(json.contains("payloadReference"));
+        assertFalse(json.contains("installationId"));
+        assertFalse(json.contains("leaseToken"));
+    }
+
+    @Test
+    void e05OldMissingMismatchedAndUnknownBindingsFailClosed() {
+        AgentCommandDraft valid = e05Draft("5", "cmd_hall_action_" + "a".repeat(64),
+                "rsn_" + "c".repeat(64));
+        String canonical = new String(
+                AgentCommandCanonicalCodec.businessBytes(valid), StandardCharsets.UTF_8);
+        String oldE05 = canonical.replace(
+                ",\"bindingVersion\":\"e05-reassignment-v1\",\"reassignmentId\":\"rsn_"
+                        + "c".repeat(64) + "\"", "");
+        String unknown = canonical.replace(
+                "\"reassignmentId\":\"rsn_" + "c".repeat(64) + "\"",
+                "\"reassignmentId\":\"rsn_" + "c".repeat(64) + "\",\"leaseToken\":\"forged\"");
+
+        assertThrows(IllegalArgumentException.class, () ->
+                AgentCommandCanonicalCodec.decodeBusinessBytes(oldE05.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () ->
+                AgentCommandCanonicalCodec.decodeBusinessBytes(unknown.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                e05Draft("05", "cmd_hall_action_" + "a".repeat(64), "rsn_" + "c".repeat(64))));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                e05Draft("5", valid.commandId(), "rsn_" + "c".repeat(64))));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                e05Draft("5", "cmd_hall_action_" + "a".repeat(64), "rsn-invalid")));
+    }
+
+    @Test
+    void rejectsUnknownDuplicateNestedOversizedAndCredentialContent() {
+        AgentCommandDraft draft = hallDraft(
+                "execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                1000L, "执行当前工作项并回报结果", "evt-1", canonicalContext());
+        String canonical = new String(
+                AgentCommandCanonicalCodec.businessBytes(draft), StandardCharsets.UTF_8);
+        String unknownEnvelope = canonical.substring(0, canonical.length() - 1)
+                + ",\"unknown\":true}";
+        String duplicateTask = canonical.replace(
+                "\"taskId\":\"task-1\"",
+                "\"taskId\":\"task-1\",\"taskId\":\"task-1\"");
+        String unknownOptionalReplacement = canonical.replace(
+                "\"requiresApproval\":true", "\"credential\":true");
+        String nestedContext = canonical.replace(
+                "\"taskTitle\":\"Task One\"",
+                "\"taskTitle\":{\"nested\":\"Task One\"}");
+
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.decodeBusinessBytes(
+                unknownEnvelope.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.decodeBusinessBytes(
+                duplicateTask.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.decodeBusinessBytes(
+                unknownOptionalReplacement.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.decodeBusinessBytes(
+                nestedContext.getBytes(StandardCharsets.UTF_8)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.decodeBusinessBytes(
+                new byte[AgentCommandCanonicalCodec.MAX_CANONICAL_BYTES + 1]));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                hallDraft("execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                        1000L, "Authorization: Bearer secret", "evt-1", canonicalContext())));
+        AgentHallCommandContext secretContext = new AgentHallCommandContext(
+                "Task One", null, null, null, "token=secret", List.of(), List.of());
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                hallDraft("execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                        1000L, "执行当前工作项并回报结果", "evt-1", secretContext)));
+    }
+
+    @Test
+    void rejectsActionIdentityCausationAndTtlConflicts() {
+        AgentCommandDraft valid = hallDraft(
+                "execute", AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                1000L, "执行当前工作项并回报结果", "evt-1", null);
+        AgentHallCommandPayload payload = (AgentHallCommandPayload) valid.payload();
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                new AgentCommandDraft(valid.schemaVersion(), valid.commandId(), valid.correlationId(),
+                        valid.causationId(), valid.tenantId(), valid.clientId(), valid.ownerJiacn(), valid.taskId(),
+                        valid.workItemId(), valid.targetAgentId(),
+                        AgentProtocolConstants.COMMAND_WORK_ITEM_RESUME,
+                        valid.issuedAt(), valid.expiresAt(), valid.intentId(), payload)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                new AgentCommandDraft(valid.schemaVersion(), valid.commandId(), valid.correlationId(),
+                        "evt-forged", valid.tenantId(), valid.clientId(), valid.ownerJiacn(), valid.taskId(),
+                        valid.workItemId(), valid.targetAgentId(), valid.commandType(),
+                        valid.issuedAt(), valid.expiresAt(), valid.intentId(), payload)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                new AgentCommandDraft(valid.schemaVersion(), valid.commandId(), valid.correlationId(),
+                        valid.causationId(), valid.tenantId(), valid.clientId(), valid.ownerJiacn(), valid.taskId(),
+                        valid.workItemId(), valid.targetAgentId(), valid.commandType(),
+                        valid.issuedAt(), valid.expiresAt() + 1, valid.intentId(), payload)));
+        assertThrows(IllegalArgumentException.class, () -> AgentCommandCanonicalCodec.businessBytes(
+                hallDraft("unknown-action", AgentProtocolConstants.COMMAND_CONTEXT_REFRESH,
+                        1000L, "执行当前工作项并回报结果", null, null)));
+    }
+
+    @Test
+    void taskInviteWhitelistStillRejectsCredentialAndNonCanonicalArrays() {
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentCommandCanonicalCodec.businessBytes(
+                        taskInviteDraft("Authorization: Bearer secret")));
+        AgentCommandDraft nonCanonical = new AgentCommandDraft(
+                1, taskInviteCommandId(), "task-1", "evt-real", "0", "client-a", OWNER, "task-1",
+                null, "agent-1", AgentProtocolConstants.COMMAND_TASK_INVITE, 1000L, 3601000L,
+                taskInvitePayload("Task One", List.of("planning", "analysis"),
+                        List.of("agent-2", "agent-1")));
+        assertThrows(IllegalArgumentException.class,
+                () -> AgentCommandCanonicalCodec.businessBytes(nonCanonical));
+    }
+
+    private AgentCommandDraft hallDraft(
+            String actionType, String commandType, long issuedAt, String instruction,
+            String triggerEventId, AgentHallCommandContext context) {
+        String intentId = "intent-1";
+        return new AgentCommandDraft(
+                1, AgentCommandCanonicalCodec.hallCommandId(
+                        "0", "client-a", OWNER, "task-1", "agent-1", intentId, commandType),
+                "task-1", triggerEventId == null ? intentId : triggerEventId,
+                "0", "client-a", OWNER, "task-1", "work-1", "agent-1", commandType,
+                issuedAt, issuedAt + AgentCommandCanonicalCodec.HALL_COMMAND_TTL_MILLIS,
+                intentId, new AgentHallCommandPayload(
+                        actionType, instruction, "juyiting", "ready", "conversation-1",
+                        triggerEventId, "supervised", true, context));
+    }
+
+    private AgentCommandDraft e05Draft(
+            String workItemVersion, String sourceCommandId, String reassignmentId) {
+        String target = "agt_" + "b".repeat(32);
+        String intentId = "rsi_" + "d".repeat(64);
+        String commandId = AgentCommandCanonicalCodec.hallCommandId(
+                "0", "client-a", OWNER, "task-1", target, intentId,
+                AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE);
+        AgentHallCommandContext context = new AgentHallCommandContext(
+                null, "Work One", null, null, workItemVersion,
+                List.of(sourceCommandId), List.of("lease-expired", "reassignment"),
+                AgentCommandCanonicalCodec.E05_REASSIGNMENT_BINDING_VERSION, reassignmentId);
+        return new AgentCommandDraft(
+                1, commandId, "task-1", "evt-e05", "0", "client-a", OWNER, "task-1",
+                "work-1", target, AgentProtocolConstants.COMMAND_WORK_ITEM_EXECUTE,
+                1000L, 1000L + AgentCommandCanonicalCodec.HALL_COMMAND_TTL_MILLIS,
+                intentId, new AgentHallCommandPayload(
+                        "work_item_execute", "Execute reassigned work item", "juyiting",
+                        "lease_expired_reassignment", null, "evt-e05", "supervised", true,
+                        context));
+    }
+
+    private AgentHallCommandContext canonicalContext() {
+        return new AgentHallCommandContext(
+                "Task One", "Work One", null, null, "v1",
+                List.of("ref-a", "ref-b"), List.of("alpha"));
+    }
+
+    private AgentCommandDraft taskInviteDraft(String title) {
+        return new AgentCommandDraft(
+                1, taskInviteCommandId(), "task-1", "evt-real", "0", "client-a", OWNER, "task-1",
+                null, "agent-1", AgentProtocolConstants.COMMAND_TASK_INVITE, 1000L, 3601000L,
+                taskInvitePayload(title, List.of("analysis", "planning"),
+                        List.of("agent-1", "agent-2")));
+    }
+
+    private AgentTaskInvitePayload taskInvitePayload(
+            String title, List<String> abilities, List<String> collaborators) {
+        return new AgentTaskInvitePayload(
+                "task_briefing", "宋江首领已完成悬赏分派，请按职责协作推进。",
+                "阅读悬赏任务，确认自己的职责；如需协助，优先参考协作名册中的好汉能力并回报下一步计划。",
+                title, abilities, "agent-1", collaborators, "coordinator",
+                "回报执行计划、风险和协助诉求；Protocol v1 使用 work.progress，完成后使用 work.result，旧客户端由兼容层处理。",
+                "juyiting");
+    }
+
+    private int occurrences(String value, String expected) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = value.indexOf(expected, offset)) >= 0) {
+            count++;
+            offset += expected.length();
+        }
+        return count;
+    }
+
+    private String taskInviteCommandId() {
+        return AgentCommandCanonicalCodec.taskInviteCommandId(
+                "0", "client-a", OWNER, "task-1", "agent-1");
+    }
+
+    private record ActionType(String actionType, String commandType) {
+    }
+}

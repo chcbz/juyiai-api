@@ -1,0 +1,41 @@
+package cn.jia.agent.dao;
+
+import cn.jia.agent.entity.AgentPersonaBindingEntity;
+import cn.jia.agent.mapper.AgentPersonaCatalogBindingRow;
+import cn.jia.core.dao.IBaseDao;
+
+import java.util.List;
+
+public interface AgentPersonaBindingDao extends IBaseDao<AgentPersonaBindingEntity> {
+    AgentPersonaBindingEntity findByIdForUpdate(long id);
+
+    AgentPersonaBindingEntity findActiveByClientAndPersona(String clientId, String personaCode);
+
+    AgentPersonaBindingEntity findExactActiveByScopeAndPersona(
+            String tenantId, String clientId, String ownerJiacn, String personaCode);
+
+    /** Locks the active globally unique role binding before a new bind is attempted. */
+    AgentPersonaBindingEntity findActiveByTenantClientAndPersonaForUpdate(
+            String tenantId, String clientId, String personaCode);
+
+    List<AgentPersonaCatalogBindingRow> findCatalogOverlay(
+            String tenantId, String clientId, String ownerJiacn);
+
+    /** Active bindings owned by an authenticated user in one exact tenant/client scope. */
+    List<AgentPersonaBindingEntity> findExactActiveByScopeAndOwner(
+            String tenantId, String clientId, String ownerJiacn);
+
+    AgentPersonaBindingEntity findExactActiveByScopeAndPersonaForUpdate(
+            String tenantId, String clientId, String ownerJiacn, String personaCode);
+
+    AgentPersonaBindingEntity findActiveByClientAndAgentId(String clientId, String agentId);
+
+    AgentPersonaBindingEntity findActiveByClientJiacnAndPersona(String clientId, String jiacn, String personaCode);
+
+    AgentPersonaBindingEntity findActiveByClientJiacnAndAgentId(String clientId, String jiacn, String agentId);
+
+    AgentPersonaBindingEntity findActiveByClientJiacnAndAgentIdForUpdate(
+            String clientId, String jiacn, String agentId);
+
+    List<AgentPersonaBindingEntity> findActiveByClientJiacn(String clientId, String jiacn);
+}

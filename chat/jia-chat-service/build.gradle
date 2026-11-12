@@ -1,0 +1,700 @@
+dependencies {
+    // Strict metadata/request codecs intentionally use Jackson2, independently of networknt3/Jackson3.
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
+    // action-v4 reuses the same standard codec/dialect as verified skill packages.
+    implementation('com.networknt:json-schema-validator') { version { strictly '3.0.1' } }
+	api project(':common:jia-common-core')
+	implementation project(':common:jia-common-service')
+	api project(':chat:jia-chat-api')
+	implementation project(':chat:jia-chat-mapper')
+	implementation project(':agent:jia-agent-api')
+    implementation project(':economy:jia-economy-api')
+	implementation project(':agent:jia-agent-service')
+	implementation project(':user:jia-user-api')
+	compileOnly project(':oauth:jia-oauth-api')
+	implementation project(':task:jia-task-core')
+    implementation project(':task:jia-task-api')
+	compileOnly project(':point:jia-point-api')
+	compileOnly project(':kefu:jia-kefu-api')
+	compileOnly project(':material:jia-material-api')
+	implementation libs.spring.boot.starter.webflux
+	implementation libs.spring.ai.starter.mcp.client
+	compileOnly libs.spring.ai.starter.model.deepseek
+	implementation "org.springframework.ai:spring-ai-starter-model-openai:${libs.versions.spring.ai.asProvider().get()}"
+	compileOnly libs.spring.ai.starter.model.ollama
+	compileOnly(libs.spring.boot.starter.elasticsearch)
+//	implementation libs.spring.ai.starter.vector.store.elasticsearch
+	// implementation 'org.springframework.ai:spring-ai-starter-vector-store-redis'
+	compileOnly libs.spring.ai.vector.store.advisor
+	implementation libs.spring.ai.starter.tool.search.advisor
+	implementation libs.spring.ai.agent.utils
+	compileOnly libs.spring.boot.starter.websocket
+	compileOnly libs.spring.security.oauth2.client
+	compileOnly libs.spring.security.config
+	compileOnly libs.spring.security.oauth2.resource.server
+	compileOnly libs.spring.security.oauth2.jose
+	compileOnly libs.spring.redis
+	testImplementation libs.spring.security.config
+	testRuntimeOnly('com.github.lansheng228:embedded-redis:7.4.1') { transitive = false }
+//	implementation 'org.springframework.retry:spring-retry'
+//	implementation 'org.springframework:spring-aspects'
+	testImplementation project(':common:jia-common-test')
+	testImplementation project(':agent:jia-agent-service')
+    // Shared real skill transaction fixture includes its durable task rows.
+    testImplementation project(':task:jia-task-service')
+    testImplementation project(':task:jia-task-mapper')
+	testImplementation project(':agent:jia-agent-mapper')
+	testImplementation project(':oauth:jia-oauth-api')
+    // Exercise the actual browser JWT chain for the private profile GET, not a mocked principal only.
+    testImplementation project(':oauth:jia-oauth-resource')
+	testImplementation libs.spring.ai.starter.mcp.client
+	testImplementation "org.springframework.ai:spring-ai-starter-model-openai:${libs.versions.spring.ai.asProvider().get()}"
+	testImplementation libs.spring.boot.starter.websocket
+	testImplementation libs.spring.security.oauth2.resource.server
+	testImplementation libs.spring.security.oauth2.jose
+	testRuntimeOnly libs.mysql
+}
+
+version = '1.1.2-SNAPSHOT'
+description = 'jia-chat-service'
+
+// D02 source-only verification slice. It avoids compiling unrelated historical chat tests.
+def juyitingExecutionReportSourceSet = sourceSets.create('juyitingExecutionReport') {
+    java.srcDir 'src/juyitingExecutionReportTest/java'
+    java.srcDir 'src/test/java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketExecutionReportTest.java'
+    java.include 'cn/jia/chat/handler/UnifiedRuntimeTestSupport.java'
+    resources.srcDir 'src/juyitingExecutionReportTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(juyitingExecutionReportSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(juyitingExecutionReportSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('juyitingExecutionReport', Test) {
+    group = 'verification'
+    description = 'Runs D02 durable Agent report service, WebSocket and schema contract tests.'
+    dependsOn tasks.named(juyitingExecutionReportSourceSet.classesTaskName)
+    testClassesDirs = juyitingExecutionReportSourceSet.output.classesDirs
+    classpath = juyitingExecutionReportSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// 1.13.20 BF07/BF08 focused regression; default test remains unchanged.
+// Compile and run separately on the shared low-memory local build host.
+def bf08FormalFlowSourceSet = sourceSets.create('bf08FormalFlow') {
+    java {
+        srcDir 'src/test/java'
+        include 'cn/jia/chat/handler/AgentWebSocketHandlerTest.java'
+        include 'cn/jia/chat/handler/UnifiedRuntimeTestSupport.java'
+        include 'cn/jia/chat/handler/FinalReplyTimingTest.java'
+        include 'cn/jia/chat/api/ChatControllerTest.java'
+        include 'cn/jia/chat/service/TenantScopeResolverTest.java'
+        include 'cn/jia/chat/service/HallActionDispatcherTest.java'
+    }
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(bf08FormalFlowSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(bf08FormalFlowSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('bf08FormalFlow', Test) {
+    group = 'verification'
+    description = 'Runs BF07/BF08 formal origin, legacy, delivery, chat scope and reference regressions.'
+    dependsOn tasks.named(bf08FormalFlowSourceSet.classesTaskName)
+    testClassesDirs = bf08FormalFlowSourceSet.output.classesDirs
+    classpath = bf08FormalFlowSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// Catalog fixture shared by maintained registration and declaration tests.
+sourceSets.test.java.srcDir 'src/sharedTest/java'
+
+// MMD-U3 finalization HTTP/orchestration slice; owner reads remain side-effect free.
+def mmdU3FinalizationSourceSet = sourceSets.create('mmdU3Finalization') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        include 'cn/jia/chat/service/ChatSelectedOutputFinalizationServiceTest.java'
+        include 'cn/jia/chat/service/ChatCompletedMessageSourceServiceTest.java'
+        include 'cn/jia/chat/service/ChatSelectedOutputFinalizationStoreTest.java'
+        include 'cn/jia/chat/api/AgentTaskSelectedOutputFinalizationControllerTest.java'
+        include 'cn/jia/chat/config/ChatSelectedOutputFinalizationSchemaInitializerTest.java'
+        include 'cn/jia/chat/config/JuyitingWorkflowMySqlTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdU3FinalizationSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(mmdU3FinalizationSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('mmdU3Finalization', Test) {
+    group = 'verification'
+    description = 'Runs MMD U3 exact selection, recovery, owner scope, read-only lookup and schema tests.'
+    dependsOn tasks.named(mmdU3FinalizationSourceSet.classesTaskName)
+    testClassesDirs = mmdU3FinalizationSourceSet.output.classesDirs
+    classpath = mmdU3FinalizationSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// MMD-U1 controlled-provider registration sibling; independent of immutable fast-v1/native-v1.
+def mmdU1ProviderCredentialBindingSourceSet = sourceSets.create('mmdU1ProviderCredentialBinding') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        include 'cn/jia/chat/handler/NativeProviderCredentialBindingDeclarationTest.java'
+        include 'cn/jia/chat/handler/AgentWebSocketNativeProviderCredentialBindingTest.java'
+        include 'cn/jia/chat/handler/NativeBountyExecutionDeclarationTest.java'
+        include 'cn/jia/chat/handler/AgentWebSocketNativeBountyExecutionTest.java'
+        include 'cn/jia/agent/security/NativeBountyCurrentBindingTest.java'
+        include 'cn/jia/chat/handler/AgentRuntimeCapabilitiesTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+// These six fixtures use production WebSocket/runtime identity classes plus JUnit/Mockito.
+// They do not import common:jia-common-test, BaseTest or Testable, so keep that annotation
+// processor and unrelated service-test graph outside this bounded source set.
+configurations.named(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.implementation
+}
+configurations.named(mmdU1ProviderCredentialBindingSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.runtimeOnly
+}
+dependencies {
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName,
+            platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName, libs.junit.jupiter)
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName, 'org.mockito:mockito-core')
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName,
+            libs.spring.boot.starter.websocket)
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName,
+            project(':oauth:jia-oauth-api'))
+    add(mmdU1ProviderCredentialBindingSourceSet.implementationConfigurationName,
+            project(':agent:jia-agent-mapper'))
+    add(mmdU1ProviderCredentialBindingSourceSet.runtimeOnlyConfigurationName,
+            'org.junit.platform:junit-platform-launcher:6.0.1')
+}
+tasks.register('mmdU1ProviderCredentialBinding', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs exact controlled-provider declaration and current authenticated-session lookup regressions.'
+    dependsOn tasks.named(mmdU1ProviderCredentialBindingSourceSet.classesTaskName)
+    testClassesDirs = mmdU1ProviderCredentialBindingSourceSet.output.classesDirs
+    classpath = mmdU1ProviderCredentialBindingSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// MMD-BRIDGE-A same-session declaration, capability and Agent-before-Chat transaction slice.
+def mmdControlledImageBridgeSourceSet = sourceSets.create('mmdControlledImageBridge') {
+    java {
+        srcDir 'src/test/java'
+        include 'cn/jia/chat/service/NativeConversationWorkNotifierTest.java'
+        srcDir 'src/mmdRegressionTest/java'
+        include 'cn/jia/chat/handler/ControlledImageBountyExecutionDeclarationTest.java'
+        include 'cn/jia/chat/handler/AgentWebSocketControlledImageExecutionTest.java'
+        include 'cn/jia/chat/handler/NativeProviderCredentialBindingDeclarationTest.java'
+        include 'cn/jia/chat/handler/NativeBountyExecutionDeclarationTest.java'
+        include 'cn/jia/chat/handler/AgentRuntimeCapabilitiesTest.java'
+        include 'cn/jia/chat/service/ControlledImagePointAndStartCapabilityServiceTest.java'
+        include 'cn/jia/chat/service/ChatBountyBootstrapRelayRecoveryTest.java'
+        include 'cn/jia/chat/api/AgentTaskControlledImageCapabilityControllerTest.java'
+        include 'cn/jia/chat/service/ChatBountyExecutionCoordinatorTest.java'
+        include 'cn/jia/chat/service/ChatBountyExecutionCoordinatorSpringTransactionTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdControlledImageBridgeSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.implementation
+}
+configurations.named(mmdControlledImageBridgeSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.runtimeOnly
+}
+dependencies {
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName,
+            platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName, libs.junit.jupiter)
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName, 'org.mockito:mockito-core')
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName, 'org.springframework:spring-test')
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName, 'org.hamcrest:hamcrest')
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName,
+            libs.spring.boot.starter.websocket)
+    // Chat transaction fixture imports the production owner-scoped task-root DAO directly.
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName,
+            project(':agent:jia-agent-mapper'))
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-resource-server')
+    add(mmdControlledImageBridgeSourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-jose')
+    add(mmdControlledImageBridgeSourceSet.runtimeOnlyConfigurationName,
+            'org.junit.platform:junit-platform-launcher:6.0.1')
+    add(mmdControlledImageBridgeSourceSet.runtimeOnlyConfigurationName,
+            project(':oauth:jia-oauth-api'))
+    add(mmdControlledImageBridgeSourceSet.runtimeOnlyConfigurationName, 'com.h2database:h2')
+    add(mmdControlledImageBridgeSourceSet.runtimeOnlyConfigurationName, 'com.jayway.jsonpath:json-path')
+}
+tasks.register('mmdControlledImageBridge', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs controlled image declaration, capability, owner HTTP and cross-module transaction regressions.'
+    dependsOn tasks.named(mmdControlledImageBridgeSourceSet.classesTaskName)
+    testClassesDirs = mmdControlledImageBridgeSourceSet.output.classesDirs
+    classpath = mmdControlledImageBridgeSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// MMD-U2 schema-3 owner preview/issue/admit and runtime declaration slice.
+def mmdControlledImageFollowupV3SourceSet = sourceSets.create('mmdControlledImageFollowupV3') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        srcDir 'src/test/java'
+        include 'cn/jia/chat/service/ChatStreamPolicyTest.java'
+        include 'cn/jia/chat/api/ChatBountyInteractionV3ControllerTest.java'
+        include 'cn/jia/chat/service/ChatBountyInteractionV3PreviewServiceTest.java'
+        include 'cn/jia/chat/service/ChatBountyInteractionV3AuthorityServiceTest.java'
+        include 'cn/jia/chat/service/ChatBountyInteractionV3AdmissionServiceTest.java'
+        include 'cn/jia/chat/service/ChatConversationAssetSourceResolverTest.java'
+        include 'cn/jia/chat/service/ChatBountyExecutionCoordinatorV3Test.java'
+        include 'cn/jia/chat/service/ChatBountyExecutionCoordinatorV3SpringTransactionTest.java'
+        include 'cn/jia/chat/handler/AgentWebSocketControlledImageV3ExecutionTest.java'
+        include 'cn/jia/chat/handler/NativeProviderCredentialBindingDeclarationTest.java'
+        include 'cn/jia/chat/handler/AgentRuntimeCapabilitiesTest.java'
+        include 'cn/jia/chat/handler/ControlledImageBountyExecutionV3DeclarationTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName) {
+    extendsFrom configurations.implementation
+}
+configurations.named(mmdControlledImageFollowupV3SourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.runtimeOnly
+}
+dependencies {
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName,
+            platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, libs.junit.jupiter)
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, 'org.mockito:mockito-core')
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, 'org.springframework:spring-test')
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, 'org.hamcrest:hamcrest')
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, libs.spring.boot.starter.websocket)
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName, project(':agent:jia-agent-mapper'))
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-resource-server')
+    add(mmdControlledImageFollowupV3SourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-jose')
+    add(mmdControlledImageFollowupV3SourceSet.runtimeOnlyConfigurationName,
+            'org.junit.platform:junit-platform-launcher:6.0.1')
+    add(mmdControlledImageFollowupV3SourceSet.runtimeOnlyConfigurationName, project(':oauth:jia-oauth-api'))
+    add(mmdControlledImageFollowupV3SourceSet.runtimeOnlyConfigurationName, 'com.h2database:h2')
+    add(mmdControlledImageFollowupV3SourceSet.runtimeOnlyConfigurationName, 'com.jayway.jsonpath:json-path')
+}
+tasks.register('mmdControlledImageFollowupV3', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs schema-3 owner context, preview, issue, admit, asset lineage and live-session declaration regressions.'
+    dependsOn tasks.named(mmdControlledImageFollowupV3SourceSet.classesTaskName)
+    testClassesDirs = mmdControlledImageFollowupV3SourceSet.output.classesDirs
+    classpath = mmdControlledImageFollowupV3SourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// MMD-U2 IA typed INSPECT authority slice; preserves CHAT v1 and compiles only affected tests.
+def mmdU2TypedInspectionSourceSet = sourceSets.create('mmdU2TypedInspection') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        include 'cn/jia/agent/security/AgentRuntimeInspectionRouteTest.java'
+        include 'cn/jia/chat/api/ChatTypedInspectionWireTest.java'
+        include 'cn/jia/chat/api/AgentInspectionInputControllerTest.java'
+        include 'cn/jia/chat/handler/TypedInspectionDeclarationTest.java'
+        include 'cn/jia/chat/handler/TypedInspectionSessionRegistryTest.java'
+        include 'cn/jia/chat/service/TypedInspectionFinalValidatorTest.java'
+        include 'cn/jia/chat/service/ChatTypedInspectionContextContractTest.java'
+        include 'cn/jia/chat/service/ChatInspectionAuthorityServiceTest.java'
+        include 'cn/jia/chat/service/ChatTypedInspectionAdmissionServiceTest.java'
+        include 'cn/jia/chat/service/ChatTypedInspectionSpringTransactionTest.java'
+        include 'cn/jia/chat/service/TypedDeliberationFinalValidatorTest.java'
+        include 'cn/jia/chat/handler/TypedDeliberationDeclarationTest.java'
+        include 'cn/jia/chat/handler/TypedDeliberationSessionRegistryTest.java'
+        include 'cn/jia/chat/service/ChatTypedDeliberationServiceTest.java'
+        include 'cn/jia/chat/handler/AgentWebSocketTypedDeliberationTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdU2TypedInspectionSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.implementation
+}
+configurations.named(mmdU2TypedInspectionSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.runtimeOnly
+}
+dependencies {
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName,
+            platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, libs.junit.jupiter)
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, 'org.mockito:mockito-core')
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, 'org.springframework:spring-test')
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, 'org.hamcrest:hamcrest')
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, libs.spring.boot.starter.websocket)
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName, project(':agent:jia-agent-mapper'))
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-resource-server')
+    add(mmdU2TypedInspectionSourceSet.implementationConfigurationName,
+            'org.springframework.security:spring-security-oauth2-jose')
+    add(mmdU2TypedInspectionSourceSet.runtimeOnlyConfigurationName,
+            'org.junit.platform:junit-platform-launcher:6.0.1')
+    add(mmdU2TypedInspectionSourceSet.runtimeOnlyConfigurationName, project(':oauth:jia-oauth-api'))
+    add(mmdU2TypedInspectionSourceSet.runtimeOnlyConfigurationName, 'com.h2database:h2')
+}
+tasks.register('mmdU2TypedInspection', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs typed INSPECT admission, authority, digest, v2 final and CHAT v1 compatibility regressions.'
+    dependsOn tasks.named(mmdU2TypedInspectionSourceSet.classesTaskName)
+    testClassesDirs = mmdU2TypedInspectionSourceSet.output.classesDirs
+    classpath = mmdU2TypedInspectionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// AC12 text-selection archive closed loop. MySQL evidence remains opt-in and guarded.
+def mmdU3ConversationArchiveSourceSet = sourceSets.create('mmdU3ConversationArchive') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        include 'cn/jia/chat/archive/conversation/ChatConversationArchiveServiceTest.java'
+        include 'cn/jia/chat/archive/conversation/ChatConversationArchiveMySqlTestGuard.java'
+        include 'cn/jia/chat/archive/conversation/ChatConversationArchiveMySqlTestGuardTest.java'
+        include 'cn/jia/chat/archive/conversation/ChatConversationArchiveMySqlIntegrationTest.java'
+        include 'cn/jia/chat/api/ChatConversationArchiveControllerTest.java'
+        include 'cn/jia/chat/config/ChatConversationArchiveContractTest.java'
+        include 'cn/jia/chat/config/ChatSchemaReadinessLifecycleTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdU3ConversationArchiveSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(mmdU3ConversationArchiveSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('mmdU3ConversationArchive', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs AC12 canonical archive wire, frozen text snapshot, ACL, recovery and schema tests.'
+    dependsOn tasks.named(mmdU3ConversationArchiveSourceSet.classesTaskName)
+    testClassesDirs = mmdU3ConversationArchiveSourceSet.output.classesDirs
+    classpath = mmdU3ConversationArchiveSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// Started-but-undelivered owner termination: strict wire and real isolated MySQL transactions.
+def mmdExecutionTerminationSourceSet = sourceSets.create('mmdExecutionTermination') {
+    java {
+        srcDir 'src/mmdRegressionTest/java'
+        srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+        include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+        include 'cn/jia/chat/archive/conversation/ChatConversationArchiveMySqlTestGuard.java'
+        include 'cn/jia/chat/archive/conversation/ChatBountyExecutionTerminationMySqlTest.java'
+        include 'cn/jia/chat/api/ChatBountyExecutionTerminationControllerTest.java'
+    }
+    resources.srcDir 'src/mmdRegressionTest/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(mmdExecutionTerminationSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(mmdExecutionTerminationSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+tasks.register('mmdExecutionTermination', Test) {
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2',
+            '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    group = 'verification'
+    description = 'Runs exact owner abandonment, paid-fact preservation, replay, ACL and SQL race tests.'
+    dependsOn tasks.named(mmdExecutionTerminationSourceSet.classesTaskName)
+    testClassesDirs = mmdExecutionTerminationSourceSet.output.classesDirs
+    classpath = mmdExecutionTerminationSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
+
+// Exact native skill WS ingress -> durable MySQL ACTIVE/receipt, no production fixture.
+def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression') {
+    java.srcDirs('src/nativeSkillResultTest/java', '../../agent/jia-agent-service/src/test/java')
+    java.include 'cn/jia/chat/handler/SkillNativeResultMySqlTest.java'
+    java.include 'cn/jia/agent/skill/SkillMarketplaceRealTransactionTest.java'
+    java.include 'cn/jia/agent/skill/SkillNativeAckMySqlTest.java'
+    java.include 'cn/jia/agent/skill/SkillExecutionMapperRealTransactionTest.java'
+    java.include 'cn/jia/agent/skill/SkillAuditMutationRejectTrigger.java'
+    java.include 'cn/jia/agent/skill/SkillTransportStorageAssertions.java'
+    resources.srcDir '../../agent/jia-agent-service/src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(nativeSkillResultSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(nativeSkillResultSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+dependencies {
+    add(nativeSkillResultSourceSet.implementationConfigurationName, 'com.h2database:h2')
+    // The shared real transaction fixture uses economy types directly; keep these
+    // dependencies confined to this verification source set, not production API.
+    add(nativeSkillResultSourceSet.implementationConfigurationName, project(':economy:jia-economy-api'))
+    add(nativeSkillResultSourceSet.implementationConfigurationName, project(':economy:jia-economy-mapper'))
+    add(nativeSkillResultSourceSet.implementationConfigurationName, project(':economy:jia-economy-service'))
+}
+tasks.register('nativeSkillResultRegression', Test) {
+    dependsOn tasks.named(nativeSkillResultSourceSet.classesTaskName)
+    testClassesDirs = nativeSkillResultSourceSet.output.classesDirs
+    classpath = nativeSkillResultSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    filter { includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker' }
+}
+
+// SM-C1 real WS registration/result consumer + agent-owned SQL/outbox transaction fixture.
+// Separate selector; it does not silently replace any existing regression suite.
+def skillManagementWireSourceSet = sourceSets.create('skillManagementWire') {
+    java.srcDirs('src/skillManagementContractTest/java', 'src/test/java', '../../agent/jia-agent-service/src/skillManagementContract/java', '../../agent/jia-agent-service/src/test/java')
+    java.include 'cn/jia/chat/handler/SkillManagementWireMySqlTest.java'
+    java.include 'cn/jia/chat/service/ChatMaterialsLockOrderMySqlTest.java'
+    java.include 'cn/jia/chat/service/WorkspaceProjectionQueryMySqlTest.java'
+    java.include 'cn/jia/chat/service/ChatMaterialsFenceTest.java'
+    java.include 'cn/jia/chat/handler/SkillManagementNodeMySqlTest.java'
+    java.include 'cn/jia/agent/skill/SkillManagementTransactionTest.java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    java.include 'cn/jia/agent/skill/SkillTransportStorageAssertions.java'
+    resources.srcDir '../../agent/jia-agent-service/src/skillManagementContract/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(skillManagementWireSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(skillManagementWireSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+dependencies {
+    add(skillManagementWireSourceSet.implementationConfigurationName, project(':economy:jia-economy-api'))
+    add(skillManagementWireSourceSet.implementationConfigurationName, project(':economy:jia-economy-mapper'))
+    add(skillManagementWireSourceSet.implementationConfigurationName, project(':economy:jia-economy-service'))
+}
+tasks.register('skillManagementWire', Test) {
+    dependsOn tasks.named(skillManagementWireSourceSet.classesTaskName)
+    testClassesDirs = skillManagementWireSourceSet.output.classesDirs
+    classpath = skillManagementWireSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    filter {
+        includeTestsMatching 'cn.jia.chat.service.ChatMaterialsLockOrderMySqlTest'
+        includeTestsMatching 'cn.jia.chat.service.WorkspaceProjectionQueryMySqlTest'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.firstInstallResultsAndRegistrationDriveRealCommittedClosedLoop'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.persistentProofRevocationAndRuntimeIdentityDriftRejectAckAndResultWithoutSqlMutation'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.currentProtocolRejectsWrongIdentityAttemptFenceEpochAndCorrelationWithNoSqlEffects'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.validlyRehashedContradictorySameMessageIdCannotReplaceCommittedReceiptOrFinancialFacts'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.persistentSqlFenceStaysLockedThroughResultCommitAndWholeTransactionRollback'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementWireMySqlTest.currentReconnectProofMaySubmitOriginalAuthorizedEpochWithoutRewritingExecutingBoot'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementNodeMySqlTest.firstInstallWithRealNodePeer'
+        includeTestsMatching 'cn.jia.chat.handler.SkillManagementNodeMySqlTest.realNativeNodeUpgradeAndPolicyKeepOldTaskPinnedWithoutBorrowingCurrent'
+    }
+    testLogging { events 'passed','failed'; exceptionFormat 'full'; showStandardStreams = true }
+}
+
+// Position/archive production SQL against an explicitly owned isolated MySQL.
+def archiveMaintenanceSourceSet = sourceSets.create('archiveMaintenanceTest') {
+    java.setSrcDirs(['src/archiveMaintenanceTest/java', 'src/test/java'])
+    java.include 'cn/jia/chat/archive/service/ArchiveConversationMySqlTest.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveTextCompilerTest.java'
+    java.include 'cn/jia/chat/api/AgentConversationToolsControllerTest.java'
+    java.include 'cn/jia/chat/service/ChatSkillMaintenanceToolsTest.java'
+    java.include 'cn/jia/chat/service/ChatSkillMaintenanceServiceTest.java'
+    java.include 'cn/jia/chat/service/ConversationToolExtensionsTest.java'
+    resources.setSrcDirs(['src/archiveMaintenanceTest/resources'])
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(archiveMaintenanceSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(archiveMaintenanceSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+dependencies {
+    add(archiveMaintenanceSourceSet.implementationConfigurationName, project(':economy:jia-economy-mapper'))
+    add(archiveMaintenanceSourceSet.implementationConfigurationName, project(':user:jia-user-mapper'))
+    add(archiveMaintenanceSourceSet.implementationConfigurationName, project(':user:jia-user-service'))
+    add(archiveMaintenanceSourceSet.implementationConfigurationName, 'org.apache.tomcat.embed:tomcat-embed-core')
+}
+tasks.register('archiveMaintenanceTest', Test) {
+    dependsOn tasks.named(archiveMaintenanceSourceSet.classesTaskName)
+    testClassesDirs = archiveMaintenanceSourceSet.output.classesDirs
+    classpath = archiveMaintenanceSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '384m'
+    def skillScript = System.getenv('CYF_ARCHIVE_SKILL_SCRIPT')
+    if (skillScript) inputs.file(skillScript)
+    def clientRoot = System.getenv('CYF_ARCHIVE_CLIENT_ROOT')
+    if (clientRoot) inputs.files(fileTree(clientRoot + '/conf') { exclude '**/node_modules/**' })
+    def skillPackage = System.getenv('CYF_ARCHIVE_SKILL_PACKAGE')
+    if (skillPackage) inputs.file(skillPackage)
+}
+
+// Reader/importer/private-data regressions affected by historical-edition access.
+// Reuses existing test sources and fixtures without compiling unrelated chat suites.
+def archiveReaderRegressionSourceSet = sourceSets.create('archiveReaderRegression') {
+    java.setSrcDirs(['src/test/java'])
+    java.srcDir '../jia-chat-mapper/src/test/java'
+    java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    java.include 'cn/jia/chat/archive/store/JdbcArchiveQuestionStoreTest.java'
+    java.include 'cn/jia/chat/archive/config/ArchiveQuestionBootstrapTest.java'
+    java.include 'cn/jia/chat/archive/config/ArchiveQuestionFeatureFlagTest.java'
+    java.include 'cn/jia/chat/archive/service/ArchiveQuestionWorkerTest.java'
+    java.include 'cn/jia/chat/archive/service/ArchiveQuestionTestSupport.java'
+    java.include 'cn/jia/chat/archive/service/ArchiveQuestionMySqlIntegrationTest.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveFixtureLoader.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveManifestBundle.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveGoldenSummary.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveGenericManifestTest.java'
+    java.include 'cn/jia/chat/archive/content/ArchiveManifestLoaderTest.java'
+    java.include 'cn/jia/chat/archive/service/ArchiveReaderServiceTest.java'
+    java.include 'cn/jia/chat/archive/service/ArchiveContentImporterTest.java'
+    java.include 'cn/jia/chat/archive/service/ArchivePersonalDataServiceTest.java'
+    java.include 'cn/jia/chat/archive/http/ArchiveControllerTest.java'
+    java.include 'cn/jia/chat/archive/http/ArchivePersonalDataControllerTest.java'
+    java.include 'cn/jia/chat/archive/http/ArchiveQuestionControllerTest.java'
+    java.include 'cn/jia/chat/archive/config/ArchiveReaderAccessPolicyTest.java'
+    resources.setSrcDirs(['src/test/resources'])
+    resources.include 'archive/**'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(archiveReaderRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(archiveReaderRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+tasks.register('archiveReaderRegression', Test) {
+    dependsOn tasks.named(archiveReaderRegressionSourceSet.classesTaskName)
+    testClassesDirs = archiveReaderRegressionSourceSet.output.classesDirs
+    classpath = archiveReaderRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '384m'
+}
+
+// R8 fixed-tenant private CHAT closure. Isolated from unrelated historical chat tests.
+def r8TenantPrivateChatSourceSet = sourceSets.create('r8TenantPrivateChat') {
+    java.srcDir 'src/r8TenantPrivateChatTest/java'
+    java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+    java.include 'cn/jia/chat/service/*.java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(r8TenantPrivateChatSourceSet.implementationConfigurationName) {
+    extendsFrom configurations.testImplementation
+}
+configurations.named(r8TenantPrivateChatSourceSet.runtimeOnlyConfigurationName) {
+    extendsFrom configurations.testRuntimeOnly
+}
+dependencies {
+    add(r8TenantPrivateChatSourceSet.implementationConfigurationName, 'com.h2database:h2')
+}
+tasks.register('r8TenantPrivateChat', Test) {
+    group = 'verification'
+    description = 'Runs R8 exact-tenant private CHAT admission, dispatch, callback and request-read regressions.'
+    dependsOn tasks.named(r8TenantPrivateChatSourceSet.classesTaskName)
+    testClassesDirs = r8TenantPrivateChatSourceSet.output.classesDirs
+    classpath = r8TenantPrivateChatSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '384m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2', '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    testLogging { events 'passed', 'failed'; exceptionFormat 'full' }
+}
+
+// R9 durable live-generation/publication classification and exact original-event recovery regressions.
+tasks.register('r9TenantPrivateChat', Test) {
+    group = 'verification'
+    description = 'Runs R8/R9 exact-tenant private CHAT live-check, retry, stale and recovery regressions.'
+    dependsOn tasks.named(r8TenantPrivateChatSourceSet.classesTaskName)
+    testClassesDirs = r8TenantPrivateChatSourceSet.output.classesDirs
+    classpath = r8TenantPrivateChatSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '384m'
+    jvmArgs '-XX:+UseSerialGC', '-XX:ActiveProcessorCount=2', '-XX:MaxMetaspaceSize=192m', '-Xss256k'
+    testLogging { events 'passed', 'failed'; exceptionFormat 'full' }
+}
+
+// Runtime fact stability: heartbeat races must not retract unchanged native actions.
+def runtimeCapabilityRegressionSourceSet = sourceSets.create('runtimeCapabilityRegression') {
+    java.include 'cn/jia/chat/memory/MemoryRepositoryIsolationTest.java'
+    java.include 'cn/jia/chat/memory/MemoryRepositoryElasticsearchTest.java'
+    java.include 'cn/jia/chat/memory/MemoryScopeMySqlTest.java'
+    java.include 'cn/jia/chat/advisor/LongTermMemoryAdvisorScopeTest.java'
+    java.include 'cn/jia/chat/api/ChatControllerTest.java'
+    java.include 'cn/jia/chat/job/MemoryScheduledJobTest.java'
+    java.include 'cn/jia/chat/job/MemoryScheduledJobMySqlTest.java'
+    java.include 'cn/jia/chat/service/LongTermMemoryTaskThreadIsolationTest.java'
+    java.include 'cn/jia/chat/service/ChatDeliberationOutboxCommitTest.java'
+    java.include 'cn/jia/chat/service/ChatDeliberationSchedulingTransactionTest.java'
+    java.srcDir 'src/skillManagementContractTest/java'
+    java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+    java.include 'cn/jia/chat/service/WorkspaceProjectionQueryMySqlTest.java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    java.include 'cn/jia/chat/service/ChatBountyAssetRelayTest.java'
+    java.include 'cn/jia/chat/service/ChatBountyAssetFilenameTest.java'
+    java.srcDir 'src/mmdRegressionTest/java'
+    java.include 'cn/jia/chat/service/ChatBountyBootstrapRelayRecoveryTest.java'
+    java.include 'cn/jia/chat/service/ChatBountyBootstrapSchedulingTransactionTest.java'
+    java.include 'cn/jia/chat/service/NativeConversationWorkNotifierTest.java'
+    java.include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'
+    java.include 'cn/jia/chat/service/recommendation/RecommendationUsageRecoveryTest.java'
+    java.srcDir 'src/test/java'
+    java.srcDir 'src/sharedTest/java'
+    java.include 'cn/jia/chat/service/SkillCapabilityExecutionFactsTest.java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketSkillExecutionRegistrationTest.java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketRuntimeAuthenticationTest.java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketUnifiedReadinessTest.java'
+    java.include 'cn/jia/chat/handler/SkillExecutionFixtures.java'
+    java.include 'cn/jia/chat/handler/UnifiedRuntimeTestSupport.java'
+    java.include 'cn/jia/chat/service/ChatActionCapabilityServiceTest.java'
+    java.include 'cn/jia/chat/service/NativeSkillScriptSessionLookupImplTest.java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketSkillExecutionRegistrationTest.java'
+    java.include 'cn/jia/chat/handler/AgentWebSocketRuntimeAuthenticationTest.java'
+    java.include 'cn/jia/chat/handler/UnifiedRuntimeTestSupport.java'
+    java.include 'cn/jia/chat/handler/SkillExecutionFixtures.java'
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(runtimeCapabilityRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(runtimeCapabilityRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+tasks.register('runtimeCapabilityRegression', Test) {
+    dependsOn tasks.named(runtimeCapabilityRegressionSourceSet.classesTaskName)
+    testClassesDirs = runtimeCapabilityRegressionSourceSet.output.classesDirs
+    classpath = runtimeCapabilityRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+}
