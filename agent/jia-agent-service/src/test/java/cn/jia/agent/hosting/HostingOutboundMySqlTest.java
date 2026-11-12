@@ -521,6 +521,20 @@ class HostingOutboundMySqlTest {
         assertEquals("ACTIVE", tx.execute(status -> store.lock("0", "fixture-client", view.setupId()).status()));
     }
 
+    @Test void conflictingControlDigestRollsBackActivationWithoutRevokingOtherAuthority() throws Exception {
+        var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
+        var setups = security.getBean(HostingSetupService.class);
+        tx.executeWithoutResult(status -> service.register(new Grant("0", "fixture-client", "hca_other_control",
+                "fixture-host", "fixture-owner", "agt_other", "CONTROL",
+                HostingOutboundExchangeService.tokenHash("rth1_" + "d".repeat(64)), "ACTIVE"), 9));
+        var error = assertThrows(HostingRentApplicationException.class, () -> tx.executeWithoutResult(status ->
+                setups.activate(ACTOR, setups.find(ACTOR, "wuyong", view.setupId()), "123", "conflicting-lease", 10)));
+        assertEquals("HOSTING_SETUP_CONFLICT", error.code());
+        assertNull(setupPoll(view, null).controlAuthorization());
+        assertEquals(0, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup_activation", Integer.class));
+        assertEquals("ACTIVE", tx.execute(status -> store.lock("0", "fixture-client", "hca_other_control").status()));
+    }
+
     @Test void cancelledSetupCannotActivateOrPublishControlAuthority() throws Exception {
         var f = invitation(); var view = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
         var setups = security.getBean(HostingSetupService.class);

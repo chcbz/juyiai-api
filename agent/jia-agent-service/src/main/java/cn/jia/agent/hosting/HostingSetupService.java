@@ -159,9 +159,14 @@ public final class HostingSetupService {
         if (setups.activation(actor.tenantId(), actor.clientId(), setup.setupId()) != null)
             throw new HostingRentApplicationException(409, "HOSTING_SETUP_ALREADY_ACTIVATED");
         String id = "hca_" + UUID.randomUUID().toString().replace("-", "");
-        exchanges.register(new HostingOutboundStore.Grant(setup.tenantId(), setup.clientId(), id, setup.hostId(),
-                setup.ownerJiacn(), setup.canonicalAgentId(), "CONTROL", setup.controlTokenHash(), "ACTIVE"), now);
-        setups.activate(setup, id, binding, lease);
+        try {
+            exchanges.register(new HostingOutboundStore.Grant(setup.tenantId(), setup.clientId(), id, setup.hostId(),
+                    setup.ownerJiacn(), setup.canonicalAgentId(), "CONTROL", setup.controlTokenHash(), "ACTIVE"), now);
+            setups.activate(setup, id, binding, lease);
+        } catch (org.springframework.dao.DuplicateKeyException conflict) {
+            // The caller's reserve/binding transaction must roll back as a whole.
+            throw new HostingRentApplicationException(409, "HOSTING_SETUP_CONFLICT");
+        }
     }
     public void revokeLease(String tenant, String client, String owner, String agent, String binding, String lease, long now) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Release requires business transaction");
