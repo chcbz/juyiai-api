@@ -92,7 +92,7 @@ class HostingRentCutoverMySqlTest {
             properties.forEach((key, value) -> { previous.put(key, System.getProperty(key)); System.setProperty(key, value); });
             Path input = scratch.resolve("fixed-input.json");
             Files.writeString(input, JSON.writeValueAsString(new HostingRentCutover.Batch(at, List.of(
-                    new HostingRentCutover.Subject("fixture-login", "fixture-owner", agent, installation)))));
+                    new HostingRentCutover.Subject("fixture-login", "fixture-owner", agent, installation, "agent-self-hosted")))));
             HostingRentCutover.main(new String[]{"--preview", input.toString(), scratch.resolve("preview.jsonl").toString()});
             assertEquals(0, count(jdbc, "economy_hosting_lease")); assertEquals(0, count(jdbc, "economy_account"));
             for (int retry = 0; retry < 2; retry++) {

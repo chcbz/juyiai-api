@@ -25,7 +25,7 @@ public final class HostingOutboundController {
     public ResponseEntity<JsonResult<HostingOutboundExchangeService.Reply>> exchange(
             @RequestBody JsonRequest<Map<String, Object>> envelope, HttpServletRequest servlet) {
         var data = envelope == null ? null : envelope.data();
-        if (data == null || !data.keySet().equals(Set.of("authorizationId", "hostId", "runtimeInstanceId", "result")))
+        if (data == null || !data.keySet().containsAll(Set.of("authorizationId", "hostId", "runtimeInstanceId", "result")))
             throw new IllegalArgumentException("Invalid hosting exchange");
         Map<String, Object> result = null;
         if (data.get("result") != null) {

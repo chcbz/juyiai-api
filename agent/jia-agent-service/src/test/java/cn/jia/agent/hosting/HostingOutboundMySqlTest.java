@@ -549,7 +549,7 @@ class HostingOutboundMySqlTest {
         var jwt = org.springframework.security.oauth2.jwt.Jwt.withTokenValue("fixture").claim("tenant_id", "0").header("alg", "none")
                 .subject("fixture-login").claim("jiacn", "fixture-owner").claim("client_id", "fixture-client").build();
         var auth = new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken(jwt); auth.setAuthenticated(true);
-        var fixture = JSON.readTree(Files.readString(Path.of(System.getenv("CYF_GSS_RUNTIME_TEST_SOURCE"), "test/fixtures/hosting-activation-v1.json")));
+        var fixture = JSON.readTree(Files.readString(Path.of(System.getenv("CYF_GSS_RUNTIME_TEST_SOURCE"), "conf/cyf-agent-runtime-v1/test/fixtures/hosting-activation-v1.json")));
         String body = fixture.get("registrationRequest").toString();
         assertEquals(JSON.valueToTree(setupBody()), fixture.get("registrationRequest").get("data"));
         var response = userMvc.perform(post("/agent/personas/wuyong/hosting-setups").principal(auth).header("Idempotency-Key", KEY)

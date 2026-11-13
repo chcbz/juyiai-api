@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const runtime = process.env.CYF_GSS_RUNTIME_TEST_SOURCE;
+const runtime = resolve(process.env.CYF_GSS_RUNTIME_TEST_SOURCE, 'conf/cyf-agent-runtime-v1');
 const { HostingOutbound } = await import(pathToFileURL(resolve(runtime, 'lib/hosting-outbound.mjs')));
 const { hostingFixture, fixtureInventory, unchangedPeers } = await import(pathToFileURL(resolve(runtime, 'test/hosting-fixture.mjs')));
 const wire = JSON.parse(await readFile(resolve(runtime, 'test/fixtures/hosting-outbound-v1.json')));
