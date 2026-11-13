@@ -32,6 +32,26 @@ class PublicArtifactVerifierTest {
     Path temporaryDirectory;
 
     @Test
+    void scratchOutputCloseMakesBytesReadableOnSameChannelAndCleanupRemovesOnlyScratch() throws Exception {
+        var operations = PublicArtifactVerifier.posixTempOperations(PublicArtifactVerifier.TempMutationHook.NONE);
+        Path root = temporaryDirectory.resolve("scratch-lifecycle");
+        var directory = operations.createPrivateDirectory(root);
+        var file = operations.createPrivateFile(directory);
+        var output = operations.openForWrite(file);
+        output.write(safeNestedJar());
+        output.close();
+        output.close(); // Closing the write view must not close the identity-bound channel.
+        assertThrows(java.io.IOException.class, () -> output.write(0));
+        try (var archive = operations.openForRead(file)) {
+            assertFalse(archive.occurrences().isEmpty());
+        }
+        operations.deleteFile(file);
+        operations.deleteDirectory(directory);
+        assertFalse(Files.exists(root));
+        assertTrue(Files.isDirectory(temporaryDirectory));
+    }
+
+    @Test
     void nestedRedundantZip64AndLatin1PropertiesStillScanAndRedactSecrets() throws Exception {
         for (boolean unsafe : List.of(false, true)) {
             String value = unsafe ? "format-secret-canary" : "${PUBLIC_API_KEY}";
