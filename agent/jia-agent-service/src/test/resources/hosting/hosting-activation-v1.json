@@ -2,7 +2,6 @@
   "authorization": {
     "authorizationId": "hca_fixture",
     "hostId": "fixture-host",
-    "purpose": "SETUP",
     "tenantId": "0",
     "clientId": "fixture-client",
     "ownerJiacn": "fixture-owner",
@@ -38,8 +37,7 @@
           "ownerJiacn": "fixture-owner",
           "canonicalAgentId": "agt_outbound_new"
         }
-      },
-      "controlAuthorization": null
+      }
     }
   },
   "activationResponse": {
@@ -51,16 +49,7 @@
       "authorizationId": "hca_fixture",
       "hostId": "fixture-host",
       "acknowledgedMessageId": null,
-      "command": null,
-      "controlAuthorization": {
-        "authorizationId": "hca_control",
-        "hostId": "fixture-host",
-        "purpose": "CONTROL",
-        "tenantId": "0",
-        "clientId": "fixture-client",
-        "ownerJiacn": "fixture-owner",
-        "canonicalAgentId": "agt_outbound_new"
-      }
+      "command": null
     }
   },
   "registrationRequest": {
@@ -68,9 +57,7 @@
     "requestId": "setup-http",
     "data": {
       "mode": "local",
-      "hostId": "fixture-host",
-      "tokenSha256": "f2ac35d97503ee14b938d1e7dee3ec625420971ff09678809a61831aae6a6b41",
-      "controlTokenSha256": "fc08cdaee043575d924acb183899fa6fc774f8d9d0658e77d36f6cd0c7eaa55f"
+      "hostId": "fixture-host"
     }
   },
   "registrationResponse": {
@@ -87,7 +74,6 @@
       "authorization": {
         "authorizationId": "hca_setup_fixture",
         "hostId": "fixture-host",
-        "purpose": "SETUP",
         "tenantId": "0",
         "clientId": "fixture-client",
         "ownerJiacn": "fixture-owner",

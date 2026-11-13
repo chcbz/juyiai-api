@@ -28,13 +28,12 @@ public final class HostingOutboundExchangeService {
     private final HostingOutboundStore store;
     private final FixedTenantAdmissionPolicy scope;
     private final TransactionTemplate transactions;
-    private cn.jia.agent.mapper.hosting.HostingSetupStore setups;
-    public void setSetups(cn.jia.agent.mapper.hosting.HostingSetupStore value) { this.setups = value; }
-    public HostingOutboundExchangeService(HostingOutboundStore store, FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
-        this.store = store; this.scope = scope; this.transactions = new TransactionTemplate(manager);
+    private final cn.jia.agent.mapper.hosting.HostingHostStore hosts;
+    public HostingOutboundExchangeService(HostingOutboundStore store, cn.jia.agent.mapper.hosting.HostingHostStore hosts, FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
+        this.store = store; this.hosts = hosts; this.scope = scope; this.transactions = new TransactionTemplate(manager);
     }
     @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.ALWAYS)
-    public record Reply(String authorizationId, String hostId, String acknowledgedMessageId, Map<String, Object> command, HostingSetupService.Authorization controlAuthorization) { }
+    public record Reply(String authorizationId, String hostId, String acknowledgedMessageId, Map<String, Object> command) { }
     public record Request(String authorizationId, String hostId, String runtimeInstanceId, Map<String, Object> result) { }
     static HostingRentApplicationException denied() { return new HostingRentApplicationException(403, "HOSTING_OUTBOUND_REJECTED"); }
     private static HostingRentApplicationException conflict() { return new HostingRentApplicationException(409, "HOSTING_OUTBOUND_CONFLICT"); }
@@ -47,16 +46,42 @@ public final class HostingOutboundExchangeService {
         try { return MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8)); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
+    public static final String DIRECTORY_PATH = "/agent/runtime/v1/hosting/authorizations";
+    public record Authorization(String authorizationId, String hostId, String tenantId, String clientId,
+                                String ownerJiacn, String canonicalAgentId) { }
+    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.ALWAYS)
+    public record Directory(HostingHostService.View host, java.util.List<Authorization> items, String nextCursor, boolean hasMore) { }
+    private cn.jia.agent.mapper.hosting.HostingHostStore.Host authenticate(byte[] hash) {
+        var host=hosts.authenticate(scope.businessTenantId(),scope.clientId(),hash);
+        if (host==null || !"ACTIVE".equals(host.status())) throw new HostingRentApplicationException(401,"HOSTING_OUTBOUND_REJECTED");
+        scope.requireAdmitted(host.tenantId(),host.clientId()); return host;
+    }
+    public cn.jia.agent.mapper.hosting.HostingHostStore.Host registeredHost(String tenant, String client, String host) {
+        scope.requireAdmitted(tenant,client);
+        return transactions.execute(tx -> hosts.find(tenant,client,host));
+    }
+    public Directory directory(String token, String cursor, int pageSize) {
+        String after=HostingHostService.cursor(cursor); HostingHostService.pageSize(pageSize);
+        return transactions.execute(tx -> {
+            var host=authenticate(tokenHash(token));
+            var grants=store.directory(host.tenantId(),host.clientId(),host.hostId(),after,pageSize+1);
+            boolean more=grants.size()>pageSize;
+            var items=grants.stream().limit(pageSize).map(g -> new Authorization(g.authorizationId(),g.hostId(),g.tenantId(),g.clientId(),g.ownerJiacn(),g.canonicalAgentId())).toList();
+            return new Directory(HostingHostService.view(host),items,more ? items.getLast().authorizationId() : null,more);
+        });
+    }
     private static void callerTransaction() {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Hosting authority requires its business transaction");
     }
     /** Internal-only persistence primitive. Caller must already authorize the exact setup or reserved binding.
-     * Hash is supplied so tokens need not be generated, retained or returned by this transport layer. */
+     * The registered host supplies credential authority, not a per-Agent secret. */
     public void register(Grant grant, long now) {
         callerTransaction(); scope.requireAdmitted(grant.tenantId(), grant.clientId());
         exact(grant.tenantId(), 50); exact(grant.clientId(), 50); exact(grant.ownerJiacn(), 50);
         exact(grant.authorizationId(), 100); exact(grant.hostId(), 100); exact(grant.canonicalAgentId(), 100);
-        if (!Set.of("SETUP", "CONTROL").contains(grant.purpose()) || !"ACTIVE".equals(grant.status()) || grant.tokenHash().length != 32 || now <= 0) throw denied();
+        if (!Set.of("SETUP", "CONTROL").contains(grant.purpose()) || !"ACTIVE".equals(grant.status()) || now <= 0) throw denied();
+        var host=hosts.find(grant.tenantId(),grant.clientId(),grant.hostId());
+        if (host==null || !"ACTIVE".equals(host.status()) || "local".equals(host.mode()) && !grant.ownerJiacn().equals(host.ownerJiacn())) throw denied();
         store.insert(grant, now); // Unique keys arbitrate concurrent creation; never rotate on a replay.
     }
     public void revoke(String tenant, String client, String authorizationId, long now) {
@@ -81,7 +106,9 @@ public final class HostingOutboundExchangeService {
         exact(request.authorizationId(), 100); exact(request.hostId(), 100); exact(request.runtimeInstanceId(), 100);
         byte[] hash = tokenHash(token);
         return transactions.execute(status -> {
-            Grant grant = store.authenticateForUpdate(scope.businessTenantId(), scope.clientId(), request.authorizationId(), hash);
+            var host = authenticate(hash);
+            if (!host.hostId().equals(request.hostId())) throw denied();
+            Grant grant = store.lock(host.tenantId(),host.clientId(),request.authorizationId());
             requireActive(grant); scope.requireAdmitted(grant.tenantId(), grant.clientId());
             if (!grant.hostId().equals(request.hostId())) throw denied();
             String acknowledgment = null;
@@ -109,17 +136,7 @@ public final class HostingOutboundExchangeService {
             var next = store.pending(grant);
             Map<String, Object> nextMessage = next == null ? null : parse(next.commandJson());
             if (nextMessage != null) command(grant, nextMessage);
-            HostingSetupService.Authorization control = null;
-            if (setups != null && "SETUP".equals(grant.purpose())) {
-                var activation = setups.activation(grant.tenantId(), grant.clientId(), grant.authorizationId());
-                if (activation != null) {
-                    var issued = store.lock(grant.tenantId(), grant.clientId(), activation.authorizationId());
-                    if (issued != null && "ACTIVE".equals(issued.status()) && "CONTROL".equals(issued.purpose()))
-                        control = new HostingSetupService.Authorization(issued.authorizationId(), issued.hostId(), issued.purpose(),
-                                issued.tenantId(), issued.clientId(), issued.ownerJiacn(), issued.canonicalAgentId());
-                }
-            }
-            return new Reply(grant.authorizationId(), grant.hostId(), acknowledgment, nextMessage, control);
+            return new Reply(grant.authorizationId(), grant.hostId(), acknowledgment, nextMessage);
         }); // Only a committed result produces an HTTP ACK. No network wait under SQL locks.
     }
     private static void requireActive(Grant grant) { if (grant == null || !"ACTIVE".equals(grant.status())) throw denied(); }

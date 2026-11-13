@@ -25,7 +25,7 @@ public final class HostingOutboundController {
     public ResponseEntity<JsonResult<HostingOutboundExchangeService.Reply>> exchange(
             @RequestBody JsonRequest<Map<String, Object>> envelope, HttpServletRequest servlet) {
         var data = envelope == null ? null : envelope.data();
-        if (data == null || !data.keySet().containsAll(Set.of("authorizationId", "hostId", "runtimeInstanceId", "result")))
+        if (data == null || !data.keySet().equals(Set.of("authorizationId", "hostId", "runtimeInstanceId", "result")))
             throw new IllegalArgumentException("Invalid hosting exchange");
         Map<String, Object> result = null;
         if (data.get("result") != null) {
@@ -37,6 +37,13 @@ public final class HostingOutboundController {
         var response = JsonResult.success(service.exchange(HostingOutboundCredentialFilter.credential(servlet), request, System.currentTimeMillis()));
         response.setRequestId(envelope.requestId());
         return ResponseEntity.ok().header("Cache-Control", "private, no-store").header(RequestIdFilter.HEADER_NAME, envelope.requestId()).body(response);
+    }
+    @org.springframework.web.bind.annotation.GetMapping(HostingOutboundExchangeService.DIRECTORY_PATH)
+    public ResponseEntity<JsonResult<HostingOutboundExchangeService.Directory>> directory(HttpServletRequest servlet) {
+        var page=HostingHostQuery.parse(servlet);
+        var response=JsonResult.success(service.directory(HostingOutboundCredentialFilter.credential(servlet),page.cursor(),page.pageSize()));
+        response.setRequestId(RequestIdFilter.current(servlet));
+        return ResponseEntity.ok().header("Cache-Control","private, no-store").body(response);
     }
     private static String text(Map<String, Object> map, String field) {
         if (!(map.get(field) instanceof String value)) throw new IllegalArgumentException("Invalid hosting exchange"); return value;

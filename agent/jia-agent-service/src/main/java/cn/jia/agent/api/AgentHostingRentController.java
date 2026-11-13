@@ -60,6 +60,25 @@ public final class AgentHostingRentController {
         this.application = null;
     }
 
+    private cn.jia.agent.hosting.HostingHostService hosts;
+    @Autowired(required=false)
+    public void setHosts(cn.jia.agent.hosting.HostingHostService hosts) { this.hosts=hosts; }
+    private cn.jia.agent.hosting.HostingHostService hosts() {
+        if (hosts==null) throw new cn.jia.agent.hosting.HostingRentApplicationException(503,"HOSTING_SETUP_UNAVAILABLE");
+        return hosts;
+    }
+    @PostMapping(value="/hosting-hosts", consumes=MediaType.APPLICATION_JSON_VALUE)
+    public Object registerHost(Authentication authentication, HttpServletRequest request,
+            @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] body) {
+        return success(hosts().register(HostingRentHttp.actor(authentication),HostingRentHttp.key(request),
+                HostingRentHttp.body(body,Set.of("hostId","tokenSha256"),Set.of())));
+    }
+    @GetMapping("/hosting-hosts")
+    public Object listHosts(Authentication authentication, HttpServletRequest request) {
+        var query=HostingHostQuery.parse(request);
+        return success(hosts().list(HostingRentHttp.actor(authentication),query.cursor(),query.pageSize()));
+    }
+
     @PostMapping(value = "/personas/{personaCode}/hosting-rent/quotes", consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
     public Object quote(
@@ -82,7 +101,7 @@ public final class AgentHostingRentController {
     public Object setup(@PathVariable String personaCode, Authentication authentication, HttpServletRequest request,
             @cn.jia.core.annotation.ApiJsonData @RequestBody byte[] body) {
         return success(application.startSetup(HostingRentHttp.actor(authentication), personaCode, HostingRentHttp.key(request),
-                HostingRentHttp.body(body, Set.of("mode", "hostId", "tokenSha256"), Set.of())));
+                HostingRentHttp.body(body, Set.of("mode", "hostId"), Set.of("hostId"))));
     }
     @GetMapping("/personas/{personaCode}/hosting-setups/{setupId}")
     public Object setup(@PathVariable String personaCode, @PathVariable String setupId, Authentication authentication, HttpServletRequest request) {

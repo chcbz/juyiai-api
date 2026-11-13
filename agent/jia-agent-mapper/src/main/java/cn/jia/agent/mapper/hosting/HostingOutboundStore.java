@@ -7,15 +7,13 @@ import java.util.List;
 /** Independent JDBC storage boundary: explicit partitioning, including before ORDER/LIMIT/locks. */
 public final class HostingOutboundStore {
     public record Grant(String tenantId, String clientId, String authorizationId, String hostId,
-            String ownerJiacn, String canonicalAgentId, String purpose, byte[] tokenHash, String status) {
-        public Grant { tokenHash = tokenHash.clone(); }
-        @Override public byte[] tokenHash() { return tokenHash.clone(); }
+            String ownerJiacn, String canonicalAgentId, String purpose, String status) {
         @Override public String toString() { return "HostingGrant[credentials=REDACTED]"; }
     }
     public record Command(long id, String messageId, String commandJson, String resultMessageId, String resultJson) { }
     private static final RowMapper<Grant> GRANT = (r, n) -> new Grant(r.getString("tenant_id"), r.getString("client_id"),
             r.getString("authorization_id"), r.getString("host_id"), r.getString("owner_jiacn"),
-            r.getString("canonical_agent_id"), r.getString("purpose"), r.getBytes("token_hash"), r.getString("status"));
+            r.getString("canonical_agent_id"), r.getString("purpose"), r.getString("status"));
     private static final RowMapper<Command> COMMAND = (r, n) -> new Command(r.getLong("id"), r.getString("message_id"),
             r.getString("command_json"), r.getString("result_message_id"), r.getString("result_json"));
     private final JdbcTemplate jdbc;
@@ -24,23 +22,26 @@ public final class HostingOutboundStore {
         if (rows.size() > 1) throw new IllegalStateException("Hosting transport identity is not unique");
         return rows.isEmpty() ? null : rows.getFirst();
     }
-    public Grant authenticateForUpdate(String tenant, String configuredClient, String id, byte[] hash) {
-        // Token lookup stays within the configured tenant even when that environment admits multiple clients.
-        return one(jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND authorization_id=? "
-                + "AND token_hash=? AND (? IS NULL OR client_id=?) FOR UPDATE", GRANT,
-                tenant, id, hash, configuredClient, configuredClient));
+    public List<Grant> directory(String tenant, String client, String host, String after, int limit) {
+        return jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND host_id=? AND status='ACTIVE' AND authorization_id>? ORDER BY authorization_id LIMIT ?", GRANT, tenant, client, host, after, limit);
+    }
+    public int activate(Grant grant) {
+        return jdbc.update("UPDATE agent_hosting_authorization SET purpose='CONTROL' WHERE tenant_id=? AND client_id=? AND authorization_id=? AND purpose='SETUP' AND status='ACTIVE'", grant.tenantId(),grant.clientId(),grant.authorizationId());
     }
     public Grant activeSubject(String tenant, String client, String owner, String agent) {
         return one(jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND canonical_agent_id=? AND purpose='CONTROL' AND status='ACTIVE'", GRANT, tenant, client, owner, agent));
+    }
+    public boolean hasSubject(String tenant, String client, String owner, String agent) {
+        return !jdbc.queryForList("SELECT authorization_id FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND canonical_agent_id=? AND purpose='CONTROL' LIMIT 1",String.class,tenant,client,owner,agent).isEmpty();
     }
     public Grant lock(String tenant, String client, String id) {
         return one(jdbc.query("SELECT * FROM agent_hosting_authorization WHERE tenant_id=? AND client_id=? AND authorization_id=? FOR UPDATE",
                 GRANT, tenant, client, id));
     }
     public void insert(Grant grant, long now) {
-        jdbc.update("INSERT INTO agent_hosting_authorization (tenant_id,client_id,authorization_id,host_id,owner_jiacn,canonical_agent_id,purpose,token_hash,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        jdbc.update("INSERT INTO agent_hosting_authorization (tenant_id,client_id,authorization_id,host_id,owner_jiacn,canonical_agent_id,purpose,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 grant.tenantId(), grant.clientId(), grant.authorizationId(), grant.hostId(), grant.ownerJiacn(), grant.canonicalAgentId(),
-                grant.purpose(), grant.tokenHash(), grant.status(), now);
+                grant.purpose(), grant.status(), now);
     }
     public int revoke(Grant grant, long now) {
         return jdbc.update("UPDATE agent_hosting_authorization SET status='REVOKED',revoked_at=? WHERE tenant_id=? AND client_id=? AND authorization_id=? AND status='ACTIVE'",

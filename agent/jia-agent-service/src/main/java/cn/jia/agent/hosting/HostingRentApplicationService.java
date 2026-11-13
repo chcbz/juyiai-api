@@ -77,18 +77,18 @@ public final class HostingRentApplicationService {
     public HostingSetupService.View startSetup(Actor actor, String personaCode, String idempotencyKey, Map<String,String> body) {
         requireEnabled(actor); key(idempotencyKey); exact(personaCode, 100);
         var service = requireSetups();
-        String mode = required(body, "mode"), hostId = required(body, "hostId"), tokenHash = required(body, "tokenSha256");
+        String mode = required(body, "mode");
         byte[] hash = hash("SETUP:" + personaCode, body);
         return transactions.execute(status -> {
             owners.requireOwner(actor); persona(personaCode);
             var replay = service.replay(actor, personaCode, idempotencyKey, hash);
             if (replay != null) return replay;
-            service.mode(actor, mode, hostId);
-            if (currentBinding(actor, actor.ownerJiacn(), personaCode) != null) throw conflict("HOSTING_RENT_LEASE_CONFLICT");
+            String hostId=service.selectHost(actor,mode,body.get("hostId"));
+            var retry=safeRetryBinding(actor,actor.ownerJiacn(),personaCode);
             // Self-hosted invitations allocate a new target, never a retained other-user installation.
-            var released = "server".equals(mode) ? releasedInstance(actor, personaCode) : null;
-            String canonical = released == null ? "agt_" + UUID.randomUUID().toString().replace("-", "") : released.getAgentId();
-            return service.create(actor, personaCode, idempotencyKey, hash, canonical, mode, hostId, tokenHash, required(body, "controlTokenSha256"), System.currentTimeMillis());
+            var released = retry==null && "server".equals(mode) ? releasedInstance(actor, personaCode) : null;
+            String canonical = retry != null ? retry.getAgentId() : released == null ? "agt_" + UUID.randomUUID().toString().replace("-", "") : released.getAgentId();
+            return service.create(actor, personaCode, idempotencyKey, hash, canonical, mode, hostId, System.currentTimeMillis());
         });
     }
     public HostingSetupService.View lookupSetup(Actor actor, String personaCode, String setupId) {
@@ -125,9 +125,10 @@ public final class HostingRentApplicationService {
             EconomyHostingRentPlanEntity plan = plan(actor, "local".equals(target.mode())
                     ? AgentHostingRentProperties.SELF_HOSTED_PLAN_ID : AgentHostingRentProperties.MANAGED_PLAN_ID, personaCode);
             persona(personaCode);
-            if (currentBinding(actor, owner, personaCode) != null) throw conflict("HOSTING_RENT_LEASE_CONFLICT");
+            var retry=safeRetryBinding(actor,owner,personaCode);
+            if (retry!=null && !retry.getAgentId().equals(target.canonicalAgentId())) throw forbidden();
             if (body.get("agentId") != null && !body.get("agentId").equals(target.canonicalAgentId())) throw forbidden();
-            if ("server".equals(target.mode())) {
+            if (retry==null && "server".equals(target.mode())) {
                 var released = releasedInstance(actor, personaCode);
                 if (released != null && !released.getAgentId().equals(target.canonicalAgentId())) throw conflict("HOSTING_RENT_QUOTE_STALE");
             }
@@ -147,7 +148,7 @@ public final class HostingRentApplicationService {
         requireEnabled(actor);
         key(idempotencyKey); exact(personaCode, 100);
         if (!"INITIAL".equals(body.get("purpose"))) throw badRequest();
-        if (setups != null) return quoteSetup(actor, personaCode, idempotencyKey, body);
+        if (setups != null && body.get("setupId") != null) return quoteSetup(actor, personaCode, idempotencyKey, body);
         if (body.get("setupId") != null) throw new HostingRentApplicationException(503, "HOSTING_SETUP_UNAVAILABLE");
         String requestedAgent = body.get("agentId");
         if (requestedAgent != null) requireAgentId(requestedAgent);
@@ -508,6 +509,18 @@ public final class HostingRentApplicationService {
         return runtime;
     }
 
+    private AgentPersonaBindingEntity safeRetryBinding(Actor actor, String owner, String persona) {
+        var binding=currentBinding(actor,owner,persona);
+        if (binding==null) return null;
+        requireExisting(actor,owner,binding.getAgentId(),persona);
+        var lease=rent.selectLatestLeaseForUpdate(actor.tenantId(),actor.clientId(),binding.getAgentId());
+        var intent=lease==null ? null : rent.selectIntent(actor.tenantId(),actor.clientId(),lease.getLatestIntentId());
+        if (lease==null || !"REFUNDED".equals(lease.getStatus()) || intent==null || !"INITIAL".equals(intent.getQuotePurpose())
+                || !"REFUNDED".equals(intent.getStatus()) || intent.getCaptureTransactionId()!=null || intent.getServiceReadyAt()!=null
+                || intent.getRuntimeInstallationId()!=null || intent.getRuntimeManifestSha256()!=null
+                || !Long.valueOf(0).equals(intent.getRuntimeProvisionGeneration())) throw conflict("HOSTING_RENT_LEASE_CONFLICT");
+        return binding;
+    }
     private AgentPersonaBindingEntity currentBinding(Actor actor, String owner, String personaCode) {
         var found = roots.lockBindings(actor.clientId(), personaCode);
         if (found.size() > 1) throw forbidden();

@@ -26,22 +26,40 @@ public final class HostingOutboundProvisioning {
     public boolean availableFor(String tenant, String client) {
         scope.requireAdmitted(tenant, client); return true;
     }
+    public cn.jia.agent.mapper.hosting.HostingHostStore.Host registeredHost(String tenant, String client, String host) {
+        return exchanges.registeredHost(tenant,client,host);
+    }
     public boolean controls(String tenant, String client, String owner, String agent) {
         scope.requireAdmitted(tenant, client);
         return store.activeSubject(tenant, client, owner, agent) != null;
     }
+    public boolean routes(String tenant, String client, String owner, String agent) {
+        scope.requireAdmitted(tenant,client);
+        return agent!=null && store.hasSubject(tenant,client,owner,agent);
+    }
+    /** Called by existing lifecycle coordinators, never by a result/HTTP GET projection. */
+    public Map<String,Object> observe(Map<String,Object> request, String preferredHost) {
+        if (!java.util.Set.of("inventory","current","observe","quiesce","evidence","cleanup").contains(request.get("method")))
+            throw new IllegalArgumentException("Not an observation or explicit handover retry");
+        return exchange(request,preferredHost,true);
+    }
     public Map<String,Object> exchange(Map<String,Object> request, String preferredHost) {
+        return exchange(request,preferredHost,false);
+    }
+    private Map<String,Object> exchange(Map<String,Object> request, String preferredHost, boolean refresh) {
         String tenant = (String) request.get("tenantId"), client = (String) request.get("clientId");
         scope.requireAdmitted(tenant, client);
         return transactions.execute(status -> {
-            var association = setups.leaseActivation(tenant, client, (String) request.get("leaseId"));
-            if (association == null || !association.bindingId().equals(request.get("bindingId"))) return null;
-            var grant = store.lock(tenant, client, association.authorizationId());
+            var association = request.get("leaseId")==null ? null : setups.leaseActivation(tenant, client, (String) request.get("leaseId"));
+            if (request.get("leaseId")!=null && (association==null || !association.bindingId().equals(request.get("bindingId")))) return null;
+            var candidate=association==null ? store.activeSubject(tenant,client,(String)request.get("ownerJiacn"),(String)request.get("canonicalAgentId")) : null;
+            var grant=association!=null ? store.lock(tenant,client,association.authorizationId())
+                    : candidate==null ? null : store.lock(tenant,client,candidate.authorizationId());
             if (grant == null || !"ACTIVE".equals(grant.status()) || !"CONTROL".equals(grant.purpose())
                     || !grant.ownerJiacn().equals(request.get("ownerJiacn")) || !grant.canonicalAgentId().equals(request.get("canonicalAgentId"))
                     || preferredHost != null && !grant.hostId().equals(preferredHost)) return null;
             // Stable semantic request key, independent of random HTTP correlation IDs. There is at
-            // most one unfinished observation per exact request; completed observations are refreshed.
+            // most one unfinished observation; only the explicit coordinator refreshes a completed one.
             var canonical = new TreeMap<String,Object>(request);
             if (canonical.get("quotedInventory") instanceof Map<?,?> inventory) {
                 var sorted = new TreeMap<String,Object>(); inventory.forEach((k,v) -> sorted.put((String) k,v));
@@ -54,7 +72,7 @@ public final class HostingOutboundProvisioning {
                 try { result = UnixManagedHostingProvisioner.hostingResponse(ProtocolMessage.decode(HostingOutboundExchangeService.parse(row.commandJson())), HostingOutboundExchangeService.parse(row.resultJson())); }
                 catch (java.io.IOException invalid) { throw new IllegalStateException("Invalid persisted lifecycle response", invalid); }
             }
-            if (row == null || row.resultJson() != null && !"prepare".equals(request.get("method"))) {
+            if (row == null || refresh && row.resultJson() != null) {
                 String id = "out:" + key + ":" + UUID.randomUUID();
                 var message = Map.<String,Object>of("protocolVersion", 1, "requestId", key,
                         "messageType", "hosting." + request.get("method"), "messageId", id,

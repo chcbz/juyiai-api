@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,7 +13,12 @@ test('actual Java security/MVC/MySQL roundtrip with real Runtime lifecycle and l
   const f = await hostingFixture(t, { observeInventory: fixtureInventory });
   const before = f.peers.map(peer => structuredClone(f.states.get(peer.subjectKey)[0]));
   const stateRoot = resolve(f.root, 'outbound'); await mkdir(stateRoot, { mode: 0o700 });
-  const options = { control: f.control(), authorization: { ...wire.authorization, token: `rth1_${'a'.repeat(64)}` }, stateRoot, apiOrigin: process.argv[2] };
+  const { purpose, ...authorization } = wire.authorization;
+  const token = `rth1_${'a'.repeat(64)}`;
+  const credential = { configVersion: 1, token, host: { hostId: authorization.hostId, mode: 'local', tenantId: authorization.tenantId,
+    clientId: authorization.clientId, ownerJiacn: authorization.ownerJiacn, tokenSha256: createHash('sha256').update(token).digest('hex') } };
+  f.control().hostCredential = credential; f.control().config = { ...f.control().config, outbound: {} };
+  const options = { control: f.control(), authorization, credential, stateRoot, apiOrigin: process.argv[2] };
   const worker = await new HostingOutbound(options).initialize(); closers.push(() => worker.close());
   await worker.exchange(); assert.deepEqual(worker.state.command, wire.response.data.command);
   const original = structuredClone(worker.state.result);

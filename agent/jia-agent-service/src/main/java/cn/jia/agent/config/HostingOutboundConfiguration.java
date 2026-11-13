@@ -14,12 +14,19 @@ import org.springframework.transaction.PlatformTransactionManager;
 @org.springframework.boot.context.properties.EnableConfigurationProperties(HostingSetupProperties.class)
 @ConditionalOnProperty(name = "agent.hosting-outbound.enabled", havingValue = "true")
 public class HostingOutboundConfiguration {
+    @Bean cn.jia.agent.mapper.hosting.HostingHostStore hostingHostStore(JdbcTemplate jdbc) {
+        return new cn.jia.agent.mapper.hosting.HostingHostStore(jdbc);
+    }
+    @Bean cn.jia.agent.hosting.HostingHostService hostingHostService(cn.jia.agent.mapper.hosting.HostingHostStore hosts,
+            FixedTenantAdmissionPolicy scope, cn.jia.agent.hosting.HostingRentOwnerResolver owners, PlatformTransactionManager manager) {
+        return new cn.jia.agent.hosting.HostingHostService(hosts,scope,owners,manager);
+    }
     @Bean cn.jia.agent.mapper.hosting.HostingSetupStore hostingSetupStore(JdbcTemplate jdbc) {
         return new cn.jia.agent.mapper.hosting.HostingSetupStore(jdbc);
     }
     @Bean cn.jia.agent.hosting.HostingSetupService hostingSetupService(cn.jia.agent.mapper.hosting.HostingSetupStore setups,
-            HostingOutboundStore store, HostingOutboundExchangeService exchanges, FixedTenantAdmissionPolicy scope, HostingSetupProperties properties) {
-        return new cn.jia.agent.hosting.HostingSetupService(setups, store, exchanges, scope, properties);
+            HostingOutboundStore store, HostingOutboundExchangeService exchanges, FixedTenantAdmissionPolicy scope, HostingSetupProperties properties, cn.jia.agent.mapper.hosting.HostingHostStore hosts, HostingControlRemoteProperties routes) {
+        return new cn.jia.agent.hosting.HostingSetupService(setups, store, exchanges, scope, properties, hosts, routes);
     }
     @Bean cn.jia.agent.hosting.HostingOutboundProvisioning hostingOutboundProvisioning(cn.jia.agent.mapper.hosting.HostingSetupStore setups,
             HostingOutboundStore store, HostingOutboundExchangeService exchanges, FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager) {
@@ -27,9 +34,7 @@ public class HostingOutboundConfiguration {
     }
     @Bean HostingOutboundStore hostingOutboundStore(JdbcTemplate jdbc) { return new HostingOutboundStore(jdbc); }
     @Bean HostingOutboundExchangeService hostingOutboundExchangeService(HostingOutboundStore store,
-            FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager, cn.jia.agent.mapper.hosting.HostingSetupStore setups) {
-        var service = new HostingOutboundExchangeService(store, scope, manager);
-        service.setSetups(setups);
-        return service;
+            FixedTenantAdmissionPolicy scope, PlatformTransactionManager manager, cn.jia.agent.mapper.hosting.HostingHostStore hosts) {
+        return new HostingOutboundExchangeService(store, hosts, scope, manager);
     }
 }

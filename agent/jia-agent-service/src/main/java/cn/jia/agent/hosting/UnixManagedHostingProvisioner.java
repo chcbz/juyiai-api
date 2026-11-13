@@ -51,7 +51,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     public void setOutbound(HostingOutboundProvisioning outbound) { this.outbound = outbound; }
     @Override public boolean available() { return rent.configured() && (outbound != null || channel.available()) && credentials.available(); }
     @Override public boolean availableFor(String tenantId, String clientId, String ownerJiacn) {
-        return available() && (outbound != null ? outbound.availableFor(tenantId, clientId) : channel.availableFor(tenantId, clientId, ownerJiacn));
+        return available() && ((outbound != null && outbound.availableFor(tenantId, clientId)) || channel.availableFor(tenantId, clientId, ownerJiacn));
     }
     @Override public boolean probeCapabilities(String tenantId, String clientId, String ownerJiacn) {
         return probeCapabilities(tenantId, clientId, ownerJiacn, null);
@@ -60,7 +60,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
         outsideTransaction();
         if (!availableFor(tenantId, clientId, ownerJiacn)) return false;
         // An offline outbound host is still eligible for an idempotent queued recovery request.
-        if (outbound != null) return existingAgentId != null && outbound.controls(tenantId, clientId, ownerJiacn, existingAgentId);
+        if (outbound != null && outbound.routes(tenantId,clientId,ownerJiacn,existingAgentId)) return outbound.controls(tenantId,clientId,ownerJiacn,existingAgentId);
         String requestId = java.util.UUID.randomUUID().toString();
         try {
             var request = new LinkedHashMap<String, Object>();
@@ -83,6 +83,10 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     }
     @Override public String deploymentMode(String tenantId, String clientId, String ownerJiacn, String hostId) {
         if (!availableFor(tenantId, clientId, ownerJiacn)) return null;
+        if (outbound!=null) {
+            var host=outbound.registeredHost(tenantId,clientId,hostId);
+            if (host!=null) return "ACTIVE".equals(host.status()) && ("server".equals(host.mode()) || ownerJiacn.equals(host.ownerJiacn())) ? host.mode() : null;
+        }
         try { return channel.deploymentMode(tenantId, clientId, ownerJiacn, hostId); }
         catch (IOException unavailable) { return null; }
     }
@@ -93,7 +97,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
         request.put("protocol", PROTOCOL); request.put("method", "inventory");
         request.put("tenantId", tenantId); request.put("clientId", clientId);
         request.put("ownerJiacn", ownerJiacn); request.put("canonicalAgentId", agentId);
-        try { return decodeInventory(request, exchange(request)); }
+        try { return decodeInventory(request, observe(request,null)); }
         catch (Exception uncertain) { return null; }
     }
     static SkillInventory decodeInventory(Map<String, Object> request, Map<String, Object> response) {
@@ -153,7 +157,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
             Candidate candidate = decodePrepared(p, prepared);
             if (candidate == null) return unknown(p);
             credentials.ensureInstallation(p, candidate); // DB-only atomic authorization/linkage, committed before ensure.
-            var observed = exchange(request(p, "observe", candidate), java.util.UUID.randomUUID().toString(), candidate.hostId());
+            var observed = observe(request(p, "observe", candidate),candidate.hostId());
             Observation proof = trustedObservation(p, candidate, "observe", observed);
             if (proof.outcome() == Outcome.SERVICE_READY || recoveryRequired(observed)) return proof;
             return trustedObservation(p, candidate, "ensure", exchange(request(p, "ensure", candidate), java.util.UUID.randomUUID().toString(), candidate.hostId()));
@@ -178,7 +182,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
         outsideTransaction();
         if (!validPreparation(initial) || !initial.intentId().equals(initial.operationId())
                 || !availableFor(initial.tenantId(), initial.clientId(), initial.ownerJiacn())) return null;
-        try { return decodeCurrent(initial, exchange(request(initial, "current", null))); }
+        try { return decodeCurrent(initial, observe(request(initial, "current", null),null)); }
         catch (Exception uncertain) { return null; }
     }
     static CurrentOperation decodeCurrent(Preparation initial, Map<String, Object> response) {
@@ -219,7 +223,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
                 || !availableFor(p.tenantId(), p.clientId(), p.ownerJiacn())) return false;
         try {
             var request = handoverRequest(p, candidate, handoverId, method);
-            return decodeHandover(request, candidate, exchange(request, java.util.UUID.randomUUID().toString(), candidate.hostId()), outcome);
+            return decodeHandover(request, candidate, observe(request,candidate.hostId()), outcome);
         } catch (Exception uncertain) {
             // Same relationship/operation retry only. A missing receipt never advances cleanup.
             return false;
@@ -372,6 +376,13 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     private static boolean digest(Object value) { return value instanceof String s && s.matches("[0-9a-f]{64}"); }
     private static boolean installation(Object value) { return value instanceof String s && s.matches("rti_[0-9a-f]{32}"); }
 
+    private boolean outboundRoute(Map<String,Object> request) {
+        return outbound!=null && outbound.routes((String)request.get("tenantId"),(String)request.get("clientId"),
+                (String)request.get("ownerJiacn"),(String)request.get("canonicalAgentId"));
+    }
+    private Map<String,Object> observe(Map<String,Object> request, String host) throws IOException {
+        return outboundRoute(request) ? outbound.observe(request,host) : exchange(request,java.util.UUID.randomUUID().toString(),host);
+    }
     Map<String, Object> exchange(Map<String, Object> request) throws IOException {
         return exchange(request, java.util.UUID.randomUUID().toString());
     }
@@ -380,7 +391,7 @@ public final class UnixManagedHostingProvisioner implements ManagedHostingProvis
     }
     Map<String, Object> exchange(Map<String, Object> request, String requestId, String preferredHost) throws IOException {
         outsideTransaction();
-        if (outbound != null) return outbound.exchange(request, preferredHost);
+        if (outboundRoute(request)) return outbound.exchange(request, preferredHost);
         var target = channel.target(request, preferredHost);
         var message = cn.jia.core.entity.ProtocolMessage.event(requestId, "hosting." + request.get("method"),
                 java.util.UUID.randomUUID().toString(), hostingData(request));

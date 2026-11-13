@@ -32,8 +32,12 @@ public final class HostingOutboundCredentialFilter extends OncePerRequestFilter 
         response.setHeader("Cache-Control", "private, no-store");
         var values = Collections.list(request.getHeaders("Authorization"));
         String path = request.getRequestURI().substring(request.getContextPath().length());
-        if (!"POST".equals(request.getMethod()) || !HostingOutboundExchangeService.PATH.equals(path)
-                || request.getQueryString() != null || !request.getParameterMap().isEmpty()
+        boolean exchange="POST".equals(request.getMethod()) && HostingOutboundExchangeService.PATH.equals(path)
+                && request.getQueryString()==null && request.getParameterMap().isEmpty();
+        boolean directory="GET".equals(request.getMethod()) && HostingOutboundExchangeService.DIRECTORY_PATH.equals(path)
+                && request.getContentLengthLong()<=0 && request.getHeader("Transfer-Encoding")==null
+                && request.getParameterMap().entrySet().stream().allMatch(e -> java.util.Set.of("cursor","pageSize").contains(e.getKey()) && e.getValue().length==1);
+        if ((!exchange && !directory)
                 || request.getHeader("Origin") != null || request.getHeader("X-API-Key") != null
                 || Collections.list(request.getHeaderNames()).stream().anyMatch(name -> name.toLowerCase(Locale.ROOT).startsWith("x-agent-"))
                 || values.size() != 1 || !values.getFirst().matches("RuntimeHosting rth1_[0-9a-f]{64}")) {
