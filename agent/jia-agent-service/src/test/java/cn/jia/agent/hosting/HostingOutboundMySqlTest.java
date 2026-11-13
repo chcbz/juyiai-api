@@ -437,7 +437,10 @@ class HostingOutboundMySqlTest {
     }
     @Test void setupCreatesOnlyRestrictedAuthorityAndPublicReplayMetadata() throws Exception {
         var f = invitation(); var created = f.app().startSetup(ACTOR, "wuyong", KEY, setupBody());
-        assertEquals("WAITING_INVENTORY", created.status()); assertEquals("SETUP", created.authorization().purpose());
+        assertEquals("WAITING_INVENTORY", created.status());
+        assertEquals("SETUP", tx.execute(t -> store.lock(ACTOR.tenantId(), ACTOR.clientId(),
+                created.authorization().authorizationId())).purpose());
+        assertFalse(JSON.writeValueAsString(created.authorization()).contains("purpose"));
         assertEquals(created, f.app().startSetup(ACTOR, "wuyong", KEY, setupBody()));
         assertFalse(JSON.writeValueAsString(created).contains(SETUP_TOKEN));
         assertEquals(1, db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_setup", Integer.class));
