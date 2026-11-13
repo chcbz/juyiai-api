@@ -44,6 +44,7 @@ class HostingRentApplicationServiceTest {
     private final HostingRentReconciler reconciler = mock(HostingRentReconciler.class);
     private final ManagedHostingProvisioner provider = mock(ManagedHostingProvisioner.class);
     private final ObjectProvider<ManagedHostingProvisioner> providers = mock(ObjectProvider.class);
+    private final cn.jia.agent.mapper.hosting.PersonaModelHostingStore modelPrices = mock(cn.jia.agent.mapper.hosting.PersonaModelHostingStore.class);
     private JdbcTemplate jdbc;
     private HostingRentApplicationService application;
     private final HostingRentMutationReceipt receipt = new HostingRentMutationReceipt(
@@ -71,6 +72,7 @@ class HostingRentApplicationServiceTest {
             return new ManagedHostingProvisioner.SkillInventory(
                     EMPTY_INVENTORY.hostId(), EMPTY_INVENTORY.inventorySha256(), List.of(), EMPTY_INVENTORY.snapshotJson());
         });
+        when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(tariff(1, 1000000000));
         useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50"));
         when(owners.requireOwner(ACTOR)).thenReturn("Tenant-A");
         when(roots.lockPersona("wuyong")).thenReturn(new AgentPersonaEntity().setPersonaCode("wuyong").setName("fixture")
@@ -120,15 +122,17 @@ class HostingRentApplicationServiceTest {
                         new EconomyPreviewProperties.AllowedScope("0", "Client-A")))), owners, rent,
                 ledger, renewal, roots, bindings, runtimes, identities, providers, reconciler,
                 new DataSourceTransactionManager(jdbc.getDataSource()), true);
+        application.setModelPrices(modelPrices);
     }
 
-    @Test void externalModelAndTariffChangeNewQuotesWithoutCodeChanges() {
+    private static cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff tariff(long version, long amount) {
+        return new cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff("wuyong", "arbitrary-provider.model",
+                "agent-hosting-preview", version, amount, 2592000, "WEN", "ACTIVE");
+    }
+
+    @Test void databaseTariffChangesAffectBothQuotePathsWithoutRestart() {
         for (boolean setupFlow : new boolean[]{false, true}) {
-        for (long amount : new long[]{730L, 890L}) {
-            long version = amount + 100;
-            useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
-                    Map.of("wuyong", "arbitrary-provider.model"),
-                    Map.of("arbitrary-provider.model", new AgentHostingRentProperties.ModelPlan("" + version, "" + amount))));
+            useProperties(new AgentHostingRentProperties(true, "1", null, "2592000", "1", "50"));
             if (setupFlow) {
                 var setups = mock(HostingSetupService.class);
                 application.setHostingSetups(setups);
@@ -139,6 +143,9 @@ class HostingRentApplicationServiceTest {
                 when(setups.inventory(ACTOR, "wuyong", "setup", KEY)).thenReturn(new HostingSetupService.Target(target,
                         new ManagedHostingProvisioner.SkillInventory("fixture-host", EMPTY_INVENTORY.inventorySha256(), List.of(), "[]")));
             }
+        for (long amount : new long[]{730L, 890L}) {
+            long version = amount + 100;
+            when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(tariff(version, amount));
             when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", version)).thenReturn(
                     new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(version)
                             .setAmountWen(amount).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
@@ -158,16 +165,14 @@ class HostingRentApplicationServiceTest {
     }
 
     @Test void missingPersonaInDifferentiatedConfigurationDoesNotFallBackToUniformPrice() {
-        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
-                Map.of("other", "opaque-model"), Map.of("opaque-model", new AgentHostingRentProperties.ModelPlan("22", "730"))));
+        when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(null);
         assertEquals("HOSTING_RENT_NOT_CONFIGURED", assertThrows(HostingRentApplicationException.class,
                 () -> application.quote(ACTOR, "wuyong", KEY, Map.of("purpose", "INITIAL"))).code());
         verifyNoInteractions(ledger);
     }
 
     @Test void changingAmountWithoutNewVersionCannotOverwriteStoredTariff() {
-        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
-                Map.of("wuyong", "configured-model"), Map.of("configured-model", new AgentHostingRentProperties.ModelPlan("29", "730"))));
+        when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(tariff(29, 730));
         when(rent.selectPlanForUpdate("0", "Client-A", "agent-hosting-preview", 29L)).thenReturn(
                 new EconomyHostingRentPlanEntity().setPlanId("agent-hosting-preview").setPlanVersion(29L)
                         .setAmountWen(600L).setPeriodSeconds(2592000L).setStatus("ACTIVE"));
@@ -330,8 +335,8 @@ class HostingRentApplicationServiceTest {
     }
 
     @Test void existingCanonicalLeaseRenewalUsesTheSameLedgerWithoutRenamingIdentity() {
-        useProperties(new AgentHostingRentProperties(true, "2", "900", "86400", "2", "80",
-                Map.of("wuyong", "replacement"), Map.of("replacement", new AgentHostingRentProperties.ModelPlan("33", "1500"))));
+        useProperties(new AgentHostingRentProperties(true, "2", "900", "86400", "2", "80"));
+        when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(tariff(33, 1500));
         String agent = "jyt-fixture-likui";
         existingInvitation(agent);
         when(rent.selectLeaseForUpdate("0", "Client-A", "hrl-test")).thenReturn(new EconomyHostingLeaseEntity()
@@ -661,8 +666,7 @@ class HostingRentApplicationServiceTest {
                 "expectedPlanVersion", "1", "expectedAmountWen", "1000000000", "expectedPeriodSeconds", "2592000");
     }
     @Test void selfHostedQuoteUsesTrustedHostPlanAndRetainsSkillInventory() {
-        useProperties(new AgentHostingRentProperties(true, "1", "1000000000", "2592000", "1", "50",
-                Map.of("wuyong", "configured-model"), Map.of("configured-model", new AgentHostingRentProperties.ModelPlan("29", "730"))));
+        when(modelPrices.find("0", "Client-A", "wuyong")).thenReturn(tariff(29, 730));
         when(provider.deploymentMode(anyString(), anyString(), anyString(), eq("fixture-host"))).thenReturn("local");
         when(rent.selectPlanForUpdate("0", "Client-A", "agent-self-hosted", 1L)).thenReturn(
                 new EconomyHostingRentPlanEntity().setPlanId("agent-self-hosted").setPlanVersion(1L)

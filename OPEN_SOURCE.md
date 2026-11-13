@@ -13,4 +13,4 @@
 
 此次没有部署或修改正在运行的服务配置。升级生产之前应另行准备外置配置、测试与受控发布。
 
-好汉模型与差异化托管价格采用[外置配置](docs/hero-model-hosting-configuration.md)，108人候选在`docs/examples/hero-hosting.properties`。不是内置默认值，不会自动加载或启用收费；成本和实际模型可交付性须在启用前核验。
+好汉模型与差异化托管价格采用[数据库配置](docs/hero-model-hosting-configuration.md)，108人初始化候选在`docs/examples/hero-hosting.sql`。需在获授权的目标库显式维护，不自动加载/迁移/启用收费；成本和Runtime实际模型可交付性须在启用前核验。

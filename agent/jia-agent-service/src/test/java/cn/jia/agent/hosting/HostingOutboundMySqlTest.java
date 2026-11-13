@@ -404,6 +404,11 @@ class HostingOutboundMySqlTest {
                         List.of(new cn.jia.economy.config.EconomyPreviewProperties.AllowedScope("0", "fixture-client")))), owners, rent,
                 ledger, mock(cn.jia.economy.hosting.HostingRentRenewalService.class), roots, bindings, mock(cn.jia.agent.dao.AgentRuntimeDao.class),
                 mock(cn.jia.agent.service.AgentIdentityService.class), providers, mock(HostingRentReconciler.class), manager, true);
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-persona-model-hosting.sql")).execute(db.dataSource());
+        db.jdbc().update("INSERT INTO economy_hosting_rent_plan(tenant_id,client_id,plan_id,plan_version,amount_wen,period_seconds,quote_ttl_seconds,currency,status,create_time) VALUES('0','fixture-client','agent-hosting-preview',1,500,2592000,300,'WEN','ACTIVE',1)");
+        db.jdbc().update("INSERT INTO economy_hosting_model_plan VALUES('0','fixture-client','fixture-model','agent-hosting-preview',1)");
+        db.jdbc().update("INSERT INTO agent_persona_model VALUES('0','fixture-client','wuyong','fixture-model')");
+        app.setModelPrices(new cn.jia.agent.mapper.hosting.PersonaModelHostingStore(db.jdbc()));
         app.setHostingSetups(security.getBean(HostingSetupService.class));
         return new Invitation(app, owners, roots, posting, bindings, provider);
     }

@@ -62,20 +62,34 @@ class AgentPersonaPublicScopeTest {
         verifyNoMoreInteractions(dao);
     }
 
-    @Test void modelMetadataUsesExternalConfigurationAndDoesNotForgeObservedModel() {
+    @Test void modelMetadataUsesDatabaseSnapshotAndDoesNotForgeObservedModel() {
         var service = service(mock(AgentPersonaDao.class));
-        service.setHostingModelConfiguration(new cn.jia.agent.config.AgentHostingRentProperties(
-                false, "1", "500", "2592000", "1", "50", java.util.Map.of("wuyong", "future.model"),
-                java.util.Map.of("future.model", new cn.jia.agent.config.AgentHostingRentProperties.ModelPlan("91", "730"))));
+        var tariff = new cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff("wuyong", "future.model",
+                "agent-hosting-preview", 91, 730, 2592000, "WEN", "ACTIVE");
         var dto = new cn.jia.agent.entity.AgentRuntimeDTO(); dto.setPersonaCode("wuyong"); dto.setExecutionModel("observed-model");
-        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", dto);
+        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", dto, tariff);
         assertEquals("future.model", dto.getConfiguredModel());
         assertEquals("730", dto.getPlatformHostingAmountWen());
         assertEquals("91", dto.getPlatformHostingPlanVersion());
         assertEquals("observed-model", dto.getExecutionModel());
         var unknown = new cn.jia.agent.entity.AgentRuntimeDTO(); unknown.setPersonaCode("missing");
-        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", unknown);
+        ReflectionTestUtils.invokeMethod(service, "applyConfiguredModel", unknown, (Object) null);
         assertNull(unknown.getConfiguredModel()); assertNull(unknown.getPlatformHostingAmountWen());
+    }
+
+    @Test void systemPersonaUsesTrustedCallerScopeWithoutReadingRequestContext() {
+        var service = service(mock(AgentPersonaDao.class));
+        var prices = mock(cn.jia.agent.mapper.hosting.PersonaModelHostingStore.class);
+        service.setHostingModelConfiguration(prices);
+        when(prices.find("tenant-blue", "trusted-client", "songjiang")).thenReturn(
+                new cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff("songjiang", "configured.model",
+                        "agent-hosting-preview", 92, 500, 2592000, "WEN", "ACTIVE"));
+        cn.jia.agent.entity.AgentRuntimeDTO dto = ReflectionTestUtils.invokeMethod(service,
+                "buildSongjiangDTO", "tenant-blue", "trusted-client");
+        assertNotNull(dto);
+        assertEquals("configured.model", dto.getConfiguredModel());
+        verify(prices).find("tenant-blue", "trusted-client", "songjiang");
+        verifyNoMoreInteractions(prices);
     }
 
     private AgentServiceImpl service(AgentPersonaDao dao) {

@@ -277,6 +277,14 @@ class HostingRentRenewalMySqlTest {
             var application = new HostingRentApplicationService(properties, gate, owners, leases, ledger, service,
                     admissionRoots, identityBindings, runtimeRows, identities, beans.getBeanProvider(ManagedHostingProvisioner.class),
                     reconciler, manager, true);
+            var prices = mock(cn.jia.agent.mapper.hosting.PersonaModelHostingStore.class);
+            when(prices.find("tenant", "client", "wuyong")).thenReturn(
+                    new cn.jia.agent.mapper.hosting.PersonaModelHostingStore.Tariff("wuyong", "fixture-model", "agent-hosting-preview", 1, 500, 2592000, "WEN", "ACTIVE"));
+            if (!selfHosted) leases.insertPlanVersion(new cn.jia.economy.entity.EconomyHostingRentPlanEntity()
+                    .setTenantId("tenant").setClientId("client").setPlanId("agent-hosting-preview").setPlanVersion(1L)
+                    .setAmountWen(500L).setPeriodSeconds(2592000L).setQuoteTtlSeconds(300L)
+                    .setCurrency("WEN").setStatus("ACTIVE").setCreateTime(1L));
+            application.setModelPrices(prices);
             var owner = new HostingRentHttp.Actor("user", "tenant", "client", "owner");
             var quote = application.quote(owner, "wuyong", java.util.UUID.randomUUID().toString(), java.util.Map.of("purpose", "INITIAL"));
             assertEquals(expectedPlan, quote.planId());
