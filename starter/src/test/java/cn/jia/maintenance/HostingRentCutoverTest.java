@@ -44,6 +44,25 @@ class HostingRentCutoverTest {
             assertTrue(context.getBeansOfType(DataSource.class).isEmpty());
         });
     }
+    @Test void explicitControlGraphStartsWithoutOnlineWorkersOrSchemaWrites() {
+        new ApplicationContextRunner().withUserConfiguration(HostingRentCutover.ControlContext.class)
+                .withInitializer(context -> context.getEnvironment().setActiveProfiles("schema-maintenance", "hosting-rent-cutover", "hosting-control-maintenance"))
+                .withPropertyValues("spring.datasource.url=jdbc:h2:mem:control_cutover;DB_CLOSE_DELAY=-1",
+                        "spring.datasource.username=sa", "spring.datasource.password=", "spring.datasource.driver-class-name=org.h2.Driver",
+                        "cyf.security.fixed-tenant.tenant-id=tenant", "cyf.security.fixed-tenant.client-id=client",
+                        "agent.hosting-outbound.enabled=true")
+                .run(context -> {
+                    assertNull(context.getStartupFailure(), () -> String.valueOf(context.getStartupFailure()));
+                    assertNotNull(context.getBean(cn.jia.agent.hosting.HostingControlMaintenance.class));
+                    assertTrue(context.getBeansOfType(cn.jia.agent.hosting.ManagedHostingProvisioner.class).isEmpty());
+                    assertTrue(context.getBeansOfType(cn.jia.agent.hosting.HostingControlChannel.class).isEmpty());
+                    assertTrue(context.getBeansOfType(org.springframework.scheduling.TaskScheduler.class).isEmpty());
+                    assertTrue(context.getBeansOfType(org.springframework.boot.ApplicationRunner.class).isEmpty());
+                    assertTrue(context.getBeansOfType(org.springframework.boot.CommandLineRunner.class).isEmpty());
+                    assertEquals(0, new JdbcTemplate(context.getBean(DataSource.class)).queryForObject(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='PUBLIC'", Integer.class));
+                });
+    }
     @Test void explicitGraphStartsWithoutBusinessWorkersOrSchemaWrites() {
         new ApplicationContextRunner().withUserConfiguration(HostingRentCutover.Context.class)
                 .withInitializer(context -> context.getEnvironment().setActiveProfiles("schema-maintenance", "hosting-rent-cutover"))

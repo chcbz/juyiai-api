@@ -133,6 +133,85 @@ class HostingOutboundMySqlTest {
         assertEquals("z-peer",service.directory(TOKEN,null,100).items().getFirst().authorizationId());
         assertEquals(403,assertThrows(HostingRentApplicationException.class,() -> poll(null)).status());
     }
+    private HostingControlMaintenance maintenance(cn.jia.agent.service.AgentIdentityService identities,
+            cn.jia.agent.dao.AgentPersonaBindingDao bindings, cn.jia.agent.dao.AgentRuntimeDao runtimes,
+            cn.jia.agent.service.AgentRuntimeV1Service installations, cn.jia.economy.mapper.EconomyHostingRentMapper leases) {
+        return new HostingControlMaintenance(hosts,security.getBean(HostingHostService.class),store,
+                security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class),service,
+                security.getBean(HostingRentOwnerResolver.class),identities,bindings,runtimes,installations,leases,
+                new FixedTenantAdmissionPolicy("0","fixture-client"),new DataSourceTransactionManager(db.dataSource()));
+    }
+    @Test void maintenancePreviewRotationRevocationAreAtomicAndNeverTouchAgentOrRent() {
+        var m=maintenance(null,null,null,null,null);
+        String old=HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash(TOKEN));
+        String nextToken="rth1_"+"b".repeat(64);
+        String next=HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash(nextToken));
+        var rotate=new HostingControlMaintenance.Command("ROTATE","fixture-host",null,null,null,next,old,null,null,null,null,null);
+        m.execute(rotate,false); assertNotNull(service.directory(TOKEN,null,100));
+        assertThrows(HostingRentApplicationException.class,() -> service.directory(nextToken,null,100));
+        m.execute(rotate,true); m.execute(rotate,true);
+        assertThrows(HostingRentApplicationException.class,() -> service.directory(TOKEN,null,100));
+        assertEquals(1,service.directory(nextToken,null,100).items().size());
+        var stale=new HostingControlMaintenance.Command("REVOKE","fixture-host",null,null,null,null,old,null,null,null,null,null);
+        assertThrows(IllegalStateException.class,() -> m.execute(stale,true));
+        var revoke=new HostingControlMaintenance.Command("REVOKE","fixture-host",null,null,null,null,next,null,null,null,null,null);
+        m.execute(revoke,false); assertEquals(1,service.directory(nextToken,null,100).items().size());
+        m.execute(revoke,true); m.execute(revoke,true);
+        assertThrows(HostingRentApplicationException.class,() -> service.directory(nextToken,null,100));
+        assertEquals("ACTIVE",tx.execute(t -> store.lock("0","fixture-client","hca_fixture")).status());
+        assertEquals(0,db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange",Integer.class));
+    }
+    @Test void maintenanceImportRequiresExactExistingOwnershipAndDoesNotCreateAnInstallationOrRent() {
+        var identities=mock(cn.jia.agent.service.AgentIdentityService.class);
+        var bindings=mock(cn.jia.agent.dao.AgentPersonaBindingDao.class);
+        var runtimes=mock(cn.jia.agent.dao.AgentRuntimeDao.class);
+        var installations=mock(cn.jia.agent.service.AgentRuntimeV1Service.class);
+        var leases=mock(cn.jia.economy.mapper.EconomyHostingRentMapper.class);
+        String agent="agt_import",installation="rti_import",leaseId="hrl_import";
+        when(installations.lockExistingInstallation("0","fixture-client","fixture-owner",installation)).thenReturn(
+                new cn.jia.agent.entity.AgentRuntimeV1InstallationView(installation,"0","fixture-client",agent,"1","a".repeat(64),1,"ACTIVE",null));
+        when(identities.requireRegistrationIdentityInScope("0","fixture-client","fixture-owner",agent)).thenReturn(
+                new cn.jia.agent.entity.AgentIdentityRegistryEntity().setBindingId(9L));
+        var binding=new cn.jia.agent.entity.AgentPersonaBindingEntity().setId(9L).setJiacn("fixture-owner").setAgentId(agent).setStatus(1);
+        binding.setTenantId("0"); binding.setClientId("fixture-client"); when(bindings.findByIdForUpdate(9L)).thenReturn(binding);
+        var runtime=new cn.jia.agent.entity.AgentRuntimeEntity().setBindingId(9L).setOwnerJiacn("fixture-owner")
+                .setRuntimeInstallationId(installation).setRuntimeHostId("fixture-host");
+        when(runtimes.lockInScope("0","fixture-client",agent)).thenReturn(runtime);
+        var lease=new cn.jia.economy.entity.EconomyHostingLeaseEntity().setLeaseId(leaseId).setBindingId("9")
+                .setPrincipalType("USER").setPrincipalId(ACTOR.actorId()).setStatus("ACTIVE").setPlanId("agent-self-hosted");
+        when(leases.selectLatestLeaseForUpdate("0","fixture-client",agent)).thenReturn(lease);
+        var m=maintenance(identities,bindings,runtimes,installations,leases);
+        var command=new HostingControlMaintenance.Command("IMPORT","fixture-host",null,ACTOR.actorId(),"fixture-owner",null,null,null,"hca_import",agent,installation,leaseId);
+        m.execute(command,false);
+        assertFalse(store.hasSubject("0","fixture-client","fixture-owner",agent));
+        runtime.setRuntimeHostId("wrong-host"); assertThrows(IllegalStateException.class,() -> m.execute(command,true));
+        runtime.setRuntimeHostId("fixture-host"); lease.setPrincipalId("wrong-payer");
+        assertThrows(IllegalStateException.class,() -> m.execute(command,true)); lease.setPrincipalId(ACTOR.actorId());
+        var receipt=m.execute(command,true); assertEquals(receipt,m.execute(command,true));
+        var mapping=security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class).leaseActivation("0","fixture-client",leaseId);
+        assertNull(mapping.setupId()); assertEquals("hca_import",mapping.authorizationId());
+        assertEquals("CONTROL",tx.execute(t -> store.lock("0","fixture-client","hca_import")).purpose());
+        assertEquals(0,db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange",Integer.class));
+        verify(installations,times(5)).lockExistingInstallation("0","fixture-client","fixture-owner",installation);
+        verifyNoMoreInteractions(installations);
+    }
+    @Test void independentAgentPollsShareHostAuthenticationWithoutSerializingAllWorkers() throws Exception {
+        tx.executeWithoutResult(t -> service.register(new Grant("0","fixture-client","hca_peer","fixture-host","fixture-owner","agt_peer","CONTROL","ACTIVE"),2));
+        var held=new CountDownLatch(1); var release=new CountDownLatch(1);
+        var workers=Executors.newFixedThreadPool(2);
+        try {
+            var first=workers.submit(() -> tx.execute(t -> {
+                assertNotNull(hosts.authenticate("0","fixture-client",HostingOutboundExchangeService.tokenHash(TOKEN)));
+                assertNotNull(store.lock("0","fixture-client","hca_fixture")); held.countDown();
+                try { assertTrue(release.await(30,TimeUnit.SECONDS)); } catch(InterruptedException e) { throw new RuntimeException(e); }
+                return true;
+            }));
+            assertTrue(held.await(30,TimeUnit.SECONDS));
+            var peer=workers.submit(() -> service.exchange(TOKEN,new HostingOutboundExchangeService.Request("hca_peer","fixture-host","instance",null),3));
+            assertNull(peer.get(20,TimeUnit.SECONDS).command());
+            release.countDown(); assertTrue(first.get(20,TimeUnit.SECONDS));
+        } finally { release.countDown(); workers.shutdownNow(); }
+    }
     @Test void hostRegistrationReplaysOnlyExactOwnerAndHash() {
         var registrations=security.getBean(HostingHostService.class);
         var request=Map.of("hostId","new-host","tokenSha256",HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash("rth1_"+"b".repeat(64))));
