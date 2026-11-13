@@ -183,6 +183,11 @@ class HostingOutboundMySqlTest {
         var m=maintenance(identities,bindings,runtimes,installations,leases);
         var command=new HostingControlMaintenance.Command("IMPORT","fixture-host",null,ACTOR.actorId(),"fixture-owner",null,null,null,"hca_import",agent,installation,leaseId);
         m.execute(command,false);
+        when(installations.lockExistingInstallation("0","fixture-client","fixture-owner",installation)).thenReturn(
+                new cn.jia.agent.entity.AgentRuntimeV1InstallationView(installation,"0","fixture-client",agent,"1","a".repeat(64),1,"REVOKED",null));
+        assertThrows(IllegalStateException.class,() -> m.execute(command,true));
+        when(installations.lockExistingInstallation("0","fixture-client","fixture-owner",installation)).thenReturn(
+                new cn.jia.agent.entity.AgentRuntimeV1InstallationView(installation,"0","fixture-client",agent,"1","a".repeat(64),1,"ACTIVE",null));
         assertFalse(store.hasSubject("0","fixture-client","fixture-owner",agent));
         runtime.setRuntimeHostId("wrong-host"); assertThrows(IllegalStateException.class,() -> m.execute(command,true));
         runtime.setRuntimeHostId("fixture-host"); lease.setPrincipalId("wrong-payer");
@@ -192,7 +197,7 @@ class HostingOutboundMySqlTest {
         assertNull(mapping.setupId()); assertEquals("hca_import",mapping.authorizationId());
         assertEquals("CONTROL",tx.execute(t -> store.lock("0","fixture-client","hca_import")).purpose());
         assertEquals(0,db.jdbc().queryForObject("SELECT count(*) FROM agent_hosting_exchange",Integer.class));
-        verify(installations,times(5)).lockExistingInstallation("0","fixture-client","fixture-owner",installation);
+        verify(installations,times(6)).lockExistingInstallation("0","fixture-client","fixture-owner",installation);
         verifyNoMoreInteractions(installations);
     }
     @Test void independentAgentPollsShareHostAuthenticationWithoutSerializingAllWorkers() throws Exception {
@@ -216,6 +221,8 @@ class HostingOutboundMySqlTest {
         var registrations=security.getBean(HostingHostService.class);
         var request=Map.of("hostId","new-host","tokenSha256",HexFormat.of().formatHex(HostingOutboundExchangeService.tokenHash("rth1_"+"b".repeat(64))));
         var first=registrations.register(ACTOR,KEY,request); assertEquals(first,registrations.register(ACTOR,KEY,request));
+        // A successful POST may not acknowledge an unrecorded alias key. Existing hosts are read by GET.
+        assertThrows(HostingRentApplicationException.class,() -> registrations.register(ACTOR,UUID.randomUUID().toString(),request));
         assertThrows(HostingRentApplicationException.class,() -> registrations.register(ACTOR,KEY,Map.of("hostId","other","tokenSha256",request.get("tokenSha256"))));
         var other=new HostingRentHttp.Actor("other-login","0","fixture-client","other-owner");
         assertThrows(HostingRentApplicationException.class,() -> registrations.register(other,UUID.randomUUID().toString(),request));

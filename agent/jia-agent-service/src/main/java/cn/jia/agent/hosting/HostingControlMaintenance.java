@@ -94,7 +94,7 @@ public final class HostingControlMaintenance {
         HostingRentHttp.exact(c.installationId(),100); HostingRentHttp.exact(c.leaseId(),100);
         // Preserve existing installation -> binding -> runtime -> lease -> grant order.
         var installation=installations.lockExistingInstallation(actor.tenantId(),actor.clientId(),owner,c.installationId());
-        if (installation==null || !c.agentId().equals(installation.canonicalAgentId())) throw mismatch();
+        if (installation==null || !"ACTIVE".equals(installation.status()) || !c.agentId().equals(installation.canonicalAgentId())) throw mismatch();
         var identity=identities.requireRegistrationIdentityInScope(actor.tenantId(),actor.clientId(),owner,c.agentId());
         var binding=bindings.findByIdForUpdate(identity.getBindingId());
         if (binding==null || !actor.tenantId().equals(binding.getTenantId()) || !actor.clientId().equals(binding.getClientId())

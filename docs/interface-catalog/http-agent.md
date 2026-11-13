@@ -2576,3 +2576,17 @@ TASK概览和事项分页/阶段计数复用同一 `AgentTaskPhaseSql.PHASE`。`
 ### 好汉目标模型与托管参考价（2026-11-13候选）
 
 AgentRuntimeDTO新增可空string字段：configuredModel、platformHostingAmountWen、platformHostingPlanVersion、platformHostingPeriodSeconds；金额/版本/秒为正整数十进制字符串，无角色配置则空。来源为外置配置，仅表示目标模型和新邀请参考价，非实际执行模型或已有租约价格；系统宋江权限不变。消费方可忽略这些无害新增字段。配置入口、错误语义和历史价格保护见[外置配置说明](../hero-model-hosting-configuration.md)。未部署/未下发Runtime模型。
+
+## Runtime主机管理增量（2026-11-13 开发候选）
+
+本段是候选代码接口差异，未重新生成历史库存计数、不表示线上已启用。业务权威为根`specs/runtime-self-host-onboarding/design.md`及同目录`host-control-v1.json`。
+
+| 方法/路径 | 认证与输入 | R.data |
+| --- | --- | --- |
+| POST `/agent/hosting-hosts` | JWT；Q.data=`{hostId,tokenSha256}`，原Idempotency-Key | `{hostId,mode,tenantId,clientId,ownerJiacn,tokenSha256}`公开归属元数据；普通用户仅local |
+| GET `/agent/hosting-hosts` | JWT；无body；cursor/pageSize | `{items,nextCursor,hasMore}`，仅本人ACTIVE local主机 |
+| POST `/agent/personas/{personaCode}/hosting-setups` | JWT；Q.data=`{mode,hostId}`；server的hostId=null，由原配置选择 | 原setup视图；不收每Agent密钥或返回第二份controlAuthorization |
+| GET `/agent/runtime/v1/hosting/authorizations` | 专用主机令牌；无body；cursor/pageSize | `{host,items,nextCursor,hasMore}`；items只含授权主体，不含purpose/secret |
+| POST `/agent/runtime/v1/hosting/exchange` | 同一主机令牌；原逐授权Q与结果ACK | 原逐授权Reply，无controlAuthorization |
+
+能力接口保留economyPreviewEnabled/skillMarketplaceEnabled/principalScopeSha256，增加布尔hostingSetupEnabled；Web真实decoder消费该字段，旧响应未含字段不默认启用新流程。必要校验与失败范围见validation-policy.md对应节。

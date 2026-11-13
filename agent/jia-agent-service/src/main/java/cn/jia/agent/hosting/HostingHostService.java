@@ -50,7 +50,8 @@ public final class HostingHostService {
                 if (replay!=null && !MessageDigest.isEqual(replay.requestHash(),next.requestHash())) throw conflict();
                 Host existing=replay == null ? store.find(next.tenantId(),next.clientId(),next.hostId()) : replay;
                 if (existing!=null) {
-                    if (!existing.hostId().equals(next.hostId()) || !existing.mode().equals(next.mode())
+                    if (!existing.idempotencyKey().equals(next.idempotencyKey())
+                            || !existing.hostId().equals(next.hostId()) || !existing.mode().equals(next.mode())
                             || !Objects.equals(existing.ownerJiacn(),next.ownerJiacn())
                             || !MessageDigest.isEqual(existing.tokenHash(),next.tokenHash()) || !"ACTIVE".equals(existing.status())) throw conflict();
                     return view(existing);

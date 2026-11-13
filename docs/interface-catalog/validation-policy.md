@@ -142,3 +142,16 @@ AMQP/WS同一wire重复限制128KiB无独立依据，改为与transport真实MED
 ## 2026-11-02：取消所有 CYF 业务表 CHECK
 
 按用户最新决定，数据库不再以CHECK实现业务规则；本节覆盖上文保留或替换CHECK的旧口径。撤除候选的具体原表达式和迁移边界见 API `docs/interface-catalog/database-check-rules-20261102.md`（当前位于技能岗位任务隔离worktree，未合入/部署）。主键/唯一键/外键/非空与现有业务授权、资金、事务及幂等保护不变。不新增触发器或层层校验作为替代。源码、正式回归与生产DDL分别记录，不能把规格更新当成线上完成。
+
+### Runtime主机管理与逐Agent授权（2026-11-13 开发候选，未上线）
+
+具体业务合同见根规格 `specs/runtime-self-host-onboarding/spec.md` / `design.md`；公共Q/R/M不另建信封。
+
+- POST `/agent/hosting-hosts`：JWT确定owner及环境分区；只接受`hostId/tokenSha256`，禁止明文token、调用方owner/scope和server登记。原幂等键只绑定首次请求；已有主机由原键重放或GET重查，不能成功接受一个未持久化的别名键，不能借重复登记换归属或密钥。不同请求/别名POST为409，GET无注册副作用。
+- GET `/agent/hosting-hosts`：仅本人ACTIVE local主机，`cursor/pageSize`经边界解析，持久化先限定分区/owner再升序LIMIT；完整分页发布到Web，不猜漏页。
+- 原生GET `/agent/runtime/v1/hosting/authorizations`：仅专用主机令牌认证，SHA-256精确匹配主机；无效/已撤销主机凭据401，目录只含本host ACTIVE授权，无业务session/secret。与POST exchange分开method/body/query规则，不能借JWT、Origin或Agent执行凭据走此通道。
+- 每Agent exchange继续校验host/scope/owner/Agent/authorizationId及原命令/结果/ACK；不属于本host或撤销授权403。401停管理轮询，403只隔离该worker，不能据此停租或删除用户资产。主机认证共享读锁、单授权排他锁、凭据CAS更新，不把整机轮询串行化。
+- 存量IMPORT只接受既有ACTIVE installation、ACTIVE binding、原runtimeHostId及ACTIVE/LOCKED租约的准确归属/付款人关联；已撤销installation不得新发管理授权。preview同事务回滚，不enroll/adopt/扣款/发命令。
+- 明确RETAINED从自动续费发现中排除；缺失/未知来源与零文PAID仍按原责任层报错，不把数据损坏当作历史权益隐藏。
+
+实现入口：HostingHostService/Store、HostingOutboundExchangeService、HostingControlMaintenance及既有HostingRentRenewalServiceImpl。回归入口：HostingOutboundMySqlTest、HostingRentRenewalMySqlTest、HostingRentCutoverTest；记录为候选覆盖，不等于已执行通过。
