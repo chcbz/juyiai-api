@@ -321,19 +321,26 @@ class HostingRentRenewalMySqlTest {
             if (selfHosted) {
                 // Simulate a permanently unreachable host before detach. No remote process control is possible.
                 var controlSocket=Path.of((String)endpoint.get("socketPath"));
-                Files.move(controlSocket,controlSocket.resolveSibling("offline.sock"));
-                var detachedBinding = identityBindings.findByIdForUpdate(publicRow.getBindingId());
-                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
-                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
-                assertTrue(Files.isRegularFile(privateSession)); assertTrue(Files.isRegularFile(skill));
-                assertEquals("REVOKED", installations.lock(original.getRuntimeInstallationId()).getStatus());
-                var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
-                assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
-                assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
-                new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(transaction ->
-                        assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
-                assertEquals(950,balance()); assertNull(httpFailure.get());
-                return;
+                Path offlineSocket = controlSocket.resolveSibling("offline.sock");
+                Files.move(controlSocket, offlineSocket);
+                try {
+                    var detachedBinding = identityBindings.findByIdForUpdate(publicRow.getBindingId());
+                    assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                    assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                    assertTrue(Files.isRegularFile(privateSession)); assertTrue(Files.isRegularFile(skill));
+                    assertEquals("REVOKED", installations.lock(original.getRuntimeInstallationId()).getStatus());
+                    var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
+                    assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
+                    assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
+                    new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(transaction ->
+                            assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
+                    assertEquals(950,balance()); assertNull(httpFailure.get());
+                    return;
+                } finally {
+                    // The offline assertion is complete; restore only this disposable fixture's
+                    // socket so its ownership-checked shutdown can close the listener.
+                    Files.move(offlineSocket, controlSocket);
+                }
             }
             var stopped = new HostingRentManagedStop(provider, completion).stop(preparation);
             assertNotNull(stopped, () -> read(log));
@@ -371,11 +378,20 @@ class HostingRentRenewalMySqlTest {
             assertEquals(0L, jdbc.queryForObject("SELECT SUM(signed_amount_wen) FROM economy_entry", Long.class));
             assertNull(httpFailure.get());
         } finally {
-            if (child != null) {
-                child.getOutputStream().close();
-                if (!child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) { child.destroy(); child.waitFor(); }
+            try {
+                if (child != null) {
+                    child.getOutputStream().close();
+                    if (!child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                        // Only the owned synthetic fixture is killed, never a production Runtime.
+                        child.destroyForcibly();
+                        assertTrue(child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS), "Owned lifecycle fixture did not exit");
+                        fail("Lifecycle fixture did not shut down after stdin EOF: " + read(log));
+                    }
+                    assertEquals(0, child.exitValue(), () -> read(log));
+                }
+            } finally {
+                server.stop(0);
             }
-            server.stop(0);
         }
     }
 
