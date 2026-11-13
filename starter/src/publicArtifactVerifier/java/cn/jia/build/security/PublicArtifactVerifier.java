@@ -445,7 +445,8 @@ public final class PublicArtifactVerifier {
             public void close() throws IOException {
                 if (!closed) {
                     closed = true;
-                    file.channel.force(true);
+                    // Disposable scan input, read through the same channel then deleted.
+                    // Crash durability is required for release artifacts, not this scratch copy.
                     file.outputClosed = true;
                 }
             }
