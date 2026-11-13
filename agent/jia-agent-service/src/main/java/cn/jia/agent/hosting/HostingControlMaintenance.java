@@ -9,7 +9,8 @@ import cn.jia.agent.mapper.hosting.HostingSetupStore;
 import cn.jia.agent.service.AgentIdentityService;
 import cn.jia.agent.service.AgentRuntimeV1Service;
 import cn.jia.core.security.FixedTenantAdmissionPolicy;
-import cn.jia.economy.mapper.EconomyHostingRentMapper;
+import cn.jia.economy.hosting.HostingRentRenewalService;
+import cn.jia.economy.service.EconomyScope;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import java.security.MessageDigest;
@@ -34,13 +35,13 @@ public final class HostingControlMaintenance {
     private final AgentPersonaBindingDao bindings;
     private final AgentRuntimeDao runtimes;
     private final AgentRuntimeV1Service installations;
-    private final EconomyHostingRentMapper leases;
+    private final HostingRentRenewalService leases;
     private final FixedTenantAdmissionPolicy partition;
     private final TransactionTemplate transactions;
     public HostingControlMaintenance(HostingHostStore hosts, HostingHostService registration, HostingOutboundStore grants,
             HostingSetupStore setups, HostingOutboundExchangeService exchange, HostingRentOwnerResolver owners,
             AgentIdentityService identities, AgentPersonaBindingDao bindings, AgentRuntimeDao runtimes,
-            AgentRuntimeV1Service installations, EconomyHostingRentMapper leases,
+            AgentRuntimeV1Service installations, HostingRentRenewalService leases,
             FixedTenantAdmissionPolicy partition, PlatformTransactionManager manager) {
         this.hosts=hosts; this.registration=registration; this.grants=grants; this.setups=setups; this.exchange=exchange;
         this.owners=owners; this.identities=identities; this.bindings=bindings; this.runtimes=runtimes;
@@ -102,7 +103,7 @@ public final class HostingControlMaintenance {
         var runtime=runtimes.lockInScope(actor.tenantId(),actor.clientId(),c.agentId());
         if (runtime==null || !binding.getId().equals(runtime.getBindingId()) || !owner.equals(runtime.getOwnerJiacn())
                 || !c.installationId().equals(runtime.getRuntimeInstallationId()) || !c.hostId().equals(runtime.getRuntimeHostId())) throw mismatch();
-        var lease=leases.selectLatestLeaseForUpdate(actor.tenantId(),actor.clientId(),c.agentId());
+        var lease=leases.lockLatestLease(new EconomyScope(actor.tenantId(),actor.clientId()),c.agentId());
         if (lease==null || !c.leaseId().equals(lease.getLeaseId()) || !binding.getId().toString().equals(lease.getBindingId())
                 || !"USER".equals(lease.getPrincipalType()) || !actor.actorId().equals(lease.getPrincipalId()) || !java.util.Set.of("ACTIVE","LOCKED").contains(lease.getStatus())) throw mismatch();
         var host=hosts.find(actor.tenantId(),actor.clientId(),c.hostId());

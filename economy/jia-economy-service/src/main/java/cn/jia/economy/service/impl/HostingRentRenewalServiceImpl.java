@@ -142,6 +142,13 @@ public final class HostingRentRenewalServiceImpl implements HostingRentRenewalSe
                 && Objects.equals(lease.getPrincipalId(), initial.getPrincipalId());
     }
 
+    @Override public EconomyHostingLeaseEntity lockLatestLease(EconomyScope scope, String agentId) {
+        gate.requireMutationAllowed(scope.tenantId(), scope.clientId());
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("Control import requires the binding transaction");
+        return leases.selectLatestLeaseForUpdate(scope.tenantId(), scope.clientId(), agentId);
+    }
+
     @Override public HandoverSnapshot lockHandover(EconomyScope scope, String initialIntentId, String leaseId) {
         gate.requireMutationAllowed(scope.tenantId(), scope.clientId());
         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())

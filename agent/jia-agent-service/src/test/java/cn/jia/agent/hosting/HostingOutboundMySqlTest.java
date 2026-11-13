@@ -135,7 +135,7 @@ class HostingOutboundMySqlTest {
     }
     private HostingControlMaintenance maintenance(cn.jia.agent.service.AgentIdentityService identities,
             cn.jia.agent.dao.AgentPersonaBindingDao bindings, cn.jia.agent.dao.AgentRuntimeDao runtimes,
-            cn.jia.agent.service.AgentRuntimeV1Service installations, cn.jia.economy.mapper.EconomyHostingRentMapper leases) {
+            cn.jia.agent.service.AgentRuntimeV1Service installations, cn.jia.economy.hosting.HostingRentRenewalService leases) {
         return new HostingControlMaintenance(hosts,security.getBean(HostingHostService.class),store,
                 security.getBean(cn.jia.agent.mapper.hosting.HostingSetupStore.class),service,
                 security.getBean(HostingRentOwnerResolver.class),identities,bindings,runtimes,installations,leases,
@@ -166,7 +166,7 @@ class HostingOutboundMySqlTest {
         var bindings=mock(cn.jia.agent.dao.AgentPersonaBindingDao.class);
         var runtimes=mock(cn.jia.agent.dao.AgentRuntimeDao.class);
         var installations=mock(cn.jia.agent.service.AgentRuntimeV1Service.class);
-        var leases=mock(cn.jia.economy.mapper.EconomyHostingRentMapper.class);
+        var leases=mock(cn.jia.economy.hosting.HostingRentRenewalService.class);
         String agent="agt_import",installation="rti_import",leaseId="hrl_import";
         when(installations.lockExistingInstallation("0","fixture-client","fixture-owner",installation)).thenReturn(
                 new cn.jia.agent.entity.AgentRuntimeV1InstallationView(installation,"0","fixture-client",agent,"1","a".repeat(64),1,"ACTIVE",null));
@@ -179,7 +179,7 @@ class HostingOutboundMySqlTest {
         when(runtimes.lockInScope("0","fixture-client",agent)).thenReturn(runtime);
         var lease=new cn.jia.economy.entity.EconomyHostingLeaseEntity().setLeaseId(leaseId).setBindingId("9")
                 .setPrincipalType("USER").setPrincipalId(ACTOR.actorId()).setStatus("ACTIVE").setPlanId("agent-self-hosted");
-        when(leases.selectLatestLeaseForUpdate("0","fixture-client",agent)).thenReturn(lease);
+        when(leases.lockLatestLease(new cn.jia.economy.service.EconomyScope("0","fixture-client"),agent)).thenReturn(lease);
         var m=maintenance(identities,bindings,runtimes,installations,leases);
         var command=new HostingControlMaintenance.Command("IMPORT","fixture-host",null,ACTOR.actorId(),"fixture-owner",null,null,null,"hca_import",agent,installation,leaseId);
         m.execute(command,false);
