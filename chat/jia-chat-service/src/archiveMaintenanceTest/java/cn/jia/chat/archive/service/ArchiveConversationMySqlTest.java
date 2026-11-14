@@ -46,7 +46,11 @@ class ArchiveConversationMySqlTest {
         when(identities.requireRegistrationIdentityInScope("0","test-client","owner-a","agent1")).thenReturn(identity);
         when(identities.lockActiveCanonicalAgentIdsInScope(anyString(),anyString(),anyString(),anyList())).thenAnswer(i->i.getArgument(3));
         var market=mock(SkillCatalogMapper.class);
-        when(market.selectApprovedProductVersion("0","test-client","v1")).thenReturn(new SkillProductVersionEntity().setReviewStatus("APPROVED").setSkillKey("configured-editorial-guide"));
+        // The shared catalog, not the owner-local binding, owns POSITION classification.
+        when(market.selectApprovedProductVersion("0","test-client","v1")).thenReturn(new SkillProductVersionEntity().setReviewStatus("APPROVED").setSkillKey("configured-editorial-guide").setProductId("editorial-product"));
+        var product=new cn.jia.agent.entity.skill.SkillProductEntity().setProductId("editorial-product").setSkillType("POSITION").setVersion(1L);
+        when(market.selectSkillProductsForUpdate("0","test-client","configured-editorial-guide")).thenReturn(List.of(product));
+        when(market.selectPositionSkillKeys("0","test-client")).thenReturn(List.of("configured-editorial-guide"));
         var manager=new DataSourceTransactionManager(ds);tx=new SpringArchiveTransactions(manager);content=new JdbcArchiveContentStore(jdbc);
         positions=new PositionSkillService(new PositionSkillStore(jdbc),identities,market,manager);
 
