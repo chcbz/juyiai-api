@@ -1094,11 +1094,14 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
 }
 configurations.named(taskQuoteRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
 configurations.named(taskQuoteRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
-gradle.projectsEvaluated {
-    def applicationRuntime = project(':starter').configurations.runtimeClasspath
-    configurations.named(taskQuoteRegressionSourceSet.compileClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
-    configurations.named(taskQuoteRegressionSourceSet.runtimeClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
+// Align Spring/Servlet dependencies locally using the application's Boot version.
+// Resolving starter's configuration from this project's parallel task is unsafe.
+dependencies {
+    add(taskQuoteRegressionSourceSet.implementationConfigurationName,
+        platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
 }
+configurations.named(taskQuoteRegressionSourceSet.compileOnlyConfigurationName) { extendsFrom configurations.testCompileOnly }
+configurations.named(taskQuoteRegressionSourceSet.annotationProcessorConfigurationName) { extendsFrom configurations.testAnnotationProcessor }
 tasks.register('taskQuoteRegression', Test) {
     group = 'verification'
     description = 'Runs database pricing, immutable quote and precise cost snapshot regressions.'
