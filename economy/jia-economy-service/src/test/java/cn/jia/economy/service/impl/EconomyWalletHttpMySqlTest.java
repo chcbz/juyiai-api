@@ -99,7 +99,7 @@ class EconomyWalletHttpMySqlTest {
         }
         @Bean EconomyWalletController controller(EconomyPreviewGate gate, EconomyWalletService wallet) { return new EconomyWalletController(gate, wallet); }
         @Bean TaskBillingService billing(SqlSessionTemplate sql, EconomyPostingServiceImpl posting, DataSource source) {
-            var pricing = cn.jia.economy.config.TaskPricingTestFixture.install(new JdbcTemplate(source), SCOPE, List.of(PRICE));
+            var pricing = cn.jia.economy.config.TaskPricingTestFixture.service(new JdbcTemplate(source));
             return new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class), sql.getMapper(EconomyLedgerMapper.class), posting, JSON, pricing);
         }
         @Bean UsageCostService costs(SqlSessionTemplate sql) { return new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class), JSON); }
@@ -117,6 +117,7 @@ class EconomyWalletHttpMySqlTest {
         database.start(); var db = database.newDatabase("wallet_http"); dataSource = db.dataSource(); jdbc = db.jdbc();
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
         new EconomyUsageCostSchemaInitializer(dataSource).afterPropertiesSet();
+        cn.jia.economy.config.TaskPricingTestFixture.install(jdbc, SCOPE, List.of(PRICE));
         jdbc.execute("CREATE TABLE test_task_root (id VARCHAR(100) PRIMARY KEY) ENGINE=InnoDB");
         jdbc.update("INSERT INTO test_task_root VALUES ('accepted'),('cancelled')");
         signingKey = new byte[32]; new SecureRandom().nextBytes(signingKey);

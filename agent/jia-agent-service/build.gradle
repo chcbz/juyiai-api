@@ -1112,5 +1112,8 @@ tasks.register('taskQuoteRegression', Test) {
     maxParallelForks = 1
     maxHeapSize = '256m'
     jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+    // The same fixture is selected explicitly for separate browser acceptance.
+    if (System.getenv('CYF_BILLING_BROWSER') != 'true') {
     filter { excludeTestsMatching 'cn.jia.agent.service.impl.AgentTaskBillingMySqlTransactionTest.browser*' }
+    }
 }
