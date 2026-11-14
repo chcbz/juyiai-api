@@ -544,6 +544,7 @@ class JuyitingWorkflowMySqlTest {
         final AnnotationConfigApplicationContext context=new AnnotationConfigApplicationContext();
         final cn.jia.chat.service.ChatTaskDeliveryReviewTransaction transaction;
         final cn.jia.agent.service.AgentTaskFormalDeliveryDecisionService decisions;
+        final cn.jia.economy.task.TaskBillingService billing = mock(cn.jia.economy.task.TaskBillingService.class);
         final Accept command;
         final org.mybatis.spring.SqlSessionTemplate sql;
         final cn.jia.agent.service.AgentTaskMutationTransaction locks;
@@ -578,7 +579,7 @@ class JuyitingWorkflowMySqlTest {
             context.registerBean(cn.jia.agent.service.AgentTaskEventBroker.class,cn.jia.agent.service.AgentTaskEventBroker::new);
             context.registerBean(cn.jia.agent.service.AgentTaskEventAfterCommitPublisher.class,()->new cn.jia.agent.service.AgentTaskEventAfterCommitPublisher(context.getBean(cn.jia.agent.service.AgentTaskEventBroker.class),manager));
             context.registerBean(cn.jia.agent.service.AgentTaskEventWriter.class,()->new cn.jia.agent.service.impl.AgentTaskEventWriterImpl(events,manager,context.getBean(cn.jia.agent.service.AgentTaskEventAfterCommitPublisher.class)));
-            context.registerBean(cn.jia.agent.service.AgentTaskFormalDeliveryDecisionService.class,()->new cn.jia.agent.service.impl.AgentTaskFormalDeliveryDecisionServiceImpl(deliveries,roots,members,work,locks,context.getBean(cn.jia.agent.service.AgentTaskEventWriter.class)));
+            context.registerBean(cn.jia.agent.service.AgentTaskFormalDeliveryDecisionService.class,()->new cn.jia.agent.service.impl.AgentTaskFormalDeliveryDecisionServiceImpl(deliveries,roots,members,work,locks,context.getBean(cn.jia.agent.service.AgentTaskEventWriter.class),billing));
             context.registerBean(cn.jia.agent.service.AgentTaskFormalDeliveryReadService.class,()->new cn.jia.agent.service.impl.AgentTaskFormalDeliveryReadServiceImpl(deliveries,roots));
             context.registerBean(cn.jia.chat.service.ChatTaskDeliveryReviewReadService.class,()->new cn.jia.chat.service.ChatTaskDeliveryReviewReadService(jdbc,context.getBean(cn.jia.agent.service.AgentTaskFormalDeliveryReadService.class),promotions));
             context.registerBean(cn.jia.chat.service.ChatTaskDeliveryReviewTransaction.class,()->new cn.jia.chat.service.ChatTaskDeliveryReviewTransaction(locks,reviews,context.getBean(cn.jia.agent.service.AgentTaskFormalDeliveryReadService.class),context.getBean(cn.jia.agent.service.AgentTaskFormalDeliveryDecisionService.class),context.getBean(cn.jia.chat.service.ChatTaskDeliveryReviewReadService.class)));
@@ -777,6 +778,7 @@ class JuyitingWorkflowMySqlTest {
                     .listForTaskOwner("0", "client", "owner", "task");
             assertEquals(instruction, history.getFirst().getReviewReason());
             revision.committedOnce();
+            verifyNoInteractions(revision.domain.billing);
             assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM chat_request", Integer.class));
             assertEquals("SENT", jdbc.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?", String.class, revision.event.getEventId()));
         }
