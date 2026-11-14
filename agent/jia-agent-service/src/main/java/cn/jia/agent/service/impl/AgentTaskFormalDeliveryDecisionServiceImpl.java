@@ -440,7 +440,7 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
         }
     }
     private static void requireId(String value, String name, int max) { if (value == null || value.isBlank() || value.length() > max || !value.equals(value.strip()) || value.codePoints().anyMatch(Character::isISOControl)) throw invalid(name + " is invalid"); }
-    private static void requireText(String value, String name, int max) { if (value == null || value.isBlank() || value.length() > max || !value.equals(value.strip()) || value.codePoints().anyMatch(Character::isISOControl)) throw invalid(name + " is invalid"); }
+    private static void requireText(String value, String name, int max) { if (value == null || value.isBlank() || value.length() > max || !value.equals(value.strip()) || value.codePoints().anyMatch(c -> Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t')) throw invalid(name + " is invalid"); }
     private static void requireVersion(Long value, String name) { if (value == null || value < 0 || value == Long.MAX_VALUE) throw invalid(name + " is invalid"); }
     private static void requireOne(int rows, String message) { if (rows != 1) throw invalidPersisted(message); }
     private static AgentTaskCollaborationException invalid(String message) { return new AgentTaskCollaborationException(Reason.INVALID_REQUEST, message); }

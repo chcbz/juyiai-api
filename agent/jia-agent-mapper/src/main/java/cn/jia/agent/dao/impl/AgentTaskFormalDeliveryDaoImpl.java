@@ -107,7 +107,7 @@ public class AgentTaskFormalDeliveryDaoImpl implements AgentTaskFormalDeliveryDa
         if (!automatic) {
             id(reviewedByJiacn, "reviewedByJiacn");
             if (reviewedByJiacn.length() > 50) throw new IllegalArgumentException("reviewedByJiacn is invalid");
-            if (next == AgentTaskFormalDeliveryState.CHANGES_REQUESTED) requiredText(reviewReason, "reviewReason");
+            if (next == AgentTaskFormalDeliveryState.CHANGES_REQUESTED) requiredReviewReason(reviewReason);
             if (next == AgentTaskFormalDeliveryState.ACCEPTED && reviewReason != null)
                 throw new IllegalArgumentException("accepted owner review must not retain review reason");
         }
@@ -162,6 +162,13 @@ public class AgentTaskFormalDeliveryDaoImpl implements AgentTaskFormalDeliveryDa
     private static void sha256(String value, String name) {
         if (value == null || !value.matches("[0-9a-f]{64}")) {
             throw new IllegalArgumentException(name + " is invalid");
+        }
+    }
+    // Review prose may contain line breaks and indentation; identifiers/summary keep their own rules.
+    private static void requiredReviewReason(String value) {
+        if (value == null || value.isBlank() || !value.equals(value.strip())
+                || value.codePoints().anyMatch(c -> Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t')) {
+            throw new IllegalArgumentException("reviewReason is invalid");
         }
     }
     private static void requiredText(String value, String name) {

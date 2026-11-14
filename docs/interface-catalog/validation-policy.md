@@ -155,3 +155,9 @@ AMQP/WS同一wire重复限制128KiB无独立依据，改为与transport真实MED
 - 明确RETAINED从自动续费发现中排除；缺失/未知来源与零文PAID仍按原责任层报错，不把数据损坏当作历史权益隐藏。
 
 实现入口：HostingHostService/Store、HostingOutboundExchangeService、HostingControlMaintenance及既有HostingRentRenewalServiceImpl。回归入口：HostingOutboundMySqlTest、HostingRentRenewalMySqlTest、HostingRentCutoverTest；记录为候选覆盖，不等于已执行通过。
+
+### 2026-11-14 正式交付修改理由的多行文本
+
+范围：`AgentTaskFormalDeliveryDecisionServiceImpl` 的 `reviewReason` 与 `AgentTaskFormalDeliveryDaoImpl` 同字段持久化。修改理由是自然语言正文，不是标识符；允许 LF、CR、TAB，原样保存，不压平或截断。保留既有非空、首尾规范、4000 UTF-16 单元上限及其他控制字符限制，不改变 summary/purpose/ID 校验。此修正不扩展现有字段长度合同。
+
+实际风险与失败范围：合法的多行 REVISION_REQUEST 在决定服务中被误拒，会使决定、子请求及 outbox ACK 同事务回滚，表现为永久 QUEUED；应允许该正文进入原事务，而非改成前端成功或重提交。身份、批次版本、幂等和资金规则不变。定向回归：`AgentTaskFormalDeliveryDecisionServiceImplTest` 多行参数，`JuyitingWorkflowMySqlTest.multilineRevisionCreatesExactlyOneChildAndPreservesReasonOnRealMysql` 验证真实 consumer/决定/DAO/子请求/ACK 与逐字保存；构建和线上状态见任务 handoff，不因本节写入视为通过。

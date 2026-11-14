@@ -764,6 +764,20 @@ class JuyitingWorkflowMySqlTest {
         }
     }
 
+    @Test void multilineRevisionCreatesExactlyOneChildAndPreservesReasonOnRealMysql() throws Exception {
+        String instruction = "将人数由8人改为10人，保留标识与方案预算。交付三行：\n标识J1\r\n人数10人\n方案预算\t120文";
+        try (var revision = new RevisionHarness(instruction)) {
+            assertEquals("QUEUED", revision.revisions.read(revision.bound.parent().outcome()).get("state"));
+            revision.consume();
+            var progress = revision.revisions.read(revision.bound.parent().outcome());
+            assertEquals("COMMITTED", progress.get("state"));
+            assertNotNull(progress.get("childRequestId"));
+            assertEquals(instruction, jdbc.queryForObject("SELECT review_reason FROM agent_task_formal_delivery WHERE delivery_id='delivery'", String.class));
+            assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM chat_request", Integer.class));
+            assertEquals("SENT", jdbc.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?", String.class, revision.event.getEventId()));
+        }
+    }
+
     /** Real consumer, real continuation/admission, real DAOs and domain transaction.
      * Only the already-validated model final and external capability/catalog reads are seeded. */
     private final class RevisionHarness implements AutoCloseable {
@@ -779,7 +793,8 @@ class JuyitingWorkflowMySqlTest {
         final ChatDispatchOutboxEntity event;
         final ChatDeliberationOutboxService.Claim claim;
         final ChatTypedDeliberationStore.Scope owner=new ChatTypedDeliberationStore.Scope("0","owner","client","7",1);
-        RevisionHarness() throws Exception {
+        RevisionHarness() throws Exception { this("请修改第一段"); }
+        RevisionHarness(String instruction) throws Exception {
             domain=domainReview();
             jdbc.execute("DROP TABLE chat_typed_review_context");jdbc.execute("DROP TABLE chat_request");
             jdbc.execute("DROP TABLE chat_message");jdbc.execute("DROP TABLE chat_conversation");
@@ -851,7 +866,7 @@ class JuyitingWorkflowMySqlTest {
             binding.put("contextDigest",turn.getContextDigest());binding.put("targetAgentId","wuyong");binding.put("route","CHAT");binding.put("taskId","task");
             var union=new LinkedHashMap<String,Object>();union.put("schemaVersion",5);union.put("kind","REVISION_REQUEST");union.put("text","按要求修改");
             union.put("clarification",null);union.put("action",null);union.put("deliverable",false);union.put("deliveryRelation",null);
-            union.put("revision",Map.of("instruction","请修改第一段","targetArtifactIds",List.of("result")));
+            union.put("revision",Map.of("instruction",instruction,"targetArtifactIds",List.of("result")));
             var validated=ChatActionFinalValidator.validateJson(binding,facts,null,"按要求修改",5,ChatDeliveryReviewContract.json(union),null,basis);
             var row=new ChatTypedDeliberationStore.Outcome("parent-outcome",owner,"parent",1,turn.getTurnId(),"task",1,101,
                     validated.finalDigest(),"REVISION_REQUEST","按要求修改",CanonicalContextJson.write(binding),CanonicalContextJson.write(facts),

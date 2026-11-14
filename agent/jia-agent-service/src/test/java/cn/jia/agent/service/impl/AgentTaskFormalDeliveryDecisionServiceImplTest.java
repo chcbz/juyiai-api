@@ -77,19 +77,22 @@ class AgentTaskFormalDeliveryDecisionServiceImplTest {
                 memberDao, workItemDao, transaction, eventWriter, billing, () -> 2_000L);
     }
 
-    @Test
-    void changesRequestedReturnsSubmittedWorkToReadyAndRequiresNewLeaseLater() {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"add tests", "标识J1\n人数10人\r\n方案预算\t120文"})
+    void changesRequestedReturnsSubmittedWorkToReadyAndRequiresNewLeaseLater(String reason) {
         when(deliveryDao.findForUpdate(TENANT, CLIENT, DELIVERY)).thenReturn(delivery());
         when(workItemDao.findByTaskAndWorkItemId(TENANT, CLIENT, OWNER, TASK, WORK)).thenReturn(workItem());
         when(deliveryDao.reviewByVersion(TENANT, CLIENT, DELIVERY, "submitted", 0L,
-                "changes_requested", OWNER, "add tests", 2_000L)).thenReturn(1);
+                "changes_requested", OWNER, reason, 2_000L)).thenReturn(1);
         when(taskMetaDao.updateStatusByVersionInOwnerScope(TENANT, CLIENT, OWNER, TASK, 4L, "running",
                 100L, null, null)).thenReturn(1);
         when(workItemDao.updateByVersion(eq(TENANT), eq(CLIENT), eq(OWNER), eq(WORK), eq(8L), any()))
                 .thenReturn(1);
         when(deliveryDao.listItems(TENANT, CLIENT, DELIVERY)).thenReturn(List.of(item()));
 
-        var result = service.decide(TENANT, CLIENT, TASK, OWNER, changesRequested());
+        var command = changesRequested();
+        command.setReviewReason(reason);
+        var result = service.decide(TENANT, CLIENT, TASK, OWNER, command);
 
         assertEquals("changes_requested", result.getState());
         org.mockito.Mockito.verifyNoInteractions(billing);
