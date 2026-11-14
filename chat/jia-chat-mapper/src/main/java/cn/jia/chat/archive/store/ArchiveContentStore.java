@@ -1,0 +1,35 @@
+package cn.jia.chat.archive.store;
+
+import cn.jia.chat.archive.model.ArchiveBlockRecord;
+import cn.jia.chat.archive.model.ArchiveEditionRecord;
+import cn.jia.chat.archive.model.ArchiveParagraphRecord;
+import cn.jia.chat.archive.model.ArchiveWorkRecord;
+
+import java.util.List;
+
+public interface ArchiveContentStore {
+    List<cn.jia.chat.archive.dto.ArchiveBookDTO> listPublishedBooks();
+    void insertWork(ArchiveWorkRecord work);
+    ArchiveWorkRecord findWork(String workId);
+    ActiveContent findActiveContent(String workId);
+    void insertEdition(ArchiveEditionRecord edition);
+    ArchiveEditionRecord findEdition(String editionId);
+    void insertBlock(ArchiveBlockRecord block);
+    ArchiveBlockRecord findBlock(String editionId, String blockId);
+    void insertParagraph(ArchiveParagraphRecord paragraph);
+    ArchiveParagraphRecord findParagraph(String editionId, String blockId, String paragraphId);
+    List<ArchiveBlockRecord> listBlocks(String editionId);
+    List<ArchiveParagraphRecord> listParagraphs(String editionId, String blockId);
+    default List<ArchiveParagraphRecord> listAllParagraphs(String editionId) {
+        throw new UnsupportedOperationException("listAllParagraphs is not supported by this store");
+    }
+    int markReady(String editionId);
+    ArchiveWorkRecord lockWork(String workId);
+    ArchiveEditionRecord lockEdition(String editionId);
+    int switchActiveEdition(String workId, String editionId);
+    int markActivated(String editionId);
+    /** Historical content must have an actual activation fact, never just READY staging. */
+    default boolean wasPublished(String editionId) { return false; }
+
+    record ActiveContent(ArchiveWorkRecord work, ArchiveEditionRecord edition) { }
+}
