@@ -171,8 +171,9 @@ public class AgentTaskRequirementEditServiceImpl implements AgentTaskRequirement
         if (command==null || command.expectedTaskVersion()<0 || command.expectedTaskVersion()==Long.MAX_VALUE
                 || command.expectedRequirementRevision()<1 || command.expectedRequirementRevision()==Long.MAX_VALUE
                 || command.title()==null || command.title().isBlank() || command.title().length()>200
-                || command.description()==null || command.description().isBlank() || command.description().length()>20000
+                || command.description()==null || command.description().length()>20000
                 || command.attachments()==null || command.attachments().size()>32
+                || (command.description().isBlank() && command.attachments().isEmpty())
                 || new HashSet<>(command.attachments()).size()!=command.attachments().size()) throw failure(Reason.BAD_REQUEST);
         AgentTaskRequirementSnapshotServiceImpl.validateOriginalInput(command.title(),command.description());
         for (var a:command.attachments()) if (a==null || a.fileId()==null || a.fileId().isBlank()

@@ -46,6 +46,14 @@ class AgentTaskRequirementEditControllerTest {
                 .andExpect(jsonPath("$.protocolVersion").value(1)).andExpect(jsonPath("$.data.taskVersion").value("1"))
                 .andExpect(jsonPath("$.data.requirementRevision").value("2")).andExpect(jsonPath("$.data.attachments[0].version").value(1));
     }
+    @Test void materialOnlyEmptyDescriptionReachesTheBusinessServiceUnchanged() throws Exception {
+        var view=new AgentTaskRequirementEditService.View("1","1","2","Title","",List.of(new AgentTaskRequirementEditService.Attachment("file",1)));
+        when(service.save(any(),eq("1"),eq("edit-key"),any())).thenReturn(view);
+        mvc.perform(put("/agent/tasks/1/requirements/edit").principal(owner()).header("Idempotency-Key","edit-key")
+                .contentType(MediaType.APPLICATION_JSON).content("{\"protocolVersion\":1,\"requestId\":\"materials-empty\",\"data\":{\"expectedTaskVersion\":\"0\",\"expectedRequirementRevision\":\"1\",\"title\":\"Title\",\"description\":\"\",\"attachments\":[{\"fileId\":\"file\",\"version\":1}]}}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.description").value(""));
+        verify(service).save(any(),eq("1"),eq("edit-key"),argThat(c->"".equals(c.description()) && c.attachments().getFirst().version()==1));
+    }
     @Test void unauthenticatedAndNumericVersionsAreNotAccepted() throws Exception {
         mvc.perform(get("/agent/tasks/1/requirements/edit")).andExpect(status().isUnauthorized());
         mvc.perform(put("/agent/tasks/1/requirements/edit").principal(owner()).header("Idempotency-Key","edit-key")

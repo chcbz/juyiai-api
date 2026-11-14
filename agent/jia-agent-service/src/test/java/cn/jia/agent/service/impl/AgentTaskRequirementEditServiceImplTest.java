@@ -71,6 +71,24 @@ class AgentTaskRequirementEditServiceImplTest {
         assertEquals("new-file",jdbc.queryForObject("SELECT file_id FROM fixture_link",String.class));
         assertEquals("New title",jdbc.queryForObject("SELECT title FROM fixture_snapshot",String.class));
     }
+    @Test void materialOnlyRequirementCanChangeFixedMaterialsAndReplay() {
+        jdbc.update("UPDATE fixture_snapshot SET description=''");
+        jdbc.update("UPDATE fixture_task SET description=''");
+        var c=new AgentTaskRequirementEditService.Command(0,1,"Materials","",List.of(new AgentTaskRequirementEditService.Attachment("new-file",2)));
+        var saved=service.save(OWNER,"1","materials-key",c);
+        assertEquals("",saved.description());assertEquals(c.attachments(),saved.attachments());
+        assertEquals(saved,service.save(OWNER,"1","materials-key",c));
+        assertEquals(1L,jdbc.queryForObject("SELECT version FROM fixture_task",Long.class));
+        assertEquals("",jdbc.queryForObject("SELECT description FROM fixture_task",String.class));
+    }
+    @Test void emptyDescriptionWithoutMaterialsIsRejectedBeforeMutation() {
+        for (String description:List.of("","  ")) {
+            var c=new AgentTaskRequirementEditService.Command(0,1,"Materials",description,List.of());
+            assertEquals(AgentTaskRequirementEditService.Reason.BAD_REQUEST,assertThrows(AgentTaskRequirementEditService.Failure.class,()->service.save(OWNER,"1","empty-key",c)).reason());
+        }
+        assertEquals(0L,jdbc.queryForObject("SELECT version FROM fixture_task",Long.class));
+        assertEquals("old-file",jdbc.queryForObject("SELECT file_id FROM fixture_link",String.class));
+    }
     @Test void failedMaterialWriteRollsBackSnapshotDetachSummaryAndVersion() {
         failLink=true;
         assertThrows(PersonalWorkspaceTaskLinkService.Failure.class,() -> service.save(OWNER,"1","edit-key",command()));
