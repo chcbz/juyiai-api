@@ -698,3 +698,34 @@ tasks.register('runtimeCapabilityRegression', Test) {
     classpath = runtimeCapabilityRegressionSourceSet.runtimeClasspath
     useJUnitPlatform()
 }
+
+// Database task quotes: affected real consumers and fixtures only.
+def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
+    java {
+        srcDir 'src/test/java'
+        include 'cn/jia/chat/service/recommendation/RecommendationCostRecorderTest.java'
+        include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'
+        include 'cn/jia/chat/service/recommendation/RecommendationUsageRecoveryTest.java'
+    }
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(taskQuoteRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(taskQuoteRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+gradle.projectsEvaluated {
+    def applicationRuntime = project(':starter').configurations.runtimeClasspath
+    configurations.named(taskQuoteRegressionSourceSet.compileClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
+    configurations.named(taskQuoteRegressionSourceSet.runtimeClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
+}
+tasks.register('taskQuoteRegression', Test) {
+    group = 'verification'
+    description = 'Runs database pricing, immutable quote and precise cost snapshot regressions.'
+    dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
+    testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
+    classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+}

@@ -1,6 +1,11 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.hosting.HostingRentHttp;
+import cn.jia.agent.dao.AgentRuntimeDao;
+import cn.jia.economy.pricing.TaskWorkload;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
 import cn.jia.agent.service.AgentTaskRequirementSnapshotService;
@@ -21,13 +26,13 @@ public final class AssigneeRecommendationQuotes {
     private final AgentTaskMutationTransaction transactions;
     private final AgentTaskRequirementSnapshotService requirements;
     private final AgentTaskExecutionGrantService grants;
-    private final AssigneeQuoteRoutes routes;
+    private final AgentRuntimeDao runtimes;
     private final TaskBillingService billing;
     public AssigneeRecommendationQuotes(AgentTaskMutationTransaction transactions,
             AgentTaskRequirementSnapshotService requirements, AgentTaskExecutionGrantService grants,
-            AssigneeQuoteRoutes routes, TaskBillingService billing) {
+            AgentRuntimeDao runtimes, TaskBillingService billing) {
         this.transactions = transactions; this.requirements = requirements; this.grants = grants;
-        this.routes = routes; this.billing = billing;
+        this.runtimes = runtimes; this.billing = billing;
     }
     public Result prepare(HostingRentHttp.Actor actor, String taskId, Supplier<Result> verifiedAdvice) {
         return transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(), actor.clientId(), actor.ownerJiacn(), taskId, root -> {
@@ -39,20 +44,22 @@ public final class AssigneeRecommendationQuotes {
             var task = new TaskBillingService.Task(new EconomyScope(actor.tenantId(), actor.clientId()), actor.ownerJiacn(), taskId);
             String recommendationId = "rec_" + UUID.randomUUID();
             var priced = new ArrayList<Recommendation>();
+            var models = new HashMap<String, String>();
+            var ids = advice.recommendations().stream().map(item -> item.agent().agentId()).collect(Collectors.toSet());
+            for (var runtime : runtimes.findByAgentIds(ids))
+                models.put(runtime.getAgentId(), runtime.getExecutionModel());
+            var judgement = advice.workload();
+            var workload = new TaskWorkload(judgement.kind().name(), judgement.inputTokens(),
+                    judgement.outputTokens(), judgement.deliverables(), Map.of());
             for (var item : advice.recommendations()) {
-                var route = routes.find(item.agent().agentId(), advice.workload().kind());
+                var binding = new TaskBillingService.Binding(requirement.requirementRevision(), requirement.sha256(),
+                        inputs.digest(), item.agent().agentId(), recommendationId);
                 Quotation quotation;
-                if (route == null) quotation = unavailable(recommendationId, "BILLING_ROUTE_MISSING");
-                else {
-                    var binding = new TaskBillingService.Binding(requirement.requirementRevision(), requirement.sha256(),
-                            inputs.digest(), item.agent().agentId(), recommendationId);
-                    try {
-                        var quote = billing.quote(task, binding, actor.actorId(),
-                                route.workload(advice.workload()), route.modelKey());
-                        quotation = new Quotation("AVAILABLE", quote.quoteId(), recommendationId, Money.wen(quote.amountWen()), null);
-                    } catch (TaskPricingService.Unavailable expected) {
-                        quotation = unavailable(recommendationId, expected.reason().name());
-                    }
+                try {
+                    var quote = billing.quote(task, binding, actor.actorId(), workload, models.get(item.agent().agentId()));
+                    quotation = new Quotation("AVAILABLE", quote.quoteId(), recommendationId, Money.wen(quote.amountWen()), null);
+                } catch (TaskPricingService.Unavailable expected) {
+                    quotation = unavailable(recommendationId, expected.reason().name());
                 }
                 priced.add(new Recommendation(item.agent(), item.recommendationLevel(), item.reason(), item.evidence(), item.gaps(), quotation));
             }

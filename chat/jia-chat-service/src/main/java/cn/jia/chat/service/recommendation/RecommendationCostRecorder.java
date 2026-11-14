@@ -44,7 +44,7 @@ public final class RecommendationCostRecorder {
         journal.prepare();
         var binding = new UsageCostService.Binding(new EconomyScope(context.tenantId(), context.clientId()),
                 context.ownerJiacn(), context.taskId(), "ASSIGNEE_RECOMMENDATION", UUID.randomUUID().toString());
-        var price = prices.find(channel, requestedModel, expectedTier).orElse(null);
+        var price = prices.find(binding.scope(), channel, requestedModel, expectedTier).orElse(null);
         var raw = new LinkedHashMap<String, Object>();
         raw.put("phase", "STARTING"); raw.put("requestedModel", requestedModel);
         raw.put("requestedChannel", channel); raw.put("requestedTier", expectedTier);

@@ -39,7 +39,7 @@ import cn.jia.economy.mapper.EconomyLedgerMapper;
 import cn.jia.economy.mapper.EconomyTaskBillingMapper;
 import cn.jia.economy.pricing.*;
 import cn.jia.economy.service.EconomyScope;
-import cn.jia.economy.service.impl.ConfiguredTaskPricingService;
+import cn.jia.economy.config.TaskPricingTestFixture;
 import cn.jia.economy.service.impl.EconomyPostingServiceImpl;
 import cn.jia.economy.service.impl.TaskBillingServiceImpl;
 import cn.jia.economy.task.TaskBillingService;
@@ -198,9 +198,9 @@ class AgentTaskBillingMySqlTransactionTest {
         walletReads = new cn.jia.economy.api.EconomyWalletService(ledger,
                 command -> { throw new AssertionError("browser fixture must not issue funds"); },
                 new org.springframework.core.env.StandardEnvironment(), walletGate);
-        var pricing = new ConfiguredTaskPricingService(new EconomyPricingProperties(
+        var pricing = TaskPricingTestFixture.install(jdbc, new cn.jia.economy.service.EconomyScope(TENANT, CLIENT),
                 List.of(new ModelTokenPrice("fixture", "fixture-model", "standard", "1", "synthetic fixture",
-                        Map.of(ModelTokenPrice.Category.INPUT, new BigDecimal("0.50")), null, Map.of())), List.of()));
+                        Map.of(ModelTokenPrice.Category.INPUT, new BigDecimal("0.50")), null, Map.of())));
         billing = proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class), ledger,
                 new EconomyPostingServiceImpl(ledger, manager, new EconomyPreviewGate(new EconomyPreviewProperties(
                         true, List.of(new EconomyPreviewProperties.AllowedScope(TENANT, CLIENT))))),
@@ -287,7 +287,7 @@ class AgentTaskBillingMySqlTransactionTest {
         quoteId = locked(() -> billing.quote(BILLING_TASK, new TaskBillingService.Binding(1, "a".repeat(64),
                 assignment.snapshotTaskInputsWithinLockedTask(SCOPE, TASK).digest(), AGENT, "recommendation-1"),
                 PAYER, new TaskWorkload("GENERAL", 1_000_000, 0, 1, Map.of()),
-                new TaskPricingService.ModelKey("fixture", "fixture-model", "standard"))).quoteId();
+                "fixture-model")).quoteId();
     }
 
     @AfterEach

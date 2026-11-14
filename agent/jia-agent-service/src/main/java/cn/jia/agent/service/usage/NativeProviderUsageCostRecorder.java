@@ -44,9 +44,8 @@ public final class NativeProviderUsageCostRecorder {
         ModelTokenPrice price;
         var start = costs.observation(binding, "started");
         if (start.isPresent()) price = start.get().price();
-        else if (evidence.channel() == null || evidence.tier() == null) price = null;
-        else price = prices.find(evidence.channel(), evidence.requestedModel(), evidence.tier())
-                .filter(p -> p.version().equals(evidence.priceVersion())).orElse(null);
+        else price = prices.findVersion(binding.scope(), evidence.channel(), evidence.requestedModel(),
+                evidence.tier(), evidence.priceVersion()).orElse(null);
         var responseModel = evidence.evidence() == null ? null : evidence.evidence().get("responseModel");
         String model = responseModel != null && responseModel.isTextual() ? responseModel.asText() : evidence.requestedModel();
         var usage = !started && "openai-images-v1".equals(evidence.protocol())

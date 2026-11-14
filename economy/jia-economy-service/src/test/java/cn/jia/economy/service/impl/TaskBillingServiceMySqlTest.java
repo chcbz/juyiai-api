@@ -4,7 +4,7 @@ import cn.jia.economy.config.EconomyMySqlTestFixture;
 import cn.jia.economy.config.EconomyPreviewGate;
 import cn.jia.economy.config.EconomyPreviewProperties;
 import cn.jia.economy.config.EconomySchemaInitializer;
-import cn.jia.economy.config.EconomyPricingProperties;
+import cn.jia.economy.config.TaskPricingTestFixture;
 import cn.jia.economy.pricing.TaskPricingService;
 import cn.jia.economy.pricing.TaskWorkload;
 import cn.jia.economy.exception.EconomyPostingException;
@@ -87,9 +87,8 @@ class TaskBillingServiceMySqlTest {
                 List.of(new EconomyPreviewProperties.AllowedScope(SCOPE.tenantId(), SCOPE.clientId()))));
         var target = new TaskBillingServiceImpl(session.getMapper(EconomyTaskBillingMapper.class), ledger,
                 new EconomyPostingServiceImpl(ledger, manager, gate), new ObjectMapper(),
-                new ConfiguredTaskPricingService(new EconomyPricingProperties(
-                        List.of("0", "0.004", "0.1", "0.3", "0.4", "0.5", "0.500001", "0.8", "999999999999999999999").stream().map(TaskBillingServiceMySqlTest::price).toList(),
-                        List.of(new EconomyPricingProperties.ToolEntry("test-channel", "render", "image", "tool-v2", "synthetic-test-price", new BigDecimal("0.004"))))));
+                TaskPricingTestFixture.install(jdbc, SCOPE,
+                        List.of("0", "0.004", "0.1", "0.3", "0.4", "0.5", "0.500001", "0.8", "999999999999999999999").stream().map(TaskBillingServiceMySqlTest::price).toList()));
         var proxy = new ProxyFactory(target);
         proxy.addAdvice(new TransactionInterceptor(manager, new AnnotationTransactionAttributeSource()));
         billing = (TaskBillingService) proxy.getProxy();
@@ -125,6 +124,8 @@ class TaskBillingServiceMySqlTest {
 
     @Test
     void unknownPriceDoesNotPersistFreeQuoteOrTouchWallet() {
+        jdbc.update("INSERT INTO economy_task_model_tariff VALUES(?,?,?,?,?,?,?)", SCOPE.tenantId(), SCOPE.clientId(),
+                route("unknown"), "test-channel", "standard", "[]", 1L);
         var missing = assertThrows(TaskPricingService.Unavailable.class, () -> quote(TASK, BINDING, "unknown"));
         assertEquals(TaskPricingService.Unavailable.Reason.MODEL_PRICE_MISSING, missing.reason());
         assertEquals(0, count("economy_task_quote"));
@@ -148,6 +149,27 @@ class TaskBillingServiceMySqlTest {
     }
 
     @Test
+    void malformedCatalogRollsBackEarlierQuoteInSameTransaction() {
+        jdbc.update("UPDATE economy_model_price SET price_data_json='broken' WHERE model=?", route("0.3"));
+        assertThrows(RuntimeException.class, () -> inTask(TASK, () -> {
+            billing.quote(TASK, BINDING, "payer-1", workload(), route("0.1"));
+            var second = new Binding(1, "requirement-sha", "input-sha", "other-agent", "recommendation-1");
+            return billing.quote(TASK, second, "payer-1", workload(), route("0.3"));
+        }));
+        assertEquals(0, count("economy_task_quote"));
+        assertEquals(100, wallet());
+    }
+
+    @Test
+    void savedQuoteReplaysEvenWhenCatalogTablesAreUnavailable() {
+        Quote first = quote(TASK, BINDING, "0.1");
+        jdbc.execute("DROP TABLE economy_task_model_tariff");
+        jdbc.execute("DROP TABLE economy_model_price_current");
+        jdbc.execute("DROP TABLE economy_model_price");
+        assertEquals(first, inTask(TASK, () -> billing.quote(TASK, BINDING, "payer-1", null, null)));
+    }
+
+    @Test
     void amountOverflowIsUnavailableWithoutPersistingQuote() {
         var overflow = assertThrows(TaskPricingService.Unavailable.class, () -> quote(TASK, BINDING, "999999999999999999999"));
         assertEquals(TaskPricingService.Unavailable.Reason.QUOTE_AMOUNT_OVERFLOW, overflow.reason());
@@ -157,8 +179,13 @@ class TaskBillingServiceMySqlTest {
 
     @Test
     void snapshotPreservesToolIdentityAndRoundsOnlyWholeTaskTotal() throws Exception {
-        var tool = new TaskQuoteCalculator.ToolKey("test-channel", "render", "image");
-        var workload = new TaskWorkload("test", 1_000_000, 0, 1, Map.of(tool, BigDecimal.ONE));
+        jdbc.update("INSERT INTO economy_tool_price VALUES(?,?,?,?,?,?,?,?)", SCOPE.tenantId(), SCOPE.clientId(),
+                "test-channel", "render", "image", "tool-v2", "{\"basis\":\"synthetic-test-price\",\"yuanPerUnit\":\"0.004\"}", 1L);
+        jdbc.update("INSERT INTO economy_tool_price_current VALUES(?,?,?,?,?,?,?)", SCOPE.tenantId(), SCOPE.clientId(),
+                "test-channel", "render", "image", "tool-v2", 1L);
+        jdbc.update("UPDATE economy_task_model_tariff SET tools_json=? WHERE model=?",
+                "[{\"channel\":\"test-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"1\"}]", route("0.004"));
+        var workload = workload();
         Quote quote = inTask(TASK, () -> billing.quote(TASK, BINDING, "payer-1", workload, route("0.004")));
         assertEquals(1, quote.amountWen());
         var tree = new ObjectMapper().readTree(quote.snapshotJson());
@@ -408,8 +435,8 @@ class TaskBillingServiceMySqlTest {
     private static TaskWorkload workload() {
         return new TaskWorkload("test", 1_000_000, 0, 1, Map.of());
     }
-    private static TaskPricingService.ModelKey route(String yuan) {
-        return new TaskPricingService.ModelKey("test-channel", "test-model-" + yuan, "standard");
+    private static String route(String yuan) {
+        return "test-model-" + yuan;
     }
     private static ModelTokenPrice price(String yuan) {
         return new ModelTokenPrice("test-channel", "test-model-" + yuan, "standard", "1", "synthetic-test-price",

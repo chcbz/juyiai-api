@@ -66,7 +66,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     @Override
     @Transactional(propagation = Propagation.MANDATORY, rollbackFor = Exception.class,
             noRollbackFor = TaskPricingService.Unavailable.class)
-    public Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, TaskPricingService.ModelKey model) {
+    public Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, String reportedModel) {
         Objects.requireNonNull(payerUserId, "payerUserId");
         String bindingHash = bindingHash(binding);
         EconomyTaskQuoteEntity stored = mapper.findQuoteByBinding(task.scope().tenantId(), task.scope().clientId(),
@@ -76,7 +76,8 @@ public class TaskBillingServiceImpl implements TaskBillingService {
             return receipt(stored);
         }
         // Replay above precedes all current price lookup, including a now-removed configuration entry.
-        var prepared = pricing.prepare(workload, model);
+        var prepared = pricing.prepare(task.scope(), workload, reportedModel);
+        workload = prepared.workload();
         var estimate = prepared.estimate();
         var modelPrice = prepared.modelPrice();
         TaskQuoteCalculator.Quote calculated;

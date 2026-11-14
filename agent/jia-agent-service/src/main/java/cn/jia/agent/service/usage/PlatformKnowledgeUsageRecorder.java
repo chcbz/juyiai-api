@@ -50,7 +50,7 @@ public final class PlatformKnowledgeUsageRecorder {
                     saved.normalizedUsage(), saved.price(), 0));
         }
         ModelTokenPrice price;
-        if (starting) price = prices.find(evidence.channel(), evidence.requestedModel(), evidence.requestedTier()).orElse(null);
+        if (starting) price = prices.find(binding.scope(), evidence.channel(), evidence.requestedModel(), evidence.requestedTier()).orElse(null);
         else {
             var start = costs.observation(binding, "started").orElseThrow(() -> new UsageCostConflict(REVISION));
             var original = JSON.readValue(start.rawUsageJson(), Evidence.class);

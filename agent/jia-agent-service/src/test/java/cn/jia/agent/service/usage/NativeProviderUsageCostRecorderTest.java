@@ -27,7 +27,7 @@ class NativeProviderUsageCostRecorderTest {
     void authorize() { when(executions.findForNativeUsageCost("0","client","executor","agent","task","run","exec"))
             .thenReturn(new PersonalWorkspaceExecutionEntity().setOwnerJiacn("owner").setTaskId("task").setExecutionState("CANCELLED")); }
     @Test void eachProviderCallHasIndependentAttemptAndHistoricalTaskOwner() {
-        authorize();when(prices.find("gpt","image","standard")).thenReturn(Optional.of(price));
+        authorize();when(prices.findVersion(new cn.jia.economy.service.EconomyScope("0", "client"), "gpt","image","standard","v1")).thenReturn(Optional.of(price));
         recorder.record(scope,"task","run","exec",evidence("call-a",NativeExecutionUsageCostRecorder.Phase.STARTED));
         recorder.record(scope,"task","run","exec",evidence("call-b",NativeExecutionUsageCostRecorder.Phase.STARTED));
         var captor=ArgumentCaptor.forClass(UsageCostService.Observation.class);verify(costs,times(2)).record(captor.capture());
@@ -44,6 +44,22 @@ class NativeProviderUsageCostRecorderTest {
         when(costs.observation(any(),eq("terminal"))).thenReturn(Optional.of(saved));
         recorder.record(scope,"task","run","exec",evidence("call",NativeExecutionUsageCostRecorder.Phase.TERMINAL));
         verify(costs,times(2)).record(saved);verifyNoInteractions(prices);
+    }
+    @Test void startedNullPriceIsRetainedRatherThanBackfilled() {
+        authorize();
+        var binding=new UsageCostService.Binding(new cn.jia.economy.service.EconomyScope("0","client"),"owner","task","NATIVE_PROVIDER_CALL","exec:call");
+        when(costs.observation(any(),eq("started"))).thenReturn(Optional.of(new UsageCostService.Observation(binding,"started",0,"{}",null,null,1)));
+        recorder.record(scope,"task","run","exec",evidence("call",NativeExecutionUsageCostRecorder.Phase.TERMINAL));
+        var capture=ArgumentCaptor.forClass(UsageCostService.Observation.class); verify(costs).record(capture.capture());
+        assertNull(capture.getValue().price()); verifyNoInteractions(prices);
+    }
+    @Test void terminalWithoutStartedUsesOnlyExactHistoricalVersion() {
+        authorize();
+        when(prices.findVersion(new cn.jia.economy.service.EconomyScope("0","client"),"gpt","image","standard","v1")).thenReturn(Optional.of(price));
+        recorder.record(scope,"task","run","exec",evidence("call",NativeExecutionUsageCostRecorder.Phase.TERMINAL));
+        var capture=ArgumentCaptor.forClass(UsageCostService.Observation.class); verify(costs).record(capture.capture());
+        assertSame(price,capture.getValue().price());
+        verify(prices,never()).find(any(),any(),any(),any());
     }
     @Test void unauthorisedExecutionNeverReadsPricesOrWritesMoney() {
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->recorder.record(scope,"task","run","exec",evidence("call",NativeExecutionUsageCostRecorder.Phase.STARTED)));

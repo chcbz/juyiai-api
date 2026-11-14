@@ -1,6 +1,5 @@
 package cn.jia.economy.task;
 
-import cn.jia.economy.pricing.TaskPricingService;
 import cn.jia.economy.pricing.TaskWorkload;
 import cn.jia.economy.service.EconomyScope;
 import java.util.Objects;
@@ -29,7 +28,7 @@ public interface TaskBillingService {
             String terminalTransactionId) { }
 
     /** Immutable per recommendation+candidate binding. Replay returns stored prices without recalculating. */
-    Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, TaskPricingService.ModelKey model);
+    Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, String reportedModel);
     /** Reserve exactly the selected quote, or replay the same reservation; never top up/reprice.
      * payerUserId comes from the caller's authenticated actor, never the request body or ownerJiacn.
      * Matching the quote payer is required even for zero-price quotes and reservation replays.

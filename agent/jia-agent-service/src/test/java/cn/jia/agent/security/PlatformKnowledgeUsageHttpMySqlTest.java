@@ -98,7 +98,7 @@ class PlatformKnowledgeUsageHttpMySqlTest {
                     Map.of(INPUT, new BigDecimal("100"), CACHED_INPUT, new BigDecimal("10"), OUTPUT, new BigDecimal("500")), null, Map.of());
             var current = new AtomicReference<>(oldPrice);
             var catalog = mock(ModelPriceCatalog.class);
-            when(catalog.find("platform", "gpt-6-luna", "standard")).thenAnswer(call -> Optional.of(current.get()));
+            when(catalog.find(new cn.jia.economy.service.EconomyScope("0", "client"), "platform", "gpt-6-luna", "standard")).thenAnswer(call -> Optional.of(current.get()));
             var recorder = new PlatformKnowledgeUsageRecorder(template.getMapper(HostingRentFinishingMapper.class), costs, catalog, bindings, renewal);
             var servletPrincipal = new SecurityContextHolderAwareRequestFilter(); servletPrincipal.afterPropertiesSet();
             var nativeFilter = new AgentRuntimeAuthenticationFilter(identity.auth);

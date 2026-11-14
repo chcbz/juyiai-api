@@ -437,6 +437,7 @@ def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegress
         include 'cn/jia/agent/schema/AgentPersonaBindingMapperContractTest.java'
         srcDir rootProject.file('economy/jia-economy-service/src/test/java')
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
+        include 'cn/jia/economy/config/TaskPricingTestFixture.java'
         include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
         include 'cn/jia/agent/security/PlatformKnowledgeUsageHttpMySqlTest.java'
         include 'cn/jia/agent/service/usage/PlatformKnowledgeUsageRecorderTest.java'
@@ -1067,4 +1068,46 @@ gradle.projectsEvaluated {
     def applicationRuntime = project(':starter').configurations.runtimeClasspath
     configurations.testCompileClasspath.shouldResolveConsistentlyWith(applicationRuntime)
     configurations.testRuntimeClasspath.shouldResolveConsistentlyWith(applicationRuntime)
+}
+
+// Database task quotes: affected real consumers and fixtures only.
+def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
+    java {
+        srcDir 'src/test/java'
+        srcDir rootProject.file('economy/jia-economy-service/src/test/java')
+        include 'cn/jia/agent/service/recommendation/AssigneeRecommendationQuotesTest.java'
+        include 'cn/jia/agent/service/recommendation/AssigneeRecommendationServiceTest.java'
+        include 'cn/jia/agent/api/AssigneeRecommendationControllerTest.java'
+        include 'cn/jia/agent/service/usage/NativeProviderUsageCostRecorderTest.java'
+        include 'cn/jia/agent/service/usage/PlatformKnowledgeUsageRecorderTest.java'
+        include 'cn/jia/agent/service/usage/PlatformKnowledgeMaintenanceFixture.java'
+        include 'cn/jia/agent/security/PlatformKnowledgeUsageHttpMySqlTest.java'
+        include 'cn/jia/agent/security/PlatformKnowledgeUsageControllerTest.java'
+        include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
+        include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
+        include 'cn/jia/economy/config/TaskPricingTestFixture.java'
+    }
+    resources.srcDir 'src/test/resources'
+    compileClasspath += sourceSets.main.output
+    runtimeClasspath += output + compileClasspath
+}
+configurations.named(taskQuoteRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+configurations.named(taskQuoteRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
+gradle.projectsEvaluated {
+    def applicationRuntime = project(':starter').configurations.runtimeClasspath
+    configurations.named(taskQuoteRegressionSourceSet.compileClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
+    configurations.named(taskQuoteRegressionSourceSet.runtimeClasspathConfigurationName) { shouldResolveConsistentlyWith(applicationRuntime) }
+}
+tasks.register('taskQuoteRegression', Test) {
+    group = 'verification'
+    description = 'Runs database pricing, immutable quote and precise cost snapshot regressions.'
+    dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
+    testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
+    classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    useJUnitPlatform()
+    maxParallelForks = 1
+    maxHeapSize = '256m'
+    jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+    filter { excludeTestsMatching 'cn.jia.agent.service.impl.AgentTaskBillingMySqlTransactionTest.browser*' }
 }

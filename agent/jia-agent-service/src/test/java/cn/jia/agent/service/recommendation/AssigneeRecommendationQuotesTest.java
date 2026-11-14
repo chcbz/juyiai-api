@@ -1,6 +1,8 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.entity.AgentTaskMetaEntity;
+import cn.jia.agent.entity.AgentRuntimeEntity;
+import cn.jia.agent.dao.AgentRuntimeDao;
 import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
@@ -23,6 +25,7 @@ class AssigneeRecommendationQuotesTest {
     private final AgentTaskMutationTransaction transactions = mock(AgentTaskMutationTransaction.class);
     private final AgentTaskRequirementSnapshotService requirements = mock(AgentTaskRequirementSnapshotService.class);
     private final AgentTaskExecutionGrantService grants = mock(AgentTaskExecutionGrantService.class);
+    private final AgentRuntimeDao runtimes = mock(AgentRuntimeDao.class);
     private final TaskBillingService billing = mock(TaskBillingService.class);
     private final AtomicBoolean locked = new AtomicBoolean();
     private AssigneeRecommendationQuotes service;
@@ -41,10 +44,10 @@ class AssigneeRecommendationQuotesTest {
             assertTrue(locked.get()); return new AgentTaskExecutionGrantService.InputCatalogue("same-assignment-digest", List.of(
                     new AgentTaskExecutionGrantService.AuthorizedInput("file", 2, "INPUT", "text/plain", 13, "content-sha")));
         });
-        var routes = new AssigneeQuoteRoutes(new AssigneeQuoteRoutes.Properties(List.of(
-                new AssigneeQuoteRoutes.Route("a", Workload.Kind.DOCUMENT, "channel", "model", "standard", List.of()),
-                new AssigneeQuoteRoutes.Route("b", Workload.Kind.DOCUMENT, "other-channel", "model", "standard", List.of()))));
-        service = new AssigneeRecommendationQuotes(transactions, requirements, grants, routes, billing);
+        when(runtimes.findByAgentIds(anySet())).thenAnswer(call -> List.of(
+                new AgentRuntimeEntity().setAgentId("a").setExecutionModel("model-a"),
+                new AgentRuntimeEntity().setAgentId("b").setExecutionModel("model-b")));
+        service = new AssigneeRecommendationQuotes(transactions, requirements, grants, runtimes, billing);
         when(billing.quote(any(), any(), anyString(), any(), any())).thenAnswer(call -> {
             assertTrue(locked.get()); return new TaskBillingService.Quote("quote-" + ((TaskBillingService.Binding) call.getArgument(1)).agentId(), 13, "{}");
         });
@@ -71,17 +74,42 @@ class AssigneeRecommendationQuotesTest {
             assertEquals("same-assignment-digest", binding.inputSnapshotDigest()); assertEquals(first.recommendationId(), binding.recommendationId());
         }
         assertEquals(List.of(20000L, 20000L), work.getAllValues().stream().map(TaskWorkload::inputTokens).toList());
+        verify(runtimes).findByAgentIds(java.util.Set.of("a", "b"));
         verify(grants, times(1)).snapshotTaskInputsWithinLockedTask(any(), eq("task"));
         verify(billing, never()).reserve(any(), any(), any(), any());
     }
     @Test void missingRouteOrPriceIsLocalToCandidateAndNeverZeroMoney() {
         doThrow(new TaskPricingService.Unavailable(TaskPricingService.Unavailable.Reason.MODEL_PRICE_MISSING))
-                .when(billing).quote(any(), any(), anyString(), any(), eq(new TaskPricingService.ModelKey("other-channel", "model", "standard")));
+                .when(billing).quote(any(), any(), anyString(), any(), eq("model-b"));
+        doThrow(new TaskPricingService.Unavailable(TaskPricingService.Unavailable.Reason.BILLING_ROUTE_MISSING))
+                .when(billing).quote(any(), any(), anyString(), any(), isNull());
         var result = service.prepare(actor, "task", () -> advice("a", "b", "unconfigured"));
         assertEquals("AVAILABLE", result.recommendations().get(0).quote().state());
         assertEquals("MODEL_PRICE_MISSING", result.recommendations().get(1).quote().unavailableReason());
         assertEquals("BILLING_ROUTE_MISSING", result.recommendations().get(2).quote().unavailableReason());
         for (var item : result.recommendations().subList(1, 3)) { assertNull(item.quote().amount()); assertNull(item.quote().quoteId()); }
+    }
+    @Test void newBindingUsesExistingReportedModelWithoutAgentSpecificConfiguration() {
+        when(runtimes.findByAgentIds(java.util.Set.of("new-agent"))).thenReturn(List.of(
+                new AgentRuntimeEntity().setAgentId("new-agent").setExecutionModel("model-a")));
+        var result = service.prepare(actor, "task", () -> advice("new-agent"));
+        assertEquals("AVAILABLE", result.recommendations().getFirst().quote().state());
+        verify(billing).quote(any(), any(), eq("jwt-user"), any(), eq("model-a"));
+    }
+    @Test void refreshedReportedModelIsUsedByNextQuote() {
+        when(runtimes.findByAgentIds(java.util.Set.of("a"))).thenReturn(
+                List.of(new AgentRuntimeEntity().setAgentId("a").setExecutionModel("before")),
+                List.of(new AgentRuntimeEntity().setAgentId("a").setExecutionModel("after")));
+        service.prepare(actor, "task", () -> advice("a"));
+        service.prepare(actor, "task", () -> advice("a"));
+        verify(billing).quote(any(), any(), eq("jwt-user"), any(), eq("before"));
+        verify(billing).quote(any(), any(), eq("jwt-user"), any(), eq("after"));
+    }
+    @Test void noReportedModelStillReachesBillingReplayBranch() {
+        when(runtimes.findByAgentIds(java.util.Set.of("old-agent"))).thenReturn(List.of());
+        var result = service.prepare(actor, "task", () -> advice("old-agent"));
+        verify(billing).quote(any(), any(), eq("jwt-user"), any(), isNull());
+        assertEquals("AVAILABLE", result.recommendations().getFirst().quote().state());
     }
     @Test void staleAdvicePreventsAllSnapshotAndPriceWork() {
         assertThrows(Failure.class, () -> service.prepare(actor, "task", () -> { throw new Failure(409, "RECOMMENDATION_STALE"); }));

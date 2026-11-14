@@ -41,7 +41,7 @@ class PlatformKnowledgeUsageRecorderTest {
         verify(costs).record(captor.capture()); return captor.getValue();
     }
     @Test void startingFreezesPriceAndBindsPlatformAgentHandoverWithoutUserOrTask() {
-        authorize(); when(prices.find("platform", "gpt-6-luna", "standard")).thenReturn(Optional.of(price));
+        authorize(); when(prices.find(new cn.jia.economy.service.EconomyScope("tenant", "client"), "platform", "gpt-6-luna", "standard")).thenReturn(Optional.of(price));
         recorder.record(scope, "lease", "handover", evidence(STARTED));
         var actual = capture(); assertNull(actual.binding().ownerJiacn()); assertNull(actual.binding().taskId());
         assertEquals("PUBLIC_KNOWLEDGE_EXTRACTION", actual.binding().source());

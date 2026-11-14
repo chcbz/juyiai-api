@@ -25,7 +25,7 @@ class RecommendationCostRecorderTest {
     private final RecommendationUsageJournal journal = mock(RecommendationUsageJournal.class);
     private final ModelPriceCatalog prices = mock(ModelPriceCatalog.class);
     private RecommendationCostRecorder recorder() {
-        when(prices.find("channel", "model", "standard")).thenReturn(Optional.of(PRICE));
+        when(prices.find(new cn.jia.economy.service.EconomyScope(CONTEXT.tenantId(), CONTEXT.clientId()), "channel", "model", "standard")).thenReturn(Optional.of(PRICE));
         when(costs.record(any())).thenReturn(new UsageCostService.Receipt("attempt", 1, TokenUsageCost.Status.PENDING_USAGE, null, false));
         doAnswer(call -> { costs.record(call.getArgument(0)); return null; }).when(journal).record(any());
         return new RecommendationCostRecorder(costs, prices, journal, "channel", "standard");
@@ -38,7 +38,7 @@ class RecommendationCostRecorderTest {
     }
     @Test void preservesTrustedBindingAndPriceBeforeCallAndActualUsageBeforeBusinessValidation() throws Exception {
         var recorder = recorder(); var attempt = recorder.begin(CONTEXT, "model");
-        when(prices.find(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        when(prices.find(any(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
         recorder.complete(attempt, response("model", "default"));
         var records = ArgumentCaptor.forClass(UsageCostService.Observation.class);
         verify(costs, times(2)).record(records.capture());
@@ -71,7 +71,7 @@ class RecommendationCostRecorderTest {
         assertEquals(TokenUsageCost.Status.PENDING_PRICE, TokenUsageCost.assess(completed.normalizedUsage(), completed.price()).status());
     }
     @Test void realUserRetriesHaveDistinctAttemptIdentitiesAndMissingPriceIsNotZero() {
-        var recorder = recorder(); when(prices.find(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        var recorder = recorder(); when(prices.find(any(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
         var first = recorder.begin(CONTEXT, "model"); var second = recorder.begin(CONTEXT, "model");
         assertNotEquals(first.binding().sourceAttemptId(), second.binding().sourceAttemptId());
         assertNull(first.price()); assertNull(second.price());

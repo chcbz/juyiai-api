@@ -98,8 +98,8 @@ class EconomyWalletHttpMySqlTest {
             return new EconomyWalletService(sql.getMapper(EconomyLedgerMapper.class), treasury, environment, gate, campaigns);
         }
         @Bean EconomyWalletController controller(EconomyPreviewGate gate, EconomyWalletService wallet) { return new EconomyWalletController(gate, wallet); }
-        @Bean TaskBillingService billing(SqlSessionTemplate sql, EconomyPostingServiceImpl posting) {
-            var pricing = new ConfiguredTaskPricingService(new EconomyPricingProperties(List.of(PRICE), List.of()));
+        @Bean TaskBillingService billing(SqlSessionTemplate sql, EconomyPostingServiceImpl posting, DataSource source) {
+            var pricing = cn.jia.economy.config.TaskPricingTestFixture.install(new JdbcTemplate(source), SCOPE, List.of(PRICE));
             return new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class), sql.getMapper(EconomyLedgerMapper.class), posting, JSON, pricing);
         }
         @Bean UsageCostService costs(SqlSessionTemplate sql) { return new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class), JSON); }
@@ -187,7 +187,7 @@ class EconomyWalletHttpMySqlTest {
         var binding = new TaskBillingService.Binding(1, "requirement", "inputs", "agent", "recommendation");
         var task = new TaskBillingService.Task(SCOPE, "owner", "accepted");
         var quote = inTask(task, () -> billing.quote(task, binding, "payer", new TaskWorkload("test", 1_000_000, 0, 1, Map.of()),
-                new TaskPricingService.ModelKey("test", "model", "standard")));
+                "model"));
         assertEquals(13, quote.amountWen()); wallet(token, 3500, 0);
         inTask(task, () -> billing.reserve(task, quote.quoteId(), binding, "payer")); wallet(token, 3487, 13);
         inTask(task, () -> billing.reserve(task, quote.quoteId(), binding, "payer")); wallet(token, 3487, 13);
@@ -202,7 +202,7 @@ class EconomyWalletHttpMySqlTest {
         assertEquals(financialTransactions, count("economy_transaction"));
         var cancelled = new TaskBillingService.Task(SCOPE, "owner", "cancelled");
         var other = inTask(cancelled, () -> billing.quote(cancelled, binding, "payer", new TaskWorkload("test", 1_000_000, 0, 1, Map.of()),
-                new TaskPricingService.ModelKey("test", "model", "standard")));
+                "model"));
         inTask(cancelled, () -> billing.reserve(cancelled, other.quoteId(), binding, "payer")); wallet(token, 3474, 13);
         inTask(cancelled, () -> billing.release(cancelled, true)); wallet(token, 3487, 0);
         inTask(cancelled, () -> billing.release(cancelled, true)); wallet(token, 3487, 0);
