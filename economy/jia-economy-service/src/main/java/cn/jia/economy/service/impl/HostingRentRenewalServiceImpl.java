@@ -142,6 +142,13 @@ public final class HostingRentRenewalServiceImpl implements HostingRentRenewalSe
                 && Objects.equals(lease.getPrincipalId(), initial.getPrincipalId());
     }
 
+    @Override public EconomyHostingLeaseEntity lockLatestLease(EconomyScope scope, String agentId) {
+        gate.requireMutationAllowed(scope.tenantId(), scope.clientId());
+        if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("Control import requires the binding transaction");
+        return leases.selectLatestLeaseForUpdate(scope.tenantId(), scope.clientId(), agentId);
+    }
+
     @Override public HandoverSnapshot lockHandover(EconomyScope scope, String initialIntentId, String leaseId) {
         gate.requireMutationAllowed(scope.tenantId(), scope.clientId());
         if (!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
@@ -250,6 +257,11 @@ public final class HostingRentRenewalServiceImpl implements HostingRentRenewalSe
                                    List<HostingLeaseChangeListener.Change> changes) {
             if ((!"ACTIVE".equals(lease.getStatus()) && !"LOCKED".equals(lease.getStatus()))
                     || !Objects.equals(lease.getPaidThrough(), expectedPaidThrough)) return result(lease, null);
+            var provenance=leases.selectIntent(scope.tenantId(),scope.clientId(),lease.getLatestIntentId());
+            if (provenance==null || !lease.getLeaseId().equals(provenance.getLeaseId())
+                    || provenance.getSettlementKind()==null || !java.util.Set.of("PAID","TRANSITION","RETAINED").contains(provenance.getSettlementKind()))
+                throw new HostingRentException(DATA_CORRUPT,"invalid recurring lease provenance");
+            if ("RETAINED".equals(provenance.getSettlementKind())) return result(lease,null);
             long now = renewal.nowMillis();
             if (now < expectedPaidThrough) return result(lease, null);
             if (!"USER".equals(lease.getPrincipalType()) || lease.getAmountWen() == null

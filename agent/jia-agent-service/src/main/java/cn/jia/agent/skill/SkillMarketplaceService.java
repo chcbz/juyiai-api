@@ -62,8 +62,11 @@ public final class SkillMarketplaceService {
                 && transport!=null && transport.allows(a.tenantId(),a.clientId())
                 && authentication.getIfAvailable()!=null && sessions.getIfAvailable()!=null;
     }
+    private boolean hostingSetupEnabled;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setHostingSetup(cn.jia.agent.hosting.HostingSetupService setup) { this.hostingSetupEnabled = true; }
     public Map<String,Object> capabilities(HostingRentHttp.Actor a) {
-        return Map.of("economyPreviewEnabled",trade.allows(a.tenantId(),a.clientId()),
+        return Map.of("economyPreviewEnabled",trade.allows(a.tenantId(),a.clientId()), "hostingSetupEnabled", hostingSetupEnabled,
                 "skillMarketplaceEnabled",available(a),"principalScopeSha256",HexFormat.of().formatHex(
                         HostingRentHttp.hash("economy-principal-scope-v1",Map.of("actor",a.actorId(),"tenant",a.tenantId(),"client",a.clientId()))));
     }

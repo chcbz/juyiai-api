@@ -36,6 +36,24 @@ public final class HostingSetupStore {
         jdbc.update("INSERT INTO agent_hosting_setup_quote (tenant_id,client_id,quote_id,setup_id) VALUES (?,?,?,?)",
                 setup.tenantId(), setup.clientId(), quoteId, setup.setupId());
     }
+    public Setup forQuote(String tenant, String client, String quote) {
+        return one(jdbc.query("SELECT s.* FROM agent_hosting_setup s JOIN agent_hosting_setup_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.setup_id=s.setup_id WHERE q.tenant_id=? AND q.client_id=? AND q.quote_id=?", ROW, tenant, client, quote));
+    }
+    public record Activation(String setupId, String authorizationId, String bindingId, String leaseId) { }
+    private static final RowMapper<Activation> ACTIVATION = (r,n) -> new Activation(r.getString("setup_id"), r.getString("authorization_id"), r.getString("binding_id"), r.getString("lease_id"));
+    /** Current read after locking the SETUP grant; a prior snapshot must not hide activation. */
+    public Activation activation(String tenant, String client, String setup) {
+        return one(jdbc.query("SELECT * FROM agent_hosting_setup_activation WHERE tenant_id=? AND client_id=? AND setup_id=? FOR UPDATE", ACTIVATION, tenant, client, setup));
+    }
+    public Activation leaseActivation(String tenant, String client, String lease) {
+        return one(jdbc.query("SELECT * FROM agent_hosting_setup_activation WHERE tenant_id=? AND client_id=? AND lease_id=?", ACTIVATION, tenant, client, lease));
+    }
+    public void activate(Setup s, String authorization, String binding, String lease) {
+        jdbc.update("INSERT INTO agent_hosting_setup_activation (tenant_id,client_id,setup_id,authorization_id,binding_id,lease_id) VALUES (?,?,?,?,?,?)", s.tenantId(), s.clientId(), s.setupId(), authorization, binding, lease);
+    }
+    public void importActivation(String tenant, String client, String authorization, String binding, String lease) {
+        jdbc.update("INSERT INTO agent_hosting_setup_activation (tenant_id,client_id,setup_id,authorization_id,binding_id,lease_id) VALUES (?,?,NULL,?,?,?)", tenant,client,authorization,binding,lease);
+    }
     public boolean isSetupQuote(String tenant, String client, String quote) {
         return !jdbc.queryForList("SELECT quote_id FROM agent_hosting_setup_quote WHERE tenant_id=? AND client_id=? AND quote_id=?",
                 String.class, tenant, client, quote).isEmpty();

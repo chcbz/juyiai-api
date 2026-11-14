@@ -42,6 +42,9 @@ public class HostingRentHandoverCompletion {
         this.identities=identities; this.runtimes=runtimes; this.runtime=runtime; this.tasks=tasks; this.keys=keys; this.scope=scope;
     }
 
+    private HostingSetupService setups;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setHostingSetups(HostingSetupService value) { this.setups = value; }
     private SkillManagementService skills;
     @org.springframework.beans.factory.annotation.Autowired
     public void setSkills(SkillManagementService value) { this.skills = value; }
@@ -83,6 +86,7 @@ public class HostingRentHandoverCompletion {
             require(keyService!=null && keyService.disableManagedKey(intent.getManagedApiKeyId(), tenant,
                     client, owner, "hosting:"+intentId));
         }
+        if (setups != null) setups.revokeLease(tenant, client, owner, agent, bindingId, leaseId, now);
         renewal.completeHandover(new EconomyScope(tenant, client),
                 new EconomyPrincipal(EconomyPrincipalType.USER, intent.getPrincipalId()), leaseId, bindingId, agent);
         binding.setStatus(AgentConstants.BINDING_STATUS_SUSPENDED);

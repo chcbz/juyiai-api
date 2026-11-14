@@ -8,6 +8,11 @@ import java.util.List;
 
 /** All discoveries partition before ordering/limit. The lease root fences money and status together. */
 public interface EconomyHostingRenewalMapper {
+    // Explicit archived provenance is not a zero-price recurring plan. Unknown provenance is
+    // deliberately not filtered out: the service reports corruption instead of hiding it.
+    String RECURRING_SOURCE = " AND NOT EXISTS (SELECT 1 FROM economy_hosting_provisioning_intent retained"
+            + " WHERE retained.tenant_id=economy_hosting_lease.tenant_id AND retained.client_id=economy_hosting_lease.client_id"
+            + " AND retained.lease_id=economy_hosting_lease.lease_id AND retained.intent_id=economy_hosting_lease.latest_intent_id AND retained.settlement_kind='RETAINED')";
     @Select("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)")
     long nowMillis();
 
@@ -39,6 +44,7 @@ public interface EconomyHostingRenewalMapper {
     @Select("SELECT * FROM economy_hosting_lease WHERE " + EconomyHostingRentMapper.EXACT_SCOPE
             + " AND principal_type='USER' AND principal_id=#{userId}"
             + " AND OCTET_LENGTH(principal_id)=OCTET_LENGTH(#{userId})"
+            + RECURRING_SOURCE
             + " AND status IN ('ACTIVE','LOCKED') AND live_slot=1 AND paid_through<=#{now}"
             + " AND (paid_through>#{afterThrough} OR (paid_through=#{afterThrough} AND lease_id>#{afterId}))"
             + " ORDER BY paid_through,lease_id LIMIT 100 FOR UPDATE")
@@ -49,6 +55,7 @@ public interface EconomyHostingRenewalMapper {
             + " FROM economy_hosting_lease WHERE " + EconomyHostingRentMapper.EXACT_SCOPE
             + " AND principal_type='USER' AND principal_id=#{userId}"
             + " AND OCTET_LENGTH(principal_id)=OCTET_LENGTH(#{userId})"
+            + RECURRING_SOURCE
             + " AND live_slot=1 AND status IN ('ACTIVE','LOCKED')")
     Long nextDeadline(@Param("tenantId") String tenantId, @Param("clientId") String clientId,
                       @Param("userId") String userId);

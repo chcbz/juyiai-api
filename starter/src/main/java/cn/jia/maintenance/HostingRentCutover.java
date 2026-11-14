@@ -75,6 +75,9 @@ public final class HostingRentCutover {
     }
 
     public static void main(String[] args) throws Exception {
+        if (args.length==3 && ("--control-preview".equals(args[0]) || "--control-apply".equals(args[0]))) {
+            control(args); return;
+        }
         if (args.length != 3 || !(args[0].equals("--preview") || args[0].equals("--apply")))
             throw new IllegalArgumentException("Usage: --preview|--apply INPUT.json NEW-RECEIPT.jsonl");
         byte[] input = Files.readAllBytes(Path.of(args[1]));
@@ -102,6 +105,31 @@ public final class HostingRentCutover {
                 }
                 output.write(JSON.writeValueAsString(Map.of("status", "COMPLETED", "subjects", commands.size())) + "\n");
             }
+        }
+    }
+
+    private static void control(String[] args) throws Exception {
+        byte[] input=Files.readAllBytes(Path.of(args[1]));
+        var command=JSON.readValue(input,HostingControlMaintenance.Command.class);
+        try (var output=Files.newBufferedWriter(Path.of(args[2]),StandardCharsets.UTF_8,StandardOpenOption.CREATE_NEW)) {
+            var app=new SpringApplication(ControlContext.class);
+            app.setWebApplicationType(WebApplicationType.NONE);
+            app.setAdditionalProfiles("schema-maintenance","hosting-rent-cutover","hosting-control-maintenance");
+            app.setDefaultProperties(Map.of("agent.hosting-outbound.enabled","true"));
+            try (var context=app.run()) {
+                Object result=context.getBean(HostingControlMaintenance.class).execute(command,"--control-apply".equals(args[0]));
+                output.write(JSON.writeValueAsString(Map.of("mode",args[0],"inputSha256",
+                        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(input)),"result",result))+"\n");
+            }
+        }
+    }
+    @Configuration(proxyBeanMethods=false)
+    @Profile("hosting-control-maintenance")
+    @EnableConfigurationProperties(HostingControlRemoteProperties.class)
+    @Import({Context.class,HostingOutboundConfiguration.class,HostingControlMaintenance.class})
+    public static class ControlContext {
+        @Bean org.springframework.jdbc.core.JdbcTemplate controlJdbc(DataSource source) {
+            return new org.springframework.jdbc.core.JdbcTemplate(source);
         }
     }
 

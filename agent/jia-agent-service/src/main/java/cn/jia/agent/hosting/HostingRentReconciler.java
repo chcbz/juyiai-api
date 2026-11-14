@@ -286,9 +286,16 @@ public final class HostingRentReconciler implements ScheduledJobHandler {
                 // no credential was issued, or the exact historical key is revoked.
                 ledger.refund(command);
                 credentials.disableForRefund(checked.preparation(), current);
+                if (setups!=null) {
+                    var p=checked.preparation();
+                    setups.revokeLease(p.tenantId(),p.clientId(),p.ownerJiacn(),p.agentId(),p.bindingId(),p.leaseId(),System.currentTimeMillis());
+                }
             }
         });
     }
+    private HostingSetupService setups;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setSetups(HostingSetupService setups) { this.setups=setups; }
     private record Snapshot(HostingRentHttp.Actor actor, ManagedHostingProvisioner.Preparation preparation,
                             String status, long version, EconomyHostingProvisioningIntentEntity intent) { }
 }

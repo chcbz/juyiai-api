@@ -3,6 +3,7 @@ package cn.jia.build.security;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -30,6 +31,26 @@ class PublicArtifactVerifierTest {
 
     @TempDir
     Path temporaryDirectory;
+
+    @Test
+    void scratchOutputCloseMakesBytesReadableOnSameChannelAndCleanupRemovesOnlyScratch() throws Exception {
+        var operations = PublicArtifactVerifier.posixTempOperations(PublicArtifactVerifier.TempMutationHook.NONE);
+        Path root = temporaryDirectory.resolve("scratch-lifecycle");
+        var directory = operations.createPrivateDirectory(root);
+        var file = operations.createPrivateFile(directory);
+        var output = operations.openForWrite(file);
+        output.write(safeNestedJar());
+        output.close();
+        output.close(); // Closing the write view must not close the identity-bound channel.
+        assertThrows(java.io.IOException.class, () -> output.write(0));
+        try (var archive = operations.openForRead(file)) {
+            assertFalse(archive.occurrences().isEmpty());
+        }
+        operations.deleteFile(file);
+        operations.deleteDirectory(directory);
+        assertFalse(Files.exists(root));
+        assertTrue(Files.isDirectory(temporaryDirectory));
+    }
 
     @Test
     void nestedRedundantZip64AndLatin1PropertiesStillScanAndRedactSecrets() throws Exception {

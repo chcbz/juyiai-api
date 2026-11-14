@@ -445,8 +445,10 @@ public final class PublicArtifactVerifier {
             public void close() throws IOException {
                 if (!closed) {
                     closed = true;
-                    // Disposable scan input, read through the same channel then deleted.
-                    // Crash durability is required for release artifacts, not this scratch copy.
+                    // Scratch data is read back through this same open channel, then deleted.
+                    // FileChannel.write is unbuffered here: visibility needs no fsync. Forcing
+                    // every nested JAR to durable storage adds I/O without crash recovery value.
+                    // Final artifacts/receipts have their own, unchanged durability boundary.
                     file.outputClosed = true;
                 }
             }

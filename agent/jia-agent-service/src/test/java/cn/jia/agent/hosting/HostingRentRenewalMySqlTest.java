@@ -321,19 +321,26 @@ class HostingRentRenewalMySqlTest {
             if (selfHosted) {
                 // Simulate a permanently unreachable host before detach. No remote process control is possible.
                 var controlSocket=Path.of((String)endpoint.get("socketPath"));
-                Files.move(controlSocket,controlSocket.resolveSibling("offline.sock"));
-                var detachedBinding = identityBindings.findByIdForUpdate(publicRow.getBindingId());
-                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
-                assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
-                assertTrue(Files.isRegularFile(privateSession)); assertTrue(Files.isRegularFile(skill));
-                assertEquals("REVOKED", installations.lock(original.getRuntimeInstallationId()).getStatus());
-                var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
-                assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
-                assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
-                new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(transaction ->
-                        assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
-                assertEquals(950,balance()); assertNull(httpFailure.get());
-                return;
+                Path offlineSocket = controlSocket.resolveSibling("offline.sock");
+                Files.move(controlSocket, offlineSocket);
+                try {
+                    var detachedBinding = identityBindings.findByIdForUpdate(publicRow.getBindingId());
+                    assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                    assertTrue(completion.completeSelfHostedIfApplicable(scope, detachedBinding, original));
+                    assertTrue(Files.isRegularFile(privateSession)); assertTrue(Files.isRegularFile(skill));
+                    assertEquals("REVOKED", installations.lock(original.getRuntimeInstallationId()).getStatus());
+                    var closed = leases.selectLeaseForUpdate("tenant","client",first.leaseId());
+                    assertEquals("CLOSED",closed.getStatus()); assertNull(closed.getExecutorStoppedAt());
+                    assertFalse(service.completedHandover(scope,first.agentId(),original.getRuntimeInstallationId()));
+                    new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(transaction ->
+                            assertTrue(admissionRoots.lockPublicInstances("tenant","client","wuyong").isEmpty()));
+                    assertEquals(950,balance()); assertNull(httpFailure.get());
+                    return;
+                } finally {
+                    // The offline assertion is complete; restore only this disposable fixture's
+                    // socket so its ownership-checked shutdown can close the listener.
+                    Files.move(offlineSocket, controlSocket);
+                }
             }
             var stopped = new HostingRentManagedStop(provider, completion).stop(preparation);
             assertNotNull(stopped, () -> read(log));
@@ -371,11 +378,20 @@ class HostingRentRenewalMySqlTest {
             assertEquals(0L, jdbc.queryForObject("SELECT SUM(signed_amount_wen) FROM economy_entry", Long.class));
             assertNull(httpFailure.get());
         } finally {
-            if (child != null) {
-                child.getOutputStream().close();
-                if (!child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) { child.destroy(); child.waitFor(); }
+            try {
+                if (child != null) {
+                    child.getOutputStream().close();
+                    if (!child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                        // Only the owned synthetic fixture is killed, never a production Runtime.
+                        child.destroyForcibly();
+                        assertTrue(child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS), "Owned lifecycle fixture did not exit");
+                        fail("Lifecycle fixture did not shut down after stdin EOF: " + read(log));
+                    }
+                    assertEquals(0, child.exitValue(), () -> read(log));
+                }
+            } finally {
+                server.stop(0);
             }
-            server.stop(0);
         }
     }
 
@@ -1112,12 +1128,42 @@ class HostingRentRenewalMySqlTest {
                 .setStatus(state).setPaidFrom(through - PERIOD).setPaidThrough(through)
                 .setLatestIntentId("initial-" + id).setVersion(1L).setTenantId(tenant).setClientId(client)
                 .setCreateTime(1L).setUpdateTime(1L));
+        if (List.of("ACTIVE","LOCKED").contains(state)) jdbc.update("""
+                INSERT INTO economy_hosting_provisioning_intent
+                (intent_id,lease_id,quote_purpose,principal_type,principal_id,persona_code,agent_id,amount_wen,
+                 period_seconds,status,settlement_kind,escrow_version,version,tenant_id,client_id,create_time,update_time)
+                VALUES (?,?,'INITIAL','USER',?,?,?,?,?,'ACTIVE','PAID',1,1,?,?,1,1)
+                """, "initial-"+id,id,user,"persona-"+id,"agent-"+id,price,PERIOD/1000,tenant,client);
         if (locked != null) jdbc.update("UPDATE economy_hosting_lease SET locked_at=? WHERE tenant_id=? AND client_id=? AND lease_id=?",
                 locked, tenant, client, id);
     }
     private EconomyHostingLeaseEntity lease(String id) { return leases.selectLatestLease("tenant", "client", "agent-" + id); }
     private long balance() { return jdbc.queryForObject("SELECT balance_wen FROM economy_account WHERE tenant_id='tenant' AND client_id='client' AND owner_type='USER' AND owner_id='user'", Long.class); }
     private int charges() { return jdbc.queryForObject("SELECT COUNT(*) FROM economy_transaction WHERE business_type='RENEW_HOSTING_RENT'", Integer.class); }
+    @Test void archivedRetainedRightsDoNotBlockPaidRenewalOrGenerateADeadline() throws Exception {
+        long due=now()-1000;
+        seed("archived","ACTIVE",0,due-2000,null);
+        jdbc.update("UPDATE economy_hosting_provisioning_intent SET settlement_kind='RETAINED' WHERE intent_id='initial-archived'");
+        assertNull(renewals.nextDeadline("tenant","client","user"));
+        assertTrue(renewals.duePageForUpdate("tenant","client","user",0,"",now()).isEmpty());
+        var before=lease("archived"); assertNull(service.reconcile(scope,"archived",due-2000).transactionId());
+        assertEquals(before,lease("archived"));
+        seed("normal","ACTIVE",500,due,null);
+        assertEquals(due,renewals.nextDeadline("tenant","client","user"));
+        trigger(); assertEquals(500,balance()); assertEquals(1,charges()); assertEquals(before,lease("archived"));
+        assertTrue(lease("normal").getPaidThrough()>due);
+    }
+    @Test void missingOrUnknownProvenanceAndBrokenPaidPriceAreNotHiddenAsRetained() {
+        long due=now()-1000; seed("damaged","ACTIVE",0,due,null);
+        assertEquals(1,renewals.duePageForUpdate("tenant","client","user",0,"",now()).size());
+        assertThrows(HostingRentException.class,() -> service.reconcile(scope,"damaged",due));
+        jdbc.update("UPDATE economy_hosting_provisioning_intent SET settlement_kind='UNKNOWN' WHERE intent_id='initial-damaged'");
+        assertThrows(HostingRentException.class,() -> service.reconcile(scope,"damaged",due));
+        jdbc.update("DELETE FROM economy_hosting_provisioning_intent WHERE intent_id='initial-damaged'");
+        assertEquals(1,renewals.duePageForUpdate("tenant","client","user",0,"",now()).size());
+        assertThrows(HostingRentException.class,() -> service.reconcile(scope,"damaged",due));
+        assertEquals(1000,balance()); assertEquals(0,charges());
+    }
     private void trigger() throws Exception { handler.executeScheduled(new ScheduledInvocation("tenant", key, 1)); }
     private void credit(long amount, String key) {
         accounts.insertAccountIfAbsent(new EconomyAccountEntity().setAccountId("issuance").setOwnerType("SYSTEM")

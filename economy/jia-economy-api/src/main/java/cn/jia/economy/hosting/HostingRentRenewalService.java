@@ -27,6 +27,9 @@ public interface HostingRentRenewalService {
     /** Read the latest immutable completed handover for the retained public instance.
      * Caller holds its persona/runtime admission roots; a stop fact alone is insufficient. */
     boolean completedHandover(EconomyScope scope, String agentId, String installationId);
+    /** Operator control import: caller holds installation/binding/runtime roots in its transaction.
+     * Locks the latest lease without changing its period, owner or money. Caller checks the exact relationship. */
+    cn.jia.economy.entity.EconomyHostingLeaseEntity lockLatestLease(EconomyScope scope, String agentId);
     /** Lock original financial roots after the caller has locked installation and binding. No external I/O. */
     HandoverSnapshot lockHandover(EconomyScope scope, String initialIntentId, String leaseId);
     record HandoverSnapshot(cn.jia.economy.entity.EconomyHostingProvisioningIntentEntity intent,

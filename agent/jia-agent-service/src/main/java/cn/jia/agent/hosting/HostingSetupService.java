@@ -22,13 +22,18 @@ public final class HostingSetupService {
     private final HostingOutboundExchangeService exchanges;
     private final FixedTenantAdmissionPolicy scope;
     private final HostingSetupProperties properties;
+    private final cn.jia.agent.mapper.hosting.HostingHostStore hosts;
+    private final cn.jia.agent.config.HostingControlRemoteProperties routes;
     public HostingSetupService(HostingSetupStore setups, HostingOutboundStore transport, HostingOutboundExchangeService exchanges,
-            FixedTenantAdmissionPolicy scope, HostingSetupProperties properties) {
-        this.setups = setups; this.transport = transport; this.exchanges = exchanges; this.scope = scope; this.properties = properties;
+            FixedTenantAdmissionPolicy scope, HostingSetupProperties properties, cn.jia.agent.mapper.hosting.HostingHostStore hosts, cn.jia.agent.config.HostingControlRemoteProperties routes) {
+        this.setups = setups; this.transport = transport; this.exchanges = exchanges; this.scope = scope; this.properties = properties; this.hosts=hosts; this.routes=routes;
     }
-    public record Authorization(String authorizationId, String hostId, String purpose, String tenantId,
+    public record Authorization(String authorizationId, String hostId, String tenantId,
             String clientId, String ownerJiacn, String canonicalAgentId) { }
-    public record View(String setupId, String personaCode, String agentId, String mode, String status, Authorization authorization) { }
+    public record View(String setupId, String personaCode, String agentId, String mode, String status,
+            // Public target metadata, never a bearer. Keep recursive sanitization of its fields.
+            @cn.jia.core.security.SensitiveField(strategy = cn.jia.core.security.SensitiveStrategy.KEEP)
+            Authorization authorization) { }
     public record Target(Setup setup, ManagedHostingProvisioner.SkillInventory inventory) { }
     private void transaction(Actor actor) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Hosting setup requires admission transaction");
@@ -41,20 +46,41 @@ public final class HostingSetupService {
                 || !persona.equals(setup.personaCode())) throw rejected();
         return setup;
     }
-    private HostingOutboundStore.Grant active(Setup setup) {
+    private HostingOutboundStore.Grant lockGrant(Setup setup) {
         var grant = transport.lock(setup.tenantId(), setup.clientId(), setup.setupId());
-        if (grant == null || !"ACTIVE".equals(grant.status()) || !"SETUP".equals(grant.purpose())
+        if (grant == null
                 || !setup.hostId().equals(grant.hostId()) || !setup.ownerJiacn().equals(grant.ownerJiacn())
                 || !setup.canonicalAgentId().equals(grant.canonicalAgentId())) throw rejected();
         return grant;
     }
-    public String mode(Actor actor, String mode, String hostId) {
-        transaction(actor); exact(hostId, 100);
-        var host = properties.managedHosts().get(hostId);
+    private HostingOutboundStore.Grant active(Setup setup) {
+        var grant = lockGrant(setup);
+        if (!"ACTIVE".equals(grant.status())) throw rejected();
+        return grant;
+    }
+    public String selectHost(Actor actor, String mode, String hostId) {
+        transaction(actor);
         if ("server".equals(mode)) {
-            if (host == null || !host.allows(actor.tenantId(), actor.clientId(), actor.ownerJiacn())) throw rejected();
-        } else if (!"local".equals(mode) || host != null) throw rejected();
-        return mode; // A user cannot relabel an operator-managed host to buy the cheaper plan.
+            if (hostId!=null) throw rejected();
+            var candidates=properties.managedHosts().entrySet().stream()
+                    .filter(e -> e.getValue().allows(actor.tenantId(),actor.clientId(),actor.ownerJiacn())).map(Map.Entry::getKey)
+                    .filter(id -> { var h=hosts.find(actor.tenantId(),actor.clientId(),id); return h!=null && "ACTIVE".equals(h.status()) && "server".equals(h.mode()); })
+                    .sorted().toList();
+            if (candidates.contains(routes.localHostId())) hostId=routes.localHostId();
+            else if (candidates.size()==1) hostId=candidates.getFirst();
+            else throw new HostingRentApplicationException(503,"HOSTING_SETUP_UNAVAILABLE");
+        } else if (!"local".equals(mode)) throw rejected();
+        mode(actor,mode,hostId); return hostId;
+    }
+    public String mode(Actor actor, String mode, String hostId) {
+        transaction(actor); exact(hostId,100);
+        var host=hosts.find(actor.tenantId(),actor.clientId(),hostId);
+        if (host==null || !"ACTIVE".equals(host.status()) || !mode.equals(host.mode())) throw rejected();
+        if ("server".equals(mode)) {
+            var configured=properties.managedHosts().get(hostId);
+            if (configured==null || !configured.allows(actor.tenantId(),actor.clientId(),actor.ownerJiacn())) throw rejected();
+        } else if (!"local".equals(mode) || !actor.ownerJiacn().equals(host.ownerJiacn())) throw rejected();
+        return mode;
     }
     public View replay(Actor actor, String persona, String key, byte[] hash) {
         transaction(actor);
@@ -64,18 +90,17 @@ public final class HostingSetupService {
         if (!MessageDigest.isEqual(hash, existing.requestHash())) throw new HostingRentApplicationException(409, "HOSTING_SETUP_CONFLICT");
         return view(existing, active(existing));
     }
-    public View create(Actor actor, String persona, String key, byte[] hash, String agent, String mode, String host, String tokenHash, long now) {
+    public View create(Actor actor, String persona, String key, byte[] hash, String agent, String mode, String host, long now) {
         transaction(actor); mode(actor, mode, host); exact(agent, 100);
-        if (tokenHash == null || !tokenHash.matches("[0-9a-f]{64}")) throw badRequest();
         String id = "hca_" + UUID.randomUUID().toString().replace("-", "");
-        // Runtime creates a random bearer locally; the authenticated user registers only its SHA-256.
-        // Lost HTTP replies replay public metadata, never rotate a key or store recoverable credentials.
+        // The already registered host owns the credential; this invitation carries no secret.
         var grant = new HostingOutboundStore.Grant(actor.tenantId(), actor.clientId(), id, host, actor.ownerJiacn(), agent,
-                "SETUP", HexFormat.of().parseHex(tokenHash), "ACTIVE");
+                "SETUP", "ACTIVE");
         var setup = new Setup(actor.tenantId(), actor.clientId(), id, actor.actorId(), actor.ownerJiacn(), persona, agent, host, mode, key, hash);
         try {
             exchanges.register(grant, now); setups.insert(setup, now);
             exchanges.enqueue(actor.tenantId(), actor.clientId(), id, message(setup, "capabilities", CAPABILITIES), now);
+            exchanges.enqueue(actor.tenantId(), actor.clientId(), id, message(setup, "target", "setup-target"), now);
             exchanges.enqueue(actor.tenantId(), actor.clientId(), id, message(setup, "inventory", INVENTORY), now);
         } catch (org.springframework.dao.DuplicateKeyException conflict) {
             throw new HostingRentApplicationException(409, "HOSTING_SETUP_CONFLICT");
@@ -94,13 +119,15 @@ public final class HostingSetupService {
     }
     public View revoke(Actor actor, String persona, String id, long now) {
         var setup = find(actor, persona, id);
+        lockGrant(setup); // Repeated cancellation is allowed, but activation always wins once committed.
+        if (setups.activation(actor.tenantId(), actor.clientId(), id) != null) throw new HostingRentApplicationException(409, "HOSTING_SETUP_ALREADY_ACTIVATED");
         exchanges.revoke(actor.tenantId(), actor.clientId(), id, now);
         return new View(id, persona, setup.canonicalAgentId(), setup.mode(), "REVOKED", null);
     }
     private View view(Setup setup, HostingOutboundStore.Grant grant) {
         String status = inventory(setup, grant, INVENTORY) == null ? "WAITING_INVENTORY" : "INVENTORY_READY";
         return new View(setup.setupId(), setup.personaCode(), setup.canonicalAgentId(), setup.mode(), status,
-                new Authorization(grant.authorizationId(), grant.hostId(), grant.purpose(), grant.tenantId(), grant.clientId(), grant.ownerJiacn(), grant.canonicalAgentId()));
+                new Authorization(grant.authorizationId(), grant.hostId(), grant.tenantId(), grant.clientId(), grant.ownerJiacn(), grant.canonicalAgentId()));
     }
     /** Queue the exact fresh observation outside the later quote transaction. A pending reply must
      * commit this command, not roll it back by throwing inside the enqueue transaction. */
@@ -138,10 +165,38 @@ public final class HostingSetupService {
     public boolean isSetupQuote(Actor actor, String quoteId) {
         transaction(actor); return setups.isSetupQuote(actor.tenantId(), actor.clientId(), quoteId);
     }
+    public Setup quoteTarget(Actor actor, String persona, String quoteId) {
+        transaction(actor);
+        var setup = setups.forQuote(actor.tenantId(), actor.clientId(), quoteId);
+        if (setup == null) return null;
+        owned(actor, persona, setup); active(setup);
+        return setup;
+    }
+    /** Joins reserve/binding transaction; no HTTP or Runtime activation happens under its locks. */
+    public void activate(Actor actor, Setup setup, String binding, String lease, long now) {
+        transaction(actor); var grant=active(setup);
+        if (setups.activation(actor.tenantId(), actor.clientId(), setup.setupId()) != null)
+            throw new HostingRentApplicationException(409, "HOSTING_SETUP_ALREADY_ACTIVATED");
+        if (transport.activate(grant)!=1) throw new HostingRentApplicationException(409,"HOSTING_SETUP_CONFLICT");
+        try { setups.activate(setup,setup.setupId(),binding,lease); }
+        catch (org.springframework.dao.DuplicateKeyException conflict) { throw new HostingRentApplicationException(409,"HOSTING_SETUP_CONFLICT"); }
+    }
+
+    public void revokeLease(String tenant, String client, String owner, String agent, String binding, String lease, long now) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Release requires business transaction");
+        scope.requireAdmitted(tenant, client);
+        var activation = setups.leaseActivation(tenant, client, lease);
+        if (activation == null) return; // Historical transitions have no outbound authority.
+        var grant=transport.lock(tenant,client,activation.authorizationId());
+        if (!activation.bindingId().equals(binding) || grant==null || !grant.ownerJiacn().equals(owner) || !grant.canonicalAgentId().equals(agent)) throw rejected();
+        exchanges.revoke(tenant,client,activation.authorizationId(),now);
+    }
+
     private static Map<String,Object> subject(Setup setup) {
         return Map.of("tenantId", setup.tenantId(), "clientId", setup.clientId(), "ownerJiacn", setup.ownerJiacn(), "canonicalAgentId", setup.canonicalAgentId());
     }
     private static Map<String,Object> message(Setup setup, String method, String messageId) {
-        return Map.of("protocolVersion", 1, "requestId", setup.setupId(), "messageType", "hosting." + method, "messageId", messageId, "data", subject(setup));
+        return Map.of("protocolVersion", 1, "requestId", setup.setupId(), "messageType", "hosting." + method, "messageId", messageId, "data", "capabilities".equals(method)
+                ? Map.of("tenantId", setup.tenantId(), "clientId", setup.clientId(), "ownerJiacn", setup.ownerJiacn()) : subject(setup));
     }
 }

@@ -43,6 +43,7 @@ final class EconomyOperationWire {
     record AgentTaskClaimReceiptView(String taskId, String agentId, String quoteId, String status, String taskVersion, Long claimedAt) { }
     static AgentTaskClaimReceiptView from(AgentTaskClaimReceiptDTO v) { return v == null ? null : new AgentTaskClaimReceiptView(v.taskId(), v.agentId(), v.quoteId(), v.status(), v.taskVersion(), epoch(v.claimedAt())); }
     static Object hosting(Object value) {
+        if (value instanceof cn.jia.agent.hosting.HostingHostService.View || value instanceof cn.jia.agent.hosting.HostingHostService.Page) return value;
         if (value instanceof cn.jia.agent.hosting.HostingSetupService.View v) return v;
         if (value instanceof HostingRentApplicationService.QuoteView v) return from(v);
         if (value instanceof HostingRentApplicationService.LeaseView v) return from(v);

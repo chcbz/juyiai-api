@@ -1,0 +1,85 @@
+{
+  "authorization": {
+    "authorizationId": "hca_fixture",
+    "hostId": "fixture-host",
+    "tenantId": "0",
+    "clientId": "fixture-client",
+    "ownerJiacn": "fixture-owner",
+    "canonicalAgentId": "agt_outbound_new"
+  },
+  "request": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "runtimeInstanceId": "fixture-instance-1",
+      "result": null
+    }
+  },
+  "response": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "code": "E0",
+    "msg": "ok",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "acknowledgedMessageId": null,
+      "command": {
+        "protocolVersion": 1,
+        "requestId": "request-fixture",
+        "messageType": "hosting.target",
+        "messageId": "setup-target",
+        "data": {
+          "tenantId": "0",
+          "clientId": "fixture-client",
+          "ownerJiacn": "fixture-owner",
+          "canonicalAgentId": "agt_outbound_new"
+        }
+      }
+    }
+  },
+  "activationResponse": {
+    "protocolVersion": 1,
+    "requestId": "http-request-fixture",
+    "code": "E0",
+    "msg": "ok",
+    "data": {
+      "authorizationId": "hca_fixture",
+      "hostId": "fixture-host",
+      "acknowledgedMessageId": null,
+      "command": null
+    }
+  },
+  "registrationRequest": {
+    "protocolVersion": 1,
+    "requestId": "setup-http",
+    "data": {
+      "mode": "local",
+      "hostId": "fixture-host"
+    }
+  },
+  "registrationResponse": {
+    "protocolVersion": 1,
+    "requestId": "setup-http",
+    "code": "E0",
+    "msg": "ok",
+    "data": {
+      "setupId": "hca_setup_fixture",
+      "personaCode": "wuyong",
+      "agentId": "agt_setup_fixture",
+      "mode": "local",
+      "status": "WAITING_INVENTORY",
+      "authorization": {
+        "authorizationId": "hca_setup_fixture",
+        "hostId": "fixture-host",
+        "tenantId": "0",
+        "clientId": "fixture-client",
+        "ownerJiacn": "fixture-owner",
+        "canonicalAgentId": "agt_setup_fixture"
+      }
+    }
+  },
+  "targetInventorySource": "TARGET"
+}
