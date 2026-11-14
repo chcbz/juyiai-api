@@ -773,6 +773,10 @@ class JuyitingWorkflowMySqlTest {
             assertEquals("COMMITTED", progress.get("state"));
             assertNotNull(progress.get("childRequestId"));
             assertEquals(instruction, jdbc.queryForObject("SELECT review_reason FROM agent_task_formal_delivery WHERE delivery_id='delivery'", String.class));
+            var history = revision.domain.context.getBean(cn.jia.agent.service.AgentTaskFormalDeliveryReadService.class)
+                    .listForTaskOwner("0", "client", "owner", "task");
+            assertEquals(instruction, history.getFirst().getReviewReason());
+            revision.committedOnce();
             assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM chat_request", Integer.class));
             assertEquals("SENT", jdbc.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?", String.class, revision.event.getEventId()));
         }

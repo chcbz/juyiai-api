@@ -214,7 +214,7 @@ public class AgentTaskFormalDeliveryReadServiceImpl implements AgentTaskFormalDe
         }
         if (state == AgentTaskFormalDeliveryState.CHANGES_REQUESTED
                 && (delivery.getReviewedAt() == null || delivery.getReviewedAt() <= 0
-                        || !text(delivery.getReviewReason(), 4_000))) {
+                        || !reviewText(delivery.getReviewReason(), 4_000))) {
             throw unavailable("Rework formal delivery has an invalid review");
         }
     }
@@ -229,6 +229,12 @@ public class AgentTaskFormalDeliveryReadServiceImpl implements AgentTaskFormalDe
     private static boolean exact(String value, int maxLength) {
         return value != null && !value.isEmpty() && !value.isBlank() && value.length() <= maxLength
                 && value.equals(value.strip()) && value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static boolean reviewText(String value, int maxLength) {
+        return value != null && !value.isBlank() && value.length() <= maxLength
+                && value.equals(value.strip())
+                && value.codePoints().noneMatch(c -> Character.isISOControl(c) && c != '\n' && c != '\r' && c != '\t');
     }
 
     private static boolean text(String value, int maxLength) {

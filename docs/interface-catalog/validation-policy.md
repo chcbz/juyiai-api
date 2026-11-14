@@ -161,3 +161,5 @@ AMQP/WS同一wire重复限制128KiB无独立依据，改为与transport真实MED
 范围：`AgentTaskFormalDeliveryDecisionServiceImpl` 的 `reviewReason` 与 `AgentTaskFormalDeliveryDaoImpl` 同字段持久化。修改理由是自然语言正文，不是标识符；允许 LF、CR、TAB，原样保存，不压平或截断。保留既有非空、首尾规范、4000 UTF-16 单元上限及其他控制字符限制，不改变 summary/purpose/ID 校验。此修正不扩展现有字段长度合同。
 
 实际风险与失败范围：合法的多行 REVISION_REQUEST 在决定服务中被误拒，会使决定、子请求及 outbox ACK 同事务回滚，表现为永久 QUEUED；应允许该正文进入原事务，而非改成前端成功或重提交。身份、批次版本、幂等和资金规则不变。定向回归：`AgentTaskFormalDeliveryDecisionServiceImplTest` 多行参数，`JuyitingWorkflowMySqlTest.multilineRevisionCreatesExactlyOneChildAndPreservesReasonOnRealMysql` 验证真实 consumer/决定/DAO/子请求/ACK 与逐字保存；构建和线上状态见任务 handoff，不因本节写入视为通过。
+
+同字段真实读依赖：`AgentTaskFormalDeliveryReadServiceImpl` 的修改历史投影以及 Web `useFormalDeliveries` 必须同域接受 LF/CR/TAB，不能出现写入后历史读取不可用。MySQL回归读取已写历史并比对原文；Web `formal-delivery-od10` 验证合法多行和NUL拒绝。其他字段规则不随之放宽。
