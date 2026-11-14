@@ -53,7 +53,7 @@ class RecommendationCostRecorderTest {
         assertEquals("started", started.receiptId()); assertEquals("responded", completed.receiptId());
         assertEquals(new BigDecimal("0.000220"), TokenUsageCost.assess(completed.normalizedUsage(), completed.price()).costYuan());
         assertTrue(completed.rawUsageJson().contains("provider-receipt"));
-        verify(prices, times(1)).find(anyString(), anyString(), anyString());
+        verify(prices, times(1)).find(new cn.jia.economy.service.EconomyScope(CONTEXT.tenantId(), CONTEXT.clientId()), "channel", "model", "standard");
     }
     @Test void missingActualTierKeepsRawUsagePendingInsteadOfSubstitutingRequestedTier() throws Exception {
         var recorder = recorder(); var attempt = recorder.begin(CONTEXT, "model");
