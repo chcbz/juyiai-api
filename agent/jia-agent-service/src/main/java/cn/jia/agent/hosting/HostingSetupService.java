@@ -30,7 +30,10 @@ public final class HostingSetupService {
     }
     public record Authorization(String authorizationId, String hostId, String tenantId,
             String clientId, String ownerJiacn, String canonicalAgentId) { }
-    public record View(String setupId, String personaCode, String agentId, String mode, String status, Authorization authorization) { }
+    public record View(String setupId, String personaCode, String agentId, String mode, String status,
+            // Public target metadata, never a bearer. Keep recursive sanitization of its fields.
+            @cn.jia.core.security.SensitiveField(strategy = cn.jia.core.security.SensitiveStrategy.KEEP)
+            Authorization authorization) { }
     public record Target(Setup setup, ManagedHostingProvisioner.SkillInventory inventory) { }
     private void transaction(Actor actor) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Hosting setup requires admission transaction");
