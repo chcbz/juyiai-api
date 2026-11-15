@@ -593,7 +593,7 @@ public class AgentTaskProviderCostConsentServiceImpl
             case BAD_REQUEST -> failure(Reason.BAD_REQUEST,failure);
             case NOT_FOUND -> failure(Reason.NOT_FOUND,failure);
             case CONFLICT, IDEMPOTENCY_CONFLICT, FORBIDDEN_OPERATION,
-                    PAID_EXECUTION_NOT_AUTHORIZED, TASK_QUOTE_UNAVAILABLE,
+                    PAID_EXECUTION_NOT_AUTHORIZED, TASK_QUOTE_UNAVAILABLE, TASK_DELIBERATION_NOT_READY,
                     TASK_FUNDS_INSUFFICIENT -> failure(Reason.CONFLICT,failure);
             case UNAUTHENTICATED, TASK_QUOTE_PAYER_FORBIDDEN -> failure(Reason.FORBIDDEN,failure);
             case INVALID_PERSISTED_STATE -> failure(Reason.SOURCE_UNAVAILABLE,failure);
