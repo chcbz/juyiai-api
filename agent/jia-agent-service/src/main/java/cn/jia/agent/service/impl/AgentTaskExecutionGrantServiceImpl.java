@@ -70,6 +70,13 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
     private ControlledImageGrantAuthority controlledAuthority;
     private cn.jia.agent.service.TaskAssigneeAuthorityService assigneeAuthority;
     private AgentTaskBountyBootstrapWakeupPublisher wakeups;
+    private cn.jia.agent.service.TaskDeliberationRuntimeLookup deliberationRuntime = scope -> false;
+
+    @Autowired
+    public void setDeliberationRuntime(cn.jia.agent.service.TaskDeliberationRuntimeLookup runtime) {
+        this.deliberationRuntime = Objects.requireNonNull(runtime);
+    }
+
 
     @Autowired
     public void setBootstrapWakeups(AgentTaskBountyBootstrapWakeupPublisher wakeups) {
@@ -283,6 +290,13 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                                 // New assignment only: replay above keeps its original authorization.
                                 // Identity/root -> lease -> wallet; no rent checks on later execution.
                                 hostingWorkAdmission.requireNewWork(scope.tenantId(), scope.clientId(), canonicalAgent);
+                                if ("DELIBERATE".equals(valid.initialOperation())) {
+                                    var executor = target.get();
+                                    if (!deliberationRuntime.ready(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope(
+                                            executor.tenantId(), executor.clientId(), executor.ownerJiacn(), executor.agentId())))
+                                        throw new AgentTaskExecutionGrantException(Reason.TASK_DELIBERATION_NOT_READY,
+                                                "Agent formal deliberation is not ready; no assignment or funds reserved");
+                                }
                                 snapshot.set(validateAndSnapshotInputs(scope,valid.taskId(),valid.inputs()));
                                 // Point-and-deliberate already read the complete catalogue under this root.
                                 // Reuse the same snapshots instead of locking/reading every file twice.

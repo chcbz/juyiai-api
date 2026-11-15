@@ -163,3 +163,9 @@ AMQP/WS同一wire重复限制128KiB无独立依据，改为与transport真实MED
 实际风险与失败范围：合法的多行 REVISION_REQUEST 在决定服务中被误拒，会使决定、子请求及 outbox ACK 同事务回滚，表现为永久 QUEUED；应允许该正文进入原事务，而非改成前端成功或重提交。身份、批次版本、幂等和资金规则不变。定向回归：`AgentTaskFormalDeliveryDecisionServiceImplTest` 多行参数，`JuyitingWorkflowMySqlTest.multilineRevisionCreatesExactlyOneChildAndPreservesReasonOnRealMysql` 验证真实 consumer/决定/DAO/子请求/ACK 与逐字保存；构建和线上状态见任务 handoff，不因本节写入视为通过。
 
 同字段真实读依赖：`AgentTaskFormalDeliveryReadServiceImpl` 的修改历史投影以及 Web `useFormalDeliveries` 必须同域接受 LF/CR/TAB，不能出现写入后历史读取不可用。MySQL回归读取已写历史并比对原文；Web `formal-delivery-od10` 验证合法多行和NUL拒绝。其他字段规则不随之放宽。
+
+### 2026-11-15 新承办正式议事就绪
+
+风险：新接入Agent虽然presence在线，但未声明/声明不兼容/原生能力尚未测量时，先承办并预占费用会永久卡在会话准入。责任层为API已有已认证会话注册表；`TaskDeliberationRuntimeLookup`只是将原`requireNativeReady`结果提供给候选展示与首次承办事务，不维护第二份状态或重验协议。锁定真实执行目标归属后、钱包预占之前检查，HTTP409 `TASK_DELIBERATION_NOT_READY`仅拒绝本次新操作，不取消现有授权、不把UNKNOWN转失败、不对已提交的相同key重放再次准入。外部执行者使用自己的owner/binding，事项Owner不代替执行者身份。候选只读结果不代替事务边界检查，因为两次请求之间可能断线。
+
+入口与定向回归：`TypedDeliberationSessionRegistry.ready`、`AgentTaskExecutionGrantServiceImpl` precommit、`AgentExternalServicePolicyServiceImpl`候选投影；同名测试覆盖缺声明、错误声明、缺原生实测、断线/撤销、重复会话、外部Owner、新操作零账务/零授权及原key恢复不重复扣款。运行结果与上线状态独立记录在RUNTIME-LEASE-SEPARATION-20261112 handoff。

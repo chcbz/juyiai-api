@@ -19,6 +19,12 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
     private final AgentTaskMetaDao tasks;
     private final AgentTaskExecutionGrantDao grants;
     private final AgentRuntimeDao runtimes;
+    private TaskDeliberationRuntimeLookup deliberationRuntime = scope -> false;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setDeliberationRuntime(TaskDeliberationRuntimeLookup runtime) {
+        this.deliberationRuntime = Objects.requireNonNull(runtime);
+    }
+
     @Inject public AgentExternalServicePolicyServiceImpl(AgentExternalServicePolicyDao policies,
             AgentIdentityService identities,AgentTaskMetaDao tasks,AgentTaskExecutionGrantDao grants,AgentRuntimeDao runtimes) {
         this.policies=policies;this.identities=identities;this.tasks=tasks;this.grants=grants;this.runtimes=runtimes;
@@ -59,7 +65,7 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,size+1);
         boolean more=rows.size()>size;
         var page=rows.subList(0,Math.min(size,rows.size()));
-        return new Candidates(page.stream().map(i->summary(scope,i)).toList(),more?page.getLast().getCanonicalAgentId():null);
+        return new Candidates(page.stream().map(i->summary(scope,i,true)).toList(),more?page.getLast().getCanonicalAgentId():null);
     }
     public List<AgentTaskAssigneeCandidateDTO> recommendationCandidates(AgentTaskExecutionGrantService.Scope scope,String task) {
         requireTask(scope,task);
@@ -69,7 +75,7 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
             // Same SQL authority as the public picker: active binding, same scope, owned or external opt-in.
             var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,101);
             var page=rows.subList(0,Math.min(100,rows.size()));
-            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(summary(scope,identity),List.of(),identity.getOwnerJiacn()));
+            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(summary(scope,identity,true),List.of(),identity.getOwnerJiacn()));
             if(rows.size()<=100)return List.copyOf(result);
             String next=page.getLast().getCanonicalAgentId();
             if(next.equals(after))throw new IllegalStateException("Candidate pagination did not advance");
@@ -83,17 +89,19 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         var identity=policies.identity(scope.tenantId(),scope.clientId(),grant.getTargetAgentId());
         if(identity==null || !Objects.equals(identity.getOwnerJiacn(),grant.getExecutorOwnerJiacn())
                 || !Objects.equals(identity.getBindingId(),grant.getExecutorBindingId())) return null;
-        return summary(scope,identity);
+        return summary(scope,identity,false);
     }
-    private AgentTaskTargetSummaryDTO summary(AgentTaskExecutionGrantService.Scope scope,AgentIdentityRegistryEntity identity) {
+    private AgentTaskTargetSummaryDTO summary(AgentTaskExecutionGrantService.Scope scope,AgentIdentityRegistryEntity identity,boolean newAssignment) {
         var runtime=runtimes.findByAgentId(identity.getCanonicalAgentId());
         boolean valid=runtime!=null && Objects.equals(runtime.getClientId(),scope.clientId())
                 && Objects.equals(runtime.getOwnerJiacn(),identity.getOwnerJiacn())
                 && Objects.equals(runtime.getBindingId(),identity.getBindingId());
+        boolean ready = !newAssignment || deliberationRuntime.ready(new TaskDeliberationRuntimeLookup.Scope(
+                scope.tenantId(), scope.clientId(), identity.getOwnerJiacn(), identity.getCanonicalAgentId()));
         // Public profile source is optional. Never expose the internal login as a nickname.
         return new AgentTaskTargetSummaryDTO(identity.getCanonicalAgentId(),valid?runtime.getName():identity.getCanonicalAgentId(),
                 null,scope.ownerJiacn().equals(identity.getOwnerJiacn()),
-                valid && "ACTIVE".equals(identity.getLifecycleStatus())?runtime.getStatus():"unavailable");
+                valid && ready && "ACTIVE".equals(identity.getLifecycleStatus())?runtime.getStatus():"unavailable");
     }
     private AgentIdentityRegistryEntity owned(AgentTaskExecutionGrantService.Scope scope,String agent) {
         exact(agent,100);var i=policies.identity(scope.tenantId(),scope.clientId(),agent);

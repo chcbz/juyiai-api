@@ -79,6 +79,35 @@ class AgentTaskExecutionGrantServiceImplTest {
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
                 new DirectTransaction(root),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
         service.setAssigneeAuthority(authority);
+        service.setDeliberationRuntime(executor -> true);
+    }
+
+    @Test void unavailableDeliberationRejectsBeforeAssignmentGrantBootstrapAndMoney() {
+        service.setDeliberationRuntime(executor -> false);
+        var failure = assertThrows(AgentTaskExecutionGrantException.class, () ->
+                service.assignForDeliberation(scope(), "task-1", "not-ready", "agent-1", 0, 1,
+                        new AgentTaskExecutionGrantService.Payment("payer-1", "quote-1", "rec-1")));
+        assertEquals("TASK_DELIBERATION_NOT_READY", failure.code());
+        assertNull(root.getAssignedAgentId()); assertEquals(0L, root.getTaskVersion());
+        assertTrue(grants.byAction.isEmpty()); assertTrue(bootstraps.byAction.isEmpty());
+        verifyNoInteractions(billing);
+    }
+
+    @Test void readinessUsesExternalExecutorOwnerAndDoesNotGateOriginalReplay() {
+        when(authority.lockForAssignment("0", "client", "owner", "agent-1"))
+                .thenReturn(new cn.jia.agent.service.TaskAssigneeAuthorityService.Target(
+                        "0", "client", "external-owner", "agent-1", 17L, 1L));
+        var seen = new java.util.ArrayList<cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope>();
+        service.setDeliberationRuntime(executor -> { seen.add(executor); return true; });
+        var original = service.assignForDeliberation(scope(), "task-1", "external-ready", "agent-1", 0, 1,
+                new AgentTaskExecutionGrantService.Payment("payer-1", "quote-1", "rec-1"));
+        assertEquals(java.util.List.of(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope(
+                "0", "client", "external-owner", "agent-1")), seen);
+        service.setDeliberationRuntime(executor -> { fail("Original intent must not reauthorize or reserve again"); return false; });
+        var replay = service.assignForDeliberation(scope(), "task-1", "external-ready", "agent-1", 0, 1,
+                new AgentTaskExecutionGrantService.Payment("payer-1", "quote-1", "rec-1"));
+        assertEquals(original.getGrantId(), replay.getGrantId());
+        verify(billing, times(1)).reserve(any(), anyString(), any(), anyString());
     }
 
     @Test void lockedRentRejectsNewAssignmentBeforeMoneyButReplaysOriginalAssignment() {
@@ -246,6 +275,7 @@ class AgentTaskExecutionGrantServiceImplTest {
         var observed=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,
                 identities,transactions,new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
         observed.setAssigneeAuthority(authority);
+        observed.setDeliberationRuntime(executor -> true);
         clearInvocations(identities,authority);
 
         var context=observed.observeFollowupContext(scope(),"task-1","agent-1");
@@ -433,6 +463,7 @@ class AgentTaskExecutionGrantServiceImplTest {
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
                 new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
         service.setAssigneeAuthority(authority);
+        service.setDeliberationRuntime(executor -> true);
         bootstraps.failInsert=true;
         assertThrows(IllegalStateException.class,
                 ()->service.assignForDeliberation(scope(),"task-1","point-rollback","agent-1",0,1, new AgentTaskExecutionGrantService.Payment("payer-1", "quote-1", "rec-1")));
@@ -641,6 +672,7 @@ class AgentTaskExecutionGrantServiceImplTest {
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
                 new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
         service.setAssigneeAuthority(authority);
+        service.setDeliberationRuntime(executor -> true);
         assertThrows(IllegalStateException.class,
                 () -> service.assignAndGrant(scope(),"task-1","key-rollback",request(), "payer-1"));
         assertNull(root.getAssignedAgentId());

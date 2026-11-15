@@ -12,7 +12,7 @@ import java.util.function.BooleanSupplier;
 
 /** Live authenticated-session index. Ambiguity is unavailable rather than an arbitrary winner. */
 @Component
-public final class TypedDeliberationSessionRegistry {
+public final class TypedDeliberationSessionRegistry implements cn.jia.agent.service.TaskDeliberationRuntimeLookup {
     public record Scope(String tenantId, String ownerJiacn, String clientId) { }
     public record Session(String sessionId, Scope scope, String agentId,
             TypedDeliberationDeclaration declaration, long registeredAt,
@@ -75,6 +75,14 @@ public final class TypedDeliberationSessionRegistry {
         }
         return new Ready(selected.sessionId(), selected.agentId(),
                 selected.declaration().supportedOperations(), selected.declaration().frozenReceipt());
+    }
+
+    /** Reuse the exact admission predicate; no independent readiness cache or presence inference. */
+    @Override public boolean ready(cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope scope) {
+        try {
+            requireNativeReady(new Scope(scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
+            return true;
+        } catch (IllegalStateException unavailable) { return false; }
     }
 
     /** Native task discussion must not freeze an empty action catalogue during startup.

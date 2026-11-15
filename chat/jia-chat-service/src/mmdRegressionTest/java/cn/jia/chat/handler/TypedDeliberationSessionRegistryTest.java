@@ -8,6 +8,28 @@ class TypedDeliberationSessionRegistryTest {
     private final TypedDeliberationSessionRegistry registry=new TypedDeliberationSessionRegistry();
     private final TypedDeliberationSessionRegistry.Scope scope=
             new TypedDeliberationSessionRegistry.Scope("0","owner","client");
+    @Test void assignmentReadinessReusesNativeAdmissionAndLiveBinding() {
+        var executor = new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0", "client", "owner", "agent");
+        assertFalse(registry.ready(executor));
+        for (Object raw : new Object[]{null, java.util.Map.of("schemaVersion", 1),
+                TypedDeliberationDeclarationTest.declaration("UNAVAILABLE"), TypedDeliberationDeclarationTest.declaration("READY")}) {
+            registry.register("s1", "0", "owner", "client", "agent", raw);
+            assertFalse(registry.ready(executor));
+        }
+        var raw = TypedDeliberationDeclarationTest.declaration("READY");
+        raw.put("nativeExecution", java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
+                "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain")));
+        var live = new java.util.concurrent.atomic.AtomicBoolean(true);
+        registry.register("s1", "0", "owner", "client", "agent", raw, live::get);
+        assertTrue(registry.ready(executor));
+        assertFalse(registry.ready(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0", "client", "task-owner", "agent")));
+        live.set(false); assertFalse(registry.ready(executor)); live.set(true);
+        registry.register("s2", "0", "owner", "client", "agent", raw);
+        assertFalse(registry.ready(executor));
+        registry.remove("s2"); assertTrue(registry.ready(executor));
+        registry.remove("s1"); assertFalse(registry.ready(executor));
+    }
+
     @Test void exactOneCurrentReadySessionIsSelected() {
         registry.register("s1","0","owner","client","agent",
                 TypedDeliberationDeclarationTest.declaration("READY"));

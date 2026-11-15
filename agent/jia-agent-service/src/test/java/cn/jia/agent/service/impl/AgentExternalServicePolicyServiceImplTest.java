@@ -29,6 +29,20 @@ class AgentExternalServicePolicyServiceImplTest {
         when(policies.receiptForUpdate(eq("0"),eq("client"),eq("B"),anyString())).thenAnswer(i->receipts.get(i.getArgument(3)));
         doAnswer(i->{AgentExternalServicePolicyEntity row=i.getArgument(0);latest.put(row.getAgentId(),row);receipts.put(row.getIdempotencyKey(),row);return null;}).when(policies).insert(any());
     }
+    @Test void onlineCandidateWithoutNativeReadinessIsUnavailableAndCanRecover() {
+        when(tasks.findByTaskIdInOwnerScope("0","client","B","task")).thenReturn(new AgentTaskMetaEntity());
+        var identity = new AgentIdentityRegistryEntity().setCanonicalAgentId("external-agent")
+                .setOwnerJiacn("executor-owner").setBindingId(7L).setLifecycleStatus("ACTIVE");
+        when(policies.candidates("0","client","B","",101)).thenReturn(List.of(identity));
+        var runtime = new AgentRuntimeEntity(); runtime.setClientId("client"); runtime.setOwnerJiacn("executor-owner");
+        runtime.setBindingId(7L); runtime.setStatus("online"); runtime.setName("Agent");
+        when(runtimes.findByAgentId("external-agent")).thenReturn(runtime);
+        assertEquals("unavailable", service.recommendationCandidates(owner,"task").getFirst().target().availability());
+        service.setDeliberationRuntime(executor -> executor.equals(new TaskDeliberationRuntimeLookup.Scope(
+                "0", "client", "executor-owner", "external-agent")));
+        assertEquals("online", service.recommendationCandidates(owner,"task").getFirst().target().availability());
+    }
+
     @Test void independentSwitchesDefaultOffAndOriginalReceiptSurvivesLaterWrites() {
         assertFalse(service.read(owner,"one").enabled());
         var first=service.write(owner,"one","key-1",true,0);
