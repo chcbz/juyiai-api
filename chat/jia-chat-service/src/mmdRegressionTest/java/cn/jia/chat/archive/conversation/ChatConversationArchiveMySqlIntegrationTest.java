@@ -7,7 +7,6 @@ import cn.jia.chat.config.ChatSchemaReadiness;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -36,10 +35,8 @@ import java.sql.SQLException;
 import java.util.Map;
 
 /** Isolated MySQL 8 DDL, transaction, scope and archive-recovery evidence; no Provider is called. */
-@EnabledIfEnvironmentVariable(named = "MMD_U1_REFERENCE_MYSQL_URL", matches = ".+")
-class ChatConversationArchiveMySqlIntegrationTest {
+class ChatConversationArchiveMySqlIntegrationTest extends cn.jia.agent.skill.SkillManagementMySqlFixture {
     private static final Scope OWNER = new Scope("0", "owner", "client");
-    private JdbcTemplate admin;
     private JdbcTemplate jdbc;
     private DriverManagerDataSource source;
     private JdbcChatConversationArchiveStore store;
@@ -49,14 +46,12 @@ class ChatConversationArchiveMySqlIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        var target = ChatConversationArchiveMySqlTestGuard.requireDisposable(System.getenv());
-        namespace = target.databasePrefix() + "_archive_";
+        namespace = "cyf_native_save_";
         database = namespace + UUID.randomUUID().toString().substring(0, 8);
-        admin = new JdbcTemplate(dataSource(target.adminUrl(), target.user(), target.password()));
         assertTrue(admin.queryForObject("SELECT VERSION()", String.class).startsWith("8."));
         admin.execute("CREATE DATABASE `" + database
                 + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
-        source = dataSource(databaseUrl(target.adminUrl(), database), target.user(), target.password());
+        source = source(database);
         jdbc = new JdbcTemplate(source);
         createSourceTables();
         execute("db/chat-conversation-archive-schema.sql");
@@ -248,6 +243,29 @@ class ChatConversationArchiveMySqlIntegrationTest {
     }
 
     @Test
+    void privateNativeFileSaveUsesExactConversationAuthorityWithoutTaskOrGrant() {
+        insertCommittedAsset();
+        jdbc.update("UPDATE chat_conversation SET conversation_scope_type='private',conversation_scope_key='agent:agent',task_id=NULL,target_agent_id='agent'");
+        jdbc.update("UPDATE chat_interaction_step SET task_id=NULL,state='RESULT_COMMITTED'");
+        jdbc.update("UPDATE chat_step_execution_link SET state='RESULT_COMMITTED'");
+        jdbc.update("UPDATE chat_request SET aggregate_state='RESULT_COMMITTED'");
+        var source = transactions.required(() -> store.findAuthorizedSourceForUpdate(OWNER,"42","asset",1,"agent"));
+        assertNotNull(source);assertNull(source.taskId());assertEquals("execution",source.executionId());
+        assertNull(store.findAuthorizedSource(new Scope("0","other","client"),"42","asset",1,"agent"));
+        for(String[] damage : new String[][] {
+                {"chat_conversation","task_id","invented",null},
+                {"chat_interaction_step","task_id","invented",null},
+                {"chat_conversation","target_agent_id","another","agent"},
+                {"chat_interaction_step","target_agent_id","another","agent"},
+                {"chat_conversation","conversation_scope_key","agent:another","agent:agent"},
+                {"chat_conversation","lifecycle_generation","4","3"}}) {
+            jdbc.update("UPDATE "+damage[0]+" SET "+damage[1]+"=?",damage[2]);assertAssetRejected();
+            jdbc.update("UPDATE "+damage[0]+" SET "+damage[1]+"=?",damage[3]);
+            assertNotNull(store.findAuthorizedSource(OWNER,"42","asset",1,"agent"));
+        }
+    }
+
+    @Test
     void committedAssetAuthorizationRejectsEveryNonterminalLinkAndExactScopeDrift() {
         insertCommittedAsset();
         for (String state : new String[]{"RUNNING", "WAITING_ADMISSION", "FAILED", "INPUTS_REVOKED"}) {
@@ -316,7 +334,7 @@ class ChatConversationArchiveMySqlIntegrationTest {
                 + "('asset','0','owner','client','42',3,'producer','step','execution','run','output','image/png',?,10,1)",
                 "a".repeat(64));
         jdbc.update("INSERT INTO chat_interaction_step VALUES "
-                + "('step','0','owner','client','producer',1,'42',3,'task-1','EXECUTE','OUTPUT_COMMITTED')");
+                + "('step','0','owner','client','producer',1,'42',3,'task-1','EXECUTE','OUTPUT_COMMITTED','agent')");
         jdbc.update("INSERT INTO chat_step_execution_link VALUES "
                 + "('0','owner','client','step','execution','OUTPUT_COMMITTED')");
         jdbc.update("INSERT INTO chat_request VALUES "
@@ -330,7 +348,7 @@ class ChatConversationArchiveMySqlIntegrationTest {
                   jiacn VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL,
                   conversation_type VARCHAR(20), conversation_scope_type VARCHAR(20),
                   conversation_scope_key VARCHAR(120), task_id VARCHAR(64), deleted_at BIGINT,
-                  lifecycle_generation BIGINT NOT NULL, status INT DEFAULT 0, target_agent_ids JSON
+                  lifecycle_generation BIGINT NOT NULL, status INT DEFAULT 0, target_agent_ids JSON, target_agent_id VARCHAR(100)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
                 """);
         jdbc.execute("""
@@ -353,7 +371,7 @@ class ChatConversationArchiveMySqlIntegrationTest {
                 CREATE TABLE chat_interaction_step (
                   step_id VARCHAR(64),tenant_id VARCHAR(50),owner_jiacn VARCHAR(50),client_id VARCHAR(50),
                   request_id VARCHAR(100),request_revision BIGINT,conversation_id VARCHAR(100),
-                  conversation_generation BIGINT,task_id VARCHAR(100),kind VARCHAR(20),state VARCHAR(30)
+                  conversation_generation BIGINT,task_id VARCHAR(100),kind VARCHAR(20),state VARCHAR(30),target_agent_id VARCHAR(100)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
                 """);
         jdbc.execute("""
@@ -414,22 +432,6 @@ class ChatConversationArchiveMySqlIntegrationTest {
     private String showCreate() {
         return jdbc.queryForObject("SHOW CREATE TABLE chat_conversation_archive_operation",
                 (result, row) -> result.getString(2));
-    }
-
-    private static DriverManagerDataSource dataSource(String url, String user, String password) {
-        DriverManagerDataSource dataSource = new DriverManagerDataSource();
-        dataSource.setDriverClassName("com.mysql.cj.jdbc.Driver");
-        dataSource.setUrl(url);
-        dataSource.setUsername(user);
-        dataSource.setPassword(password);
-        return dataSource;
-    }
-
-    private static String databaseUrl(String base, String database) {
-        int query = base.indexOf('?');
-        String suffix = query < 0 ? "" : base.substring(query);
-        String plain = query < 0 ? base : base.substring(0, query);
-        return plain.substring(0, plain.lastIndexOf('/') + 1) + database + suffix;
     }
 
     private static String sha(String value) {

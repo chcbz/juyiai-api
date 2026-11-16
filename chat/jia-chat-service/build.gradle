@@ -461,6 +461,11 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
     java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
     java.include 'cn/jia/chat/service/ChatPrivateNativeAdmissionMySqlTest.java'
+    java.srcDir 'src/mmdRegressionTest/java'
+    java.include 'cn/jia/chat/archive/conversation/ChatConversationArchiveServiceTest.java'
+    java.include 'cn/jia/chat/archive/conversation/ChatConversationArchiveMySqlIntegrationTest.java'
+    java.include 'cn/jia/chat/api/ChatConversationArchiveControllerTest.java'
+    java.include 'cn/jia/agent/service/impl/PersonalWorkspaceServiceImplTest.java'
     java.srcDirs('../../agent/jia-agent-service/src/mmdU1BootstrapOutbox/java', 'src/skillManagementContractTest/java')
     java.include 'cn/jia/agent/service/impl/NativeCancellationFixture.java'
     java.include 'cn/jia/agent/service/impl/NativeConversationQueueMySqlTest.java'
@@ -506,6 +511,10 @@ tasks.register('nativeSkillResultRegression', Test) {
         includeTestsMatching 'cn.jia.agent.api.PersonalWorkspaceExecutionControllerTest'
         includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeAdmissionTest'
         includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeAdmissionMySqlTest'
+        includeTestsMatching 'cn.jia.chat.archive.conversation.ChatConversationArchiveServiceTest'
+        includeTestsMatching 'cn.jia.chat.archive.conversation.ChatConversationArchiveMySqlIntegrationTest'
+        includeTestsMatching 'cn.jia.chat.api.ChatConversationArchiveControllerTest'
+        includeTestsMatching 'cn.jia.agent.service.impl.PersonalWorkspaceServiceImplTest'
         includeTestsMatching 'cn.jia.agent.service.impl.NativeConversationQueueMySqlTest'
         includeTestsMatching 'cn.jia.agent.service.impl.NativeConversationWorkDiscoveryMySqlTest'
         includeTestsMatching 'cn.jia.agent.service.impl.TaskExecutionCancellationMySqlTest'
@@ -789,4 +798,9 @@ tasks.named('compileTestJava') {
 // Admission needs only this schema, not duplicated unrelated MMD resource catalogs.
 tasks.named(nativeSkillResultSourceSet.processResourcesTaskName) {
     from('src/mmdRegressionTest/resources') { include 'contracts/revision-chat-tables.sql' }
+}
+
+// The explicit selected-file save suite uses the same owned MySQL lifecycle.
+tasks.named(mmdU3ConversationArchiveSourceSet.compileJavaTaskName) {
+    source file('../../agent/jia-agent-service/src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
 }

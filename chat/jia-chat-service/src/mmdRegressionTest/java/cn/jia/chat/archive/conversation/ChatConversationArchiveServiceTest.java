@@ -49,10 +49,11 @@ class ChatConversationArchiveServiceTest {
                         message, start, end, sha(selected.getBytes(StandardCharsets.UTF_8))));
     }
 
-    private void readyAsset(String asset) {
+    private void readyAsset(String asset) { readyAsset(asset,"task-1"); }
+    private void readyAsset(String asset,String task) {
         String hash = sha(ASSET_BYTES);
         store.sources.put(asset, new Source(asset, 1, "42", 3, "request-1", 1,
-                "step-1", "task-1", "execution-1", "run-1", "output-1",
+                "step-1", task, "execution-1", "run-1", "output-1",
                 "image/png", hash, ASSET_BYTES.length));
         when(executions.openConversationOutput(any(), eq("execution-1"), eq("run-1"), eq("output-1")))
                 .thenAnswer(i -> new PersonalWorkspaceExecutionService.ConversationDownload("execution-1",
@@ -86,6 +87,17 @@ class ChatConversationArchiveServiceTest {
         var captured=ArgumentCaptor.forClass(PersonalWorkspaceService.ConversationArchiveCommand.class);
         verify(workspace).archiveConversationAsset(any(),captured.capture());
         try(var source=captured.getValue().source().open()) {assertArrayEquals(ASSET_BYTES,source.readAllBytes());}
+    }
+
+    @Test
+    void privateFileSaveUsesExecutionAddressAndReplaysOriginalReceiptWithoutAnotherFile() throws Exception {
+        readyAsset("private-file",null);
+        var command=asset("private-save-key","private-file");
+        var saved=service.archive(OWNER,command);
+        assertEquals("saved",saved.state());
+        assertEquals(saved,service.archive(OWNER,command));
+        verify(executions,times(1)).openConversationOutput(any(),eq("execution-1"),eq("run-1"),eq("output-1"));
+        verify(workspace,times(1)).archiveConversationAsset(any(),any());
     }
 
     @Test
