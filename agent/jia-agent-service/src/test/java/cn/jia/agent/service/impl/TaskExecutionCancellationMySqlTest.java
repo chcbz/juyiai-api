@@ -203,7 +203,9 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         row("staged","owner","task","TASK","OUTPUT_STAGED",1);
         for(String terminal:List.of("OUTPUT_COMMITTED","RESULT_COMMITTED","FAILED","INPUTS_REVOKED","CANCELLED"))
             row(terminal,"owner","task","CONVERSATION",terminal,1);
-        row("private","owner","task","PRIVATE","QUEUED",1);row("foreign","other","task","CONVERSATION","QUEUED",1);
+        row("private","owner",null,"CONVERSATION","QUEUED",6);
+        jdbc.update("UPDATE agent_personal_workspace_execution SET business_scope='PRIVATE',assignment_revision=NULL WHERE execution_id='private'");
+        row("retired5","owner","task","CONVERSATION","QUEUED",5);row("foreign","other","task","CONVERSATION","QUEUED",1);
         row("other-task","owner","other","CONVERSATION","QUEUED",1);
         jdbc.update("""
             INSERT INTO agent_personal_workspace_execution_output
@@ -219,7 +221,7 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         var attachment=skills.find("0","client","owner","active");assertEquals("CANCELLED",attachment.getPhase());
         assertTrue(attachment.getEffectsJson().contains("UNKNOWN")); assertTrue(attachment.getResultManifestJson().contains("preserved"));assertEquals(3L,attachment.getVersion());
         for(String terminal:List.of("OUTPUT_COMMITTED","RESULT_COMMITTED","FAILED","INPUTS_REVOKED","CANCELLED"))assertEquals(terminal,state(terminal));
-        for(String untouched:List.of("private","foreign","other-task"))assertEquals("QUEUED",state(untouched));
+        for(String untouched:List.of("private","retired5","foreign","other-task"))assertEquals("QUEUED",state(untouched));
         cancel();assertEquals(3L,skills.find("0","client","owner","active").getVersion());
         verify(events,times(1)).publishEvent(any(WorkspaceExecutionProjectionHint.class));
     }
@@ -265,7 +267,7 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         verify(events,times(1)).publishEvent(any(WorkspaceExecutionProjectionHint.class));
     }
     @Test void requiresOuterTransactionAndWakeupFailureDoesNotUndoCommittedCancellation() {
-        row("active","owner","task","CONVERSATION","QUEUED",1);
+        row("active","owner","task","CONVERSATION","QUEUED",6);skill("active","RUNNING");
         assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,
                 ()->service.cancelTaskExecutions("0","client","owner","task"));
         doThrow(new IllegalStateException("local receiver unavailable")).when(events).publishEvent(any(WorkspaceExecutionProjectionHint.class));
