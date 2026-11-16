@@ -1127,3 +1127,11 @@ tasks.register('taskQuoteRegression', Test) {
 tasks.named('compileTestJava') {
     source file('src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
 }
+
+// Billing consumes the same native cancellation fixture and owned MySQL lifecycle.
+[tasks.named('compileTaskQuoteRegressionJava'), tasks.named('compileManagedHostingRegressionJava')].each { provider ->
+    provider.configure {
+        source file('src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
+        source file('src/test/java/cn/jia/agent/service/impl/NativeCancellationFixture.java')
+    }
+}

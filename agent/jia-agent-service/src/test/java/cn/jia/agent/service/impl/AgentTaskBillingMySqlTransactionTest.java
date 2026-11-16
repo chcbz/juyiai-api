@@ -79,8 +79,7 @@ import static org.mockito.Mockito.*;
  * Only identity/material observations, the external wakeup receiver and explicit fault injection
  * are test doubles. No task, event, grant, outbox or money persistence is implemented by this test.
  */
-@EnabledIfEnvironmentVariable(named = "ECO_V0_W02_MYSQL_URL", matches = ".+")
-class AgentTaskBillingMySqlTransactionTest {
+class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManagementMySqlFixture {
     private static final String TENANT = "0", CLIENT = "billing-client", OWNER = "billing-owner";
     private static final String PAYER = "billing-user", TASK = "billing-task", AGENT = "agent-1";
     private static final AgentTaskExecutionGrantService.Scope SCOPE =
@@ -89,7 +88,7 @@ class AgentTaskBillingMySqlTransactionTest {
             new TaskBillingService.Task(new EconomyScope(TENANT, CLIENT), OWNER, TASK);
     private static final Path DDL = Path.of("../jia-agent-mapper/src/main/resources/db");
 
-    private JdbcTemplate admin, jdbc, independent;
+    private JdbcTemplate jdbc, independent;
     private String database;
     private DataSourceTransactionManager manager;
     private AgentTaskMutationTransaction roots;
@@ -131,25 +130,12 @@ class AgentTaskBillingMySqlTransactionTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        // Same explicitly acknowledged worker-owned MySQL used by the economy regressions.
-        assertEquals("true", System.getenv("ECO_V0_W02_MYSQL_ISOLATED_FIXTURE"));
-        String baseUrl = System.getenv("ECO_V0_W02_MYSQL_URL");
-        String prefix = System.getenv("ECO_V0_W02_MYSQL_DATABASE_PREFIX");
-        assertTrue(baseUrl.startsWith("jdbc:mysql://"));
-        assertNotNull(prefix); assertTrue(prefix.matches("[a-z][a-z0-9_]{0,23}"));
-        String user = System.getenv("ECO_V0_W02_MYSQL_USER");
-        String password = System.getenv("ECO_V0_W02_MYSQL_PASSWORD");
-        admin = new JdbcTemplate(new DriverManagerDataSource(baseUrl, user, password));
-        assertTrue(admin.queryForObject("SELECT VERSION()", String.class).startsWith("8.0.21"));
-        database = prefix + "_agentbill_" + Long.toUnsignedString(System.nanoTime(), 36);
+        // Owned ephemeral MySQL only; never connect to a configured/production database.
+        database = "cyf_agentbill_" + Long.toUnsignedString(System.nanoTime(), 36);
         admin.execute("CREATE DATABASE `" + database + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
-        int query = baseUrl.indexOf('?');
-        String address = query < 0 ? baseUrl : baseUrl.substring(0, query);
-        String url = address.substring(0, address.indexOf('/', "jdbc:mysql://".length()) + 1)
-                + database + (query < 0 ? "" : baseUrl.substring(query));
-        var source = new DriverManagerDataSource(url, user, password);
+        var source = source(database);
         jdbc = new JdbcTemplate(source);
-        independent = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
+        independent = new JdbcTemplate(source(database));
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
         // Read unchanged production definitions; no parallel hand-written table schema.
         String schema = Files.readString(DDL.resolve("schema.sql"));
