@@ -493,7 +493,10 @@ configurations.named(nativeSkillResultSourceSet.implementationConfigurationName)
 // The workspace preservation fixture authors an actual XLSX; no production preview parser is added.
 dependencies {
     add(nativeSkillResultSourceSet.compileOnlyConfigurationName,
-            "org.apache.poi:poi-ooxml:${libs.versions.poi.ooxml.full.get()}")
+            "org.apache.poi:poi-ooxml:${libs.versions.poi.ooxml.full.get()}") {
+        exclude group: 'org.apache.poi', module: 'poi-ooxml-lite'
+    }
+    add(nativeSkillResultSourceSet.compileOnlyConfigurationName, libs.poi.ooxml.full)
 }
 
 configurations.named(nativeSkillResultSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
