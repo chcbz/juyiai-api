@@ -490,6 +490,12 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     runtimeClasspath += output + compileClasspath
 }
 configurations.named(nativeSkillResultSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
+// The workspace preservation fixture authors an actual XLSX; no production preview parser is added.
+dependencies {
+    add(nativeSkillResultSourceSet.compileOnlyConfigurationName,
+            "org.apache.poi:poi-ooxml:${libs.versions.poi.ooxml.full.get()}")
+}
+
 configurations.named(nativeSkillResultSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
 dependencies {
     add(nativeSkillResultSourceSet.implementationConfigurationName, 'com.h2database:h2')
