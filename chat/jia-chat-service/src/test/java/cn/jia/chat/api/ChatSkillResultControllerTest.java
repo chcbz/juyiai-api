@@ -62,7 +62,7 @@ class ChatSkillResultControllerTest {
                     .andExpect(jsonPath("$.data.stepId").value("step")).andExpect(jsonPath("$.data.requestId").value("request"))
                     .andExpect(jsonPath("$.data.data.answer").value("result")).andExpect(jsonPath("$.data.outputs").isEmpty());
         }
-        verify(jdbc,atLeastOnce()).queryForList(contains("s.kind='EXECUTE' AND e.execution_protocol_version IN (4,5)"),eq("0"),eq("client"),eq("owner"),eq("execution"),eq("42"),eq(1L),eq("task"));
+        verify(jdbc,atLeastOnce()).queryForList(contains("s.kind='EXECUTE' AND e.execution_protocol_version IN (4,5,6)"),eq("0"),eq("client"),eq("owner"),eq("execution"),eq("42"),eq(1L),eq("task"));
         verify(skills,never()).markProjected(any(),any(),any());
     }
     @Test void missingRelationCannotFallBackToLatestResultAndIncompleteChainCannotExposeCompleteResult() throws Exception {
