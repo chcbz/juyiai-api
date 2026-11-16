@@ -119,7 +119,7 @@ class ChatPrivateNativeAdmissionTest {
         verify(executions,times(1)).create(any(),any());
     }
     @Test void linkFailureRollsBackAllEarlierWritesIncludingFirstConversation() {
-        when(steps.insertLink(any())).thenThrow(new IllegalStateException("write failed"));
+        doThrow(new IllegalStateException("write failed")).when(steps).insertLink(any());
         assertThrows(IllegalStateException.class,()->service.admitPrivate("tenant",sender,input()));
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM writes",Integer.class));
         assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
@@ -133,7 +133,7 @@ class ChatPrivateNativeAdmissionTest {
                     assertEquals(8,jdbc.queryForObject("SELECT COUNT(*) FROM writes",Integer.class));
                     return winner;
                 });
-        when(dao.insertRequest(any())).thenThrow(new org.springframework.dao.DuplicateKeyException("request key"));
+        doThrow(new org.springframework.dao.DuplicateKeyException("request key")).when(dao).insertRequest(any());
         clearInvocations(executions);
         var replay=service.admitPrivate("tenant",sender,input);
         assertTrue(replay.admission().replay());assertEquals("42",replay.admission().conversationId());

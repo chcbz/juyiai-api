@@ -769,7 +769,7 @@ public class SkillExecutionServiceTest {
         var point=Arrays.stream(cn.jia.agent.api.ControlledImagePointAndStartController.class.getDeclaredMethods()).map(java.lang.reflect.Method::getName).toList();
         assertFalse(point.contains("submit"));assertTrue(point.contains("get"));
     }
-    @Test void runtimeCredentialLaneRejectsRetiredV3AndOldOutputCommitButKeepsV5() {
+    @Test void runtimeCredentialLaneRejectsRetiredTaskRoutesAndAdmitsOnlyExecutionAddressedNativeRoutes() {
         for(String path:List.of("/internal/agent/tasks/workspace-executions/commands",
                 "/internal/agent/tasks/task/runs/run/inputs",
                 "/internal/agent/tasks/task/runs/run/inputs/input_1/content",
@@ -784,9 +784,10 @@ public class SkillExecutionServiceTest {
             var request=new org.springframework.mock.web.MockHttpServletRequest(path.endsWith("/commands")||path.contains("-commands")||path.contains("/inputs")?"GET":"POST",path);
             assertFalse(cn.jia.agent.security.AgentRuntimeAuthenticationFilter.allowed(request));
         }
-        for(String path:List.of("/internal/agent/tasks/task/runs/run/conversation/resume",
-                "/internal/agent/tasks/task/runs/run/conversation/result-commits/manifest"))
-            assertTrue(cn.jia.agent.security.AgentRuntimeAuthenticationFilter.allowed(new org.springframework.mock.web.MockHttpServletRequest("POST",path)));
+        for(String operation:List.of("resume","result-commits/manifest")) {
+            assertFalse(cn.jia.agent.security.AgentRuntimeAuthenticationFilter.allowed(new org.springframework.mock.web.MockHttpServletRequest("POST","/internal/agent/tasks/task/runs/run/conversation/"+operation)));
+            assertTrue(cn.jia.agent.security.AgentRuntimeAuthenticationFilter.allowed(new org.springframework.mock.web.MockHttpServletRequest("POST","/internal/agent/executions/exec/runs/run/"+operation)));
+        }
     }
     @Test void legacyV4WritesAreRetiredWithoutStateRewrites() {
         execution.setExecutionProtocolVersion(4);String before=skill.getSnapshotJson();
