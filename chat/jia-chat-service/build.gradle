@@ -461,7 +461,6 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
     java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
     java.include 'cn/jia/chat/service/ChatPrivateNativeAdmissionMySqlTest.java'
-    resources.srcDir 'src/mmdRegressionTest/resources'
     java.include 'cn/jia/chat/service/ChatPrivateNativeProjectionTest.java'
     java.include 'cn/jia/chat/service/NativeSkillScriptSessionLookupImplTest.java'
     java.include 'cn/jia/agent/skill/SkillMarketplaceRealTransactionTest.java'
@@ -763,4 +762,9 @@ tasks.register('taskQuoteRegression', Test) {
 // Compile the same owned fixture when using the standard test source set.
 tasks.named('compileTestJava') {
     source file('../../agent/jia-agent-service/src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
+}
+
+// Admission needs only this schema, not duplicated unrelated MMD resource catalogs.
+tasks.named(nativeSkillResultSourceSet.processResourcesTaskName) {
+    from('src/mmdRegressionTest/resources') { include 'contracts/revision-chat-tables.sql' }
 }
