@@ -2,6 +2,7 @@ package cn.jia.chat.service;
 
 import cn.jia.agent.config.PersonalWorkspaceExecutionProperties;
 import cn.jia.agent.config.ControlledImageFollowupV3SchemaInitializer;
+import cn.jia.agent.config.SkillExecutionSchemaInitializer;
 import cn.jia.agent.dao.*;
 import cn.jia.agent.dao.impl.*;
 import cn.jia.agent.mapper.*;
@@ -138,6 +139,13 @@ class ChatPrivateNativeAdmissionMySqlTest extends SkillManagementMySqlFixture {
         assertThrows(IllegalStateException.class,()->service.admitPrivate("0",sender,input()));
         for(String table:ATOMIC_TABLES)assertEquals(0,count(table),table);
         assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+    }
+    @Test void maintenanceDetectorAcceptsNativeSixPairsAndRejectsMissingAttachments() {
+        service.admitPrivate("0",sender,input());
+        var detector=new SkillExecutionSchemaInitializer(jdbc);
+        assertDoesNotThrow(detector::afterPropertiesSet);
+        jdbc.update("DELETE FROM agent_skill_execution");
+        assertThrows(IllegalStateException.class,detector::afterPropertiesSet);
     }
     @Test void changedBodyOrGenerationCannotReuseCommittedRequest() {
         var first=service.admitPrivate("0",sender,input());
