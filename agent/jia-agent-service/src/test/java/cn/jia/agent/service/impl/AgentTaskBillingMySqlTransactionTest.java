@@ -225,6 +225,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(authority.requireGrantTarget(eq(TENANT), eq(CLIENT), eq(OWNER), anyString(), anyString(), anyLong()))
                 .thenReturn(target);
         assignment.setAssigneeAuthority(authority);
+        // Live Agent transport is an external observation; SQL/money remains real here.
+        assignment.setDeliberationRuntime(executor -> {
+            assertEquals(new TaskDeliberationRuntimeLookup.Scope(TENANT, CLIENT, OWNER, AGENT), executor);
+            return true;
+        });
         deliveryReads = proxy(new AgentTaskFormalDeliveryReadServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)), meta),
                 AgentTaskFormalDeliveryReadService.class);
@@ -349,6 +354,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals("submitted", jdbc.queryForObject("SELECT state FROM agent_task_formal_delivery", String.class));
         failEvent = null; decisions.acceptForHostingExpiry(TENANT, CLIENT, TASK, OWNER, command);
         assertEquals("CAPTURED", charge());
+    }
+
+    @Test
+    void unavailableNativeDeliberationRollsBackAssignmentAndReservesNoMoney() {
+        assignment.setDeliberationRuntime(executor -> false);
+        var failure = assertThrows(AgentTaskExecutionGrantException.class, this::assign);
+        assertEquals("TASK_DELIBERATION_NOT_READY", failure.code());
+        assertAssignmentAbsent();
     }
 
     @Test
