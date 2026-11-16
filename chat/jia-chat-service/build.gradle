@@ -458,6 +458,10 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     java.include 'cn/jia/agent/skill/SkillExecutionServiceTest.java'
     java.include 'cn/jia/agent/api/PersonalWorkspaceExecutionControllerTest.java'
     java.include 'cn/jia/chat/service/ChatPrivateNativeAdmissionTest.java'
+    java.srcDir '../../agent/jia-agent-service/src/skillManagementContract/java'
+    java.include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
+    java.include 'cn/jia/chat/service/ChatPrivateNativeAdmissionMySqlTest.java'
+    resources.srcDir 'src/mmdRegressionTest/resources'
     java.include 'cn/jia/chat/service/ChatPrivateNativeProjectionTest.java'
     java.include 'cn/jia/chat/service/NativeSkillScriptSessionLookupImplTest.java'
     java.include 'cn/jia/agent/skill/SkillMarketplaceRealTransactionTest.java'
@@ -490,6 +494,7 @@ tasks.register('nativeSkillResultRegression', Test) {
         includeTestsMatching 'cn.jia.agent.skill.SkillExecutionServiceTest'
         includeTestsMatching 'cn.jia.agent.api.PersonalWorkspaceExecutionControllerTest'
         includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeAdmissionTest'
+        includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeAdmissionMySqlTest'
         includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeProjectionTest'
         includeTestsMatching 'cn.jia.chat.service.NativeSkillScriptSessionLookupImplTest'
     }
@@ -753,4 +758,9 @@ tasks.register('taskQuoteRegression', Test) {
     maxParallelForks = 1
     maxHeapSize = '256m'
     jvmArgs '-XX:MaxMetaspaceSize=160m', '-Xss256k'
+}
+
+// Compile the same owned fixture when using the standard test source set.
+tasks.named('compileTestJava') {
+    source file('../../agent/jia-agent-service/src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
 }

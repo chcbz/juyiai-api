@@ -11,7 +11,6 @@ import com.baomidou.mybatisplus.core.config.GlobalConfig;
 import com.baomidou.mybatisplus.core.incrementer.DefaultIdentifierGenerator;
 import com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean;
 import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -29,9 +28,8 @@ import static org.mockito.Mockito.*;
 
 /** Real production DDL, MyBatis CAS and transactions. Caller root authorization is outside
  * this execution-layer slice; task+wallet concurrency is covered by coordinator tests. */
-@EnabledIfEnvironmentVariable(named="ECO_V0_W02_MYSQL_URL", matches=".+")
-class TaskExecutionCancellationMySqlTest {
-    JdbcTemplate admin, jdbc;
+class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagementMySqlFixture {
+    JdbcTemplate jdbc;
     String database;
     TransactionTemplate tx;
     TaskExecutionCancellationService service;
@@ -41,16 +39,9 @@ class TaskExecutionCancellationMySqlTest {
     ApplicationEventPublisher events;
 
     @BeforeEach void setup() throws Exception {
-        assertEquals("true", System.getenv("ECO_V0_W02_MYSQL_ISOLATED_FIXTURE"));
-        String base=System.getenv("ECO_V0_W02_MYSQL_URL"), prefix=System.getenv("ECO_V0_W02_MYSQL_DATABASE_PREFIX");
-        assertTrue(base.startsWith("jdbc:mysql://")); assertNotNull(prefix); assertTrue(prefix.matches("[a-z][a-z0-9_]{0,23}"));
-        String user=System.getenv("ECO_V0_W02_MYSQL_USER"), password=System.getenv("ECO_V0_W02_MYSQL_PASSWORD");
-        admin=new JdbcTemplate(new DriverManagerDataSource(base,user,password));
-        database=prefix+"_execcancel_"+Long.toUnsignedString(System.nanoTime(),36);
+        database="cyf_execcancel_"+Long.toUnsignedString(System.nanoTime(),36);
         admin.execute("CREATE DATABASE `"+database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
-        int q=base.indexOf('?'); String address=q<0?base:base.substring(0,q);
-        String url=address.substring(0,address.indexOf('/',"jdbc:mysql://".length())+1)+database+(q<0?"":base.substring(q));
-        var source=new DriverManagerDataSource(url,user,password); jdbc=new JdbcTemplate(source);
+        var source=source(database); jdbc=new JdbcTemplate(source);
         var schema=new ResourceDatabasePopulator();
         for(String name:List.of("agent-personal-workspace-v1_11-executions.sql", "agent-personal-workspace-v1_13-task-execution.sql",
                 "agent-personal-workspace-v1_13-task-publication.sql", "agent-personal-workspace-v1_14-conversation-execution.sql",
@@ -82,7 +73,7 @@ class TaskExecutionCancellationMySqlTest {
     }
     @AfterEach void cleanup() {
         if(database!=null&&admin!=null) {
-            assertTrue(database.startsWith(System.getenv("ECO_V0_W02_MYSQL_DATABASE_PREFIX")+"_execcancel_"));
+            assertTrue(database.matches("cyf_execcancel_[a-z0-9]+"));
             admin.execute("DROP DATABASE `"+database+"`");
         }
     }

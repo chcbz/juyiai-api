@@ -219,14 +219,15 @@ tasks.register('jytUxB01a', Test) {
     useJUnitPlatform()
 }
 
-// JYT-UX-B01B isolated Hall submission/case verification slice. The MySQL fixture is opt-in
-// through JYT_UX_B01B_MYSQL_* and creates only task-prefixed temporary databases.
+// Hall submission verification uses an owned private MySQL process, never a configured database.
 def jytUxB01bSourceSet = sourceSets.create('jytUxB01b') {
     java {
         srcDir 'src/test/java'
         include 'cn/jia/agent/service/impl/HallRequestDraftServiceImplTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionServiceTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionMySqlTest.java'
+        srcDir 'src/skillManagementContract/java'
+        include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
         include 'cn/jia/agent/api/HallRequestDraftControllerTest.java'
         include 'cn/jia/agent/api/HallSubmissionControllerTest.java'
         include 'cn/jia/agent/api/HallRequestDraftCacheControlFilterTest.java'
@@ -262,6 +263,8 @@ def jytUxB03SourceSet = sourceSets.create('jytUxB03') {
         include 'cn/jia/agent/config/HallPrivateCaseSchemaInitializerTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionServiceTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionMySqlTest.java'
+        srcDir 'src/skillManagementContract/java'
+        include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
         include 'cn/jia/agent/api/HallSubmissionControllerTest.java'
         include 'cn/jia/agent/mapper/HallRequestDraftMapperContractTest.java'
         include 'cn/jia/agent/mapper/HallPrivateCaseMapperContractTest.java'
@@ -286,7 +289,7 @@ tasks.register('jytUxB03', Test) {
 }
 
 // B02 scoped reads, private organization marks, formal review projection and unfunded TASK_CREATE.
-// MySQL fixtures require the existing isolated-fixture opt-in; test sources are not execution evidence.
+// Hall submission uses the owned MySQL fixture; test sources are not execution evidence.
 def jytUxB02SourceSet = sourceSets.create('jytUxB02') {
     java {
         srcDir 'src/test/java'
@@ -303,6 +306,8 @@ def jytUxB02SourceSet = sourceSets.create('jytUxB02') {
         include 'cn/jia/agent/service/impl/HallReadTaskCreateMySqlTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionServiceTest.java'
         include 'cn/jia/agent/service/impl/HallRequestDraftSubmissionMySqlTest.java'
+        srcDir 'src/skillManagementContract/java'
+        include 'cn/jia/agent/skill/SkillManagementMySqlFixture.java'
         include 'cn/jia/agent/api/HallSubmissionControllerTest.java'
         include 'cn/jia/agent/api/HallRequestDraftControllerTest.java'
         include 'cn/jia/agent/api/HallRequestDraftCacheControlFilterTest.java'
@@ -1116,4 +1121,9 @@ tasks.register('taskQuoteRegression', Test) {
     if (System.getenv('CYF_BILLING_BROWSER') != 'true') {
     filter { excludeTestsMatching 'cn.jia.agent.service.impl.AgentTaskBillingMySqlTransactionTest.browser*' }
     }
+}
+
+// Default test compilation shares only the owned MySQL lifecycle, not unrelated contract suites.
+tasks.named('compileTestJava') {
+    source file('src/skillManagementContract/java/cn/jia/agent/skill/SkillManagementMySqlFixture.java')
 }

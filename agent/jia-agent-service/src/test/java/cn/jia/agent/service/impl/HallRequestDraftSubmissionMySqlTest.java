@@ -26,13 +26,11 @@ import org.apache.ibatis.session.SqlSessionFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 
@@ -61,13 +59,12 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
- * Real isolated production-parity MySQL 8.0.21 evidence for Hall CHECK catalog, unique-key races,
+ * Real isolated production-parity MySQL 8.0.21 evidence for Hall schema, unique-key races,
  * CAS and rollback. The exact version is an evidence target for the deployed engine, not an
  * application runtime rejection of otherwise supported MySQL versions.
- * The fixture creates and drops only a task-prefixed temporary database acknowledged by the caller.
+ * The fixture creates and drops only a task-prefixed temporary database inside its owned private mysqld; never a configured server.
  */
-@EnabledIfEnvironmentVariable(named = "JYT_UX_B01B_MYSQL_URL", matches = ".+")
-class HallRequestDraftSubmissionMySqlTest {
+class HallRequestDraftSubmissionMySqlTest extends cn.jia.agent.skill.SkillManagementMySqlFixture {
     private static final HallRequestDraftService.OwnerScope OWNER =
             new HallRequestDraftService.OwnerScope("0", "client-a", "owner-a");
     private static final HallRequestDraftService.OwnerScope OTHER_OWNER =
@@ -76,7 +73,6 @@ class HallRequestDraftSubmissionMySqlTest {
             new HallRequestDraftService.OwnerScope("0", "client-b", "owner-a");
     private static final String MIME = PersonalWorkspaceExecutionProperties.DOCX;
 
-    private JdbcTemplate admin;
     private JdbcTemplate jdbc;
     private String database;
     private String namespace;
@@ -88,25 +84,15 @@ class HallRequestDraftSubmissionMySqlTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        String baseUrl = required("JYT_UX_B01B_MYSQL_URL");
-        String user = required("JYT_UX_B01B_MYSQL_USER");
-        String password = System.getenv("JYT_UX_B01B_MYSQL_PASSWORD");
-        String prefix = required("JYT_UX_B01B_MYSQL_DATABASE_PREFIX");
-        if (password == null || !baseUrl.startsWith("jdbc:mysql://")
-                || !prefix.matches("[A-Za-z0-9_]{1,20}")
-                || !"true".equals(required("JYT_UX_B01B_MYSQL_ISOLATED_FIXTURE"))) {
-            throw new IllegalStateException("B01B isolated MySQL acknowledgement/credentials required");
-        }
-        namespace = prefix + "_jyt_b01b_";
+        namespace = "cyf_jyt_b01b_";
         database = namespace + UUID.randomUUID().toString().substring(0, 8);
-        admin = new JdbcTemplate(dataSource(baseUrl, user, password));
         String version = admin.queryForObject("SELECT VERSION()", String.class);
         assertTrue(version != null && version.startsWith("8.0.21"),
                 "B01B fixture requires MySQL 8.0.21, got " + version);
         admin.execute("CREATE DATABASE `" + database
                 + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
 
-        DataSource source = dataSource(databaseUrl(baseUrl, database), user, password);
+        DataSource source = source(database);
         jdbc = new JdbcTemplate(source);
         new HallRequestDraftSchemaInitializer(jdbc).afterPropertiesSet();
         new HallPrivateCaseSchemaInitializer(jdbc).afterPropertiesSet();
@@ -591,29 +577,6 @@ class HallRequestDraftSubmissionMySqlTest {
         factory.setInterfaces(HallRequestDraftService.class);
         factory.addAdvice(interceptor);
         return (HallRequestDraftService) factory.getProxy();
-    }
-
-    private static DriverManagerDataSource dataSource(String url, String user, String password) {
-        DriverManagerDataSource source = new DriverManagerDataSource();
-        source.setDriverClassName("com.mysql.cj.jdbc.Driver");
-        source.setUrl(url);
-        source.setUsername(user);
-        source.setPassword(password);
-        return source;
-    }
-
-    private static String databaseUrl(String baseUrl, String database) {
-        int query = baseUrl.indexOf('?');
-        String suffix = query < 0 ? "" : baseUrl.substring(query);
-        String root = query < 0 ? baseUrl : baseUrl.substring(0, query);
-        int slash = root.indexOf('/', "jdbc:mysql://".length());
-        return (slash < 0 ? root + "/" : root.substring(0, slash + 1)) + database + suffix;
-    }
-
-    private static String required(String name) {
-        String value = System.getenv(name);
-        if (value == null || value.isBlank()) throw new IllegalStateException(name + " is required");
-        return value;
     }
 
     private static void assertFailure(HallRequestDraftService.Reason reason, Runnable action) {
