@@ -1361,7 +1361,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
     }
     @SuppressWarnings("unchecked") private static Map<String,Object> skillMap(String json) {
         try {return V3_JSON.readValue(json,Map.class);}
-        catch(com.fasterxml.jackson.core.JsonProcessingException | IllegalArgumentException invalid){throw failure(Reason.TASK_CONFLICT);}
+        catch(tools.jackson.core.JacksonException | IllegalArgumentException invalid){throw failure(Reason.TASK_CONFLICT);}
     }
     private cn.jia.agent.entity.SkillExecutionEntity skillRow(OwnerScope scope,String executionId,boolean lock) {
         if(skillExecutions==null)throw failure(Reason.CAPABILITY_UNAVAILABLE);
@@ -1622,8 +1622,18 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
     }
     private void requireNativeScriptSession(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution,cn.jia.agent.entity.SkillExecutionEntity skill) {
         var snapshot=skillMap(skill.getSnapshotJson());
-        if(cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef"))
-                &&(nativeSkillScriptSessions==null||!nativeSkillScriptSessions.supports(scope)))throw failure(Reason.NOT_FOUND);
+        if(!cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")))return;
+        if(nativeSkillScriptSessions==null||runtimeAuthentication==null)throw failure(Reason.NOT_FOUND);
+        // Authentication stays in its owning agent boundary. Chat consumes the trusted fence
+        // and checks its live registry/declaration; it must not import the authentication service.
+        try {
+            var proof=runtimeAuthentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId());
+            var expected=new AgentRuntimeAuthentication.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId(),scope.runtimeInstanceId());
+            if(proof==null||!expected.equals(proof.scope()))throw failure(Reason.NOT_FOUND);
+            var fence=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration());
+            if(!nativeSkillScriptSessions.supports(scope,fence)
+                    ||!proof.equals(runtimeAuthentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId())))throw failure(Reason.NOT_FOUND);
+        }catch(IllegalStateException|IllegalArgumentException unavailable){throw failure(Reason.NOT_FOUND);}
     }
     private cn.jia.agent.service.SkillExecutionService.Command skillCommand(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution) {
         var skill=skillRow(skillOwner(scope),execution.getExecutionId(),false);if(!"READY".equals(skill.getPhase()))throw failure(Reason.NOT_FOUND);
@@ -1634,7 +1644,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         if(skill.getTaskSkillBindingJson()==null)throw failure(Reason.TASK_CONFLICT);
         final List<?> stored;
         try {stored=V3_JSON.readValue(skill.getTaskSkillBindingJson(),List.class);}
-        catch(com.fasterxml.jackson.core.JsonProcessingException invalid){throw failure(Reason.TASK_CONFLICT);}
+        catch(tools.jackson.core.JacksonException invalid){throw failure(Reason.TASK_CONFLICT);}
         if(stored==null)throw failure(Reason.TASK_CONFLICT);
         var selections=nativeSelections(snapshot);
         if(stored.size()!=selections.size())throw failure(Reason.TASK_CONFLICT);
@@ -1830,7 +1840,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         }
         final Object data;
         try {data=command.data()==null?null:V3_JSON.readValue(skillJson(command.data()),Object.class);}
-        catch(com.fasterxml.jackson.core.JsonProcessingException invalid){throw failure(Reason.BAD_REQUEST);}
+        catch(tools.jackson.core.JacksonException invalid){throw failure(Reason.BAD_REQUEST);}
         var artifacts=List.copyOf(command.artifacts());
         for(var effect:command.effectDependencies())id(effect,"effectId",100);
         var dependencies=List.copyOf(command.effectDependencies());
