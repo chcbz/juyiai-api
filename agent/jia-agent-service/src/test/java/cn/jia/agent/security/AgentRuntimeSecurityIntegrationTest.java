@@ -142,7 +142,7 @@ class AgentRuntimeSecurityIntegrationTest {
             return projection(authentication);
         }
 
-        @GetMapping("/internal/agent/tasks/workspace-executions/commands")
+        @GetMapping("/internal/agent/executions/commands")
         Map<String, String> runtimeQueuedCommands(Authentication authentication) {
             return projection(authentication);
         }
@@ -421,16 +421,16 @@ class AgentRuntimeSecurityIntegrationTest {
             @Override public void close() {closed.set(true);}
         };
         var fence=new PersonalWorkspaceExecutionService.ConversationFence(1L,"01234567-89ab-cdef-0123-456789abcdef");
-        when(skills.inputContent(scope,"task-a","run-a","input_1",fence)).thenAnswer(call->{
+        when(skills.inputContent(scope,"exec-a","run-a","input_1",fence)).thenAnswer(call->{
             installationRows.get(installationFor(A)).setStatus("REVOKED");
             return new PersonalWorkspaceExecutionService.RuntimeDownload("file.png","image/png","a".repeat(64),source.length(),stream);
         });
-        var response=conversationMvc.perform(headers(post("/internal/agent/tasks/task-a/runs/run-a/conversation/inputs/input_1/content"),A,"runtime-a",TOKEN_A)
+        var response=conversationMvc.perform(headers(post("/internal/agent/executions/exec-a/runs/run-a/inputs/input_1/content"),A,"runtime-a",TOKEN_A)
                 .contentType("application/json").content("{\"protocolVersion\":1,\"requestId\":\"native-source-fence\",\"data\":{\"version\":\"1\",\"token\":\"01234567-89ab-cdef-0123-456789abcdef\"}}"))
                 .andExpect(status().isBadRequest()).andReturn().getResponse();
         assertFalse(response.getContentAsString().contains(source));
         assertTrue(closed.get());
-        verify(skills).inputContent(scope,"task-a","run-a","input_1",fence);
+        verify(skills).inputContent(scope,"exec-a","run-a","input_1",fence);
     }
 
     @Test
@@ -611,8 +611,8 @@ class AgentRuntimeSecurityIntegrationTest {
     }
 
     @Test
-    void privateWorkspaceQueuePathIsExactAndNativeOnly() throws Exception {
-        String path = "/internal/agent/tasks/workspace-executions/commands";
+    void nativeExecutionQueuePathIsExactAndNativeOnly() throws Exception {
+        String path = "/internal/agent/executions/commands";
         mvc.perform(headers(get(path), A, "runtime-a", TOKEN_A))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.agentId").value(A));
         mvc.perform(headers(post(path), A, "runtime-a", TOKEN_A)).andExpect(status().isForbidden());

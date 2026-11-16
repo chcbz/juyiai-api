@@ -560,7 +560,7 @@ public class SkillExecutionServiceTest {
             row.setTenantId("0");row.setClientId("client");
             when(installations.lock(id)).thenReturn(installation);
             when(runtimes.lockInScope("0","client","agent")).thenReturn(row);
-            var auth=new AgentRuntimeAuthenticationService(runtimes,installations,mock(AgentIdentityRegistryDao.class),identities,accounts,mock(AgentTaskEventsGate.class),new cn.jia.core.security.FixedTenantAdmissionPolicy("0",null));
+            var auth=new AgentRuntimeAuthenticationService(runtimes,installations,mock(AgentIdentityRegistryDao.class),identities,accounts,mock(cn.jia.agent.config.AgentTaskEventsGate.class),new cn.jia.core.security.FixedTenantAdmissionPolicy("0",null));
             when(manager.getTransaction(any())).thenAnswer(i->{active.set(true);return status;});
             doAnswer(i->{active.set(false);return null;}).when(manager).commit(status);
             doAnswer(i->{active.set(false);return null;}).when(manager).rollback(status);
