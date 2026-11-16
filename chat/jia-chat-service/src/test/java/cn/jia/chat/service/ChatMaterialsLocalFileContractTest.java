@@ -16,7 +16,7 @@ class ChatMaterialsLocalFileContractTest {
     }
     @Test void genericFilesRetainActualMimeAndAuthorizedHash() {
         var declaration=Map.of("schemaVersion",1,"supportedInputs",List.of(format("*/*","LOCAL_FILE","file")));
-        for(String mime:List.of("text/plain","application/pdf","application/x-custom")) {
+        for(String mime:List.of("text/plain","application/pdf","application/x-custom","image/jpeg","image/png","audio/mpeg")) {
             var result=ChatMaterialsInputContract.candidates(Map.of("materialsInput",declaration),List.of(source(mime)));
             var input=(Map<?,?>)((List<?>)result.get("sources")).getFirst();
             assertEquals(mime,input.get("mimeType"));assertEquals("LOCAL_FILE",input.get("carrier"));

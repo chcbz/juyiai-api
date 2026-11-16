@@ -139,17 +139,17 @@ public final class ChatTypedDeliberationContextService {
     }
 
     /** Cheap hint to skip package I/O. Authoritative admission still checks after idempotency. */
-    public boolean nativeRuntimeReady(cn.jia.agent.service.SkillCapabilityLookup.Scope scope) {
+    public boolean discussionRuntimeReady(cn.jia.agent.service.SkillCapabilityLookup.Scope scope) {
         try {
-            sessions.observeNative(new TypedDeliberationSessionRegistry.Scope(
+            sessions.observeDiscussion(new TypedDeliberationSessionRegistry.Scope(
                     scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
             return true;
         } catch (IllegalStateException unavailable) { return false; }
     }
 
-    public void requireNativeRuntime(cn.jia.agent.service.SkillCapabilityLookup.Scope scope) {
+    public void requireDiscussionRuntime(cn.jia.agent.service.SkillCapabilityLookup.Scope scope) {
         try {
-            sessions.observeNative(new TypedDeliberationSessionRegistry.Scope(
+            sessions.observeDiscussion(new TypedDeliberationSessionRegistry.Scope(
                     scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
         } catch (TypedDeliberationSessionRegistry.RuntimeNotReadyException awaiting) {
             throw new RuntimeNotReadyException(awaiting);
@@ -165,7 +165,7 @@ public final class ChatTypedDeliberationContextService {
         var executor=dispatchAuthority.admissionTarget(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),taskId,targetAgentId);
         TypedDeliberationSessionRegistry.Ready ready;
         try {
-            ready=sessions.requireNativeReady(new TypedDeliberationSessionRegistry.Scope(
+            ready=sessions.requireSingleReady(new TypedDeliberationSessionRegistry.Scope(
                     scope.tenantId(),executor.ownerJiacn(),scope.clientId()),targetAgentId);
         } catch (TypedDeliberationSessionRegistry.RuntimeNotReadyException awaiting) {
             throw new RuntimeNotReadyException(awaiting);

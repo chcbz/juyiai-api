@@ -169,3 +169,18 @@ AMQP/WS同一wire重复限制128KiB无独立依据，改为与transport真实MED
 风险：新接入Agent虽然presence在线，但未声明/声明不兼容/原生能力尚未测量时，先承办并预占费用会永久卡在会话准入。责任层为API已有已认证会话注册表；`TaskDeliberationRuntimeLookup`只是将原`requireNativeReady`结果提供给候选展示与首次承办事务，不维护第二份状态或重验协议。锁定真实执行目标归属后、钱包预占之前检查，HTTP409 `TASK_DELIBERATION_NOT_READY`仅拒绝本次新操作，不取消现有授权、不把UNKNOWN转失败、不对已提交的相同key重放再次准入。外部执行者使用自己的owner/binding，事项Owner不代替执行者身份。候选只读结果不代替事务边界检查，因为两次请求之间可能断线。
 
 入口与定向回归：`TypedDeliberationSessionRegistry.ready`、`AgentTaskExecutionGrantServiceImpl` precommit、`AgentExternalServicePolicyServiceImpl`候选投影；同名测试覆盖缺声明、错误声明、缺原生实测、断线/撤销、重复会话、外部Owner、新操作零账务/零授权及原key恢复不重复扣款。运行结果与上线状态独立记录在RUNTIME-LEASE-SEPARATION-20261112 handoff。
+
+
+### 2026-11-16 附件与普通议事职责收口（覆盖上节文件输出准入要求；源码候选，未部署）
+
+基线 API `d6f03755ac524b7604495ed162943a5b30ec580f`，范围为普通点将议事、原生资料投影/读取及bootstrap故障隔离。用户要求追溯并删除越界校验，不是删除身份、资金、租约或摘要保护。
+
+- **删除图片理解能力门禁**：`ChatMaterialsInputContract`不再因图片MIME未命中原生载体而拒绝议事。`sources`只证明本次可直接交付的真实载体；完整已授权`sourceCatalog/availableSources`仍保留JPEG、PNG、音频和其他资料，交给模型选择现有通用文件执行或说明限制。没有匹配的载体不伪造`LOCAL_FILE`、读取回执或理解成功。
+- **普通议事与文件执行分离**：`TypedDeliberationSessionRegistry.ready/requireSingleReady/observeDiscussion`只核对真实讨论协议及其适用的已认证会话；移除普通议事对`nativeExecution.outputMimeTypes`非空的依赖。实际原生脚本授权/声明检查仍在`nativeScriptDeclared`及执行接纳边界；不能因允许文字答复而虚构文件执行能力。保留新承办预占前检查真实讨论就绪、同key幂等恢复。
+- **资料读取不重复进行当前能力准入**：`ChatMaterialsInputService`使用原回合已持久化载体声明及权威目录复核manifest，不用今日的能力广播重建旧授权。HTTP原生身份fence、当前dispatch/task/资料ACL、版本/摘要、会话/请求状态、流式读取前后核权继续保留；能力广播改变不是撤销已有文件访问授权。
+- **无害声明字段兼容**：材料声明及其条目接受额外元数据并仅投影已知字段，不透传未知URL/权限；实际schema版本、carrier语义、MIME语法、摘要格式和重复声明保护不放宽。
+- **局部失败隔离**：已持久化启动意图的`INVALID_REQUEST/INVALID_ROUTE`通过既有`TERMINAL_FAILURE/DEAD`结束该意图并继续处理队列。必须核验终态回执；不取消业务任务、不代替资金结算、不伪报执行成功。未知/基础设施/持久化/授权错误不按输入问题吞掉，原保护保留。
+
+历史追溯：图片拒绝始于`29bd0b302a`（2026-10-22），`0ab9e72a54`（2026-10-31）清理存储/执行格式限制时漏改本类，`5b96cd8d6e`（2026-11-04）添加LOCAL_FILE仍保留；`6e57eead938`开源导入继承旧残留，不是本周重新添加。
+
+定向入口：现有`runtimeCapabilityRegression`中的`ChatMaterialsImageContractTest`、`ChatMaterialsLocalFileContractTest`、`ChatMaterialsFenceTest`、`ChatRetainedOutputSourcesTest`、`ChatRetainedOutputAdmissionTest`、`TypedDeliberationSessionRegistryTest`、`ChatActionCapabilityServiceTest`和`ChatBountyBootstrapRelayRecoveryTest`。保留实际载体适配、选中技能参数合同、文件输出合同及退役入口的安全拒绝，不把全仓检索命中当作全量删除结论。完整任务证据见根handoff `MATERIAL-RESPONSIBILITY-20261116`；测试与上线状态分别记录。

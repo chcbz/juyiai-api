@@ -24,12 +24,24 @@ class ChatMaterialsImageContractTest {
             assertEquals("a".repeat(64),input.get("sha256"));
         }
     }
-    @Test void unsupportedImageCannotSilentlyBecomeAnEmptyTextTurn() {
-        for (var registration:List.of(Map.<String,Object>of(),registration("image/png"))) {
-            var error=assertThrows(ChatDeliberationException.class,()->
-                    ChatMaterialsInputContract.candidates(registration,List.of(source("image/jpeg"))));
-            assertTrue(error.getMessage().contains("已收到图片资料"));
+    @Test void missingNativeCarrierDoesNotRejectOrMutateTheAuthorizedCatalogue() {
+        for (String mime:List.of("image/jpeg", "image/png", "audio/mpeg", "application/x-custom")) {
+            var catalog=List.of(source(mime));
+            var result=ChatMaterialsInputContract.candidates(Map.of(),catalog);
+            assertEquals(List.of(),result.get("sources")); // no fabricated delivery receipt
+            assertEquals(List.of(source(mime)),catalog); // still available to native file execution
+            assertNull(ChatMaterialsInputContract.bind(result,"tenant","owner","client","conversation",1,"task","request","turn","agent"));
         }
+        assertEquals(List.of(),ChatMaterialsInputContract.candidates(registration("image/png"),List.of(source("image/jpeg"))).get("sources"));
+    }
+    @Test void harmlessDeclarationMetadataIsProjectedNotUsedAsAuthority() {
+        var format=new java.util.LinkedHashMap<String,Object>(Map.of("mediaKind","image","mimeType","image/png",
+                "carrier","LOCAL_IMAGE","carrierContractDigest","sha256:"+"b".repeat(64)));
+        format.put("displayName","image adapter");format.put("downloadUrl","https://untrusted.invalid");
+        var parsed=ChatMaterialsInputContract.declaration(Map.of("schemaVersion",1,"supportedInputs",List.of(format),"description","extra metadata"));
+        assertEquals(registration("image/png").get("materialsInput"),parsed);
+        format.put("carrier","UNKNOWN");
+        assertThrows(IllegalArgumentException.class,()->ChatMaterialsInputContract.declaration(Map.of("schemaVersion",1,"supportedInputs",List.of(format))));
     }
     @Test void noMaterialsDoesNotNeedAnImageCapability() {
         assertEquals(List.of(),ChatMaterialsInputContract.candidates(Map.of(),List.of()).get("sources"));

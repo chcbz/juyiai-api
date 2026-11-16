@@ -72,7 +72,7 @@ public class ChatTypedDiscussionAdmissionService {
         if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
             throw persistence("Bootstrap package preparation requires no active transaction");
         if (packagePreparation == null) throw persistence("Skill package preparation is unavailable");
-        contexts.requireNativeRuntime(scope);
+        contexts.requireDiscussionRuntime(scope);
         packagePreparation.prepare(scope);
     }
 
@@ -108,7 +108,7 @@ public class ChatTypedDiscussionAdmissionService {
             var runtimeScope = new cn.jia.agent.service.SkillCapabilityLookup.Scope(tenantId,client,executor.ownerJiacn(),targets.getFirst());
             // Skip cold package I/O, but do not reject here: a concurrent same-key
             // admission must still return its original receipt under the task lock.
-            if (contexts.nativeRuntimeReady(runtimeScope)) packagePreparation.prepare(runtimeScope);
+            if (contexts.discussionRuntimeReady(runtimeScope)) packagePreparation.prepare(runtimeScope);
             else preparationSkipped = true;
         }
         final boolean unavailableAtPreparation = preparationSkipped;

@@ -51,6 +51,59 @@ class ChatBountyBootstrapRelayRecoveryTest {
         tick = () -> callbacks.get(callbacks.size() - 1).run();
     }
 
+    private static cn.jia.agent.entity.AgentTaskBountyBootstrapClaimDTO claim(String task) {
+        return new cn.jia.agent.entity.AgentTaskBountyBootstrapClaimDTO("bootstrap_"+task,"0","client","owner",task,
+                "action_"+task,1,"TASK_REQUIREMENT_REVISION_V1",1,"agent","grant_"+task,1,"DELIBERATE",
+                List.of(),"a".repeat(64),"worker",10000,1,1);
+    }
+
+    private void echoReconciliation() {
+        when(outbox.reconcile(any(),any(),anyLong())).thenAnswer(call -> {
+            cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO command=call.getArgument(1);
+            String status=switch(command.outcome()) {
+                case ADMITTED -> "ADMITTED";
+                case RETRYABLE_FAILURE -> "RETRY";
+                case TERMINAL_FAILURE -> "DEAD";
+            };
+            return new cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileResultDTO(command.bootstrapId(),status,
+                    command.expectedOutboxVersion()+1,command.conversationId(),command.initialRequestId());
+        });
+    }
+
+    @Test void twoRejectedIntentsDoNotStopTheFollowingNormalTask() {
+        var first=claim("683");var second=claim("684");var next=claim("689");
+        when(outbox.claimNextAvailable(anyString(),anyLong())).thenReturn(first,second,next);
+        // Deterministic invalid input/route is local even when different users hit it consecutively.
+        when(admission.admit(first)).thenThrow(new ChatDeliberationException(ChatDeliberationException.Reason.INVALID_REQUEST,"invalid immutable input"));
+        when(admission.admit(second)).thenThrow(new ChatDeliberationException(ChatDeliberationException.Reason.INVALID_ROUTE,"invalid route"));
+        when(admission.admit(next)).thenReturn(new ChatBountyBootstrapAdmissionService.Admission("conversation",1,"request","message","step",false));
+        echoReconciliation();
+        tick.run();tick.run();tick.run();
+        assertTrue(relay.isRunning());verify(admission).admit(next);
+        var commands=org.mockito.ArgumentCaptor.forClass(cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO.class);
+        verify(outbox,times(3)).reconcile(any(),commands.capture(),anyLong());
+        assertEquals(List.of(cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO.Outcome.TERMINAL_FAILURE,
+                cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO.Outcome.TERMINAL_FAILURE,
+                cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO.Outcome.ADMITTED),commands.getAllValues().stream().map(cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO::outcome).toList());
+        assertEquals("BOUNTY_INVALID_REQUEST",commands.getAllValues().getFirst().errorCode());
+        verify(scheduler,never()).cancel(any());
+    }
+
+    @Test void terminalRejectionWithoutDurableAcknowledgmentStillFailsClosed() {
+        var bad=claim("bad");when(outbox.claimNextAvailable(anyString(),anyLong())).thenReturn(bad);
+        when(admission.admit(bad)).thenThrow(new ChatDeliberationException(ChatDeliberationException.Reason.INVALID_REQUEST,"invalid input"));
+        when(outbox.reconcile(any(),any(),anyLong())).thenReturn(
+                new cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileResultDTO(bad.bootstrapId(),"RETRY",2,null,null));
+        tick.run();tick.run();assertFalse(relay.isRunning());
+    }
+
+    @Test void persistenceFailureIsNotMistakenForAUserRejection() {
+        var bad=claim("bad");when(outbox.claimNextAvailable(anyString(),anyLong())).thenReturn(bad);
+        when(admission.admit(bad)).thenThrow(new ChatDeliberationException(ChatDeliberationException.Reason.PERSISTENCE_ERROR,"database unavailable"));
+        echoReconciliation();tick.run();tick.run();assertFalse(relay.isRunning());
+        verify(outbox,times(2)).reconcile(any(),argThat(command -> command.outcome()==cn.jia.agent.entity.AgentTaskBountyBootstrapReconcileDTO.Outcome.RETRYABLE_FAILURE),anyLong());
+    }
+
     @Test void twoConnectionFailuresDoNotPermanentlyDisableNormalTaskAdmission() {
         var unavailable = new CannotCreateTransactionException("JDBC unavailable",
                 new SQLTransientConnectionException("pool unavailable", "08001"));

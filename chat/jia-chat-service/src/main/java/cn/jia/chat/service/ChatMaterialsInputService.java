@@ -4,7 +4,6 @@ import cn.jia.agent.security.AgentRuntimeAuthentication;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
 import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.chat.deliberation.*;
-import cn.jia.chat.handler.TypedDeliberationSessionRegistry;
 import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.function.Supplier;
@@ -18,12 +17,10 @@ public class ChatMaterialsInputService {
     private final ChatDeliberationDao dao;
     private final ChatTypedDeliberationStore store;
     private final AgentTaskMutationTransaction tasks;
-    private final TypedDeliberationSessionRegistry sessions;
     private final ChatSkillSourceAccessService sources;
-    private final cn.jia.agent.service.AgentTaskExecutionGrantService grants;
     public ChatMaterialsInputService(ChatDeliberationDao dao,ChatTypedDeliberationStore store,AgentTaskMutationTransaction tasks,
-            TypedDeliberationSessionRegistry sessions,ChatSkillSourceAccessService sources,cn.jia.agent.service.AgentTaskExecutionGrantService grants) {
-        this.dao=dao;this.store=store;this.tasks=tasks;this.sessions=sessions;this.sources=sources;this.grants=grants;
+            ChatSkillSourceAccessService sources) {
+        this.dao=dao;this.store=store;this.tasks=tasks;this.sources=sources;
     }
     /** Called under the HTTP boundary's native identity fence, before any task/grant lock. */
     public Prepared prepare(AgentRuntimeAuthentication.Scope runtime,String requestId,String turnId,String sourceId,String digest) {
@@ -75,7 +72,7 @@ public class ChatMaterialsInputService {
                     ||!Set.of("RECEIVED","QUEUED","DISPATCHED","STREAMING","UNKNOWN","RECOVERY_REQUIRED").contains(turn.getState())
                        &&!(finalRead&&Set.of("FINAL_PERSISTED","PUBLISHED").contains(turn.getState())))throw missing();
             var material=(Map<?,?>)facts(turn).get("materialsInput");if(material==null||!expectedDigest.equals(material.get("manifestDigest")))throw missing();
-            var actual=ChatMaterialsInputContract.bind(nativeCandidates(admission,turn),scope.tenantId(),scope.ownerJiacn(),scope.clientId(),
+            var actual=ChatMaterialsInputContract.bind(nativeCandidates(admission,material),scope.tenantId(),scope.ownerJiacn(),scope.clientId(),
                     scope.conversationId(),scope.conversationGeneration(),admission.taskId(),turn.getRequestId(),turn.getTurnId(),turn.getTargetAgentId());
             if(!CanonicalContextJson.write(actual).equals(CanonicalContextJson.write(material)))throw missing();
             // Revalidate every native source under the same root before a final. Storage reads stay outside locks.
@@ -83,9 +80,13 @@ public class ChatMaterialsInputService {
             return callback.get();
         });
     }
-    private Object nativeCandidates(ChatTypedDeliberationStore.Admission admission,ChatTurnEntity turn) {
-        var registered=sessions.requireSingleReady(new TypedDeliberationSessionRegistry.Scope(turn.getTenantId(),dispatchAuthority.forTurn(turn).executorOwner(),turn.getClientId()),turn.getTargetAgentId());
-        return ChatMaterialsInputContract.candidates(registered.frozenDeclaration(),ChatTypedDeliberationContextService.parseCatalog(admission.sourceCatalogJson()));
+    private Object nativeCandidates(ChatTypedDeliberationStore.Admission admission,Map<?,?> material) {
+        // The persisted delivery contract, not today's advertised capabilities,
+        // binds this turn. Runtime identity and current source ACL are checked by
+        // the HTTP fence/dispatch authority and sources above, including readback.
+        var manifest=(Map<?,?>)material.get("manifest");
+        return ChatMaterialsInputContract.candidates(Map.of("materialsInput",manifest.get("profile")),
+                ChatTypedDeliberationContextService.parseCatalog(admission.sourceCatalogJson()));
     }
     private record Input(String taskId,Map<String,Object> input) { }
     private Input input(ChatTurnEntity turn,String sourceId) {

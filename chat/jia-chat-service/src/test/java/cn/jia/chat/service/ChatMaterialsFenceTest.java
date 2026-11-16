@@ -27,8 +27,7 @@ class ChatMaterialsFenceTest {
     final ChatSkillSourceAccessService sources=mock(ChatSkillSourceAccessService.class);
     final AgentRuntimeAuthenticationService authentication=mock(AgentRuntimeAuthenticationService.class);
     final ChatDispatchAuthorityService dispatch=mock(ChatDispatchAuthorityService.class);
-    final ChatMaterialsInputService service=new ChatMaterialsInputService(dao,store,tasks,sessions,sources,
-            mock(AgentTaskExecutionGrantService.class));
+    final ChatMaterialsInputService service=new ChatMaterialsInputService(dao,store,tasks,sources);
     final AgentMaterialsInputController controller=new AgentMaterialsInputController(service,authentication);
     final AgentRuntimeAuthentication runtime=mock(AgentRuntimeAuthentication.class);
     final AgentRuntimeAuthenticationService.Proof proof=new AgentRuntimeAuthenticationService.Proof(
@@ -80,8 +79,6 @@ class ChatMaterialsFenceTest {
             assertTrue(fenced,"incomingTurn must not acquire task before runtime identity");events.add("incoming");return binding;
         });
         when(dispatch.forTurn(turn)).thenAnswer(i->{assertTrue(fenced);return binding;});
-        when(sessions.requireSingleReady(any(),eq("agent"))).thenReturn(
-                new TypedDeliberationSessionRegistry.Ready("session","agent",List.of("CHAT"),declaration));
         when(tasks.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any()))
                 .thenAnswer(i->{
                     assertTrue(fenced,"task root must be acquired after runtime identity");events.add("task");
@@ -103,6 +100,24 @@ class ChatMaterialsFenceTest {
         assertTrue(streamClosed);
         assertEquals(List.of("fence","incoming","task","release","storage","fence","task","release"),events);
         assertEquals(2,fences);
+    }
+    @Test void capabilityRefreshDoesNotReauthorizeOrInvalidateFrozenDelivery() throws Exception {
+        when(sessions.requireSingleReady(any(),anyString())).thenThrow(new IllegalStateException("new declaration has no image carrier"));
+        assertArrayEquals(bytes,read());
+        verifyNoInteractions(sessions);
+        assertEquals(2,fences); // identity and source authorization are still current
+    }
+    @Test void frozenManifestTamperingStillFailsBeforeReadingContent() {
+        var snapshot=dao.findSnapshot("0","owner","client","snapshot");
+        var facts=new LinkedHashMap<>(ChatSkillSnapshotJson.object(snapshot.getFactsManifestJson()));
+        var material=new LinkedHashMap<>((Map<String,Object>)facts.get("materialsInput"));
+        var manifest=new LinkedHashMap<>((Map<String,Object>)material.get("manifest"));
+        var input=new LinkedHashMap<>((Map<String,Object>)((List<?>)manifest.get("sources")).getFirst());
+        input.put("sha256","c".repeat(64));manifest.put("sources",List.of(input));
+        material.put("manifest",manifest);facts.put("materialsInput",material);
+        snapshot.setFactsManifestJson(CanonicalContextJson.write(facts));
+        assertThrows(ChatDeliberationException.class,this::read);
+        verify(sources,never()).open(any(),anyString(),anyString(),anyLong(),any());
     }
     @Test void revokedRuntimeDuringStorageDoesNotDeliverBytes() {
         when(sources.open(any(),anyString(),anyString(),anyLong(),any())).thenAnswer(i->{

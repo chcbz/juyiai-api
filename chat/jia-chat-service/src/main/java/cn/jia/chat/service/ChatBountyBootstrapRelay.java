@@ -200,16 +200,33 @@ public class ChatBountyBootstrapRelay implements SmartLifecycle, AutoCloseable, 
             reconcile(scope, claim, Outcome.RETRYABLE_FAILURE, null, null,
                     "BOUNTY_RUNTIME_AWAITING");
             return false;
+        } catch (ChatDeliberationException failure) {
+            if (failure.reason() != ChatDeliberationException.Reason.INVALID_REQUEST
+                    && failure.reason() != ChatDeliberationException.Reason.INVALID_ROUTE) {
+                throw admissionUnavailable(scope, claim, failure);
+            }
+            // A deterministic rejection belongs to this immutable intent, not to
+            // the shared worker. No provider call or business completion occurred.
+            log.warn("Bounty bootstrap intent rejected: taskId={}, bootstrapId={}, attempt={}, reason={}",
+                    claim.taskId(), claim.bootstrapId(), claim.claimAttempt(), failure.reason());
+            reconcile(scope, claim, Outcome.TERMINAL_FAILURE, null, null,
+                    "BOUNTY_" + failure.reason().name());
+            return true;
         } catch (RuntimeException failure) {
-            // A missing owner-scoped revision or a revoked grant must never be replaced by a
-            // truncated task-plan projection or a text CHAT dispatch. Retain for reconciliation.
-            log.warn("Bounty bootstrap admission failed, will retry with original intent", failure);
-            reconcile(scope, claim, Outcome.RETRYABLE_FAILURE, null, null,
-                    "BOUNTY_ADMISSION_UNAVAILABLE");
-            throw new IllegalStateException("BOUNTY_ADMISSION_UNAVAILABLE", failure);
+            throw admissionUnavailable(scope, claim, failure);
         }
         reconcile(scope, claim, Outcome.ADMITTED, result.conversationId(), result.requestId(), null);
         return true;
+    }
+
+    private IllegalStateException admissionUnavailable(AgentTaskExecutionGrantService.Scope scope,
+            AgentTaskBountyBootstrapClaimDTO claim, RuntimeException failure) {
+        // Unknown, infrastructure, identity and persistence failures are not
+        // reclassified as user input errors, nor silently acknowledged as success.
+        log.warn("Bounty bootstrap admission failed: taskId={}, bootstrapId={}, attempt={}",
+                claim.taskId(), claim.bootstrapId(), claim.claimAttempt(), failure);
+        reconcile(scope, claim, Outcome.RETRYABLE_FAILURE, null, null, "BOUNTY_ADMISSION_UNAVAILABLE");
+        return new IllegalStateException("BOUNTY_ADMISSION_UNAVAILABLE", failure);
     }
 
     private static boolean transientClaimFailure(Throwable failure) {
@@ -235,6 +252,8 @@ public class ChatBountyBootstrapRelay implements SmartLifecycle, AutoCloseable, 
                 outcome, conversationId, requestId, errorCode), System.currentTimeMillis());
         if (response == null || !claim.bootstrapId().equals(response.bootstrapId())
                 || outcome == Outcome.RETRYABLE_FAILURE && (!"RETRY".equals(response.status())
+                || response.conversationId() != null || response.initialRequestId() != null)
+                || outcome == Outcome.TERMINAL_FAILURE && (!"DEAD".equals(response.status())
                 || response.conversationId() != null || response.initialRequestId() != null)
                 || outcome == Outcome.ADMITTED && (!"ADMITTED".equals(response.status())
                 || !Objects.equals(conversationId, response.conversationId())

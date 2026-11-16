@@ -668,6 +668,15 @@ def runtimeCapabilityRegressionSourceSet = sourceSets.create('runtimeCapabilityR
     java.include 'cn/jia/chat/service/ChatBountyAssetFilenameTest.java'
     java.srcDir 'src/mmdRegressionTest/java'
     java.include 'cn/jia/chat/service/ChatBountyBootstrapRelayRecoveryTest.java'
+    // Material responsibility cleanup: reuse this maintained source slice, not full historical test compilation.
+    java.include 'cn/jia/chat/handler/TypedDeliberationDeclarationTest.java'
+    java.include 'cn/jia/chat/handler/TypedDeliberationSessionRegistryTest.java'
+    java.include 'cn/jia/chat/service/ChatMaterialsImageContractTest.java'
+    java.include 'cn/jia/chat/service/ChatMaterialsLocalFileContractTest.java'
+    java.include 'cn/jia/chat/service/ChatMaterialsFenceTest.java'
+    java.include 'cn/jia/chat/service/ChatRetainedOutputSourcesTest.java'
+    java.include 'cn/jia/chat/service/ChatRetainedOutputAdmissionTest.java'
+
     java.include 'cn/jia/chat/service/ChatBountyBootstrapSchedulingTransactionTest.java'
     java.include 'cn/jia/chat/service/NativeConversationWorkNotifierTest.java'
     java.include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'

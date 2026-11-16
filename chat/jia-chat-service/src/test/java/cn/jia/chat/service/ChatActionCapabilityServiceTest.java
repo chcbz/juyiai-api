@@ -172,6 +172,12 @@ class ChatActionCapabilityServiceTest {
                         "contentMimeType", "application/vnd.example.custom")).toList();
         var manyAction = service.availableNative(scope, "task", manySources, declaration, "session").getFirst();
         assertEquals(33, manyAction.get("maxSources"));
+        // The generic file action carries authorized inputs even without an image/audio preview declaration.
+        var mixed=List.<java.util.Map<String,Object>>of(java.util.Map.of("contentMimeType","image/jpeg"),
+                java.util.Map.of("contentMimeType","image/png"),java.util.Map.of("contentMimeType","audio/mpeg"));
+        var mixedAction=service.availableNative(scope,"task",mixed,declaration,"session").getFirst();
+        assertEquals(List.of("audio/mpeg","image/jpeg","image/png"),mixedAction.get("inputMimeTypes"));
+
         assertEquals(List.of("application/vnd.example.custom"), manyAction.get("inputMimeTypes"));
         assertEquals(List.of("application/json","text/plain"),action.get("outputMimeTypes"));assertEquals(List.of("image/png","text/plain"),action.get("inputMimeTypes"));
         when(executions.nativeLocalFileCapabilities()).thenReturn(new PersonalWorkspaceExecutionService.ExecutionCapabilities(List.of("text/plain","image/png"),List.of("image/png"),true));
@@ -246,9 +252,9 @@ class ChatActionCapabilityServiceTest {
         var contexts=new ChatTypedDeliberationContextService(jdbc,sessions,
                 mock(cn.jia.chat.config.ChatTypedDeliberationReadiness.class),capabilities,true);
         var scope=new SkillCapabilityLookup.Scope("0","client","owner","agent");
-        assertFalse(contexts.nativeRuntimeReady(scope));
+        assertFalse(contexts.discussionRuntimeReady(scope));
         var failure=assertThrows(ChatTypedDeliberationContextService.RuntimeNotReadyException.class,
-                ()->contexts.requireNativeRuntime(scope));
+                ()->contexts.requireDiscussionRuntime(scope));
         var controller=mock(cn.jia.chat.api.ChatTypedDeliberationController.class,CALLS_REAL_METHODS);
         var response=controller.error(failure);
         assertEquals(503,response.getStatusCode().value());

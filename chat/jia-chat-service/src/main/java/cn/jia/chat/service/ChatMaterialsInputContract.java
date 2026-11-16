@@ -1,16 +1,15 @@
 package cn.jia.chat.service;
 import java.util.*;
-import cn.jia.core.util.JsonUtil;
 
 /** Public native-input transport facts, not a skill grant or an independent analysis turn. */
 public final class ChatMaterialsInputContract {
     private ChatMaterialsInputContract() { }
     @SuppressWarnings("unchecked") public static Map<String,Object> declaration(Object raw) {
-        if(!(raw instanceof Map<?,?> m)||!m.keySet().equals(Set.of("schemaVersion","supportedInputs"))
+        if(!(raw instanceof Map<?,?> m)||!m.keySet().containsAll(Set.of("schemaVersion","supportedInputs"))
                 ||!Integer.valueOf(1).equals(m.get("schemaVersion"))||!(m.get("supportedInputs") instanceof List<?> list))throw new IllegalArgumentException("materials declaration");
         var inputs=new ArrayList<Map<String,Object>>();var seen=new HashSet<String>();
         for(var value:list) {
-            if(!(value instanceof Map<?,?> item)||!item.keySet().equals(Set.of("mediaKind","mimeType","carrier","carrierContractDigest")))throw new IllegalArgumentException("materials input");
+            if(!(value instanceof Map<?,?> item)||!item.keySet().containsAll(Set.of("mediaKind","mimeType","carrier","carrierContractDigest")))throw new IllegalArgumentException("materials input");
             String media=(String)item.get("mediaKind"),mime=(String)item.get("mimeType"),carrier=(String)item.get("carrier"),digest=(String)item.get("carrierContractDigest");
             if(media==null||!Set.of("text","image","audio","file").contains(media)||mime==null||(!mime.matches("[a-z0-9.+-]+/[a-z0-9.+-]+") && !("LOCAL_FILE".equals(carrier)&&"*/*".equals(mime)))
                     ||carrier==null||!Set.of("DIRECT_TEXT","LOCAL_IMAGE","LOCAL_AUDIO","PARSED_TEXT","LOCAL_FILE").contains(carrier)
@@ -36,13 +35,10 @@ public final class ChatMaterialsInputContract {
             selected.add(Map.of("sourceRefId",source.get("sourceRefId"),"sourceKind",source.get("sourceKind"),"sha256",source.get("contentHash"),
                     "byteLength",source.get("byteLength"),"mimeType",source.get("contentMimeType"),"carrier",input.get("carrier"),"carrierContractDigest",input.get("carrierContractDigest")));
         }
-        for (var source:catalog) {
-            if (source.get("contentMimeType") instanceof String mime && mime.startsWith("image/")
-                    && selected.stream().noneMatch(item -> item.get("sourceRefId").equals(source.get("sourceRefId")))) {
-                throw new ChatDeliberationException(ChatDeliberationException.Reason.INVALID_REQUEST,
-                        "已收到图片资料，但当前 Agent 不支持读取此格式（" + mime + "），请转换为支持的格式或切换 Agent。");
-            }
-        }
+        // This is optional native carrier delivery, not a reading-capability gate.
+        // Unmatched files remain in the full authorized sourceCatalog used by the
+        // model's action selection and generic native file execution. Do not invent
+        // a carrier/read receipt, reject the discussion, or filter that catalogue.
         selected.sort(Comparator.comparing(x->(String)x.get("sourceRefId")));return Map.of("profile",profile,"sources",List.copyOf(selected));
     }
     @SuppressWarnings("unchecked") public static Map<String,Object> bind(Object candidates,String tenant,String owner,String client,

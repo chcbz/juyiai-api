@@ -80,21 +80,16 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
     /** Reuse the exact admission predicate; no independent readiness cache or presence inference. */
     @Override public boolean ready(cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope scope) {
         try {
-            requireNativeReady(new Scope(scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
+            requireSingleReady(new Scope(scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
             return true;
         } catch (IllegalStateException unavailable) { return false; }
     }
 
-    /** Native task discussion must not freeze an empty action catalogue during startup.
-     * Plain chat/read-only consumers continue to use requireSingleReady independently. */
-    public Ready requireNativeReady(Scope scope, String agentId) {
-        return requireNativeDeclaration(requireSingleReady(scope, agentId));
-    }
-
-    /** Observation only. Final admission still validates the authenticated binding.
-     * currentBinding may query SQL, so preparation hints must not invoke it. */
-    public Ready observeNative(Scope scope, String agentId) {
-        return requireNativeDeclaration(selectReady(scope, agentId, false));
+    /** Observation only. Discussion readiness does not require file-generation
+     * formats. Final admission still checks the authenticated current binding;
+     * preparation hints must not invoke its potentially SQL-backed validator. */
+    public Ready observeDiscussion(Scope scope, String agentId) {
+        return selectReady(scope, agentId, false);
     }
 
     private Ready requireNativeDeclaration(Ready ready) {

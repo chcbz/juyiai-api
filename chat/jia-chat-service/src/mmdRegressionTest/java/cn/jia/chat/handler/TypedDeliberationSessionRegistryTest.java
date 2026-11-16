@@ -8,17 +8,15 @@ class TypedDeliberationSessionRegistryTest {
     private final TypedDeliberationSessionRegistry registry=new TypedDeliberationSessionRegistry();
     private final TypedDeliberationSessionRegistry.Scope scope=
             new TypedDeliberationSessionRegistry.Scope("0","owner","client");
-    @Test void assignmentReadinessReusesNativeAdmissionAndLiveBinding() {
+    @Test void assignmentReadinessRequiresDiscussionProtocolAndLiveBindingNotOutputFormats() {
         var executor = new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0", "client", "owner", "agent");
         assertFalse(registry.ready(executor));
         for (Object raw : new Object[]{null, java.util.Map.of("schemaVersion", 1),
-                TypedDeliberationDeclarationTest.declaration("UNAVAILABLE"), TypedDeliberationDeclarationTest.declaration("READY")}) {
+                TypedDeliberationDeclarationTest.declaration("UNAVAILABLE")}) {
             registry.register("s1", "0", "owner", "client", "agent", raw);
             assertFalse(registry.ready(executor));
         }
         var raw = TypedDeliberationDeclarationTest.declaration("READY");
-        raw.put("nativeExecution", java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
-                "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain")));
         var live = new java.util.concurrent.atomic.AtomicBoolean(true);
         registry.register("s1", "0", "owner", "client", "agent", raw, live::get);
         assertTrue(registry.ready(executor));
@@ -28,6 +26,15 @@ class TypedDeliberationSessionRegistryTest {
         assertFalse(registry.ready(executor));
         registry.remove("s2"); assertTrue(registry.ready(executor));
         registry.remove("s1"); assertFalse(registry.ready(executor));
+    }
+
+    @Test void emptyFileOutputDeclarationDoesNotBlockAnAnswer() {
+        var raw=TypedDeliberationDeclarationTest.declaration("READY");
+        raw.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
+                "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of()));
+        registry.register("s1","0","owner","client","agent",raw);
+        assertTrue(registry.ready(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0","client","owner","agent")));
+        assertFalse(registry.nativeScriptDeclared(scope,"agent","s1"));
     }
 
     @Test void exactOneCurrentReadySessionIsSelected() {
@@ -98,16 +105,17 @@ class TypedDeliberationSessionRegistryTest {
         assertThrows(IllegalStateException.class,()->registry.requireSingleReady(new TypedDeliberationSessionRegistry.Scope("0","Owner","client"),"agent"));
         registry.remove("other");assertEquals(1,registry.size());registry.remove("s1");assertEquals(0,registry.size());
     }
-    @Test void plannerReadinessDoesNotAdmitNativeTaskUntilSameSessionPublishesTools() {
+    @Test void discussionReadinessDoesNotInventNativeExecutionPermission() {
         var declaration=TypedDeliberationDeclarationTest.declaration("READY");
         registry.register("s1","0","owner","client","agent",declaration);
         assertEquals("s1",registry.requireSingleReady(scope,"agent").sessionId());
-        assertThrows(TypedDeliberationSessionRegistry.RuntimeNotReadyException.class,()->registry.requireNativeReady(scope,"agent"));
+        assertEquals("s1",registry.observeDiscussion(scope,"agent").sessionId());
+        assertFalse(registry.nativeScriptDeclared(scope,"agent","s1"));
         declaration.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
                 "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain"),
                 "supportedToolPolicyRefs",java.util.List.of("NATIVE_SKILL_SCRIPT_V1")));
         registry.register("s1","0","owner","client","agent",declaration);
-        assertEquals("s1",registry.requireNativeReady(scope,"agent").sessionId());
+        assertEquals("s1",registry.requireSingleReady(scope,"agent").sessionId());
         assertTrue(registry.nativeScriptDeclared(scope,"agent","s1"));
         assertFalse(registry.nativeScriptDeclared(scope,"agent","old"));
         registry.remove("s1");
@@ -120,10 +128,10 @@ class TypedDeliberationSessionRegistryTest {
                 "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain"),
                 "supportedToolPolicyRefs",java.util.List.of("NATIVE_SKILL_SCRIPT_V1")));
         registry.register("s1","0","owner","client","agent",declaration,()->{calls.incrementAndGet();return false;});
-        assertEquals("s1",registry.observeNative(scope,"agent").sessionId());
+        assertEquals("s1",registry.observeDiscussion(scope,"agent").sessionId());
         assertTrue(registry.nativeScriptDeclared(scope,"agent","s1"));
         assertEquals(0,calls.get());
-        assertThrows(TypedDeliberationSessionRegistry.RuntimeNotReadyException.class,()->registry.requireNativeReady(scope,"agent"));
+        assertThrows(TypedDeliberationSessionRegistry.RuntimeNotReadyException.class,()->registry.requireSingleReady(scope,"agent"));
         assertEquals(1,calls.get());
     }
 
