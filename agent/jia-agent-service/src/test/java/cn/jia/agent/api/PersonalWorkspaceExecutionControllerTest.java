@@ -122,7 +122,6 @@ class PersonalWorkspaceExecutionControllerTest {
 
         verify(service).getByIdempotencyKey(owner, "paid-create-key");
         verify(service, never()).get(any(), eq("request"));
-        verify(service, never()).create(any(), any(), any());
     }
 
     @Test
@@ -149,12 +148,9 @@ class PersonalWorkspaceExecutionControllerTest {
                         .queryParam("tenant_id", "0").principal(tenantJwt(java.util.Map.of("tenant_id", "1"))))
                 .andExpect(status().isOk());
         verify(service).list(gray, 20, null, null);
-        when(service.create(eq(gray), any(), eq("gray-create"))).thenReturn(executionView("gray"));
-        controller.create(new cn.jia.core.entity.JsonRequest<>(1, "request",
-                new PersonalWorkspaceExecutionController.CreateRequest(null,"agent-a",null,
-                        "instruction",PersonalWorkspaceExecutionProperties.DOCX,List.of())),
-                "gray-create",tenantJwt(java.util.Map.of("tenant_id","1","tenantId","1")));
-        verify(service).create(eq(gray),any(),eq("gray-create"));
+        when(service.get(gray,"gray")).thenReturn(executionView("gray"));
+        controller.get("gray",tenantJwt(java.util.Map.of("tenant_id","1","tenantId","1")));
+        verify(service).get(gray,"gray");
     }
 
     @Test

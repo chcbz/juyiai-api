@@ -452,8 +452,14 @@ tasks.register('mmdExecutionTermination', Test) {
 
 // Exact native skill WS ingress -> durable MySQL ACTIVE/receipt, no production fixture.
 def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression') {
-    java.srcDirs('src/nativeSkillResultTest/java', '../../agent/jia-agent-service/src/test/java')
+    java.srcDirs('src/nativeSkillResultTest/java', 'src/test/java', '../../agent/jia-agent-service/src/test/java')
     java.include 'cn/jia/chat/handler/SkillNativeResultMySqlTest.java'
+    // Native v6 unit slices share the existing result lane, not unrelated full-test fixture sources.
+    java.include 'cn/jia/agent/skill/SkillExecutionServiceTest.java'
+    java.include 'cn/jia/agent/api/PersonalWorkspaceExecutionControllerTest.java'
+    java.include 'cn/jia/chat/service/ChatPrivateNativeAdmissionTest.java'
+    java.include 'cn/jia/chat/service/ChatPrivateNativeProjectionTest.java'
+    java.include 'cn/jia/chat/service/NativeSkillScriptSessionLookupImplTest.java'
     java.include 'cn/jia/agent/skill/SkillMarketplaceRealTransactionTest.java'
     java.include 'cn/jia/agent/skill/SkillNativeAckMySqlTest.java'
     java.include 'cn/jia/agent/skill/SkillExecutionMapperRealTransactionTest.java'
@@ -479,7 +485,14 @@ tasks.register('nativeSkillResultRegression', Test) {
     classpath = nativeSkillResultSourceSet.runtimeClasspath
     useJUnitPlatform()
     maxParallelForks = 1
-    filter { includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker' }
+    filter {
+        includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker'
+        includeTestsMatching 'cn.jia.agent.skill.SkillExecutionServiceTest'
+        includeTestsMatching 'cn.jia.agent.api.PersonalWorkspaceExecutionControllerTest'
+        includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeAdmissionTest'
+        includeTestsMatching 'cn.jia.chat.service.ChatPrivateNativeProjectionTest'
+        includeTestsMatching 'cn.jia.chat.service.NativeSkillScriptSessionLookupImplTest'
+    }
 }
 
 // SM-C1 real WS registration/result consumer + agent-owned SQL/outbox transaction fixture.
