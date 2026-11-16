@@ -92,6 +92,13 @@ class ChatConversationArchiveServiceTest {
     @Test
     void privateFileSaveUsesExecutionAddressAndReplaysOriginalReceiptWithoutAnotherFile() throws Exception {
         readyAsset("private-file",null);
+        // The storage adapter consumes the lazy source outside the business lock.
+        // A canned UploadView alone does not exercise the execution reader.
+        doAnswer(invocation -> {
+            PersonalWorkspaceService.ConversationArchiveCommand value = invocation.getArgument(1);
+            try (var stream = value.source().open()) { assertArrayEquals(ASSET_BYTES, stream.readAllBytes()); }
+            return upload(sha(ASSET_BYTES), "image/png", ASSET_BYTES.length);
+        }).when(workspace).archiveConversationAsset(any(), any());
         var command=asset("private-save-key","private-file");
         var saved=service.archive(OWNER,command);
         assertEquals("saved",saved.state());

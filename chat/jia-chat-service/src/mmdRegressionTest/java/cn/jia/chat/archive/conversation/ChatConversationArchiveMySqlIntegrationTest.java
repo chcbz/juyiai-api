@@ -255,6 +255,9 @@ class ChatConversationArchiveMySqlIntegrationTest extends cn.jia.agent.skill.Ski
         for(String[] damage : new String[][] {
                 {"chat_conversation","task_id","invented",null},
                 {"chat_interaction_step","task_id","invented",null},
+                {"chat_interaction_step","grant_id","invented",null},
+                {"chat_interaction_step","grant_version","1",null},
+                {"chat_interaction_step","assignment_revision","1",null},
                 {"chat_conversation","target_agent_id","another","agent"},
                 {"chat_interaction_step","target_agent_id","another","agent"},
                 {"chat_conversation","conversation_scope_key","agent:another","agent:agent"},
@@ -334,7 +337,7 @@ class ChatConversationArchiveMySqlIntegrationTest extends cn.jia.agent.skill.Ski
                 + "('asset','0','owner','client','42',3,'producer','step','execution','run','output','image/png',?,10,1)",
                 "a".repeat(64));
         jdbc.update("INSERT INTO chat_interaction_step VALUES "
-                + "('step','0','owner','client','producer',1,'42',3,'task-1','EXECUTE','OUTPUT_COMMITTED','agent')");
+                + "('step','0','owner','client','producer',1,'42',3,'task-1','EXECUTE','OUTPUT_COMMITTED','agent',NULL,NULL,NULL)");
         jdbc.update("INSERT INTO chat_step_execution_link VALUES "
                 + "('0','owner','client','step','execution','OUTPUT_COMMITTED')");
         jdbc.update("INSERT INTO chat_request VALUES "
@@ -371,7 +374,8 @@ class ChatConversationArchiveMySqlIntegrationTest extends cn.jia.agent.skill.Ski
                 CREATE TABLE chat_interaction_step (
                   step_id VARCHAR(64),tenant_id VARCHAR(50),owner_jiacn VARCHAR(50),client_id VARCHAR(50),
                   request_id VARCHAR(100),request_revision BIGINT,conversation_id VARCHAR(100),
-                  conversation_generation BIGINT,task_id VARCHAR(100),kind VARCHAR(20),state VARCHAR(30),target_agent_id VARCHAR(100)
+                  conversation_generation BIGINT,task_id VARCHAR(100),kind VARCHAR(20),state VARCHAR(30),target_agent_id VARCHAR(100),
+                  grant_id VARCHAR(100),grant_version BIGINT,assignment_revision BIGINT
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
                 """);
         jdbc.execute("""
