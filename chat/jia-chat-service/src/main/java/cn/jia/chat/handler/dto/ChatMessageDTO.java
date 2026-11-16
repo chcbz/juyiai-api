@@ -39,5 +39,7 @@ public class ChatMessageDTO {
     private Map<String, Object> clientSeenVector;
     /** Candidate references re-authorized by the server before INSPECT. */
     private List<Map<String, Object>> inputRefs;
+    /** Explicit private native selections: fixed workspace version or same-conversation asset revision. */
+    private List<Map<String, Object>> materialRefs;
     private Map<String, Object> metadata;
 }

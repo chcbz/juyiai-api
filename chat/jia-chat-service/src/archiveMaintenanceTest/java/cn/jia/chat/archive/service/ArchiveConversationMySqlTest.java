@@ -75,7 +75,7 @@ class ArchiveConversationMySqlTest {
         byte[] bytes=text.getBytes(StandardCharsets.UTF_8);sourceSha=ArchiveEtags.sha256(bytes);
         var s=new PersonalWorkspaceService.Scope("0","test-client","owner-a");
         var f=new PersonalWorkspaceViews.FileView("file1","UPLOAD","UPLOAD","底本","TEXT","ACTIVE",1,1,1,null);
-        var v=new PersonalWorkspaceViews.VersionView("file1",1,"source.txt","text/plain",bytes.length,sourceSha,1,"READY");
+        var v=new PersonalWorkspaceViews.VersionView("file1",1,"source.txt","text/plain",bytes.length,sourceSha,1);
         when(files.get(s,"file1")).thenReturn(new PersonalWorkspaceViews.FileDetailView(f,v,List.of(v),List.of(),List.of()));
         when(files.versions(s,"file1")).thenReturn(List.of(v));
         when(files.readContent(s,"file1",1)).thenReturn(new PersonalWorkspaceService.Content("source.txt","text/plain",bytes));

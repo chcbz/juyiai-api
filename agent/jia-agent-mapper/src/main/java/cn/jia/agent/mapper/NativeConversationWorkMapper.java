@@ -11,23 +11,17 @@ public interface NativeConversationWorkMapper {
     @Select("""
         <script>
         SELECT DISTINCT tenant_id AS tenantId, client_id AS clientId, target_agent_id AS agentId,
-               CASE WHEN execution_mode='CONVERSATION' THEN 'NATIVE_CONVERSATION' ELSE 'WORKSPACE_FILE' END AS lane
+               'NATIVE_CONVERSATION' AS lane
           FROM agent_personal_workspace_execution
          WHERE tenant_id=#{tenantId} AND BINARY tenant_id=BINARY #{tenantId}
            AND execution_state='QUEUED'
+           AND execution_mode='CONVERSATION' AND execution_protocol_version=6
+           AND conversation_provider_started_at IS NULL
            AND (
              <foreach collection="targets" item="target" separator=" OR ">
                (client_id=#{target.clientId} AND BINARY client_id=BINARY #{target.clientId}
                  AND target_agent_id=#{target.agentId} AND BINARY target_agent_id=BINARY #{target.agentId}
-                 <choose>
-                   <when test='target.lane == "WORKSPACE_FILE"'>
-                     AND (execution_mode IN ('PRIVATE','TASK') OR execution_mode IS NULL)
-                   </when>
-                   <otherwise>
-                     AND execution_mode='CONVERSATION' AND execution_protocol_version=5
-                     AND conversation_provider_started_at IS NULL
-                   </otherwise>
-                 </choose>)
+                 AND #{target.lane}='NATIVE_CONVERSATION')
              </foreach>
            )
         </script>

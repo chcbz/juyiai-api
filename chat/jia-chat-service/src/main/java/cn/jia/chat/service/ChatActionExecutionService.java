@@ -114,8 +114,8 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         var baseline=grants.resolveAndAdmit(grantScope,parent.taskId(),parent.assignmentRevision(),target,"EXECUTE_SKILL",false);
         var snapshot="EXECUTE_NATIVE".equals(capability.operation())?prepareNative(action,actionId,capability,catalog,baseline):prepare(action,actionId,capability,catalog,baseline);
         var creation=executions.create(new PersonalWorkspaceExecutionService.OwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),
-                new SkillExecutionService.Create(actionId,parent.taskId(),scope.conversationId(),scope.conversationGeneration(),target,
-                        baseline.grantId(),baseline.grantVersion(),parent.assignmentRevision(),snapshot));
+                new SkillExecutionService.Create(actionId,new SkillExecutionService.TaskScope(scope.conversationId(),scope.conversationGeneration(),parent.taskId(),
+                        baseline.grantId(),baseline.grantVersion(),parent.assignmentRevision()),target,snapshot));
         if(creation==null||!parent.taskId().equals(creation.taskId())||!scope.conversationId().equals(creation.conversationId())
                 ||!target.equals(creation.targetAgentId())||!"QUEUED".equals(creation.state())
                 ||!ChatSkillSnapshotJson.sha(snapshot).equals(creation.snapshotDigest()))throw conflict();
@@ -151,9 +151,9 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
             input.put("sourceKind",kind);input.put("sourceIdentity",source.get("sourceIdentity"));input.put("inputRef",source.get("sourceRefId"));
             input.put("contentMimeType",source.get("contentMimeType"));input.put("byteLength",source.get("byteLength"));input.put("sha256",source.get("contentHash"));inputs.add(input);
         }
-        var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",5);
-        snapshot.put("toolPolicyRef",capability.skill()==null?SkillExecutionService.NATIVE_LOCAL_FILES_POLICY:SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);snapshot.put("actionEventId",actionId);snapshot.put("taskId",parent.taskId());
-        snapshot.put("conversationId",scope.conversationId());snapshot.put("conversationGeneration",Long.toString(scope.conversationGeneration()));
+        var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);
+        snapshot.put("toolPolicyRef",capability.skill()==null?SkillExecutionService.NATIVE_LOCAL_FILES_POLICY:SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);snapshot.put("actionEventId",actionId);
+        snapshot.put("scope",new SkillExecutionService.ScopeView("TASK",scope.conversationId(),Long.toString(scope.conversationGeneration()),parent.taskId()).asMap());
         snapshot.put("targetAgentId",action.validated().binding().get("targetAgentId"));
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),"assignmentRevision",Long.toString(baseline.assignmentRevision())));
         snapshot.put("instruction",action.validated().interactionOutcome().action().instruction());snapshot.put("parameters",action.validated().interactionOutcome().action().parameters());
@@ -223,9 +223,8 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
             input.put("inputRef",source.get("sourceRefId"));input.put("contentMimeType",source.get("contentMimeType"));
             input.put("byteLength",source.get("byteLength"));input.put("sha256",source.get("contentHash"));inputs.add(input);
         }
-        var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",5);snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("actionEventId",actionId);
-        snapshot.put("taskId",parent.taskId());snapshot.put("conversationId",scope.conversationId());
-        snapshot.put("conversationGeneration",Long.toString(scope.conversationGeneration()));snapshot.put("targetAgentId",target);
+        var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("actionEventId",actionId);
+        snapshot.put("scope",new SkillExecutionService.ScopeView("TASK",scope.conversationId(),Long.toString(scope.conversationGeneration()),parent.taskId()).asMap());snapshot.put("targetAgentId",target);
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),
                 "assignmentRevision",Long.toString(baseline.assignmentRevision())));
         var selectedSkill=Map.of("key",descriptor.skillKey(),"version",descriptor.skillVersion(),"installationId",descriptor.installationId(),

@@ -113,7 +113,7 @@ public class ChatBountyMediaController {
     public ResponseEntity<JsonResult<List<OutputItem>>> outputs(@PathVariable String requestId,
             @PathVariable String stepId, Authentication authentication) {
         var allowed = authorize(requestId, stepId, authentication);
-        var items = executions.listConversationOutputs(allowed.scope(), allowed.step().taskId(),
+        var items = executions.listConversationOutputs(allowed.scope(), allowed.step().executionId(),
                 allowed.execution().runId());
         if (items == null) throw unavailable();
         var body = new java.util.ArrayList<OutputItem>(items.size());
@@ -194,7 +194,7 @@ public class ChatBountyMediaController {
         if (!safeId(requestId) || !safeId(stepId) || !safeId(outputId)) throw unavailable();
         var allowed = authorize(requestId, stepId, authentication);
         var execution = allowed.execution();
-        try(var output=executions.openConversationOutput(allowed.scope(),allowed.step().taskId(),execution.runId(),outputId)) {
+        try(var output=executions.openConversationOutput(allowed.scope(),allowed.step().executionId(),execution.runId(),outputId)) {
             if(output==null||!execution.executionId().equals(output.executionId())||!outputId.equals(output.outputId()))throw unavailable();
             if(expectedHash!=null&&!expectedHash.equals(output.sha256()))throw unavailable();
             // Bytes and digest are verified by storage before the service returns this descriptor.
@@ -276,11 +276,11 @@ public class ChatBountyMediaController {
         var request = requests.getRequest(tenant, sender.jiacn(), sender.clientId(), requestId);
         var step = request.steps().stream().filter(candidate -> stepId.equals(candidate.stepId()))
                 .findFirst().orElseThrow(ChatBountyMediaController::unavailable);
-        if (!"EXECUTE".equals(step.kind()) || !safeId(step.taskId())
+        if (!"EXECUTE".equals(step.kind()) || step.taskId()!=null&&!safeId(step.taskId())
                 || !safeId(step.executionId()) || !safeId(step.targetAgentId())) throw unavailable();
         var execution = executions.get(scope, step.executionId());
         if (execution == null || !step.executionId().equals(execution.executionId())
-                || !step.taskId().equals(execution.taskId())
+                || !java.util.Objects.equals(step.taskId(),execution.taskId())
                 || !request.conversationId().equals(execution.conversationId())
                 || !step.targetAgentId().equals(execution.targetAgentId())
                 || !"CONVERSATION".equals(execution.executionMode())

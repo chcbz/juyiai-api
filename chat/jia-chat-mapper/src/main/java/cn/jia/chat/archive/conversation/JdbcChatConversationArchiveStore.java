@@ -221,9 +221,16 @@ public final class JdbcChatConversationArchiveStore implements ChatConversationA
                   AND s.kind='EXECUTE' AND l.execution_id IS NOT NULL
                   AND ((s.state='OUTPUT_COMMITTED' AND l.state='OUTPUT_COMMITTED' AND r.aggregate_state='OUTPUT_COMMITTED')
                     OR (s.state='RESULT_COMMITTED' AND l.state='RESULT_COMMITTED' AND r.aggregate_state='RESULT_COMMITTED'))
-                  AND c.conversation_type='juyiting' AND c.conversation_scope_type='bounty'
-                  AND BINARY c.task_id=BINARY s.task_id
-                  AND BINARY c.conversation_scope_key=BINARY CONCAT('task:',s.task_id)
+                  AND c.conversation_type='juyiting'
+                  AND ((c.conversation_scope_type='bounty'
+                    AND BINARY c.task_id=BINARY s.task_id
+                    AND BINARY c.conversation_scope_key=BINARY CONCAT('task:',s.task_id))
+                  OR (c.conversation_scope_type='private' AND c.task_id IS NULL AND s.task_id IS NULL
+                    AND s.grant_id IS NULL AND s.grant_version IS NULL AND s.assignment_revision IS NULL
+                    AND BINARY c.target_agent_id=BINARY s.target_agent_id
+                    AND BINARY c.conversation_scope_key=BINARY CONCAT('agent:',s.target_agent_id)
+                    AND JSON_VALID(c.target_agent_ids) AND JSON_LENGTH(c.target_agent_ids)=1
+                    AND BINARY JSON_UNQUOTE(JSON_EXTRACT(c.target_agent_ids,'$[0]'))=BINARY s.target_agent_id))
                 """+(targetAgentId==null?"":" AND JSON_VALID(c.target_agent_ids)"
                         +" AND JSON_LENGTH(c.target_agent_ids)=1"
                         +" AND BINARY JSON_UNQUOTE(JSON_EXTRACT(c.target_agent_ids,'$[0]'))=BINARY ?"

@@ -1282,13 +1282,13 @@ public final class SkillManagementService {
         };
         return !retained(auth,relationship)&&positionChange(change)?ownedChange(change,admission):owned(actor,scope.agentId(),null,true,admission);
     }
-    public Map<String,Object> nativeTaskBinding(String tenant,String client,String executionId,String grantId,long grantVersion,String agent,String installationId) {
-        return taskBinding(tenant,client,executionId,grantId,grantVersion,agent,installationId,true);
+    public Map<String,Object> executionBinding(String tenant,String client,String executionId,String scopeSha256,long grantRevision,String agent,String installationId) {
+        return installationBinding(tenant,client,executionId,scopeSha256,grantRevision,agent,installationId,true);
     }
     public Map<String,Object> taskBinding(String tenant,String client,String executionId,String grantId,long grantVersion,String agent,String installationId) {
-        return taskBinding(tenant,client,executionId,grantId,grantVersion,agent,installationId,false);
+        return installationBinding(tenant,client,executionId,grantId,grantVersion,agent,installationId,false);
     }
-    private Map<String,Object> taskBinding(String tenant,String client,String executionId,String grantId,long grantVersion,String agent,String installationId,boolean nativeV5) {
+    private Map<String,Object> installationBinding(String tenant,String client,String executionId,String authorityId,long authorityRevision,String agent,String installationId,boolean nativeExecution) {
         // Internal adapter invoked only after exact installation ownership/admission was verified.
         var auth=db.findAuthorization(tenant,client,installationId);
         Map<String,Object> ref;String key,permissions;
@@ -1313,9 +1313,16 @@ public final class SkillManagementService {
                     "packageSha256",HexFormat.of().formatHex(i.getPackageSha256()),"manifestSha256",manifest.manifestSha256());
             key=i.getSkillKey();var approved=new ArrayList<>(SkillMarketplaceHttp.permissions(e.getApprovedPermissionsManifest()));approved.sort(UTF8);permissions=permissionsHash(approved);
         }
-        var result=map("executionId",executionId,"taskGrantId",grantId,"taskGrantVersion",Long.toString(grantVersion),"agentId",agent,"skillKey",key,
+        var result=map("executionId",executionId,"agentId",agent,"skillKey",key,
                 "skillInstallationId",installationId,"productVersionId",ref.get("productVersionId"),"skillVersion",ref.get("skillVersion"),
                 "packageSha256",ref.get("packageSha256"),"manifestSha256",ref.get("manifestSha256"),"approvedPermissionsSha256",permissions);
-        if(nativeV5)SkillManagementCodec.validateNativeTaskBinding(result);else validate("TaskSkillBinding",result);return result;
+        if(nativeExecution) {
+            result.put("scopeSha256",authorityId);result.put("grantRevision",Long.toString(authorityRevision));
+            SkillManagementCodec.validateExecutionBinding(result);
+        } else {
+            result.put("taskGrantId",authorityId);result.put("taskGrantVersion",Long.toString(authorityRevision));
+            validate("TaskSkillBinding",result);
+        }
+        return result;
     }
 }

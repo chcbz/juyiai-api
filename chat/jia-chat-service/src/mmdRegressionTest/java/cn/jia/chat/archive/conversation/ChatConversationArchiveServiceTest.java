@@ -54,7 +54,7 @@ class ChatConversationArchiveServiceTest {
         store.sources.put(asset, new Source(asset, 1, "42", 3, "request-1", 1,
                 "step-1", "task-1", "execution-1", "run-1", "output-1",
                 "image/png", hash, ASSET_BYTES.length));
-        when(executions.openConversationOutput(any(), eq("task-1"), eq("run-1"), eq("output-1")))
+        when(executions.openConversationOutput(any(), eq("execution-1"), eq("run-1"), eq("output-1")))
                 .thenAnswer(i -> new PersonalWorkspaceExecutionService.ConversationDownload("execution-1",
                         "output-1", "/untrusted/runtime/path", "image/png", hash,
                         ASSET_BYTES.length, new java.io.ByteArrayInputStream(ASSET_BYTES)));
@@ -250,10 +250,9 @@ class ChatConversationArchiveServiceTest {
                 new PersonalWorkspaceViews.FileView("pws_file_1", "UPLOAD", "AGENT_DELIVERY",
                         "conversation source", "text/plain".equals(mime) ? "TEXT" : "IMAGE",
                         "ACTIVE", 1, 1, 1,
-                        new PersonalWorkspaceViews.Capabilities("AVAILABLE", "AVAILABLE", "UNVERIFIED",
-                                "AVAILABLE", "AVAILABLE")),
+                        new PersonalWorkspaceViews.Capabilities("AVAILABLE", "AVAILABLE", "UNVERIFIED", "AVAILABLE")),
                 new PersonalWorkspaceViews.VersionView("pws_file_1", 1, "source", mime,
-                        length, hash, 1, "READY"));
+                        length, hash, 1));
     }
 
     private static String sha(byte[] bytes) {

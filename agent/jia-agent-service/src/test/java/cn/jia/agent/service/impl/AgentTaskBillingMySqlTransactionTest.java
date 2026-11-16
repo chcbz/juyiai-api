@@ -254,11 +254,11 @@ class AgentTaskBillingMySqlTransactionTest {
         var leases = new AgentWorkItemLeaseServiceImpl(members, work, roots, events, 900000);
         leases.setAssigneeAuthority(authority);
         when(authority.requireTaskAgent(TENANT,CLIENT,OWNER,TASK,AGENT,false)).thenReturn(AGENT);
-        var executionCancellation = proxy(new TaskExecutionCancellationServiceImpl(
-                new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
-                        sql.getMapper(PersonalWorkspaceExecutionInputMapper.class), sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class)),
-                new SkillExecutionDaoImpl(sql.getMapper(SkillExecutionMapper.class)),
-                mock(org.springframework.context.ApplicationEventPublisher.class)), TaskExecutionCancellationService.class);
+        var executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
+                sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
+        var executionCancellation=proxy(new TaskExecutionCancellationServiceImpl(executionRows,
+                NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(sql.getMapper(SkillExecutionMapper.class)),
+                        mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,TASK,AGENT,roots)),TaskExecutionCancellationService.class);
         var consentCancellation = proxy(new AgentTaskProviderCostConsentServiceImpl(
                 new AgentTaskProviderCostConsentDaoImpl(sql.getMapper(AgentTaskProviderCostConsentMapper.class)),
                 assignment,roots,mock(ControlledImageProviderOperatorPolicy.class),new ObjectMapper()), AgentTaskProviderCostConsentService.class);
@@ -468,7 +468,7 @@ class AgentTaskBillingMySqlTransactionTest {
         assertEquals(2,jdbc.queryForObject("SELECT attempt_count FROM agent_task_work_item",Integer.class));
         assertEquals("REVOKED",jdbc.queryForObject("SELECT state FROM agent_task_execution_grant",String.class));
         assertEquals(100L,jdbc.queryForObject("SELECT started_at FROM agent_task_meta",Long.class));
-        assertEquals("paid-lease",jdbc.queryForObject("SELECT conversation_lease_token FROM agent_personal_workspace_execution",String.class));
+        assertNull(jdbc.queryForObject("SELECT conversation_lease_token FROM agent_personal_workspace_execution",String.class));
         assertEquals(receipt,cancellation.cancel(TENANT,CLIENT,OWNER,PAYER,TASK,3));
         assertEquals(2,count("economy_transaction"));
     }
@@ -512,12 +512,13 @@ class AgentTaskBillingMySqlTransactionTest {
             (execution_id,tenant_id,client_id,owner_jiacn,task_id,run_id,target_agent_id,instruction,output_content_mime_type,
              execution_state,grant_revision,idempotency_key,request_hash,created_at,execution_mode,execution_protocol_version,
              conversation_lease_token,conversation_lease_version,conversation_lease_expires_at,conversation_provider_started_at,conversation_provider_lease_version)
-            VALUES ('exec',?,?,?,?, 'run',?,'fixture instruction','text/plain','QUEUED',1,'exec-key',REPEAT('a',64),100,'CONVERSATION',5,'paid-lease',3,200,150,3)
+            VALUES ('exec',?,?,?,?, 'run',?,'fixture instruction','text/plain','QUEUED',1,'exec-key',REPEAT('a',64),100,'CONVERSATION',6,'paid-lease',3,200,150,3)
             """,TENANT,CLIENT,OWNER,TASK,AGENT);
+        jdbc.update("UPDATE agent_personal_workspace_execution SET business_scope='TASK',conversation_id='42',assignment_revision=3 WHERE execution_id='exec'");
         jdbc.update("""
             INSERT INTO agent_skill_execution (tenant_id,client_id,owner_jiacn,execution_id,snapshot_json,snapshot_sha256,
-             phase,version,effects_json,created_at,updated_at) VALUES (?,?,?,'exec','{}',REPEAT('a',64),'RUNNING',2,'{}',100,100)
-            """,TENANT,CLIENT,OWNER);
+             phase,version,effects_json,created_at,updated_at) VALUES (?,?,?,'exec',?,REPEAT('a',64),'RUNNING',2,'{}',100,100)
+            """,TENANT,CLIENT,OWNER,NativeCancellationFixture.snapshot(TASK));
     }
     private String executionState(){return jdbc.queryForObject("SELECT execution_state FROM agent_personal_workspace_execution WHERE execution_id='exec'",String.class);}
     private String skillPhase(){return jdbc.queryForObject("SELECT phase FROM agent_skill_execution WHERE execution_id='exec'",String.class);}
@@ -689,7 +690,7 @@ class AgentTaskBillingMySqlTransactionTest {
                 "agent-personal-workspace-v1_14-conversation-output.sql",
                 "agent-personal-workspace-v1_15-conversation-lease.sql",
                 "agent-personal-workspace-v1_16-conversation-provider-start.sql",
-                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql")) {
+                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql")) {
             new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/" + file))
                     .execute(jdbc.getDataSource());
         }

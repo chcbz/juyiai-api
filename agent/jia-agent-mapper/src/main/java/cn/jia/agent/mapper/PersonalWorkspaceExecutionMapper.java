@@ -10,73 +10,85 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
     @Select("""
             SELECT * FROM agent_personal_workspace_execution
             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
-              AND task_id=#{taskId} AND execution_mode IN ('TASK','CONVERSATION')
+              AND task_id=#{taskId} AND execution_mode='CONVERSATION' AND execution_protocol_version=6 AND business_scope='TASK'
               AND BINARY tenant_id=BINARY #{tenantId} AND BINARY client_id=BINARY #{clientId}
               AND BINARY owner_jiacn=BINARY #{ownerJiacn} AND BINARY task_id=BINARY #{taskId}
               AND execution_state NOT IN ('OUTPUT_COMMITTED','RESULT_COMMITTED','FAILED','INPUTS_REVOKED','CANCELLED')
-            ORDER BY execution_id FOR UPDATE
+            ORDER BY conversation_id,execution_id
             """)
-    java.util.List<PersonalWorkspaceExecutionEntity> lockUnfinishedTaskExecutions(
+    java.util.List<PersonalWorkspaceExecutionEntity> findUnfinishedTaskExecutions(
             @Param("tenantId") String tenantId, @Param("clientId") String clientId,
             @Param("ownerJiacn") String ownerJiacn, @Param("taskId") String taskId);
 
     @Update("""
-            UPDATE agent_personal_workspace_execution SET execution_state='CANCELLED',update_time=#{now}
+            UPDATE agent_personal_workspace_execution SET execution_state='CANCELLED',update_time=#{now},
+              conversation_lease_token=NULL,conversation_lease_runtime_id=NULL,conversation_lease_expires_at=NULL
             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
-              AND task_id=#{taskId} AND execution_id=#{executionId} AND execution_state=#{expectedState}
-              AND execution_mode IN ('TASK','CONVERSATION')
+              AND execution_id=#{executionId} AND execution_state=#{expectedState}
+              AND execution_mode='CONVERSATION' AND execution_protocol_version=6
               AND BINARY tenant_id=BINARY #{tenantId} AND BINARY client_id=BINARY #{clientId}
-              AND BINARY owner_jiacn=BINARY #{ownerJiacn} AND BINARY task_id=BINARY #{taskId}
-              AND BINARY execution_id=BINARY #{executionId}
+              AND BINARY owner_jiacn=BINARY #{ownerJiacn} AND BINARY execution_id=BINARY #{executionId}
             """)
-    int cancelLockedTaskExecution(@Param("tenantId") String tenantId, @Param("clientId") String clientId,
-            @Param("ownerJiacn") String ownerJiacn, @Param("taskId") String taskId,
-            @Param("executionId") String executionId, @Param("expectedState") String expectedState,
-            @Param("now") long now);
+    int cancelLockedExecution(@Param("tenantId") String tenantId, @Param("clientId") String clientId,
+            @Param("ownerJiacn") String ownerJiacn, @Param("executionId") String executionId,
+            @Param("expectedState") String expectedState, @Param("now") long now);
 
     @Select("""
         SELECT e.* FROM agent_personal_workspace_execution e
         WHERE BINARY e.tenant_id=BINARY #{tenantId} AND BINARY e.client_id=BINARY #{clientId}
-          AND BINARY e.target_agent_id=BINARY #{agentId} AND BINARY e.task_id=BINARY #{taskId}
+          AND BINARY e.target_agent_id=BINARY #{agentId} AND BINARY e.execution_id=BINARY #{executionId}
           AND BINARY e.run_id=BINARY #{runId}
-          AND ((e.execution_mode='CONVERSATION' AND EXISTS (
-            SELECT 1 FROM agent_task_execution_grant g WHERE g.tenant_id=e.tenant_id AND g.client_id=e.client_id
-              AND g.owner_jiacn=e.owner_jiacn AND g.task_id=e.task_id AND g.grant_id=e.task_grant_id
-              AND g.grant_version=e.task_grant_version AND g.target_agent_id=e.target_agent_id
-              AND BINARY g.executor_owner_jiacn=BINARY #{executorOwner}))
-            OR (e.execution_mode IN ('PRIVATE','TASK') AND BINARY e.owner_jiacn=BINARY #{executorOwner}))
+          AND e.execution_mode='CONVERSATION' AND e.execution_protocol_version=6
+          AND ((e.business_scope='PRIVATE' AND BINARY e.owner_jiacn=BINARY #{executorOwner}
+                AND e.task_id IS NULL AND e.task_grant_id IS NULL
+                AND e.task_grant_version IS NULL AND e.assignment_revision IS NULL)
+            OR (e.business_scope='TASK' AND EXISTS (
+              SELECT 1 FROM agent_task_execution_grant g
+              WHERE BINARY g.tenant_id=BINARY e.tenant_id AND BINARY g.client_id=BINARY e.client_id
+                AND BINARY g.owner_jiacn=BINARY e.owner_jiacn AND BINARY g.task_id=BINARY e.task_id
+                AND BINARY g.grant_id=BINARY e.task_grant_id AND g.grant_version=e.task_grant_version
+                AND BINARY g.target_agent_id=BINARY e.target_agent_id
+                AND BINARY g.executor_owner_jiacn=BINARY #{executorOwner})))
         """)
     PersonalWorkspaceExecutionEntity findForRuntime(@Param("tenantId") String tenantId,
         @Param("clientId") String clientId,@Param("executorOwner") String executorOwner,
-        @Param("agentId") String agentId,@Param("taskId") String taskId,@Param("runId") String runId);
+        @Param("agentId") String agentId,@Param("executionId") String executionId,@Param("runId") String runId);
 
 
-    /** Cost evidence only: immutable original grant identity survives cancellation/version changes.
-     * The authenticated Runtime must still have the original executor binding. No execution,
-     * task-state, grant reactivation or wallet authority is granted by this read.
+
+    /** Evidence-only authority for current native6 executions, including terminal runs.
+     * TASK retains the original executor binding after grant cancellation/version changes;
+     * PRIVATE has no task grant and is bound to its original owner and target Agent.
+     * Neither branch grants a lease, reactivates work, or mutates business completion.
      */
     @Select("""
         SELECT e.* FROM agent_personal_workspace_execution e
         WHERE e.tenant_id=#{tenantId} AND e.client_id=#{clientId} AND e.execution_id=#{executionId}
           AND BINARY e.tenant_id=BINARY #{tenantId} AND BINARY e.client_id=BINARY #{clientId}
-          AND BINARY e.execution_id=BINARY #{executionId} AND BINARY e.task_id=BINARY #{taskId}
+          AND BINARY e.execution_id=BINARY #{executionId}
           AND BINARY e.run_id=BINARY #{runId} AND BINARY e.target_agent_id=BINARY #{agentId}
-          AND e.execution_mode='CONVERSATION' AND e.execution_protocol_version=5
-          AND EXISTS (
-            SELECT 1 FROM agent_task_execution_grant g
-            JOIN agent_runtime r ON r.agent_id=g.target_agent_id AND r.binding_id=g.executor_binding_id
-              AND BINARY r.tenant_id=BINARY g.tenant_id AND BINARY r.client_id=BINARY g.client_id
-              AND BINARY r.owner_jiacn=BINARY g.executor_owner_jiacn
-              AND BINARY r.agent_id=BINARY g.target_agent_id
-            WHERE BINARY g.tenant_id=BINARY e.tenant_id AND BINARY g.client_id=BINARY e.client_id
-              AND BINARY g.owner_jiacn=BINARY e.owner_jiacn AND BINARY g.task_id=BINARY e.task_id
-              AND BINARY g.grant_id=BINARY e.task_grant_id AND BINARY g.target_agent_id=BINARY e.target_agent_id
-              AND BINARY g.executor_owner_jiacn=BINARY #{executorOwner})
+          AND e.execution_mode='CONVERSATION' AND e.execution_protocol_version=6
+          AND ((e.business_scope='PRIVATE' AND BINARY e.owner_jiacn=BINARY #{executorOwner}
+                AND e.task_id IS NULL AND e.task_grant_id IS NULL
+                AND e.task_grant_version IS NULL AND e.assignment_revision IS NULL
+                AND EXISTS (SELECT 1 FROM agent_runtime r
+                  WHERE BINARY r.tenant_id=BINARY e.tenant_id AND BINARY r.client_id=BINARY e.client_id
+                    AND BINARY r.owner_jiacn=BINARY e.owner_jiacn AND BINARY r.agent_id=BINARY e.target_agent_id))
+            OR (e.business_scope='TASK' AND EXISTS (
+              SELECT 1 FROM agent_task_execution_grant g
+              JOIN agent_runtime r ON r.agent_id=g.target_agent_id AND r.binding_id=g.executor_binding_id
+                AND BINARY r.tenant_id=BINARY g.tenant_id AND BINARY r.client_id=BINARY g.client_id
+                AND BINARY r.owner_jiacn=BINARY g.executor_owner_jiacn
+                AND BINARY r.agent_id=BINARY g.target_agent_id
+              WHERE BINARY g.tenant_id=BINARY e.tenant_id AND BINARY g.client_id=BINARY e.client_id
+                AND BINARY g.owner_jiacn=BINARY e.owner_jiacn AND BINARY g.task_id=BINARY e.task_id
+                AND BINARY g.grant_id=BINARY e.task_grant_id AND BINARY g.target_agent_id=BINARY e.target_agent_id
+                AND BINARY g.executor_owner_jiacn=BINARY #{executorOwner})))
         """)
     PersonalWorkspaceExecutionEntity findForNativeUsageCost(@Param("tenantId") String tenantId,
         @Param("clientId") String clientId, @Param("executorOwner") String executorOwner,
-        @Param("agentId") String agentId, @Param("taskId") String taskId,
-        @Param("runId") String runId, @Param("executionId") String executionId);
+        @Param("agentId") String agentId, @Param("executionId") String executionId,
+        @Param("runId") String runId);
 
     @Select("""
             SELECT COUNT(*)
@@ -138,67 +150,31 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
     @Select("""
             <script>
             SELECT * FROM agent_personal_workspace_execution
-             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
-               AND target_agent_id=#{targetAgentId} AND execution_state='QUEUED'
-               AND (execution_mode IN ('PRIVATE','TASK') OR execution_mode IS NULL)
-               AND CAST(tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY)
-               AND OCTET_LENGTH(tenant_id)=OCTET_LENGTH(#{tenantId})
-               AND CAST(client_id AS BINARY)=CAST(#{clientId} AS BINARY)
-               AND OCTET_LENGTH(client_id)=OCTET_LENGTH(#{clientId})
-               AND CAST(owner_jiacn AS BINARY)=CAST(#{ownerJiacn} AS BINARY)
-               AND OCTET_LENGTH(owner_jiacn)=OCTET_LENGTH(#{ownerJiacn})
-               AND CAST(target_agent_id AS BINARY)=CAST(#{targetAgentId} AS BINARY)
-               AND OCTET_LENGTH(target_agent_id)=OCTET_LENGTH(#{targetAgentId})
-            <if test='afterCreatedAt != null'>
-               AND (created_at &gt; #{afterCreatedAt} OR (created_at=#{afterCreatedAt}
-                    AND CAST(execution_id AS BINARY) &gt; CAST(#{afterExecutionId} AS BINARY)))
-            </if>
-             ORDER BY created_at ASC, CAST(execution_id AS BINARY) ASC LIMIT #{limit}
-            </script>
-            """)
-    // File-lane selection precedes LIMIT; NULL retains historical PRIVATE semantics.
-    // Task lease and business authorization remain service-owned.
-    java.util.List<PersonalWorkspaceExecutionEntity> listQueuedByTargetAfter(
-            @Param("tenantId") String tenantId, @Param("clientId") String clientId,
-            @Param("ownerJiacn") String ownerJiacn, @Param("targetAgentId") String targetAgentId,
-            @Param("afterCreatedAt") Long afterCreatedAt, @Param("afterExecutionId") String afterExecutionId,
-            @Param("limit") int limit);
-
-    default java.util.List<PersonalWorkspaceExecutionEntity> listQueuedByTarget(String tenantId, String clientId,
-            String ownerJiacn, String targetAgentId, int limit) {
-        return listQueuedByTargetAfter(tenantId,clientId,ownerJiacn,targetAgentId,null,null,limit);
-    }
-
-    @Select("""
-            <script>
-            SELECT * FROM agent_personal_workspace_execution
              WHERE tenant_id=#{tenantId} AND client_id=#{clientId}
                AND target_agent_id=#{targetAgentId} AND execution_state='QUEUED'
                AND execution_mode='CONVERSATION'
-               AND (execution_protocol_version&lt;&gt;4 OR EXISTS (
-                 SELECT 1 FROM agent_skill_execution sk
-                  WHERE sk.tenant_id=agent_personal_workspace_execution.tenant_id
-                    AND sk.client_id=agent_personal_workspace_execution.client_id
-                    AND sk.owner_jiacn=agent_personal_workspace_execution.owner_jiacn
-                    AND sk.execution_id=agent_personal_workspace_execution.execution_id
-                    AND CAST(sk.tenant_id AS BINARY)=CAST(agent_personal_workspace_execution.tenant_id AS BINARY)
-                    AND CAST(sk.client_id AS BINARY)=CAST(agent_personal_workspace_execution.client_id AS BINARY)
-                    AND CAST(sk.owner_jiacn AS BINARY)=CAST(agent_personal_workspace_execution.owner_jiacn AS BINARY)
-                    AND CAST(sk.execution_id AS BINARY)=CAST(agent_personal_workspace_execution.execution_id AS BINARY)
-                    AND sk.phase='READY'))
+               AND execution_protocol_version=6
+               AND conversation_provider_started_at IS NULL
                AND CAST(tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY)
                AND OCTET_LENGTH(tenant_id)=OCTET_LENGTH(#{tenantId})
                AND CAST(client_id AS BINARY)=CAST(#{clientId} AS BINARY)
                AND OCTET_LENGTH(client_id)=OCTET_LENGTH(#{clientId})
-               AND EXISTS (SELECT 1 FROM agent_task_execution_grant g
-                   WHERE g.tenant_id=agent_personal_workspace_execution.tenant_id
-                     AND g.client_id=agent_personal_workspace_execution.client_id
-                     AND g.owner_jiacn=agent_personal_workspace_execution.owner_jiacn
-                     AND g.task_id=agent_personal_workspace_execution.task_id
-                     AND g.grant_id=agent_personal_workspace_execution.task_grant_id
-                     AND g.grant_version=agent_personal_workspace_execution.task_grant_version
-                     AND g.target_agent_id=agent_personal_workspace_execution.target_agent_id
-                     AND BINARY g.executor_owner_jiacn=BINARY #{ownerJiacn})
+               AND ((business_scope='PRIVATE'
+                     AND task_id IS NULL AND task_grant_id IS NULL
+                     AND task_grant_version IS NULL AND assignment_revision IS NULL
+                     AND BINARY owner_jiacn=BINARY #{ownerJiacn})
+                 OR (business_scope='TASK'
+                     AND task_id IS NOT NULL AND task_grant_id IS NOT NULL
+                     AND task_grant_version IS NOT NULL AND assignment_revision IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM agent_task_execution_grant g
+                       WHERE BINARY g.tenant_id=BINARY agent_personal_workspace_execution.tenant_id
+                         AND BINARY g.client_id=BINARY agent_personal_workspace_execution.client_id
+                         AND BINARY g.owner_jiacn=BINARY agent_personal_workspace_execution.owner_jiacn
+                         AND BINARY g.task_id=BINARY agent_personal_workspace_execution.task_id
+                         AND BINARY g.grant_id=BINARY agent_personal_workspace_execution.task_grant_id
+                         AND g.grant_version=agent_personal_workspace_execution.task_grant_version
+                         AND BINARY g.target_agent_id=BINARY agent_personal_workspace_execution.target_agent_id
+                         AND BINARY g.executor_owner_jiacn=BINARY #{ownerJiacn})))
                AND CAST(target_agent_id AS BINARY)=CAST(#{targetAgentId} AS BINARY)
                AND OCTET_LENGTH(target_agent_id)=OCTET_LENGTH(#{targetAgentId})
                AND CAST(execution_mode AS BINARY)=CAST('CONVERSATION' AS BINARY)
@@ -310,66 +286,6 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
     PersonalWorkspaceExecutionEntity lockByTaskRun(@Param("tenantId") String tenantId,
             @Param("clientId") String clientId, @Param("ownerJiacn") String ownerJiacn,
             @Param("taskId") String taskId, @Param("runId") String runId);
-
-    @Update("""
-            UPDATE agent_personal_workspace_execution
-               SET conversation_provider_started_at=#{startedAt},
-                   conversation_provider_lease_version=#{leaseVersion},update_time=#{startedAt}
-             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
-               AND task_id=#{taskId} AND run_id=#{runId} AND execution_id=#{executionId}
-               AND controlled_consent_id=#{consentId}
-               AND execution_mode='CONVERSATION' AND execution_state='QUEUED'
-               AND permitted_operation='GENERATE_IMAGE' AND output_content_mime_type='image/png'
-               AND conversation_lease_version=#{leaseVersion}
-               AND conversation_provider_started_at IS NULL
-               AND conversation_provider_lease_version IS NULL
-               AND CAST(tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY)
-               AND OCTET_LENGTH(tenant_id)=OCTET_LENGTH(#{tenantId})
-               AND CAST(client_id AS BINARY)=CAST(#{clientId} AS BINARY)
-               AND OCTET_LENGTH(client_id)=OCTET_LENGTH(#{clientId})
-               AND CAST(owner_jiacn AS BINARY)=CAST(#{ownerJiacn} AS BINARY)
-               AND OCTET_LENGTH(owner_jiacn)=OCTET_LENGTH(#{ownerJiacn})
-               AND CAST(task_id AS BINARY)=CAST(#{taskId} AS BINARY)
-               AND OCTET_LENGTH(task_id)=OCTET_LENGTH(#{taskId})
-               AND CAST(run_id AS BINARY)=CAST(#{runId} AS BINARY)
-               AND OCTET_LENGTH(run_id)=OCTET_LENGTH(#{runId})
-               AND CAST(execution_id AS BINARY)=CAST(#{executionId} AS BINARY)
-               AND OCTET_LENGTH(execution_id)=OCTET_LENGTH(#{executionId})
-               AND CAST(controlled_consent_id AS BINARY)=CAST(#{consentId} AS BINARY)
-               AND OCTET_LENGTH(controlled_consent_id)=OCTET_LENGTH(#{consentId})
-            """)
-    int markControlledProviderStarted(@Param("tenantId")String tenantId,
-            @Param("clientId")String clientId,@Param("ownerJiacn")String ownerJiacn,
-            @Param("taskId")String taskId,@Param("runId")String runId,
-            @Param("executionId")String executionId,@Param("consentId")String consentId,
-            @Param("leaseVersion")long leaseVersion,@Param("startedAt")long startedAt);
-
-    @Update("""
-            UPDATE agent_personal_workspace_execution
-               SET conversation_provider_started_at=#{startedAt},
-                   conversation_provider_lease_version=#{leaseVersion},update_time=#{startedAt}
-             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
-               AND task_id=#{taskId} AND run_id=#{runId} AND execution_id=#{executionId}
-               AND controlled_consent_id=#{consentId} AND operation_grant_id=#{operationGrantId}
-               AND execution_mode='CONVERSATION' AND execution_protocol_version=3
-               AND permitted_operation IN ('GENERATE_IMAGE','EDIT_IMAGE')
-               AND output_content_mime_type='image/png' AND runtime_input_snapshot_digest IS NOT NULL
-               AND conversation_lease_version=#{leaseVersion}
-               AND conversation_provider_started_at IS NULL
-               AND conversation_provider_lease_version IS NULL
-               AND CAST(tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY)
-               AND CAST(client_id AS BINARY)=CAST(#{clientId} AS BINARY)
-               AND CAST(owner_jiacn AS BINARY)=CAST(#{ownerJiacn} AS BINARY)
-               AND CAST(execution_id AS BINARY)=CAST(#{executionId} AS BINARY)
-               AND CAST(controlled_consent_id AS BINARY)=CAST(#{consentId} AS BINARY)
-               AND CAST(operation_grant_id AS BINARY)=CAST(#{operationGrantId} AS BINARY)
-            """)
-    int markControlledProviderStartedV3(@Param("tenantId")String tenantId,
-            @Param("clientId")String clientId,@Param("ownerJiacn")String ownerJiacn,
-            @Param("taskId")String taskId,@Param("runId")String runId,
-            @Param("executionId")String executionId,@Param("consentId")String consentId,
-            @Param("operationGrantId")String operationGrantId,
-            @Param("leaseVersion")long leaseVersion,@Param("startedAt")long startedAt);
 
     @Select("""
             SELECT * FROM agent_personal_workspace_execution

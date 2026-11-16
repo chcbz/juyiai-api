@@ -27,6 +27,7 @@ public class SkillExecutionServiceTest {
     final PersonalWorkspaceExecutionDao pwe=mock(PersonalWorkspaceExecutionDao.class);
     final SkillExecutionDao attachments=mock(SkillExecutionDao.class);
     final AgentTaskExecutionGrantService grants=mock(AgentTaskExecutionGrantService.class);
+    final PersonalWorkspaceWriteService writes=mock(PersonalWorkspaceWriteService.class);
     final PersonalWorkspaceStorage storage=mock(PersonalWorkspaceStorage.class);
     final InstalledSkillDescriptorLookup installed=mock(InstalledSkillDescriptorLookup.class);
     final SkillCapabilityLookup capabilities=mock(SkillCapabilityLookup.class);
@@ -46,15 +47,15 @@ public class SkillExecutionServiceTest {
         when(storage.maxContentBytes()).thenReturn(100000L);
         var runtimes=mock(AgentRuntimeDao.class);var agent=new AgentRuntimeEntity().setAgentId("agent").setOwnerJiacn("owner");agent.setTenantId("0");agent.setClientId("client");
         when(runtimes.findCandidateRosterByOwner("client","owner")).thenReturn(List.of(agent));
-        service=new PersonalWorkspaceExecutionServiceImpl(pwe,mock(PersonalWorkspaceDao.class),mock(PersonalWorkspaceTaskLinkDao.class),runtimes,storage,mock(PersonalWorkspaceWriteService.class),new PersonalWorkspaceExecutionProperties(List.of("image/png","text/plain")));
+        service=new PersonalWorkspaceExecutionServiceImpl(pwe,mock(PersonalWorkspaceDao.class),mock(PersonalWorkspaceTaskLinkDao.class),runtimes,storage,writes,new PersonalWorkspaceExecutionProperties(List.of("image/png","text/plain")));
         wireAssigneeFixture(service,pwe);
         service.setSkillExecutionDependencies(attachments,installed,capabilities,policy);
         service.setSkillManagement(management);
         // This suite isolates the actual PWE consumer. SQL lock serialization is covered by
         // SkillManagementTransactionTest, not simulated by these mocked repositories.
         when(management.admitNative(any(),anyString(),anyString(),any())).thenAnswer(i->((Supplier<?>)i.getArgument(3)).get());
-        when(management.nativeTaskBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
-            SkillManagementCodec.map("executionId",i.getArgument(2),"taskGrantId",i.getArgument(3),"taskGrantVersion",Long.toString(i.getArgument(4,Long.class)),
+        when(management.executionBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
+            SkillManagementCodec.map("executionId",i.getArgument(2),"scopeSha256",i.getArgument(3),"grantRevision",Long.toString(i.getArgument(4,Long.class)),
                 "agentId",i.getArgument(5),"skillKey","analysis","skillInstallationId",i.getArgument(6),"productVersionId","spv_analysis_1",
                 "skillVersion","1.0.0","packageSha256",HASH,"manifestSha256",HASH,"approvedPermissionsSha256",HASH));
         var root=new AgentTaskMetaEntity().setTaskId("task").setAssignedAgentId("agent").setTaskVersion(7L).setOwnerJiacn("owner");root.setTenantId("0");root.setClientId("client");
@@ -63,6 +64,9 @@ public class SkillExecutionServiceTest {
         service.setConversationAdmission(grants,transactions);
         service.setTaskExecutionDependencies(conversations,mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
         when(conversations.requireAccessible(any(),eq("42"))).thenReturn(new WorkspaceConversationAccessService.ConversationView("42","bounty","task:task","task",List.of("agent"),1,1));
+        when(conversations.withLockedAccessible(any(),eq("42"),any())).thenAnswer(i->
+                ((java.util.function.Function<WorkspaceConversationAccessService.ConversationView,?>)i.getArgument(2)).apply(
+                        conversations.requireAccessible(i.getArgument(0),i.getArgument(1))));
         when(grants.admit(any(),eq("task"),eq("grant"),eq(1L),eq(7L),eq("agent"),eq("EXECUTE_SKILL"),eq(false))).thenReturn(new AgentTaskExecutionGrantService.Admission("grant",1,7,"agent","EXECUTE_SKILL",false));
         var auth=mock(AgentRuntimeAuthenticationService.class);when(auth.withNativeFence(any(),any())).thenAnswer(i->((Supplier<?>)i.getArgument(1)).get());service.setRuntimeAuthentication(auth);
         var principal=org.springframework.beans.BeanUtils.instantiateClass(AgentRuntimeAuthentication.class.getDeclaredConstructor(AgentRuntimeAuthentication.Scope.class),new AgentRuntimeAuthentication.Scope("0","client","owner","agent","runtime"));
@@ -79,7 +83,7 @@ public class SkillExecutionServiceTest {
         when(capabilities.lookup(any(),eq(sessionFence))).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session",sessionFence,new SkillCapabilityLookup.Catalog("1",List.of(new SkillCapabilityLookup.RuntimeSkill("analysis","1.0.0",HASH,HASH,"native-model",SkillCapabilityLookup.Readiness.READY,null,HASH,null,"install","spv_analysis_1","EXECUTABLE","1",true,1L)))));
         var snapshot=snapshot();String digest=sha(json(snapshot));
         execution=new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setTaskId("task").setRunId("run").setConversationId("42").setTargetAgentId("agent").setOwnerJiacn("owner")
-                .setExecutionMode("CONVERSATION").setExecutionState("QUEUED").setExecutionProtocolVersion(5).setPermittedOperation("EXECUTE_SKILL").setTaskGrantId("grant").setTaskGrantVersion(1L).setAssignmentRevision(7L)
+                .setExecutionMode("CONVERSATION").setBusinessScope("TASK").setExecutionState("QUEUED").setExecutionProtocolVersion(6).setPermittedOperation("EXECUTE_SKILL").setTaskGrantId("grant").setTaskGrantVersion(1L).setAssignmentRevision(7L)
                 .setGrantRevision(1L).setCreatedAt(1L).setConversationLeaseVersion(1L).setConversationLeaseToken(fence.token()).setConversationLeaseRuntimeId("runtime").setConversationLeaseExpiresAt(System.currentTimeMillis()+900000);
         execution.setTenantId("0");execution.setClientId("client");
         skill=new SkillExecutionEntity().setTenantId("0").setClientId("client").setOwnerJiacn("owner").setExecutionId("exec").setSkillKey("analysis").setSkillVersion("1.0.0")
@@ -91,8 +95,8 @@ public class SkillExecutionServiceTest {
     }
     @AfterEach void clear(){SecurityContextHolder.clearContext();}
     Map<String,Object> snapshot() {
-        var s=new LinkedHashMap<String,Object>();s.put("schemaVersion",1);s.put("executionProtocolVersion",5);s.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);s.put("skills",List.of(Map.of("skill",Map.of("key","analysis","version","1.0.0","installationId","install","packageSha256",HASH,"manifestSha256",HASH,"runner","native-model","entrypoint","SKILL.md"))));
-        s.put("taskId","task");s.put("conversationId","42");s.put("conversationGeneration","1");s.put("targetAgentId","agent");s.put("actionEventId","action");s.put("instruction","识别资料");s.put("parameters",Map.of());s.put("inputs",List.of());
+        var s=new LinkedHashMap<String,Object>();s.put("schemaVersion",1);s.put("executionProtocolVersion",6);s.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);s.put("skills",List.of(Map.of("skill",Map.of("key","analysis","version","1.0.0","installationId","install","packageSha256",HASH,"manifestSha256",HASH,"runner","native-model","entrypoint","SKILL.md"))));
+        s.put("scope",new SkillExecutionService.ScopeView("TASK","42","1","task").asMap());s.put("targetAgentId","agent");s.put("actionEventId","action");s.put("instruction","识别资料");s.put("parameters",Map.of());s.put("inputs",List.of());
         s.put("sourceSnapshotDigest",sha("[]"));s.put("outputs",outputs);s.put("taskGrant",Map.of("id","grant","version",1,"assignmentRevision",7));s.put("providerBinding",null);s.put("costInfo",Map.of("mode","UNKNOWN"));return s;
     }
     SkillExecutionService.EffectStart start(){return new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,HASH,null);}
@@ -111,12 +115,12 @@ public class SkillExecutionServiceTest {
         when(assignees.resolveForAssignment("0", "client", "owner", "agent")).thenReturn(target);
         when(assignees.requireGrantTarget("0", "client", "owner", "task", "grant", 1)).thenReturn(target);
         service.setAssigneeAuthority(assignees);
-        when(pwe.findForRuntime("0", "client", "provider", "agent", "task", "run")).thenReturn(execution);
+        when(pwe.findForRuntime("0", "client", "provider", "agent", "exec", "run")).thenReturn(execution);
         var session = new AgentManagedSessionLookup.SessionFence("rti_"+"1".repeat(32), "host", "runtime", 2);
         var providerCatalog = new SkillCapabilityLookup.Scope("0", "client", "provider", "agent");
         when(policy.read(any(), eq("task"))).thenReturn(new TaskSkillPolicyService.Snapshot(true, null, 7, session, providerCatalog));
-        assertEquals("NEW", service.startEffect(provider, "task", "run", "generate", start()).disposition());
-        service.recordEffect(provider, "task", "run", "generate", effect("SUCCEEDED", "request", HASH));
+        assertEquals("NEW", service.startEffect(provider, "exec", "run", "generate", start()).disposition());
+        service.recordEffect(provider, "exec", "run", "generate", effect("SUCCEEDED", "request", HASH));
         var receipt = commit(provider, dataResult());
         assertEquals("RESULT_COMMITTED", receipt.state());
         assertEquals("owner", execution.getOwnerJiacn());
@@ -129,84 +133,104 @@ public class SkillExecutionServiceTest {
         verify(attachments, never()).lock("0", "client", "provider", "exec");
         verify(assignees, atLeastOnce()).requireGrantTarget("0", "client", "owner", "task", "grant", 1);
         // The task owner cannot impersonate the provider even though it owns the task data.
-        assertThrows(Failure.class, () -> service.resume(runtime, "task", "run",
+        assertThrows(Failure.class, () -> service.resume(runtime, "exec", "run",
                 new SkillExecutionService.Resume("exec", skill.getSnapshotSha256())));
         assertThrows(Failure.class, () -> service.resume(new RuntimeScope("0", "foreign", "provider", "agent", "runtime"),
-                "task", "run", new SkillExecutionService.Resume("exec", skill.getSnapshotSha256())));
+                "exec", "run", new SkillExecutionService.Resume("exec", skill.getSnapshotSha256())));
     }
 
     @Test void effectIsNewOnceAndReplayDoesNotRecheckProviderOrInstallation() {
-        assertEquals("NEW",service.startEffect(runtime,"task","run","generate",start()).disposition());
-        clearInvocations(installed);assertEquals("RECORDED",service.startEffect(runtime,"task","run","generate",start()).disposition());verifyNoInteractions(installed);
+        assertEquals("NEW",service.startEffect(runtime,"exec","run","generate",start()).disposition());
+        clearInvocations(installed);assertEquals("RECORDED",service.startEffect(runtime,"exec","run","generate",start()).disposition());verifyNoInteractions(installed);
         assertEquals("WAITING_PROVIDER",skill.getPhase());assertEquals(1L,skill.getVersion());
     }
-    @Test void effectDigestChangeCannotReopen(){service.startEffect(runtime,"task","run","generate",start());assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","generate",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,"b".repeat(64),null)));}
+    @Test void effectDigestChangeCannotReopen(){service.startEffect(runtime,"exec","run","generate",start());assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","generate",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,"b".repeat(64),null)));}
     @Test void alreadyAdmittedOldInstallationDoesNotBorrowCurrentCatalogReadiness(){
         when(capabilities.lookup(any(),any())).thenReturn(SkillCapabilityLookup.View.unavailable(SkillCapabilityLookup.State.DISCONNECTED));
-        assertEquals("NEW",service.startEffect(runtime,"task","run","generate",start()).disposition());verifyNoInteractions(capabilities);
+        assertEquals("NEW",service.startEffect(runtime,"exec","run","generate",start()).disposition());verifyNoInteractions(capabilities);
     }
     @Test void oldTaskStillRequiresItsExactAuthorizedDescriptorEvenIfCurrentCatalogIsReady(){
         when(installed.read(any())).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of()));
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","generate",start()));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","generate",start()));
         verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
     }
-    @Test void bindingRevisionCannotBeInvented(){assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","generate",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,HASH,"invented")));}
-    @Test void expiredAndWrongLeaseRejectEvenReplays(){service.startEffect(runtime,"task","run","generate",start());execution.setConversationLeaseExpiresAt(1L);assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","generate",start()));}
+    @Test void bindingRevisionCannotBeInvented(){assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","generate",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,HASH,"invented")));}
+    @Test void expiredAndWrongLeaseRejectEvenReplays(){service.startEffect(runtime,"exec","run","generate",start());execution.setConversationLeaseExpiresAt(1L);assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","generate",start()));}
     @Test void resumeDoesNotInventUnknownForAnUnconfirmedStart() {
-        service.startEffect(runtime,"task","run","generate",start());String before=skill.getEffectsJson();
-        var resume=service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        service.startEffect(runtime,"exec","run","generate",start());String before=skill.getEffectsJson();
+        var resume=service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertEquals("WAITING_PROVIDER",resume.phase());assertFalse(resume.allowedWork().contains("EXECUTE"));
         assertEquals("START_RECORDED",((Map<?,?>)resume.effects().get("generate")).get("status"));
         assertFalse(((Map<?,?>)resume.effects().get("generate")).containsKey("ownerRuntimeFence"));
-        assertEquals(before,skill.getEffectsJson());assertEquals("RECORDED",service.startEffect(runtime,"task","run","generate",start()).disposition());
+        assertEquals(before,skill.getEffectsJson());assertEquals("RECORDED",service.startEffect(runtime,"exec","run","generate",start()).disposition());
     }
-    @Test void resultUnknownIsNotReportedAsDeterministicFailure(){service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("UNKNOWN",null,null));assertEquals("RESULT_UNKNOWN",skill.getPhase());assertEquals("QUEUED",execution.getExecutionState());}
-    @Test void resultCannotCommitWhileAnEffectIsUnknown(){service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("UNKNOWN",null,null));assertThrows(Failure.class,()->commit(runtime,dataResult()));}
-    @Test void succeededEffectCannotChangeItsReceipt(){service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH));assertThrows(Failure.class,()->service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","changed",HASH)));}
-    @Test void providerRequestIdCannotBeRebound(){service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("ACCEPTED","request",null));assertThrows(Failure.class,()->service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","other",HASH)));}
+    @Test void resultUnknownIsNotReportedAsDeterministicFailure(){service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("UNKNOWN",null,null));assertEquals("RESULT_UNKNOWN",skill.getPhase());assertEquals("QUEUED",execution.getExecutionState());}
+    @Test void resultCannotCommitWhileAnEffectIsUnknown(){service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("UNKNOWN",null,null));assertThrows(Failure.class,()->commit(runtime,dataResult()));}
+    @Test void succeededEffectCannotChangeItsReceipt(){service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH));assertThrows(Failure.class,()->service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","changed",HASH)));}
+    @Test void providerRequestIdCannotBeRebound(){service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("ACCEPTED","request",null));assertThrows(Failure.class,()->service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","other",HASH)));}
     @Test void dataOnlyResultCommitsWithoutFakeAssetAndProjectionCompletesIt(){
-        service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH));
+        service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH));
         var receipt=commit(runtime,dataResult());assertEquals("RESULT_COMMITTED",receipt.state());assertEquals("ARCHIVING",receipt.phase());assertEquals("ARCHIVING",skill.getPhase());
         verify(pwe,never()).insertOutput(any());assertEquals("RESULT_COMMITTED",execution.getExecutionState());
         service.markProjected(owner,"exec",receipt.resultDigest());assertEquals("COMPLETE",skill.getPhase());service.markProjected(owner,"exec",receipt.resultDigest());
     }
     @Test void resultReplayDoesNotInvokeRunnerOrStorageAndDifferentDataConflicts(){
-        service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH));
+        service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH));
         var first=commit(runtime,dataResult());clearInvocations(storage,installed);
         assertEquals(first,commit(runtime,dataResult()));verifyNoInteractions(storage,installed);
         assertThrows(Failure.class,()->commit(runtime,new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer","changed"),List.of(),List.of())));
     }
-    @Test void structuredDataSchemaIsRealNotMarker(){service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH));assertThrows(RuntimeException.class,()->commit(runtime,new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer",7),List.of(),List.of())));}
-    @Test void failedSourceSnapshotAndWrongSkillDigestReject(){skill.setSnapshotSha256("b".repeat(64));assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","generate",start()));}
+    @Test void structuredDataSchemaIsRealNotMarker(){service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH));assertThrows(RuntimeException.class,()->commit(runtime,new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer",7),List.of(),List.of())));}
+    @Test void failedSourceSnapshotAndWrongSkillDigestReject(){skill.setSnapshotSha256("b".repeat(64));assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","generate",start()));}
     @Test void projectionRequiresCommittedMacroState(){assertThrows(Failure.class,()->service.markProjected(owner,"exec",HASH));}
     @Test void resultReadNeedsCurrentConversationAcl(){when(conversations.requireAccessible(any(),eq("42"))).thenReturn(null);assertThrows(Failure.class,()->service.result(owner,"exec"));}
     @Test void skillCreationPinsAuthorityAndChargesNothing(){
         var hints=mock(NativeConversationWorkDiscovery.class);service.setNativeWorkDiscovery(hints);
         doAnswer(i->{execution=i.getArgument(0);return null;}).when(pwe).insert(any());
         doAnswer(i->{skill=i.getArgument(0);skill.setPhase("READY").setVersion(0L).setEffectsJson("{}");return null;}).when(attachments).insertReady(any());
-        var result=service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot()));
+        var result=service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot()));
         var ordering=inOrder(pwe,attachments,hints);
         ordering.verify(pwe).insert(any());ordering.verify(attachments).insertReady(any());
         ordering.verify(hints).afterCommit(new NativeConversationWorkAvailable("0","client","agent"));
-        assertTrue(result.executionId().matches("pwe_[a-f0-9]{60}"));assertTrue(result.runId().matches("pwe_run_[a-f0-9]{64}"));assertEquals("READY",skill.getPhase());assertNull(execution.getControlledConsentId());assertEquals(5,execution.getExecutionProtocolVersion());assertNull(execution.getOutputContentMimeType());
+        assertTrue(result.executionId().matches("pwe_[a-f0-9]{60}"));assertTrue(result.runId().matches("pwe_run_[a-f0-9]{64}"));assertEquals("READY",skill.getPhase());assertNull(execution.getControlledConsentId());assertEquals(6,execution.getExecutionProtocolVersion());assertNull(execution.getOutputContentMimeType());
         verify(grants).admit(any(),eq("task"),eq("grant"),eq(1L),eq(7L),eq("agent"),eq("EXECUTE_SKILL"),eq(false));
         verify(management).admitNative(eq(new SkillCapabilityLookup.Scope("0","client","owner","agent")),eq("analysis"),eq("install"),any());
         var stored=JsonMapper.builder().build().readValue(skill.getTaskSkillBindingJson(),List.class);
-        var binding=(Map<?,?>)((Map<?,?>)stored.getFirst()).get("taskSkillBinding");
+        var binding=(Map<?,?>)((Map<?,?>)stored.getFirst()).get("executionBinding");
         assertNull(skill.getSkillKey());assertNull(skill.getSkillVersion());assertNull(skill.getPackageSha256());assertNull(skill.getManifestSha256());
         assertEquals(result.executionId(),binding.get("executionId"));assertEquals("install",binding.get("skillInstallationId"));
-        assertEquals("grant",binding.get("taskGrantId"));assertEquals("1",binding.get("taskGrantVersion"));
-        assertFalse(skill.getSnapshotJson().contains("taskSkillBinding"));assertEquals(sha(skill.getSnapshotJson()),skill.getSnapshotSha256());
+        assertEquals(sha(json(new SkillExecutionService.ScopeView("TASK","42","1","task").asMap())),binding.get("scopeSha256"));assertEquals("1",binding.get("grantRevision"));
+        assertFalse(skill.getSnapshotJson().contains("executionBinding"));assertEquals(sha(skill.getSnapshotJson()),skill.getSnapshotSha256());
+    }
+    @Test void privateCreationUsesConversationRootWithoutTaskGrantOrPersonalFilePublication() {
+        var authority=mock(AgentService.class);service.setNativeAgentAuthority(authority);
+        when(conversations.requireAccessible(any(),eq("42"))).thenReturn(
+                new WorkspaceConversationAccessService.ConversationView("42","private","agent:agent",null,List.of("agent"),1,1));
+        var snapshot=snapshot();snapshot.put("skills",List.of());snapshot.remove("taskGrant");
+        snapshot.put("scope",new SkillExecutionService.PrivateScope("42",1).wire().asMap());
+        snapshot.put("actionEventId","private-action");insertFixtures();clearInvocations(grants,management,pwe);
+        var result=service.create(owner,new SkillExecutionService.Create("private-action",new SkillExecutionService.PrivateScope("42",1),"agent",snapshot));
+        assertNull(result.taskId());assertEquals("PRIVATE",execution.getBusinessScope());
+        assertNull(execution.getTaskId());assertNull(execution.getTaskGrantId());assertNull(execution.getTaskGrantVersion());
+        assertNull(execution.getAssignmentRevision());assertEquals("CONVERSATION",execution.getExecutionMode());
+        assertEquals("[]",skill.getTaskSkillBindingJson());
+        verify(authority).requireApiKeyOwnedAgentForUpdate("0","client","owner","agent");
+        verifyNoInteractions(grants,management);verify(pwe,never()).insertOutput(any());
+    }
+    @Test void privateAdmissionRejectsSyntheticTaskAuthorityBeforeAnyInsert() {
+        var snapshot=snapshot();snapshot.put("scope",new SkillExecutionService.PrivateScope("42",1).wire().asMap());
+        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.PrivateScope("42",1),"agent",snapshot)));
+        verify(pwe,never()).insert(any());
     }
     @Test void revokedOrMissingTaskGrantCannotAdmitNativeExecution() {
         when(grants.admit(any(),eq("task"),eq("grant"),eq(1L),eq(7L),eq("agent"),eq("EXECUTE_SKILL"),eq(false)))
                 .thenThrow(new AgentTaskExecutionGrantException(AgentTaskExecutionGrantException.Reason.NOT_FOUND,"unavailable"));
         assertThrows(RuntimeException.class,()->service.create(owner,
-                new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot())));
+                new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot())));
         verify(pwe,never()).insert(any());verify(attachments,never()).insertReady(any());
     }
-    @Test void mismatchedGrantSnapshotCannotCreate(){var snapshot=snapshot();snapshot.put("taskGrant",Map.of("id","other","version",1,"assignmentRevision",7));assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot)));verify(pwe,never()).insert(any());}
-    @Test void malformedParametersCannotCreate(){var snapshot=snapshot();snapshot.put("parameters",Map.of("unknown",true));assertThrows(RuntimeException.class,()->service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot)));verify(pwe,never()).insert(any());}
+    @Test void mismatchedGrantSnapshotCannotCreate(){var snapshot=snapshot();snapshot.put("taskGrant",Map.of("id","other","version",1,"assignmentRevision",7));assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot)));verify(pwe,never()).insert(any());}
+    @Test void malformedParametersCannotCreate(){var snapshot=snapshot();snapshot.put("parameters",Map.of("unknown",true));assertThrows(RuntimeException.class,()->service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot)));verify(pwe,never()).insert(any());}
     void replaceSnapshot(Map<String,Object> snapshot) {skill.setSnapshotJson(json(snapshot)).setSnapshotSha256(sha(json(snapshot)));}
     @Test void resultStoresExactCarrierEvidenceAndRejectsMissingReceipt() {
         var snapshot=snapshot();snapshot.put("inputs",List.of(Map.of("inputRef","input_1","sha256",HASH)));replaceSnapshot(snapshot);
@@ -227,34 +251,34 @@ public class SkillExecutionServiceTest {
         assertEquals("RESULT_COMMITTED",result.state());assertTrue(skill.getResultManifestJson().contains("[\"bird\"]"));
     }
     @Test void unknownEffectFailureDoesNotInventDefinitiveFailure() {
-        service.startEffect(runtime,"task","run","generate",start());
-        var result=service.failConversation(runtime,"task","run",fence,"AGENT_DELIVERY_FAILED");
+        service.startEffect(runtime,"exec","run","generate",start());
+        var result=service.failConversation(runtime,"exec","run",fence,"AGENT_DELIVERY_FAILED");
         assertEquals("QUEUED",result.state());assertEquals("RESULT_UNKNOWN",skill.getPhase());assertEquals("SKILL_EFFECT_RESULT_UNKNOWN",skill.getLastErrorCode());
     }
     @Test void definitiveFailureUpdatesBothRows() {
-        service.startEffect(runtime,"task","run","generate",start());service.recordEffect(runtime,"task","run","generate",effect("FAILED","request",null));
-        var result=service.failConversation(runtime,"task","run",fence,"AGENT_DELIVERY_FAILED");assertEquals("FAILED",result.state());assertEquals("FAILED",skill.getPhase());
+        service.startEffect(runtime,"exec","run","generate",start());service.recordEffect(runtime,"exec","run","generate",effect("FAILED","request",null));
+        var result=service.failConversation(runtime,"exec","run",fence,"AGENT_DELIVERY_FAILED");assertEquals("FAILED",result.state());assertEquals("FAILED",skill.getPhase());
     }
 
     @Test void nativeTurnFailureAndUnknownEffectAreBothRetainedUntilRealResolution() {
-        service.startEffect(runtime,"task","run","generate",start());
-        var result=service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
+        service.startEffect(runtime,"exec","run","generate",start());
+        var result=service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
         assertEquals("QUEUED",result.state());assertEquals("RESULT_UNKNOWN",skill.getPhase());assertEquals("NATIVE_EXECUTION_TURN_FAILED",skill.getLastErrorCode());
-        long version=skill.getVersion();service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED");assertEquals(version,skill.getVersion());
-        assertThrows(Failure.class,()->service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
-        var resume=service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        long version=skill.getVersion();service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED");assertEquals(version,skill.getVersion());
+        assertThrows(Failure.class,()->service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
+        var resume=service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertEquals(List.of("QUERY_EFFECT"),resume.allowedWork());
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","replacement",start()));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","replacement",start()));
         assertThrows(Failure.class,()->commit(runtime,dataResult()));
-        service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH));
+        service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH));
         assertEquals("FAILED",execution.getExecutionState());assertEquals("FAILED",skill.getPhase());assertEquals("NATIVE_EXECUTION_TURN_FAILED",skill.getLastErrorCode());
-        assertEquals("KNOWN",service.recordEffect(runtime,"task","run","generate",effect("SUCCEEDED","request",HASH)).disposition());
-        assertEquals("FAILED",service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED").state());
+        assertEquals("KNOWN",service.recordEffect(runtime,"exec","run","generate",effect("SUCCEEDED","request",HASH)).disposition());
+        assertEquals("FAILED",service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED").state());
     }
     @Test void knownInterruptedWithoutUnknownEffectIsTerminal() {
-        assertEquals("FAILED",service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED").state());
+        assertEquals("FAILED",service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED").state());
         assertEquals("FAILED",skill.getPhase());assertEquals("NATIVE_EXECUTION_TURN_INTERRUPTED",skill.getLastErrorCode());
-        assertThrows(Failure.class,()->service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
+        assertThrows(Failure.class,()->service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
     }
     RuntimeScope authenticatedRestart() throws Exception {
         var scope=new RuntimeScope("0","client","owner","agent","runtime-new");
@@ -265,47 +289,47 @@ public class SkillExecutionServiceTest {
     }
     @Test void lostFailureResponseIsReadableByRestartWithoutNewLeaseOrScriptCapability() throws Exception {
         var snapshot=snapshot();snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);replaceSnapshot(snapshot);
-        service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
+        service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
         var restarted=authenticatedRestart();clearInvocations(pwe,attachments);
-        var receipt=service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        var receipt=service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertNull(receipt.lease());assertEquals("FAILED",receipt.phase());assertEquals(List.of(),receipt.allowedWork());
         assertNull(receipt.resultManifest());assertEquals("NATIVE_EXECUTION_TURN_FAILED",receipt.turnFailureCode());
         verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
-        assertThrows(Failure.class,()->service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec","b".repeat(64))));
-        assertThrows(Failure.class,()->service.failConversation(restarted,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
+        assertThrows(Failure.class,()->service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec","b".repeat(64))));
+        assertThrows(Failure.class,()->service.failConversation(restarted,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
         execution.setConversationLeaseExpiresAt(1L);
-        assertEquals("FAILED",service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())).phase());
+        assertEquals("FAILED",service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())).phase());
     }
     @Test void expiredLeaseAllowsRestartToReportLocallyPersistedFailureButOldFenceRemainsInvalid() throws Exception {
         emptySkills();execution.setConversationLeaseExpiresAt(1L);var restarted=authenticatedRestart();
-        assertThrows(Failure.class,()->service.failConversation(restarted,"task","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
-        var receipt=service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        assertThrows(Failure.class,()->service.failConversation(restarted,"exec","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
+        var receipt=service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertNull(receipt.turnFailureCode());assertEquals(2L,receipt.lease().version());
-        assertThrows(Failure.class,()->service.failConversation(restarted,"task","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
+        assertThrows(Failure.class,()->service.failConversation(restarted,"exec","run",fence,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
         var renewed=new ConversationFence(receipt.lease().version(),receipt.lease().token());
-        assertEquals("FAILED",service.failConversation(restarted,"task","run",renewed,"NATIVE_EXECUTION_TURN_INTERRUPTED").state());
-        var confirmation=service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        assertEquals("FAILED",service.failConversation(restarted,"exec","run",renewed,"NATIVE_EXECUTION_TURN_INTERRUPTED").state());
+        var confirmation=service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertEquals("NATIVE_EXECUTION_TURN_INTERRUPTED",confirmation.turnFailureCode());assertNull(confirmation.lease());
     }
     @Test void recordedTurnFailureAndUnknownEffectRecoverAfterLeaseExpiryWithoutScriptCapability() throws Exception {
-        service.startEffect(runtime,"task","run","generate",start());
-        service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
+        service.startEffect(runtime,"exec","run","generate",start());
+        service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED");
         var snapshot=snapshot();snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);replaceSnapshot(snapshot);
         var restarted=authenticatedRestart();
-        assertThrows(Failure.class,()->service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+        assertThrows(Failure.class,()->service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
         execution.setConversationLeaseExpiresAt(1L);
-        var receipt=service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        var receipt=service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertEquals("NATIVE_EXECUTION_TURN_FAILED",receipt.turnFailureCode());assertEquals(List.of("QUERY_EFFECT"),receipt.allowedWork());
         assertEquals("START_RECORDED",((Map<?,?>)receipt.effects().get("generate")).get("status"));
         var renewed=new ConversationFence(receipt.lease().version(),receipt.lease().token());
         long version=skill.getVersion();
-        assertEquals("QUEUED",service.failConversation(restarted,"task","run",renewed,"NATIVE_EXECUTION_TURN_FAILED").state());
+        assertEquals("QUEUED",service.failConversation(restarted,"exec","run",renewed,"NATIVE_EXECUTION_TURN_FAILED").state());
         assertEquals("RESULT_UNKNOWN",skill.getPhase());assertEquals(version,skill.getVersion());
-        assertThrows(Failure.class,()->service.failConversation(restarted,"task","run",renewed,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
-        assertThrows(Failure.class,()->service.failConversation(restarted,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
-        service.recordEffect(restarted,"task","run","generate",new SkillExecutionService.EffectResult("exec",skill.getSnapshotSha256(),renewed,HASH,null,"FAILED",null,null));
-        assertEquals("FAILED",service.failConversation(restarted,"task","run",renewed,"NATIVE_EXECUTION_TURN_FAILED").state());
-        assertEquals("FAILED",service.resume(restarted,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())).phase());
+        assertThrows(Failure.class,()->service.failConversation(restarted,"exec","run",renewed,"NATIVE_EXECUTION_TURN_INTERRUPTED"));
+        assertThrows(Failure.class,()->service.failConversation(restarted,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
+        service.recordEffect(restarted,"exec","run","generate",new SkillExecutionService.EffectResult("exec",skill.getSnapshotSha256(),renewed,HASH,null,"FAILED",null,null));
+        assertEquals("FAILED",service.failConversation(restarted,"exec","run",renewed,"NATIVE_EXECUTION_TURN_FAILED").state());
+        assertEquals("FAILED",service.resume(restarted,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())).phase());
     }
     @Test void newEffectPreparesBeforeNativeTransactionButReplaysNeverReprepare() {
         var auth=mock(AgentRuntimeAuthenticationService.class);var observed=new ArrayList<Boolean>();
@@ -316,10 +340,10 @@ public class SkillExecutionServiceTest {
             try{return ((Supplier<?>)i.getArgument(1)).get();}
             finally{org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(false);}
         });service.setRuntimeAuthentication(auth);
-        assertEquals("NEW",service.startEffect(runtime,"task","run","generate",start()).disposition());
+        assertEquals("NEW",service.startEffect(runtime,"exec","run","generate",start()).disposition());
         assertEquals(List.of(false,true),observed);
         observed.clear();doThrow(new InstalledSkillDescriptorLookup.SourceUnavailable()).when(installed).read(any());
-        assertEquals("RECORDED",service.startEffect(runtime,"task","run","generate",start()).disposition());
+        assertEquals("RECORDED",service.startEffect(runtime,"exec","run","generate",start()).disposition());
         assertTrue(observed.isEmpty());
     }
     @Test void inputDescriptorClosesWhenLeaseChangesDuringStorageIo() {
@@ -334,7 +358,7 @@ public class SkillExecutionServiceTest {
                 @Override public void close() {closed.set(true);}
             });
         });
-        assertThrows(Failure.class,()->service.inputContent(runtime,"task","run","source",fence));
+        assertThrows(Failure.class,()->service.inputContent(runtime,"exec","run","source",fence));
         assertTrue(closed.get());
     }
 
@@ -345,7 +369,7 @@ public class SkillExecutionServiceTest {
     }
 
     SkillExecutionService.ResultReceipt commit(RuntimeScope scope,SkillExecutionService.ResultCommit command) {
-        return service.commitResult(scope,"task","run",manifestId(command),command);
+        return service.commitResult(scope,"exec","run",manifestId(command),command);
     }
     static String manifestId(SkillExecutionService.ResultCommit command) {
         var preimage=new LinkedHashMap<String,Object>();preimage.put("schemaVersion",2);preimage.put("data",command.data());
@@ -362,15 +386,15 @@ public class SkillExecutionServiceTest {
     }
     @Test void emptySkillsAdmitWithoutFakeInstallationOrCatalogAndFreezeOutputs() {
         var snapshot=snapshot();snapshot.put("skills",List.of());insertFixtures();clearInvocations(installed,management,capabilities,policy);
-        var created=service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot));
-        assertEquals(5,execution.getExecutionProtocolVersion());assertEquals("[]",skill.getTaskSkillBindingJson());assertNull(skill.getSkillKey());
+        var created=service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot));
+        assertEquals(6,execution.getExecutionProtocolVersion());assertEquals("[]",skill.getTaskSkillBindingJson());assertNull(skill.getSkillKey());
         assertEquals(sha(json(snapshot)),created.snapshotDigest());verifyNoInteractions(installed,management,capabilities,policy);
     }
     @Test void emptySkillsCommandRetainsExplicitLocalPolicyInstructionParametersAndInputs() {
         emptySkills();skill.setPhase("READY");execution.setInstruction("write a real file");
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();
-        assertEquals(5,command.executionProtocolVersion());assertEquals(List.of(),command.skills());
+        assertEquals(6,command.executionProtocolVersion());assertEquals(List.of(),command.skills());
         assertEquals(SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,command.toolPolicyRef());assertEquals("write a real file",command.instruction());
         assertEquals(Map.of(),command.parameters());assertEquals(List.of(),command.inputRefs());assertEquals(outputs,command.outputs());
         verifyNoInteractions(installed,management,capabilities,policy);
@@ -385,21 +409,21 @@ public class SkillExecutionServiceTest {
         var report=new SkillCapabilityLookup.RuntimeSkill("analysis","1.0.0",HASH,null,null,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE,
                 null,null,null,"install","spv_analysis_1","INSTRUCTION","1",true,1L);
         when(capabilities.lookup(any(),eq(session))).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session",session,new SkillCapabilityLookup.Catalog("1",List.of(report))));
-        when(management.nativeTaskBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
-                SkillManagementCodec.map("executionId",i.getArgument(2),"taskGrantId",i.getArgument(3),"taskGrantVersion",Long.toString(i.getArgument(4,Long.class)),
+        when(management.executionBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
+                SkillManagementCodec.map("executionId",i.getArgument(2),"scopeSha256",i.getArgument(3),"grantRevision",Long.toString(i.getArgument(4,Long.class)),
                 "agentId",i.getArgument(5),"skillKey","analysis","skillInstallationId",i.getArgument(6),"productVersionId","spv_analysis_1",
                 "skillVersion","1.0.0","packageSha256",HASH,"manifestSha256",null,"approvedPermissionsSha256",HASH));
-        insertFixtures();service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snap));
+        insertFixtures();service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap));
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();
         assertNull(command.skills().getFirst().skill().manifestSha256());
-        assertTrue(command.skills().getFirst().taskSkillBinding().containsKey("manifestSha256"));
-        assertNull(command.skills().getFirst().taskSkillBinding().get("manifestSha256"));
+        assertTrue(command.skills().getFirst().executionBinding().containsKey("manifestSha256"));
+        assertNull(command.skills().getFirst().executionBinding().get("manifestSha256"));
         assertEquals(outputs,command.outputs());
-        var binding=new LinkedHashMap<>(command.skills().getFirst().taskSkillBinding());
+        var binding=new LinkedHashMap<>(command.skills().getFirst().executionBinding());
         assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validate("TaskSkillBinding",binding));
-        assertDoesNotThrow(()->SkillManagementCodec.validateNativeTaskBinding(binding));
-        binding.remove("approvedPermissionsSha256");assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validateNativeTaskBinding(binding));
+        assertDoesNotThrow(()->SkillManagementCodec.validateExecutionBinding(binding));
+        binding.remove("approvedPermissionsSha256");assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validateExecutionBinding(binding));
     }
     @Test void compatibleMultipleSkillsKeepTheirOwnExactBindingsAndAdmissionLocks() {
         var scope=new SkillCapabilityLookup.Scope("0","client","owner","agent");
@@ -413,39 +437,39 @@ public class SkillExecutionServiceTest {
                 null,HASH,null,"install_2","spv_analysis_1","EXECUTABLE","1",true,1L);
         when(capabilities.lookup(any(),eq(session))).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session",session,
                 new SkillCapabilityLookup.Catalog("1",List.of(original,extra))));
-        when(management.nativeTaskBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
-                SkillManagementCodec.map("executionId",i.getArgument(2),"taskGrantId",i.getArgument(3),"taskGrantVersion",Long.toString(i.getArgument(4,Long.class)),
+        when(management.executionBinding(anyString(),anyString(),anyString(),anyString(),anyLong(),anyString(),anyString())).thenAnswer(i->
+                SkillManagementCodec.map("executionId",i.getArgument(2),"scopeSha256",i.getArgument(3),"grantRevision",Long.toString(i.getArgument(4,Long.class)),
                         "agentId",i.getArgument(5),"skillKey","install_2".equals(i.getArgument(6))?"format":"analysis","skillInstallationId",i.getArgument(6),
                         "productVersionId","spv_analysis_1","skillVersion","1.0.0","packageSha256",HASH,"manifestSha256",HASH,"approvedPermissionsSha256",HASH));
         var snap=snapshot();var selection=new LinkedHashMap<>((Map<String,Object>)((List<?>)snap.get("skills")).getFirst());
         var selected=new LinkedHashMap<>((Map<String,Object>)selection.get("skill"));selected.put("installationId","install_2");selected.put("key","format");selection.put("skill",selected);
         snap.put("skills",List.of(selection,((List<?>)snap.get("skills")).getFirst()));insertFixtures();
-        service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snap));
+        service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap));
         var order=inOrder(management);order.verify(management).admitNative(eq(scope),eq("analysis"),eq("install"),any());
         order.verify(management).admitNative(eq(scope),eq("format"),eq("install_2"),any());
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();
         assertEquals(2,command.skills().size());
-        assertEquals("install_2",command.skills().getFirst().taskSkillBinding().get("skillInstallationId"));
-        assertEquals("install",command.skills().get(1).taskSkillBinding().get("skillInstallationId"));
-        assertTrue(command.skills().stream().allMatch(item->execution.getExecutionId().equals(item.taskSkillBinding().get("executionId"))));
+        assertEquals("install_2",command.skills().getFirst().executionBinding().get("skillInstallationId"));
+        assertEquals("install",command.skills().get(1).executionBinding().get("skillInstallationId"));
+        assertTrue(command.skills().stream().allMatch(item->execution.getExecutionId().equals(item.executionBinding().get("executionId"))));
     }
     @Test void mismatchedSkillBindingCannotBeDispatched() {
-        insertFixtures();service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot()));
+        insertFixtures();service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot()));
         skill.setTaskSkillBindingJson(skill.getTaskSkillBindingJson().replace("\"skillInstallationId\":\"install\"","\"skillInstallationId\":\"foreign\""));
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         assertTrue(service.runtimeConversationCommandViews(runtime,16).isEmpty());
     }
     @Test void duplicateSkillInstallationsAreRejectedRatherThanCollapsed() {
         var snap=snapshot();var item=((List<?>)snap.get("skills")).getFirst();snap.put("skills",List.of(item,item));
-        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snap)));
+        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap)));
         verify(pwe,never()).insert(any());
     }
     @Test void nullOrDuplicateEffectDependenciesAreBadRequests() {
         var nulls=new ArrayList<String>();nulls.add(null);
         for(List<String> dependencies:List.<List<String>>of(nulls,List.of("same","same"))) {
             var command=new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),null,List.of(),List.of(),dependencies);
-            assertEquals(Reason.BAD_REQUEST,assertThrows(Failure.class,()->service.commitResult(runtime,"task","run","manifest_"+HASH,command)).getReason());
+            assertEquals(Reason.BAD_REQUEST,assertThrows(Failure.class,()->service.commitResult(runtime,"exec","run","manifest_"+HASH,command)).getReason());
         }
     }
     @Test void actualNativeResultCommitSignalsOnlyAfterTransactionCommit() {
@@ -494,11 +518,11 @@ public class SkillExecutionServiceTest {
         cn.jia.agent.service.PersonalWorkspaceService.UploadSource source = () -> new java.io.ByteArrayInputStream(bytes) {
             @Override public byte[] readAllBytes() { throw new AssertionError("Native upload must stream"); }
         };
-        var first=service.stageConversationOutputStream(runtime,"task","run",fence,"output_native_1","result.txt","text/plain",source,bytes.length,hash);
-        assertEquals(first,service.stageConversationOutputStream(runtime,"task","run",fence,"output_native_1","result.txt","text/plain",source,bytes.length,hash));
-        assertThrows(Failure.class, () -> service.stageConversationOutputStream(runtime,"task","run",fence,
+        var first=service.stageConversationOutputStream(runtime,"exec","run",fence,"output_native_1","result.txt","text/plain",source,bytes.length,hash);
+        assertEquals(first,service.stageConversationOutputStream(runtime,"exec","run",fence,"output_native_1","result.txt","text/plain",source,bytes.length,hash));
+        assertThrows(Failure.class, () -> service.stageConversationOutputStream(runtime,"exec","run",fence,
                 "output_native_1","result.txt","text/plain",source,bytes.length,"0".repeat(64)));
-        assertThrows(Failure.class, () -> service.stageConversationOutputStream(runtime,"task","run",fence,
+        assertThrows(Failure.class, () -> service.stageConversationOutputStream(runtime,"exec","run",fence,
                 "output_native_1","result.txt","text/plain",source,bytes.length + 1,hash));
         verify(storage,times(1)).storeStream(any(),any(),eq((long)bytes.length),eq("text/plain"));verify(pwe,times(1)).insertOutput(any());
         var command=new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),null,
@@ -506,64 +530,211 @@ public class SkillExecutionServiceTest {
         var receipt=commit(runtime,command);assertEquals("RESULT_COMMITTED",receipt.state());assertEquals("COMMITTED",rows.get("output_native_1").getOutputState());
         var manifest=JsonMapper.builder().build().readValue(skill.getResultManifestJson(),Map.class);
         assertEquals(2,manifest.get("schemaVersion"));assertEquals(bytes.length,((Map<?,?>)((List<?>)manifest.get("artifacts")).getFirst()).get("byteLength"));
-        var recovery=service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        var recovery=service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
         assertEquals(List.of("PROJECT_RESULT"),recovery.allowedWork());assertEquals(manifest,recovery.resultManifest());
         clearInvocations(storage,installed);assertEquals(receipt,commit(runtime,command));
         verifyNoInteractions(storage,installed);
     }
+
+    /** Real authentication transaction advice; mocked rows do not prove SQL serialization. */
+    final class OutputFence {
+        final org.springframework.transaction.PlatformTransactionManager manager=mock(org.springframework.transaction.PlatformTransactionManager.class);
+        final org.springframework.transaction.TransactionStatus status=mock(org.springframework.transaction.TransactionStatus.class);
+        final java.util.concurrent.atomic.AtomicBoolean active=new java.util.concurrent.atomic.AtomicBoolean();
+        final AgentRuntimeDao runtimes=mock(AgentRuntimeDao.class);
+        final AgentRuntimeV1InstallationDao installations=mock(AgentRuntimeV1InstallationDao.class);
+        final AgentRuntimeEntity row;
+        OutputFence() {
+            String id="rti_"+"1".repeat(32);
+            var installation=new AgentRuntimeV1InstallationEntity().setInstallationId(id).setCanonicalAgentId("agent").setStatus("ACTIVE");
+            installation.setTenantId("0");installation.setClientId("client");
+            var identity=new AgentIdentityRegistryEntity().setCanonicalAgentId("agent").setBindingId(3L);
+            var identities=mock(AgentIdentityService.class);
+            when(identities.requireRegistrationIdentityInScope("0","client","owner","agent")).thenReturn(identity);
+            when(identities.requireActiveBinding(identity,null)).thenReturn(new AgentPersonaBindingEntity().setId(3L));
+            var accounts=mock(cn.jia.user.security.AccountSecurityService.class);
+            when(accounts.findUniqueByExactJiacn("owner")).thenReturn(Optional.of(new cn.jia.user.security.AccountSecuritySnapshot(7,"owner",cn.jia.user.security.AccountState.ACTIVE,2)));
+            row=new AgentRuntimeEntity().setAgentId("agent").setOwnerJiacn("owner").setBindingId(3L)
+                    .setRuntimeInstallationId(id).setRuntimeHostId("host").setRuntimeInstanceId("runtime")
+                    .setRuntimeSessionGeneration(2L).setTokenHash("urs1:"+"b".repeat(64)+":7:2");
+            row.setTenantId("0");row.setClientId("client");
+            when(installations.lock(id)).thenReturn(installation);
+            when(runtimes.lockInScope("0","client","agent")).thenReturn(row);
+            var auth=new AgentRuntimeAuthenticationService(runtimes,installations,mock(AgentIdentityRegistryDao.class),identities,accounts,mock(AgentTaskEventsGate.class),new cn.jia.core.security.FixedTenantAdmissionPolicy("0",null));
+            when(manager.getTransaction(any())).thenAnswer(i->{active.set(true);return status;});
+            doAnswer(i->{active.set(false);return null;}).when(manager).commit(status);
+            doAnswer(i->{active.set(false);return null;}).when(manager).rollback(status);
+            var advice=new org.springframework.transaction.interceptor.TransactionInterceptor();advice.setTransactionManager(manager);
+            advice.setTransactionAttributeSource(new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource());
+            var proxy=new org.springframework.aop.framework.ProxyFactory(auth);proxy.setProxyTargetClass(true);proxy.addAdvice(advice);
+            service.setRuntimeAuthentication((AgentRuntimeAuthenticationService)proxy.getProxy());
+        }
+    }
+    byte[] outputBytes() { return "native result\n".getBytes(StandardCharsets.UTF_8); }
+    PersonalWorkspaceExecutionOutputEntity stagedRow(String uri) {
+        var row=new PersonalWorkspaceExecutionOutputEntity().setExecutionId("exec").setOutputId("output_native_1")
+                .setOwnerJiacn("owner").setOriginalFilename("result.txt").setContentHash(sha("native result\n"))
+                .setByteLength((long)outputBytes().length).setContentMimeType("text/plain").setStorageUri(uri)
+                .setOutputPurpose("CONVERSATION").setOutputState("STAGED");
+        row.setTenantId("0");row.setClientId("client");return row;
+    }
+    StagedOutput stageNativeFile() {
+        var bytes=outputBytes();
+        return service.stageConversationOutputStream(runtime,"exec","run",fence,"output_native_1","result.txt","text/plain",
+                ()->new java.io.ByteArrayInputStream(bytes),bytes.length,sha("native result\n"));
+    }
+    @Test void runtimeRotationDuringNativeStorageCannotInsertOutput() {
+        emptySkills();var auth=new OutputFence();
+        when(storage.storeStream(any(),any(),anyLong(),eq("text/plain"))).thenAnswer(i->{
+            assertFalse(auth.active.get());auth.row.setRuntimeSessionGeneration(3L).setRuntimeInstanceId("replacement");
+            return new PersonalWorkspaceStorage.StoredObject("object",sha("native result\n"),outputBytes().length,"text/plain");
+        });
+        assertThrows(RuntimeException.class,this::stageNativeFile);
+        verify(pwe,never()).insertOutput(any());verify(auth.manager).rollback(auth.status);
+        verify(auth.manager,never()).commit(any());
+    }
+    @Test void nativeStorageOccursOutsideRootAndPersistentFenceButInsertionInsideFence() {
+        emptySkills();var auth=new OutputFence();var rootActive=new java.util.concurrent.atomic.AtomicBoolean();
+        when(conversations.withLockedAccessible(any(),eq("42"),any())).thenAnswer(i->{
+            rootActive.set(true);
+            try {return ((java.util.function.Function<WorkspaceConversationAccessService.ConversationView,?>)i.getArgument(2)).apply(conversations.requireAccessible(i.getArgument(0),"42"));}
+            finally {rootActive.set(false);}
+        });
+        when(storage.storeStream(any(),any(),anyLong(),eq("text/plain"))).thenAnswer(i->{
+            assertFalse(auth.active.get());assertFalse(rootActive.get());
+            return new PersonalWorkspaceStorage.StoredObject("object",sha("native result\n"),outputBytes().length,"text/plain");
+        });
+        doAnswer(i->{assertTrue(auth.active.get());assertTrue(rootActive.get());return null;}).when(pwe).insertOutput(any());
+        assertEquals("STAGED",stageNativeFile().state());
+        var order=inOrder(storage,auth.installations,auth.runtimes,pwe,auth.manager);
+        order.verify(storage).storeStream(any(),any(),anyLong(),eq("text/plain"));
+        order.verify(auth.installations).lock("rti_"+"1".repeat(32));
+        order.verify(auth.runtimes).lockInScope("0","client","agent");
+        order.verify(pwe).insertOutput(any());order.verify(auth.manager).commit(auth.status);
+    }
+    @Test void stagedNativeReplayStillRequiresPersistentIdentityFence() {
+        emptySkills();var auth=new OutputFence();
+        when(pwe.lockOutput("0","client","owner","exec","output_native_1")).thenReturn(stagedRow("original"));
+        assertEquals("STAGED",stageNativeFile().state());verify(auth.manager).commit(auth.status);
+        auth.row.setRuntimeSessionGeneration(3L);assertThrows(RuntimeException.class,this::stageNativeFile);
+        verify(auth.manager).rollback(auth.status);verify(pwe,never()).insertOutput(any());
+        verify(storage,never()).storeStream(any(),any(),anyLong(),anyString());
+    }
+    @Test void changedNativeStagedTupleCannotBeReconciledOrRestored() {
+        emptySkills();new OutputFence();
+        when(pwe.lockOutput("0","client","owner","exec","output_native_1"))
+                .thenReturn(stagedRow("original"),stagedRow("replacement"));
+        assertEquals(Reason.OUTPUT_CONFLICT,assertThrows(Failure.class,this::stageNativeFile).getReason());
+        verify(pwe,never()).insertOutput(any());verify(storage,never()).storeStream(any(),any(),anyLong(),anyString());
+    }
+    @Test void nativeOutputWithDifferentStoredHashDoesNotOverwriteOrRestorage() {
+        emptySkills();
+        when(pwe.lockOutput("0","client","owner","exec","output_native_1")).thenReturn(stagedRow("original").setContentHash("0".repeat(64)));
+        assertEquals(Reason.OUTPUT_CONFLICT,assertThrows(Failure.class,this::stageNativeFile).getReason());
+        verify(pwe,never()).insertOutput(any());verify(storage,never()).storeStream(any(),any(),anyLong(),anyString());
+    }
+    @Test void nativeResultCannotBypassPersistentIdentityFence() {
+        emptySkills();var auth=new OutputFence();auth.row.setRuntimeSessionGeneration(3L);
+        assertThrows(RuntimeException.class,()->commit(runtime,dataResult()));
+        verify(auth.manager).rollback(auth.status);verify(pwe,never()).updateOutput(any());
+        verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+    SkillExecutionService.ResultCommit stagedNativeResult() {
+        emptySkills();var output=stagedRow("original");
+        when(pwe.lockOutputs("0","client","owner","exec")).thenReturn(List.of(output));
+        when(pwe.lockOutput("0","client","owner","exec","output_native_1")).thenReturn(output);
+        return new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer","ok"),
+                List.of(new OutputDeclaration("output_native_1",output.getContentHash(),outputBytes().length)),List.of(),List.of());
+    }
+    @Test void runtimeRotationDuringResultVerificationCannotCommitRows() {
+        var command=stagedNativeResult();var auth=new OutputFence();
+        when(storage.openStream(any(),anyString(),anyString(),anyLong(),anyString())).thenAnswer(i->{
+            assertFalse(auth.active.get());auth.row.setRuntimeSessionGeneration(3L);
+            return new java.io.ByteArrayInputStream(outputBytes());
+        });
+        assertThrows(RuntimeException.class,()->commit(runtime,command));verify(auth.manager).rollback(auth.status);
+        verify(pwe,never()).updateOutput(any());verify(pwe,never()).update(any());
+        verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+    @Test void leaseRotationDuringResultVerificationCannotCommitRows() {
+        var command=stagedNativeResult();
+        when(storage.openStream(any(),anyString(),anyString(),anyLong(),anyString())).thenAnswer(i->{
+            execution.setConversationLeaseVersion(2L);return new java.io.ByteArrayInputStream(outputBytes());
+        });
+        assertThrows(Failure.class,()->commit(runtime,command));verify(pwe,never()).updateOutput(any());
+        verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+    @Test void storageTupleRotationDuringResultVerificationCannotCommitRows() {
+        var command=stagedNativeResult();
+        when(storage.openStream(any(),anyString(),anyString(),anyLong(),anyString())).thenAnswer(i->{
+            when(pwe.lockOutput("0","client","owner","exec","output_native_1")).thenReturn(stagedRow("replacement"));
+            return new java.io.ByteArrayInputStream(outputBytes());
+        });
+        assertEquals(Reason.OUTPUT_CONFLICT,assertThrows(Failure.class,()->commit(runtime,command)).getReason());
+        verify(pwe,never()).updateOutput(any());verify(pwe,never()).update(any());
+        verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+    @Test void nativeFileCommitNeverPublishesPersonalFilesOrFormalDeliveryImplicitly() {
+        var artifacts=mock(AgentTaskArtifactService.class);var deliveries=mock(AgentTaskFormalDeliveryService.class);
+        // Keep the already wired task-root transaction; publication collaborators alone must remain unused.
+        ReflectionTestUtils.setField(service,"taskArtifacts",artifacts);ReflectionTestUtils.setField(service,"formalDeliveries",deliveries);
+        clearInvocations(writes);assertNativeFileRecovery(outputBytes());
+        verifyNoInteractions(writes,artifacts,deliveries);
+    }
+
     @Test void emptySkillsDoNotBypassCurrentConversationAclOrGeneration() {
         emptySkills();
         when(conversations.requireAccessible(any(),eq("42"))).thenReturn(null);
-        assertThrows(Failure.class,()->service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+        assertThrows(Failure.class,()->service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
         assertThrows(Failure.class,()->commit(runtime,dataResult()));
         when(conversations.requireAccessible(any(),eq("42"))).thenReturn(new WorkspaceConversationAccessService.ConversationView("42","bounty","task:task","task",List.of("agent"),2,1));
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","new-step",start()));
-        assertThrows(Failure.class,()->service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","new-step",start()));
+        assertThrows(Failure.class,()->service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
         verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
     }
     @Test void finalResultCanExcludeKnownFailedExplorationButCannotDependOnIt() {
-        emptySkills();service.startEffect(runtime,"task","run","explore",start());
-        service.recordEffect(runtime,"task","run","explore",effect("FAILED",null,null));
-        service.startEffect(runtime,"task","run","final",start());service.recordEffect(runtime,"task","run","final",effect("SUCCEEDED",null,HASH));
+        emptySkills();service.startEffect(runtime,"exec","run","explore",start());
+        service.recordEffect(runtime,"exec","run","explore",effect("FAILED",null,null));
+        service.startEffect(runtime,"exec","run","final",start());service.recordEffect(runtime,"exec","run","final",effect("SUCCEEDED",null,HASH));
         var invalid=new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer","ok"),List.of(),List.of(),List.of("explore"));
         assertThrows(Failure.class,()->commit(runtime,invalid));
         var valid=new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer","ok"),List.of(),List.of(),List.of("final"));
         assertEquals("RESULT_COMMITTED",commit(runtime,valid).state());assertTrue(skill.getResultManifestJson().contains("effectDependencies"));
     }
     @Test void resumeAllowsOnlyNewAuthorizedStepsAfterConfirmedEffectsAndReplaysNeverReexecute() {
-        emptySkills();service.startEffect(runtime,"task","run","first",start());service.recordEffect(runtime,"task","run","first",effect("SUCCEEDED",null,HASH));
-        var resume=service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
-        assertTrue(resume.allowedWork().contains("CONTINUE_EXECUTION"));assertEquals("KNOWN",service.startEffect(runtime,"task","run","first",start()).disposition());
-        assertEquals("NEW",service.startEffect(runtime,"task","run","second",start()).disposition());
+        emptySkills();service.startEffect(runtime,"exec","run","first",start());service.recordEffect(runtime,"exec","run","first",effect("SUCCEEDED",null,HASH));
+        var resume=service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));
+        assertTrue(resume.allowedWork().contains("CONTINUE_EXECUTION"));assertEquals("KNOWN",service.startEffect(runtime,"exec","run","first",start()).disposition());
+        assertEquals("NEW",service.startEffect(runtime,"exec","run","second",start()).disposition());
     }
     @Test void unknownEffectCannotBeBypassedByNewIdOrOmittingDependencies() {
-        emptySkills();service.startEffect(runtime,"task","run","unknown",start());service.recordEffect(runtime,"task","run","unknown",effect("UNKNOWN",null,null));
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","replacement",start()));
+        emptySkills();service.startEffect(runtime,"exec","run","unknown",start());service.recordEffect(runtime,"exec","run","unknown",effect("UNKNOWN",null,null));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","replacement",start()));
         assertThrows(Failure.class,()->commit(runtime,dataResult()));
-        var resume=service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));assertFalse(resume.allowedWork().contains("CONTINUE_EXECUTION"));
+        var resume=service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256()));assertFalse(resume.allowedWork().contains("CONTINUE_EXECUTION"));
     }
     @Test void nonexistentDependencyAndWrongManifestIdCannotCommit() {
         emptySkills();var missing=new SkillExecutionService.ResultCommit(fence,skill.getSnapshotSha256(),Map.of("answer","ok"),List.of(),List.of(),List.of("missing"));
         assertThrows(Failure.class,()->commit(runtime,missing));
-        assertThrows(Failure.class,()->service.commitResult(runtime,"task","run","manifest_"+HASH,dataResult()));
+        assertThrows(Failure.class,()->service.commitResult(runtime,"exec","run","manifest_"+HASH,dataResult()));
     }
     @Test void arbitraryToolPolicyOrProviderRevisionNeverGrantsTools() {
         var snapshot=snapshot();snapshot.put("skills",List.of());snapshot.put("toolPolicyRef","all-tools");
-        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action","task","42",1,"agent","grant",1,7,snapshot)));
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","provider",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,HASH,"revision")));
+        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot)));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","provider",new SkillExecutionService.EffectStart("exec",skill.getSnapshotSha256(),fence,HASH,"revision")));
         verify(pwe,never()).insert(any());
     }
     @Test void unfinishedRetiredOwnerViewIsReadOnlyAndCannotAdvertiseRecovery() {
         clearInvocations(storage);
         when(pwe.listInputs("0","client","owner","exec")).thenReturn(List.of());
-        for (int protocol : List.of(1,2,3,4)) {
+        for (int protocol : List.of(1,2,3,4,5)) {
             execution.setExecutionProtocolVersion(protocol).setExecutionState("QUEUED")
                     .setFailureCode(null).setFailureMessage(null).setOutputContentMimeType("image/png");
             var view=service.get(owner,"exec");
             assertEquals("QUEUED",view.state());
             assertEquals("UNSUPPORTED_RETIRED_PROTOCOL",view.recoveryStatus());
             assertNull(view.runtimeCommand());assertNull(view.failureCode());assertNull(view.failureMessage());
-            var error=assertThrows(Failure.class,()->service.resume(runtime,"task","run",
+            var error=assertThrows(Failure.class,()->service.resume(runtime,"exec","run",
                     new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
             assertEquals(Reason.NOT_FOUND,error.getReason());
             execution.setExecutionState("OUTPUT_STAGED");
@@ -571,22 +742,25 @@ public class SkillExecutionServiceTest {
             execution.setExecutionState("OUTPUT_COMMITTED");
             assertNull(service.get(owner,"exec").recoveryStatus());
         }
-        execution.setExecutionProtocolVersion(5).setExecutionState("QUEUED");
+        execution.setExecutionProtocolVersion(6).setExecutionState("QUEUED");
         assertNull(service.get(owner,"exec").recoveryStatus());
         verify(pwe,never()).update(any());verifyNoInteractions(storage);
     }
     @Test void legacyConversationProtocolsCannotClaimResumeStageOrReportFailure() {
         clearInvocations(storage);
-        for(int protocol:List.of(1,2,3)) {
-            execution.setExecutionProtocolVersion(protocol);String snapshot=skill.getSnapshotJson();
-            assertThrows(Failure.class,()->service.claimConversationStart(runtime,"task","run","command","message"));
-            assertThrows(Failure.class,()->service.renewConversationLease(runtime,"task","run",fence));
-            assertThrows(Failure.class,()->service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
-            assertThrows(Failure.class,()->service.stageConversationOutput(runtime,"task","run",fence,"output_1","a.txt","text/plain",new byte[]{1}));
-            assertThrows(Failure.class,()->service.failConversation(runtime,"task","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
+        for(String mode:List.of("PRIVATE","TASK","CONVERSATION")) for(int protocol:List.of(1,2,3,4,5)) {
+            execution.setExecutionMode(mode).setExecutionProtocolVersion(protocol);String snapshot=skill.getSnapshotJson();
+            assertThrows(Failure.class,()->service.claimConversationStart(runtime,"exec","run","command","message"));
+            assertThrows(Failure.class,()->service.renewConversationLease(runtime,"exec","run",fence));
+            assertThrows(Failure.class,()->service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+            assertThrows(Failure.class,()->service.stageConversationOutput(runtime,"exec","run",fence,"output_1","a.txt","text/plain",new byte[]{1}));
+            assertThrows(Failure.class,()->service.failConversation(runtime,"exec","run",fence,"NATIVE_EXECUTION_TURN_FAILED"));
             assertEquals("QUEUED",execution.getExecutionState());assertEquals(snapshot,skill.getSnapshotJson());
         }
-        assertThrows(Failure.class,()->service.createConversation(owner,null));
+        var publicMethods=Arrays.stream(PersonalWorkspaceExecutionService.class.getMethods()).map(java.lang.reflect.Method::getName).toList();
+        for(String retired:List.of("createConversation","create","capabilities","start","fail","stageOutput",
+                "commitOutputs","runtimeInputs","runtimeInputContent","runtimeQueuedCommands","revokeInputs"))
+            assertFalse(publicMethods.contains(retired));
         verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());verifyNoInteractions(storage);
     }
     @Test void retiredRuntimeControllerHasNoOldCommandStartOrCommitRoutes() {
@@ -596,11 +770,18 @@ public class SkillExecutionServiceTest {
         assertFalse(point.contains("submit"));assertTrue(point.contains("get"));
     }
     @Test void runtimeCredentialLaneRejectsRetiredV3AndOldOutputCommitButKeepsV5() {
-        for(String path:List.of("/internal/agent/tasks/conversation-executions/controlled-image-v3-commands",
+        for(String path:List.of("/internal/agent/tasks/workspace-executions/commands",
+                "/internal/agent/tasks/task/runs/run/inputs",
+                "/internal/agent/tasks/task/runs/run/inputs/input_1/content",
+                "/internal/agent/tasks/task/runs/run/outputs/output_1/content",
+                "/internal/agent/tasks/task/runs/run/output-commits/manifest",
+                "/internal/agent/tasks/task/runs/run/failure",
+                "/internal/agent/tasks/task/runs/run/start",
+                "/internal/agent/tasks/conversation-executions/controlled-image-v3-commands",
                 "/internal/agent/tasks/task/runs/run/conversation/provider-start-controlled-image-v3",
                 "/internal/agent/tasks/task/runs/run/conversation/inputs-v3",
                 "/internal/agent/tasks/task/runs/run/conversation/output-commits/manifest")) {
-            var request=new org.springframework.mock.web.MockHttpServletRequest(path.contains("-commands")?"GET":"POST",path);
+            var request=new org.springframework.mock.web.MockHttpServletRequest(path.endsWith("/commands")||path.contains("-commands")||path.contains("/inputs")?"GET":"POST",path);
             assertFalse(cn.jia.agent.security.AgentRuntimeAuthenticationFilter.allowed(request));
         }
         for(String path:List.of("/internal/agent/tasks/task/runs/run/conversation/resume",
@@ -609,9 +790,9 @@ public class SkillExecutionServiceTest {
     }
     @Test void legacyV4WritesAreRetiredWithoutStateRewrites() {
         execution.setExecutionProtocolVersion(4);String before=skill.getSnapshotJson();
-        assertThrows(Failure.class,()->service.resume(runtime,"task","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
-        assertThrows(Failure.class,()->service.startEffect(runtime,"task","run","first",start()));
-        assertThrows(Failure.class,()->service.inputs(runtime,"task","run",fence));assertThrows(Failure.class,()->commit(runtime,dataResult()));
+        assertThrows(Failure.class,()->service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+        assertThrows(Failure.class,()->service.startEffect(runtime,"exec","run","first",start()));
+        assertThrows(Failure.class,()->service.inputs(runtime,"exec","run",fence));assertThrows(Failure.class,()->commit(runtime,dataResult()));
         assertThrows(Failure.class,()->service.markProjected(owner,"exec",HASH));
         assertEquals("QUEUED",execution.getExecutionState());assertEquals(before,skill.getSnapshotJson());assertEquals("{}",skill.getEffectsJson());
         verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
@@ -622,6 +803,81 @@ public class SkillExecutionServiceTest {
         String digest=sha(json(manifest));manifest.put("resultDigest",digest);manifest.put("manifestId","manifest_"+digest);skill.setResultManifestJson(json(manifest));
         var view=service.result(owner,"exec");assertEquals(digest,view.resultManifest().get("resultDigest"));assertEquals(1,view.resultManifest().get("schemaVersion"));
         verify(pwe,never()).update(any());verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+
+    private void privateExecutionFixture() {
+        execution.setBusinessScope("PRIVATE").setTaskId(null).setTaskGrantId(null)
+                .setTaskGrantVersion(null).setAssignmentRevision(null);
+        var snapshot=new LinkedHashMap<>(snapshot());
+        snapshot.put("scope",new SkillExecutionService.ScopeView("PRIVATE","42","1",null).asMap());
+        snapshot.remove("taskGrant");snapshot.put("skills",List.of());
+        skill.setSnapshotJson(json(snapshot)).setSnapshotSha256(sha(json(snapshot)));
+        when(conversations.requireAccessible(any(),eq("42"))).thenReturn(
+                new WorkspaceConversationAccessService.ConversationView("42","private","agent:agent",null,List.of("agent"),1,1));
+    }
+    @Test void privateCancellationInvalidatesLeaseButPreservesUnknownExternalEffects() {
+        privateExecutionFixture();String effects="{\"external\":{\"status\":\"UNKNOWN\"}}";
+        skill.setEffectsJson(effects).setPhase("RESULT_UNKNOWN");
+        when(pwe.cancelLockedExecution(any(),anyLong())).thenReturn(true);
+        assertEquals("CANCELLED",service.cancel(owner,"exec"));
+        assertEquals("CANCELLED",skill.getPhase());assertEquals(effects,skill.getEffectsJson());
+        assertNull(execution.getConversationLeaseToken());assertNull(execution.getConversationLeaseRuntimeId());
+        assertNull(execution.getConversationLeaseExpiresAt());
+        assertEquals("CANCELLED",service.cancel(owner,"exec"));
+        verify(pwe,times(1)).cancelLockedExecution(any(),anyLong());verifyNoInteractions(grants);
+        assertThrows(Failure.class,()->service.renewConversationLease(runtime,"exec","run",fence));
+        assertThrows(Failure.class,()->service.resume(runtime,"exec","run",new SkillExecutionService.Resume("exec",skill.getSnapshotSha256())));
+    }
+    @Test void committedPrivateResultWinsCancellationWithoutMutation() {
+        privateExecutionFixture();execution.setExecutionState("RESULT_COMMITTED");skill.setPhase("ARCHIVING");
+        assertEquals("RESULT_COMMITTED",service.cancel(owner,"exec"));
+        assertEquals("ARCHIVING",skill.getPhase());verify(pwe,never()).cancelLockedExecution(any(),anyLong());
+        verify(attachments,never()).compareAndSet(any(),anyLong(),anyString());
+    }
+    @Test void privateOwnerOutputCatalogueUsesExecutionIdentityAndNoSyntheticTask() {
+        privateExecutionFixture();execution.setExecutionState("RESULT_COMMITTED");
+        assertEquals(List.of(),service.listConversationOutputs(owner,"exec","run"));
+        verifyNoInteractions(grants);
+        verify(storage,never()).openStream(any(),anyString(),anyString(),anyLong(),anyString());
+        verify(pwe,never()).findByTaskRun(anyString(),anyString(),anyString(),anyString(),anyString());
+        verify(pwe,never()).lockByTaskRun(anyString(),anyString(),anyString(),anyString(),anyString());
+        assertThrows(Failure.class,()->service.listConversationOutputs(owner,"task","run"));
+        assertThrows(Failure.class,()->service.listConversationOutputs(owner,"exec","other-run"));
+    }
+    @Test void privateOwnerOutputReadRejectsLifecycleChangeBeforeStorage() {
+        privateExecutionFixture();execution.setExecutionState("RESULT_COMMITTED");
+        when(conversations.requireAccessible(any(),eq("42"))).thenReturn(
+                new WorkspaceConversationAccessService.ConversationView("42","private","agent:agent",null,List.of("agent"),2,1));
+        assertThrows(Failure.class,()->service.openConversationOutput(owner,"exec","run","output"));
+        verify(storage,never()).openStream(any(),anyString(),anyString(),anyLong(),anyString());
+    }
+    @Test void privateLeaseAndInputAccessUseSameExecutionWithoutSyntheticTaskGrant() {
+        privateExecutionFixture();
+        var agents=mock(AgentService.class);service.setNativeAgentAuthority(agents);
+        var renewed=service.renewConversationLease(runtime,"exec","run",fence);
+        assertEquals("exec",renewed.executionId());
+        var inputs=service.inputs(runtime,"exec","run",fence);
+        assertTrue(inputs.noReferencedMaterials());assertEquals(6,inputs.schemaVersion());
+        verify(agents,times(2)).requireApiKeyOwnedAgentForUpdate("0","client","owner","agent");
+        verifyNoInteractions(grants);
+        verify(pwe,never()).findByTaskRun(anyString(),anyString(),anyString(),anyString(),anyString());
+        verify(pwe,never()).lockByTaskRun(anyString(),anyString(),anyString(),anyString(),anyString());
+    }
+    @Test void runtimeRejectsWrongRunLegacyTaskRouteIdentityAndSnapshotScopeDrift() {
+        assertThrows(Failure.class,()->service.renewConversationLease(runtime,"exec","wrong-run",fence));
+        assertThrows(Failure.class,()->service.renewConversationLease(runtime,"task","run",fence));
+        privateExecutionFixture();
+        var snapshot=new LinkedHashMap<>(snapshot());
+        skill.setSnapshotJson(json(snapshot)); // persisted PRIVATE cannot borrow a TASK snapshot
+        assertThrows(Failure.class,()->service.renewConversationLease(runtime,"exec","run",fence));
+        verify(pwe,never()).update(any());verifyNoInteractions(grants);
+    }
+    @Test void privateRuntimeRejectsConversationGenerationChangeBeforeMutation() {
+        privateExecutionFixture();
+        when(conversations.requireAccessible(any(),eq("42"))).thenReturn(
+                new WorkspaceConversationAccessService.ConversationView("42","private","agent:agent",null,List.of("agent"),2,1));
+        assertThrows(Failure.class,()->service.renewConversationLease(runtime,"exec","run",fence));
+        verify(pwe,never()).update(any());verifyNoInteractions(grants);
     }
 
     /** Existing fixture has one authenticated owner. Cross-owner fixtures supply explicit grant authority separately. */
@@ -635,6 +891,6 @@ public class SkillExecutionServiceTest {
             .thenAnswer(i->new cn.jia.agent.service.TaskAssigneeAuthorityService.Target(i.getArgument(0),i.getArgument(1),i.getArgument(2),"agent",1L,null));
         service.setAssigneeAuthority(authority);
         org.mockito.Mockito.when(rows.findForRuntime(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.anyString()))
-            .thenAnswer(i->rows.findByTaskRun(i.getArgument(0),i.getArgument(1),i.getArgument(2),i.getArgument(4),i.getArgument(5)));
+            .thenAnswer(i->rows.find(i.getArgument(0),i.getArgument(1),i.getArgument(2),i.getArgument(4)));
     }
 }

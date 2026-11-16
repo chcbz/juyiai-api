@@ -9,16 +9,16 @@ import java.util.List;
 /** Exact owner-scoped persistence boundary for private execution grants and output receipts. */
 public interface PersonalWorkspaceExecutionDao {
     /** Current reads under the task root; immutable terminal executions are not rewritten. */
-    List<PersonalWorkspaceExecutionEntity> lockUnfinishedTaskExecutions(
+    List<PersonalWorkspaceExecutionEntity> findUnfinishedTaskExecutions(
             String tenantId, String clientId, String ownerJiacn, String taskId);
-    boolean cancelLockedTaskExecution(PersonalWorkspaceExecutionEntity execution, long now);
+    boolean cancelLockedExecution(PersonalWorkspaceExecutionEntity execution, long now);
 
     PersonalWorkspaceExecutionEntity findForRuntime(String tenantId,String clientId,String executorOwner,
-            String agentId,String taskId,String runId);
+            String agentId,String executionId,String runId);
 
     /** Historical native cost authority, not active execution admission. */
     PersonalWorkspaceExecutionEntity findForNativeUsageCost(String tenantId, String clientId, String executorOwner,
-            String agentId, String taskId, String runId, String executionId);
+            String agentId, String executionId, String runId);
 
     PersonalWorkspaceExecutionEntity find(String tenantId, String clientId, String ownerJiacn,
             String executionId);
@@ -38,10 +38,6 @@ public interface PersonalWorkspaceExecutionDao {
             String taskId, String runId);
     PersonalWorkspaceExecutionEntity lockByTaskRun(String tenantId, String clientId, String ownerJiacn,
             String taskId, String runId);
-    List<PersonalWorkspaceExecutionEntity> listQueuedByTargetAfter(String tenantId, String clientId,
-            String ownerJiacn, String targetAgentId, Long afterCreatedAt, String afterExecutionId, int limit);
-    List<PersonalWorkspaceExecutionEntity> listQueuedByTarget(String tenantId, String clientId,
-            String ownerJiacn, String targetAgentId, int limit);
     List<PersonalWorkspaceExecutionEntity> listQueuedConversationsByTarget(String tenantId,
             String clientId, String ownerJiacn, String targetAgentId,
             Long afterCreatedAt, String afterExecutionId, int limit);
@@ -49,11 +45,6 @@ public interface PersonalWorkspaceExecutionDao {
     boolean hasExecutionProtocolVersionColumn();
     void insert(PersonalWorkspaceExecutionEntity execution);
     void update(PersonalWorkspaceExecutionEntity execution);
-    boolean markControlledProviderStarted(String tenantId,String clientId,String ownerJiacn,
-            String taskId,String runId,String executionId,String consentId,long leaseVersion,long startedAt);
-    boolean markControlledProviderStartedV3(String tenantId,String clientId,String ownerJiacn,
-            String taskId,String runId,String executionId,String consentId,String operationGrantId,
-            long leaseVersion,long startedAt);
     void insertInput(PersonalWorkspaceExecutionInputEntity input);
     List<PersonalWorkspaceExecutionInputEntity> listInputs(String tenantId, String clientId,
             String ownerJiacn, String executionId);

@@ -6,9 +6,7 @@ import cn.jia.agent.dao.HallPrivateCaseDao;
 import cn.jia.agent.dao.HallRequestDraftDao;
 import cn.jia.agent.dao.PersonalWorkspaceDao;
 import cn.jia.agent.entity.AgentRuntimeDTO;
-import cn.jia.agent.entity.AgentTaskMetaEntity;
 import cn.jia.agent.entity.HallExecutionResultRow;
-import cn.jia.agent.entity.HallPrivateCaseEntity;
 import cn.jia.agent.entity.HallRequestDraftEntity;
 import cn.jia.agent.service.AgentService;
 import cn.jia.agent.service.HallRequestDraftService;
@@ -16,7 +14,6 @@ import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.chat.service.WorkspaceConversationAccessService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.DuplicateKeyException;
 
@@ -68,45 +65,33 @@ class HallRequestDraftSubmissionServiceTest {
     }
 
     @Test
-    void createSubmitReservesKeyCreatesPrivateCaseAndReturnsDurableReplay() {
-        HallRequestDraftEntity editing = draft("hdr_1", "CREATE", 3, "EDITING");
-        HallRequestDraftEntity submitted = copy(editing).setState("SUBMITTED").setRevision(4L)
+    void historicalPrivateSubmissionIsReadOnlyAndCannotBeReplayedAsExecution() {
+        var submitted = draft("hdr_1", "CREATE", 4, "SUBMITTED")
                 .setCaseId("hpc_fixed").setSubmissionRef("hpc_fixed")
                 .setSubmittedExecutionId("pwe_1").setSubmitKey("submit-key")
                 .setSubmitHash(hashForTest("SUBMIT", "hdr_1", "3", "true"));
-        when(drafts.findBySubmitKey("0", "client-a", "owner-a", "submit-key"))
-                .thenReturn(null, submitted);
-        when(drafts.lock("0", "client-a", "owner-a", "hdr_1")).thenReturn(editing);
-        when(drafts.reserveSubmitIntent(eq("0"), eq("client-a"), eq("owner-a"),
-                eq("hdr_1"), eq(3L), eq("submit-key"), any(), eq(now.get()))).thenReturn(1);
-        when(drafts.markSubmitted(eq("0"), eq("client-a"), eq("owner-a"), eq("hdr_1"),
-                eq(3L), eq("submit-key"), any(), any(), any(), eq("pwe_1"), eq(now.get())))
-                .thenAnswer(invocation -> {
-                    String caseId = invocation.getArgument(7);
-                    submitted.setCaseId(caseId).setSubmissionRef(caseId);
-                    return 1;
-                });
-        when(drafts.find("0", "client-a", "owner-a", "hdr_1")).thenReturn(submitted);
-        when(executions.create(any(), any(), eq("submit-key"))).thenReturn(execution("pwe_1"));
+        when(drafts.findBySubmitKey("0", "client-a", "owner-a", "submit-key")).thenReturn(submitted);
         when(executions.get(any(), eq("pwe_1"))).thenReturn(execution("pwe_1"));
-
-        HallRequestDraftService.SubmissionReceipt receipt = service.submit(
-                SCOPE, "hdr_1", 3, true, "submit-key");
+        var receipt = service.getSubmissionByIdempotencyKey(SCOPE, "submit-key");
         assertEquals("PRIVATE_CASE", receipt.ref().sourceType());
-        assertEquals(submitted.getCaseId(), receipt.ref().sourceId());
         assertEquals("pwe_1", receipt.execution().executionId());
-        assertEquals(now.get(), receipt.submittedAt());
+        assertReason(HallRequestDraftService.Reason.SUBMISSION_UNAVAILABLE,
+                () -> service.submit(SCOPE, "hdr_1", 3, true, "submit-key"));
+        verify(drafts, never()).reserveSubmitIntent(any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyLong(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        verifyNoInteractions(cases);
+    }
 
-        ArgumentCaptor<HallPrivateCaseEntity> privateCase =
-                ArgumentCaptor.forClass(HallPrivateCaseEntity.class);
-        verify(cases).insert(privateCase.capture());
-        assertEquals(SCOPE.ownerJiacn(), privateCase.getValue().getOwnerJiacn());
-        assertEquals(1, privateCase.getValue().getRevision());
-        verify(cases).insertExecution(any());
-
-        HallRequestDraftService.SubmissionReceipt replay =
-                service.getSubmissionByIdempotencyKey(SCOPE, "submit-key");
-        assertEquals(receipt, replay);
+    @Test
+    void retiredDraftKindsCannotReserveOrCreateAnyExecution() {
+        for (String kind : List.of("CREATE", "REVISION", "TASK_ACTION")) {
+            when(drafts.lock("0", "client-a", "owner-a", "retired")).thenReturn(draft("retired", kind, 1, "EDITING"));
+            assertReason(HallRequestDraftService.Reason.SUBMISSION_UNAVAILABLE,
+                    () -> service.submit(SCOPE, "retired", 1, true, "key"));
+        }
+        verifyNoInteractions(cases, executions);
+        verify(drafts, never()).reserveSubmitIntent(any(), any(), any(), any(),
+                org.mockito.ArgumentMatchers.anyLong(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test
@@ -126,7 +111,7 @@ class HallRequestDraftSubmissionServiceTest {
     }
 
     @Test
-    void submitRequiresAcknowledgementAndCompleteFieldsWithoutSideEffects() {
+    void submitRequiresAcknowledgementBeforeRejectingRetiredKinds() {
         HallRequestDraftEntity incomplete = draft("hdr_2", "CREATE", 1, "EDITING")
                 .setTargetAgentId(null);
         when(drafts.findBySubmitKey("0", "client-a", "owner-a", "key")).thenReturn(null);
@@ -134,65 +119,14 @@ class HallRequestDraftSubmissionServiceTest {
 
         assertReason(HallRequestDraftService.Reason.BAD_REQUEST,
                 () -> service.submit(SCOPE, "hdr_2", 1, false, "key"));
-        assertReason(HallRequestDraftService.Reason.BAD_REQUEST,
+        assertReason(HallRequestDraftService.Reason.SUBMISSION_UNAVAILABLE,
                 () -> service.submit(SCOPE, "hdr_2", 1, true, "key"));
         verifyNoInteractions(cases, executions);
     }
 
     @Test
-    void taskActionDelegatesToExistingTaskExecutionContractWithoutFormalReworkFields() {
-        HallRequestDraftEntity editing = draft("hdr_task_action", "TASK_ACTION", 2, "EDITING")
-                .setTaskId("task-1").setConversationId("conversation-1");
-        HallRequestDraftEntity submitted = copy(editing).setState("SUBMITTED").setRevision(3L)
-                .setSubmissionRef("task-1").setSubmittedExecutionId("pwe_task_1")
-                .setSubmitKey("task-submit")
-                .setSubmitHash(hashForTest("SUBMIT", "hdr_task_action", "2", "true"));
-        AgentTaskMetaEntity task = new AgentTaskMetaEntity().setTaskId("task-1")
-                .setOwnerJiacn("owner-a");
-        task.setTenantId("0"); task.setClientId("client-a");
-        when(tasks.findByTaskIdInOwnerScope("0", "client-a", "owner-a", "task-1"))
-                .thenReturn(task);
-        when(conversations.requireAccessible(any(), eq("conversation-1"))).thenReturn(
-                new WorkspaceConversationAccessService.ConversationView(
-                        "conversation-1", "TASK", "task-1", "task-1",
-                        List.of("agent-a"), 1, 1));
-        when(drafts.findBySubmitKey("0", "client-a", "owner-a", "task-submit"))
-                .thenReturn(null);
-        when(drafts.lock("0", "client-a", "owner-a", "hdr_task_action"))
-                .thenReturn(editing);
-        when(drafts.reserveSubmitIntent(eq("0"), eq("client-a"), eq("owner-a"),
-                eq("hdr_task_action"), eq(2L), eq("task-submit"), any(), eq(now.get())))
-                .thenReturn(1);
-        when(drafts.markSubmitted(eq("0"), eq("client-a"), eq("owner-a"),
-                eq("hdr_task_action"), eq(2L), eq("task-submit"), any(),
-                eq(null), eq("task-1"), eq("pwe_task_1"), eq(now.get()))).thenReturn(1);
-        when(drafts.find("0", "client-a", "owner-a", "hdr_task_action"))
-                .thenReturn(submitted);
-        PersonalWorkspaceExecutionService.ExecutionView taskExecution =
-                new PersonalWorkspaceExecutionService.ExecutionView(
-                        "pwe_task_1", "task-1", "run-1", "conversation-1", "agent-a",
-                        "QUEUED", null, null, 1, MIME, List.of(), null,
-                        "TASK", "task-1", "work-1", "RUNNING");
-        when(executions.create(any(), any(), eq("task-submit"))).thenReturn(taskExecution);
-        when(executions.get(any(), eq("pwe_task_1"))).thenReturn(taskExecution);
-
-        HallRequestDraftService.SubmissionReceipt receipt = service.submit(
-                SCOPE, "hdr_task_action", 2, true, "task-submit");
-        assertEquals("TASK", receipt.ref().sourceType());
-        assertEquals("task-1", receipt.ref().sourceId());
-        ArgumentCaptor<PersonalWorkspaceExecutionService.CreateCommand> command =
-                ArgumentCaptor.forClass(PersonalWorkspaceExecutionService.CreateCommand.class);
-        verify(executions).create(any(), command.capture(), eq("task-submit"));
-        assertEquals("task-1", command.getValue().taskId());
-        assertEquals("conversation-1", command.getValue().conversationId());
-        assertEquals(null, command.getValue().sourceOutputRef(),
-                "ordinary TASK_ACTION must not impersonate formal-delivery rework");
-        verifyNoInteractions(cases);
-    }
-
-    @Test
     void sameKeyDifferentDraftCannotReplayAnotherSubmission() {
-        HallRequestDraftEntity submitted = draft("hdr_other", "CREATE", 2, "SUBMITTED")
+        HallRequestDraftEntity submitted = draft("hdr_other", "TASK_CREATE", 2, "SUBMITTED")
                 .setCaseId("hpc_other").setSubmissionRef("hpc_other")
                 .setSubmittedExecutionId("pwe_other").setSubmitKey("shared")
                 .setSubmitHash(hashForTest("SUBMIT", "hdr_other", "1", "true"));
@@ -206,7 +140,10 @@ class HallRequestDraftSubmissionServiceTest {
 
     @Test
     void duplicateSubmitReservationFailsBeforeCaseOrExecutionSideEffects() {
-        HallRequestDraftEntity editing = draft("hdr_target", "CREATE", 1, "EDITING");
+        service = new HallRequestDraftServiceImpl(drafts, cases, executions,
+                mock(PersonalWorkspaceDao.class), tasks, agents, conversations,
+                new PersonalWorkspaceExecutionProperties(List.of(MIME)), now::get, mock(cn.jia.agent.service.HallTaskCreationService.class));
+        HallRequestDraftEntity editing = draft("hdr_target", "TASK_CREATE", 1, "EDITING").setTargetAgentId(null).setOutputMime(null);
         when(drafts.lock("0", "client-a", "owner-a", "hdr_target")).thenReturn(editing);
         when(drafts.reserveSubmitIntent(eq("0"), eq("client-a"), eq("owner-a"),
                 eq("hdr_target"), eq(1L), eq("shared"), any(), eq(now.get())))
@@ -222,7 +159,10 @@ class HallRequestDraftSubmissionServiceTest {
 
     @Test
     void nonDuplicateReservationIntegrityFailureIsNotMisclassifiedAsIdempotency() {
-        HallRequestDraftEntity editing = draft("hdr_target", "CREATE", 1, "EDITING");
+        service = new HallRequestDraftServiceImpl(drafts, cases, executions,
+                mock(PersonalWorkspaceDao.class), tasks, agents, conversations,
+                new PersonalWorkspaceExecutionProperties(List.of(MIME)), now::get, mock(cn.jia.agent.service.HallTaskCreationService.class));
+        HallRequestDraftEntity editing = draft("hdr_target", "TASK_CREATE", 1, "EDITING").setTargetAgentId(null).setOutputMime(null);
         when(drafts.lock("0", "client-a", "owner-a", "hdr_target")).thenReturn(editing);
         DataIntegrityViolationException invalid = new DataIntegrityViolationException("CHECK failure");
         when(drafts.reserveSubmitIntent(eq("0"), eq("client-a"), eq("owner-a"),
@@ -258,7 +198,7 @@ class HallRequestDraftSubmissionServiceTest {
         assertEquals(List.of(new HallRequestDraftService.ResultItemView(
                 "output_1", "file-1", 1, MIME, "result.docx", 123,
                 "a".repeat(64), "AVAILABLE")), result.items());
-        assertEquals(List.of("VIEW", "CREATE_REVISION"), result.allowedActions());
+        assertEquals(List.of("VIEW"), result.allowedActions());
     }
 
     @Test

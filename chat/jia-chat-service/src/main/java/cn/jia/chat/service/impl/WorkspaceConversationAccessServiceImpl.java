@@ -43,13 +43,25 @@ public class WorkspaceConversationAccessServiceImpl implements WorkspaceConversa
     @Override
     @Transactional(readOnly = true)
     public ConversationView requireAccessible(Scope scope, String conversationId) {
+        return readAccessible(scope,conversationId,false);
+    }
+
+    @Override
+    @Transactional(rollbackFor=Exception.class)
+    public <T> T withLockedAccessible(Scope scope,String conversationId,
+            java.util.function.Function<ConversationView,T> action) {
+        return Objects.requireNonNull(action,"action").apply(readAccessible(scope,conversationId,true));
+    }
+
+    private ConversationView readAccessible(Scope scope,String conversationId,boolean lock) {
         validateScope(scope);
         String canonicalConversationId = canonicalConversationId(conversationId);
 
         ChatConversationEntity conversation;
         try {
-            conversation = conversationDao.findScopedById(
-                    scope.tenantId(), scope.ownerJiacn(), scope.clientId(), canonicalConversationId);
+            conversation = lock
+                    ? conversationDao.lockScopedById(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),canonicalConversationId)
+                    : conversationDao.findScopedById(scope.tenantId(),scope.ownerJiacn(),scope.clientId(),canonicalConversationId);
         } catch (RuntimeException queryFailure) {
             throw denied();
         }

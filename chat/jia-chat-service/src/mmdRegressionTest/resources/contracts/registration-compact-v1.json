@@ -108,7 +108,7 @@
       },
       "nativeExecution": {
         "schemaVersion": 1,
-        "executionProtocolVersion": 5,
+        "executionProtocolVersion": 6,
         "toolPolicyRef": "NATIVE_LOCAL_FILES_V1",
         "outputMimeTypes": [
           "text/plain",

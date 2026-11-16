@@ -440,10 +440,10 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertEquals(false,item.get("admissionEnabled"));assertEquals("NOT_EXECUTABLE",object(item.get("runtime")).get("state"));
         String id=text(target,"skillInstallationId");var rows=service.descriptors(scope());assertEquals(1,rows.size());
         var descriptor=rows.getFirst();assertTrue(descriptor.verifiedNative());assertNull(descriptor.manifestJson());assertNull(descriptor.manifestSha256());
-        var binding=service.admitNative(scope(),"pdf-export",id,()->service.nativeTaskBinding("0",ACTOR.clientId(),"exec-native","grant",1,AGENT,id));
+        var binding=service.admitNative(scope(),"pdf-export",id,()->service.executionBinding("0",ACTOR.clientId(),"exec-native","a".repeat(64),1,AGENT,id));
         assertNull(binding.get("manifestSha256"));assertNotNull(binding.get("approvedPermissionsSha256"));
         assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validate("TaskSkillBinding",binding));
-        assertDoesNotThrow(()->SkillManagementCodec.validateNativeTaskBinding(binding));
+        assertDoesNotThrow(()->SkillManagementCodec.validateExecutionBinding(binding));
         policyChange("DISABLE",first);
         assertThrows(SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",id,()->"never"));
     }

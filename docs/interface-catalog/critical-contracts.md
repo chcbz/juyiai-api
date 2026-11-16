@@ -53,19 +53,19 @@
 
 | 类型 | 目标字段 |
 | --- | --- |
-| Capabilities | upload/read/edit/preview/download:String（沿用各能力状态，不改成truthy判断） |
+| Capabilities | upload/read/edit/download:String（沿用各能力状态；NF删除浏览器preview能力字段） |
 | File | fileId:ID, sourceKind:String, originKind:String, displayName:String, mediaFamily:String, state:String, metadataRevision:D0, latestVersion:D1, createdAt:T, capabilities:Capabilities |
-| Version | fileId:ID, version:D1, originalFilename:String, contentMimeType:String, byteLength:D0, sha256:H, createdAt:T, previewState:String |
+| Version | fileId:ID, version:D1, originalFilename:String, contentMimeType:String, byteLength:D0, sha256:H, createdAt:T |
 | FileList | items:File[], nextCursor:String?, hasMore:boolean（由真实服务是否还有下一页判定） |
 | FileDetail | file:File, latestVersion:Version, versions:Version[], relations:数组, derivation:数组；relations/derivation在固定源码生产者均为[]；本版固定空数组，不发明未实现的对象结构 |
 | Operation | operationId:ID, state:String, fileId:ID?, fileVersion:D1?, errorCode:String? |
 | Upload | operation:Operation, file:File?, version:Version?；是否可null必须与异步处理中状态匹配 |
 | Usage | impactRevision:D0, taskReferences:TaskReference[], activeExecutions:{executionId:ID}[]（实际ActiveExecutionView，不暴露lease/路径） |
 | TaskReference | taskId:ID, relationId:ID, version:D1, role:String, relationRevision:D0, createdAt:T |
-| Preview | state:String, parts:PreviewPart[], partial:boolean, reason:String? |
-| PreviewPart | partId:ID, contentMimeType:String |
+| Preview（退役，仅历史说明） | state:String, parts:PreviewPart[], partial:boolean, reason:String? |
+| PreviewPart（退役，仅历史说明） | partId:ID, contentMimeType:String |
 
-所有资源version线上的目标均为D1，即使DB是int；schemaVersion/attempt/pageSize不受此规则影响。2026-10-14续查已核实生产者：upload/read/download=AVAILABLE，edit=UNVERIFIED，preview=AVAILABLE|UNSUPPORTED；relations/derivation固定空列表，activeExecutions仅executionId。预览View.state=READY|FAILED|UNSUPPORTED；不以能力AVAILABLE代替本次解析成功。
+所有资源version线上的目标均为D1，即使DB是int；schemaVersion/attempt/pageSize不受此规则影响。NF目标与当前工作区修改：upload/read/download=AVAILABLE，edit=UNVERIFIED；浏览器格式支持由共享FilePreview决定，API不返回preview或previewState。relations/derivation固定空列表，activeExecutions仅executionId。旧Preview结构仅用于理解退役路由，不用于新候选。该修改尚未正式构建/部署。
 
 前缀P=`/agent/personal-workspace`。每条JWT及scope内文件ACL；不存在/不可见均FILE_NOT_FOUND/404。
 
@@ -78,8 +78,8 @@
 | PW05 | `GET /agent/personal-workspace/files/{fileId}/versions` | path fileId；目标增加可选cursor，现行尚无 | 200 R<{items:Version[],nextCursor:String?,hasMore:boolean}>。原service只取100条，故撤销无条件hasMore:false设计；沿现有100条窗口额外取1条探测，按version降序、cursor内lastVersion排除已读项，scope/fileId仍逐次鉴权；详见下段。同步修Map.of(null)缺陷 |
 | PW06 | `POST /agent/personal-workspace/files/{fileId}/versions` | multipart file、expectedPreviousVersion:D1，displayName可选；Idempotency-Key | 201 R<Upload>；版本不符409；不能原地覆盖旧version字节 |
 | PW07 | `GET /agent/personal-workspace/files/{fileId}/versions/{version}/content` | path固定version；无body | 200原文件字节；不自动加Range支持，当前控制器未实现成果目录同款Range逻辑 |
-| PW08 | `GET /agent/personal-workspace/files/{fileId}/versions/{version}/preview` | query无或view=parts，禁止其他/重复值 | 200 R<Preview>；目标统一parts一种结构，删除legacyPreview分支，不按参数返回两种schema |
-| PW09 | `GET /agent/personal-workspace/files/{fileId}/versions/{version}/preview/parts/{partId}` | 固定version+partId | 200对应预览字节；重新查ACL，不从客户端任意路径读取 |
+| PW08（NF-WIRE目标退役，下列为旧合同） | `GET /agent/personal-workspace/files/{fileId}/versions/{version}/preview` | query无或view=parts，禁止其他/重复值 | 200 R<Preview>；目标统一parts一种结构，删除legacyPreview分支，不按参数返回两种schema |
+| PW09（NF-WIRE目标退役，下列为旧合同） | `GET /agent/personal-workspace/files/{fileId}/versions/{version}/preview/parts/{partId}` | 固定version+partId | 200对应预览字节；重新查ACL，不从客户端任意路径读取 |
 | PW10 | `GET /agent/personal-workspace/files/{fileId}/usage` | 无body | 200 R<Usage>；impactRevision关联之后trash的影响确认，不可假造 |
 | PW11 | `POST /agent/personal-workspace/files/{fileId}/trash` | Q<{impactRevision:D0,acknowledgeExistingReferences:boolean}>；If-Match、幂等key | 200 R<File>及ETag；保留引用影响确认与已授权执行快照；不删成果事实 |
 | PW12 | `POST /agent/personal-workspace/files/{fileId}/restore` | Q<null>；If-Match、幂等key | 200 R<File>及ETag；与trash不同操作域，不能跨路由复用去重结果 |
@@ -546,3 +546,137 @@ path ID沿`[A-Za-z0-9][A-Za-z0-9._:-]{0,99}`；幂等键沿`[A-Za-z0-9][A-Za-z0-
 6. 共享SSE辅助`authenticatedSse.js`的实际两调用者Chat.vue、useHallConversation.js都传GET `/chat/conversation/events?id=...`，hall额外带Last-Event-ID。绑定到原ChatController.conversationEvents，不计为三个新接口；响应body仍事件流，不能整体当R JSON解析。认证代际、清理和游标恢复保留。
 
 最早用例：新DTO+真实局部metadata回执；二页关联确认；无ETag+断流保持未知；身份切换丢弃旧响应；If-Match冲突不重发；SSE断线游标不混入JSON解包。本轮只查源码，应用用例在开发阶段执行，不因“尚未开发所以没有新测试成功”反复阻止设计收口。
+
+<a id="nf-wire"></a>
+## NF-WIRE 原文件预览与统一原生执行合同（2026-11-16，目标6）
+
+业务权威为[详设NF-1](../../../specs/juyiting-ui-baseline-20261006/optimization/detailed-design.md#nf-1)，实现/迁移为[NF-API](../../../specs/juyiting-ui-baseline-20261006/optimization/code-backend-design.md#nf-api)。**这是新候选目标，不是已上线接口。** 当前源码活动基线5尚未被本次设计部署替换；目标只执行6，不兼容运行1—5。公共JSON信封protocolVersion=1、D1/身份/错误约定沿interface-standard，以下例子仅展示data正文。
+
+### NF-WIRE.1 浏览器发送与重放
+
+普通密议保留`POST /chat/stream`作为用户发送入口，不新增“私人执行”HTTP。新PRIVATE正文增加必填materialRefs，已有conversationScopeType/private与target等字段沿原规范，禁止携带taskId/taskGrant或伪造tenant/owner。
+
+```json
+{
+  "requestId":"req-fixed-001",
+  "requestRevision":"1",
+  "conversationId":null,
+  "conversationType":"juyiting",
+  "conversationScopeType":"private",
+  "targetAgentId":"agent-001",
+  "content":"根据这份表格整理一份分析报告",
+  "materialRefs":[
+    {"kind":"WORKSPACE_VERSION","fileId":"file-001","version":"3"}
+  ]
+}
+```
+
+以上省略原scopeKey/targetAgentIds等既有字段，不改变其校验；具体值仍由当前前端会话模块生成并由API授权。`Idempotency-Key`如提供须与请求身份按现有绑定规则一致，信封requestId与业务requestId遵循既有接口标准，不新增第二个执行意图key。
+
+| 字段/条件 | 精确定义 |
+|---|---|
+| requestId | 原不透明ID规则；同用户/client/环境内同意图固定，网络未知不换ID |
+| requestRevision | 新PRIVATE仅1；其它业务请求修订规则不随本次改变 |
+| conversationId | 首次显式null，已有会话为真实ID；重放必须沿第一次原值 |
+| materialRefs | 数组，可空，沿资料选择最多32项；同一引用去重后发送，API重复引用拒绝400；保留用户顺序进入意图摘要 |
+| WORKSPACE_VERSION | 精确fileId及version正整数字符串，范围1..2147483647；禁止latest/自动升版本 |
+| CURRENT_CONVERSATION_ASSET | 精确assetId及revision正long字符串；必须同一已有会话、代次和可读状态；首次null会话不能传此来源 |
+| 原inputRefs | 继续只表示conversation/task/message引用；不放文件ID/版本，不冒充权限 |
+| content | 沿现有正文非空/长度规则；若只有资料需用户给出处理意图，不由Web自动补“执行” |
+
+`clientIntentSha256`包含原会话值、目标、正文、材料引用及本请求其它语义字段；服务端owner/tenant来自可信身份。相同key同意图回原request/conversation，不再读取当前latest形成新快照；不同意图409。首次建会话、授权资料和request/turn/step/execution及既有派发事实同事务；并发唯一键失败整笔回滚后读胜者，不留下空会话。
+
+响应仍为现有SSE协议：受理后返回真实conversationId/request引用，状态用现有请求事件与GET读取，不把stream_started/EOF当完成。响应丢失复用`GET /chat/requests/{requestId}`读取原会话/请求；GET404不能证明之前未受理，继续查询或相同body/key重放。新PRIVATE不能再双派发普通CHAT与EXECUTE。正式议事、改稿沿既有typed/action业务接口，统一的是下游原生执行，不是取消其授权/交付合同。
+
+### NF-WIRE.2 原生合同（唯一活动6）
+
+```ts
+type ExecutionScope =
+ | {kind:'PRIVATE'; conversationId:string; conversationGeneration:string; taskId:null}
+ | {kind:'TASK'; conversationId:string; conversationGeneration:string; taskId:string}
+type NativeCommand = {
+ executionProtocolVersion:6; executionId:string; runId:string;
+ scope:ExecutionScope; commandId:string; messageId:string;
+ snapshotSha256:string; instruction:string; parameters:object;
+ inputRefs:string[]; outputs:object; toolPolicyRef:string;
+ skills:Array<{skill:object; executionBinding:object}>;
+}
+```
+
+- 以上是目标Command完整顶层结构；skill/output的既有不可变包身份和输出约束不另造；taskId/conversationId/generation不再顶层重复。大整数按D1，kind精确PRIVATE/TASK，不以null猜scope。PRIVATE taskId必须null；TASK必须真实ID。
+- API业务快照保存scope、授权来源及授权修订、目标Agent、固定技能选择与输入摘要；snapshotSha256绑定该不可变快照。实际Runtime安装身份由领取时fence绑定，安装执行绑定按下节独立持久，不与快照摘要循环引用。浏览器不得传这些授权字段。Runtime不重做事项业务权限，也不能更改scope。
+- `executionBinding`由API可信服务生成，经既有认证通道传递并对照本机安装事实校验，不新增签名服务，也不把摘要称作签名。替代当前必须taskGrant的绑定结构；TASK授权的taskGrant仍在API权威快照，PRIVATE无假grant。精确字段如下，现有工具凭据和管理接入不另造。
+- inputs snapshot的`schemaVersion`由原5明确升级6，仍含executionId/leaseVersion/snapshotSha256/noReferencedMaterials/inputs；每项包含inputRef、sourceKind、sourceIdentity、MIME、D1长度和sha256。PRIVATE允许WORKSPACE_VERSION/CURRENT_CONVERSATION_ASSET，TASK保留原受限来源。sourceIdentity由API产生，不能接受任意URL/路径。
+- 输出manifest schemaVersion=2、公共信封1和文件存储格式保持原合同，不因执行6统一改号。空输出列表合法，多文件合法，文件生成与正式交付不同。
+- registry/command codec/store/queue及恢复一致要求6；注册能力不匹配不派任务，不自动降级。纯历史读不创建活动store。旧未知命令不能落入generic executor；管理/E05按其现行合同分发，不机械改成6。
+
+#### executionBinding精确目标字段
+
+```ts
+type ExecutionBinding = {
+ executionId:string; scopeSha256:string; grantRevision:string;
+ agentId:string; skillKey:string; skillInstallationId:string;
+ productVersionId:string; skillVersion:string; packageSha256:string;
+ manifestSha256:string|null; approvedPermissionsSha256:string;
+}
+```
+
+所有字段必有；仅manifestSha256可null且须与已安装描述符一致。ID/版本/摘要沿现有管理合同定义；grantRevision为执行行正整数字符串，scopeSha256为现有canonical JSON算法对Command.scope计算的SHA-256。删除taskGrantId/taskGrantVersion，不留双字段回退。Runtime核对executionId、scope摘要、Agent身份与每项技能安装/包/权限摘要；不得将这些字段解释为新增工具权限。runtimeInstallationId/runtimeInstanceId继续由既有领取/租约fence绑定，不为本次绑定另发安装身份证明。
+
+API继续使用现有独立绑定持久化列`task_skill_binding_json`（历史物理列名不代表私人任务），新6内容为skills中的executionBinding；历史字节不改。输入业务snapshot与此安装绑定分开持久，避免生成摘要时相互引用；快照含固定技能安装选择、权限摘要和scope，绑定必须与其选择一致。未知/额外授权字段不作为权威。开发同步管理codec中仅原生绑定部分、Runtime原生binding schema/validator及registry调用；管理安装协议本身不升级。
+
+### NF-WIRE.3 Runtime地址收口
+
+新唯一base：`/internal/agent/executions/{executionId}/runs/{runId}`。executionId是定位符不是权限；Runtime身份由现有AgentRuntime认证，API读取权威scope执行授权。相同id但runId/安装身份/会话代次不匹配拒绝。
+
+| 方法 | 路径（base后缀，队列除外） | 合同 |
+|---|---|---|
+| GET | `/internal/agent/executions/commands` | 唯一当前队列；授权过滤在LIMIT之前，不接受浏览器token |
+| POST | `/lease`、`/lease/renew` | 原lease/fence语义；PRIVATE会话授权，TASK再核任务授权 |
+| POST | `/inputs`、`/inputs/{inputRef}/content` | 同一固定快照/字节流，body原fence |
+| POST | `/outputs/{outputId}/content` | 原multipart及元数据/完整性合同 |
+| POST | `/result-commits/{manifestId}` | 原不可变结果及幂等提交，不创建正式交付 |
+| POST | `/resume`、`/failure` | 同执行恢复/错误事实，未知副作用不重跑 |
+| POST | `/effects/{effectId}/start`、`/effects/{effectId}/result` | 原获准外部效果合同；不因迁址增加付费授权 |
+| POST | `/usage`、`/provider-usage` | 迁移原用量合同及回执，不能遗漏task定位依赖 |
+
+`/failure`运行时回执以`executionId`、`runId`、`scope`（与Command相同四字段）、`targetAgentId`、`state`和`failureCode`绑定本次执行。Runtime只有在四字段scope、执行/run/Agent均匹配且state=FAILED、failureCode=AGENT_DELIVERY_FAILED时确认失败；state=QUEUED表示效果尚未明确，仍保留未知/恢复，不重跑模型。该运行时投影不沿用历史owner ExecutionView的顶层taskId作为必填，不改变历史只读DTO。
+
+原`/internal/agent/tasks/conversation-executions/commands`及`/tasks/{taskId}/runs/{runId}/conversation/...`活动映射同候选删除，不设重定向/适配控制器；相关安全白名单、usage消费者、恢复定位、依赖闭包全部更新。其它task业务接口不改。代码处置表所列更早7个旧文件Runtime接口同样删除。
+
+### NF-WIRE.4 预览及会话文件保存
+
+原文件路径保留：
+- GET `/agent/personal-workspace/files/{fileId}/versions/{version}/content`
+- GET `/agent/tasks/{taskId}/deliverables/{artifactId}/versions/{artifactVersion}/content`
+- GET/HEAD `/chat/conversations/{conversationId}/assets/{assetId}/content`及既有asset详情GET；原Range/If-Range只在已有实现支持处保持，不承诺其它路径新增Range。
+
+删除上述资料/成果的preview与preview/parts；删除API浏览器支持性字段previewState/capabilities.preview，并同步wire及消费者；真实MIME/长度/hash/固定版本和ACL保留。private/no-store、nosniff和原下载响应头保持。预览通过鉴权fetch取得Blob，不把原HTML作为业务同源页面打开，不在静态文档内传Token。
+
+密议没有归档业务。下列`archive-operations`仅是现有文件保存接口的历史技术命名，操作对象是单个文件，不是会话归档。为避免无业务收益的接口改名，复用该接口，**不新增save接口、不新增归档状态或按钮**：
+
+```http
+POST /chat/conversations/{conversationId}/archive-operations
+Idempotency-Key: conversation-archive-<原key>
+```
+```json
+{"mode":"create","items":[{"assetRef":{"assetId":"asset-001","revision":"1"}}]}
+```
+
+一次只保存一个固定asset，复用原JSON信封和响应。禁止传bytes/URL/storageUri/任意filename冒充来源。GET `/chat/conversations/{conversationId}/archive-operations/{operationId}`查询，响应既有operationId/state/revision/items；状态pending/saving/saved/partial_failed。只有item.state=saved且具有fileId/version才确认成功。现有源唯一键保证同asset/revision重复点击不重复复制，原保存操作恢复不用重跑Agent。文案统一“个人资料”，不改变内部workspace术语。
+
+### NF-WIRE.5 错误与旧入口
+
+- 无有效身份401；不可访问沿403/防枚举404；引用形状/PRIVATE带task/跨字段非法400；原意图不同或状态版本冲突409；依赖不可用沿503。保留原异常家族，不凭文案判断。
+- Runtime未知合同在解码/准入边界拒绝，不尝试解释成当前6；共用HTTP服务对当前不可见执行沿既有404，内部日志记录合同/绑定失败，不泄露权限细节。
+- 文件GET200但浏览器不支持/解析失败是本地展示状态，不改成后端执行失败；预览重试只GET，不调用模型。
+- 删除的4个预览、5个旧业务写/能力及7个旧文件Runtime映射按框架404/405处理；不新增墓碑服务。现行5的旧运行地址也不适配到6。旧浏览器不强制刷新丢草稿，更不能自动改投新接口。
+- 旧execution列表/详情/request、旧协作查询、原成果/交付/验收查询保留只读。旧草稿写入口和前端消费者一同收口；formal submit/decision和当前改稿业务保持。
+
+### NF-WIRE.6 本地交接与验证
+
+`open-deliberation({mode,taskId,targetAgentId,instruction,inputs:[{fileId,version}]})`仍是仅本地预填：PRIVATE taskId=null、TASK须匹配当前事项/承办；来源identityEpoch由父组件持有；不自动产生HTTP/请求ID/执行。已有草稿冲突确认，取消保持双方内容。用户发送时PRIVATE inputs映射materialRefs，TASK进入既有来源选择/typed受理；**不再映射成inputRefs**。正式返工不走只有文字的此事件。
+
+正反例：首次同key同体并发只有一个会话/执行；同key换文件版本409；新密议带其它会话asset拒绝；PRIVATE无task也能生成/预览/显式保存；PRIVATE不得出现formal delivery；TASK无grant不能因共用内核放行；保存成功后删会话不删个人资料；历史读取无执行副作用；运行合同缺失/1—5/未知拒绝；6两种scope共用runner和恢复。
+
+此文不代表接口/DDL已实现。正式交付固定精确三端候选和DDL、必要测试及原安装恢复证据，不能把旧5诊断当新6通过。

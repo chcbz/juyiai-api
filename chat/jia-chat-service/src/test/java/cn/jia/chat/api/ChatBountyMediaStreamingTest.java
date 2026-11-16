@@ -43,13 +43,13 @@ class ChatBountyMediaStreamingTest {
         mvc=MockMvcBuilders.standaloneSetup(new ChatBountyMediaController(requests,files,identities,tenants)).build();
     }
     void source(long size,String mime) {
-        when(files.openConversationOutput(scope,"task","run","output")).thenAnswer(i -> {
+        when(files.openConversationOutput(scope,"execution","run","output")).thenAnswer(i -> {
             opened=new VirtualFile(size);
             return new PersonalWorkspaceExecutionService.ConversationDownload("execution","output","source",mime,HASH,size,opened);
         });
     }
     @Test void catalogueCarriesTheStoredFilenameAlongsideUnchangedOutputIdentity() throws Exception {
-        when(files.listConversationOutputs(scope,"task","run")).thenReturn(List.of(
+        when(files.listConversationOutputs(scope,"execution","run")).thenReturn(List.of(
                 new PersonalWorkspaceExecutionService.ConversationOutputInfo("execution","output","text/plain",HASH,8L,null,"roles.txt")));
         mvc.perform(get("/chat/requests/request/steps/step/outputs").principal(auth))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].filename").value("roles.txt"))
@@ -97,7 +97,7 @@ class ChatBountyMediaStreamingTest {
         assertTrue(opened.closed);
     }
     @Test void unavailableObjectNeverSendsSuccessfulHeadersOrBytes() throws Exception {
-        when(files.openConversationOutput(scope,"task","run","output")).thenThrow(
+        when(files.openConversationOutput(scope,"execution","run","output")).thenThrow(
                 new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE));
         mvc.perform(get(PATH).principal(auth)).andExpect(status().isNotFound())
                 .andExpect(header().doesNotExist("Content-Disposition"));

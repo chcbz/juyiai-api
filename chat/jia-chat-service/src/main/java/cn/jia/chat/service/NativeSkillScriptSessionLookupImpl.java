@@ -3,32 +3,37 @@ package cn.jia.chat.service;
 import cn.jia.agent.service.NativeSkillScriptSessionLookup;
 import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.agent.service.SkillCapabilityLookup;
-import cn.jia.agent.service.TaskSkillPolicyService;
+import cn.jia.agent.service.AgentManagedSessionLookup;
+import cn.jia.agent.security.AgentRuntimeAuthenticationService;
 import cn.jia.chat.handler.TypedDeliberationSessionRegistry;
 import org.springframework.stereotype.Service;
 import java.util.Objects;
 
-/** Join the same authenticated skill fence and the live typed session declaration. */
+/** Runtime capability evidence only. Business scope/grant checks belong to execution admission. */
 @Service
 public final class NativeSkillScriptSessionLookupImpl implements NativeSkillScriptSessionLookup {
-    private final TaskSkillPolicyService policies;
+    private final AgentRuntimeAuthenticationService authentication;
     private final SkillCapabilityLookup runtimes;
     private final TypedDeliberationSessionRegistry sessions;
-    public NativeSkillScriptSessionLookupImpl(TaskSkillPolicyService policies,SkillCapabilityLookup runtimes,TypedDeliberationSessionRegistry sessions) {
-        this.policies=policies;this.runtimes=runtimes;this.sessions=sessions;
+    public NativeSkillScriptSessionLookupImpl(AgentRuntimeAuthenticationService authentication,SkillCapabilityLookup runtimes,TypedDeliberationSessionRegistry sessions) {
+        this.authentication=authentication;this.runtimes=runtimes;this.sessions=sessions;
     }
-    @Override public boolean supports(PersonalWorkspaceExecutionService.RuntimeScope scope,String taskId) {
-        var key=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),scope.agentId());
-        var policy=policies.read(key,taskId);
-        if(policy==null||policy.decision()!=TaskSkillPolicyService.Decision.ALLOWED||policy.fence()==null||policy.runtimeScope()==null
-                ||!Objects.equals(policy.runtimeScope().ownerJiacn(),scope.executorOwnerJiacn())
-                ||!Objects.equals(policy.fence().runtimeInstanceId(),scope.runtimeInstanceId()))return false;
-        var live=runtimes.lookup(policy.runtimeScope(),policy.fence());
-        if(live==null||live.state()!=SkillCapabilityLookup.State.AVAILABLE)return false;
+    @Override public boolean supports(PersonalWorkspaceExecutionService.RuntimeScope scope) {
         try {
+            var proof=authentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId());
+            if(proof==null||!Objects.equals(proof.scope().tenantId(),scope.tenantId())
+                    ||!Objects.equals(proof.scope().clientId(),scope.clientId())
+                    ||!Objects.equals(proof.scope().agentId(),scope.agentId())
+                    ||!Objects.equals(proof.scope().ownerJiacn(),scope.executorOwnerJiacn())
+                    ||!Objects.equals(proof.scope().runtimeInstanceId(),scope.runtimeInstanceId()))return false;
+            var key=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId());
+            var fence=new AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration());
+            var live=runtimes.lookup(key,fence);
+            if(live==null||live.state()!=SkillCapabilityLookup.State.AVAILABLE)return false;
             if(!sessions.nativeScriptDeclared(new TypedDeliberationSessionRegistry.Scope(scope.tenantId(),scope.executorOwnerJiacn(),scope.clientId()),
                     scope.agentId(),live.sessionId()))return false;
-            return policy.equals(policies.read(key,taskId))&&live.sameExecutionFacts(runtimes.lookup(policy.runtimeScope(),policy.fence()));
-        }catch(IllegalStateException unavailable){return false;}
+            return proof.equals(authentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId()))
+                    &&live.sameExecutionFacts(runtimes.lookup(key,fence));
+        }catch(IllegalStateException|IllegalArgumentException unavailable){return false;}
     }
 }

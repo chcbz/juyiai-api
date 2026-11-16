@@ -25,6 +25,8 @@ public class PersonalWorkspaceExecutionEntity extends BaseEntity {
     private String runId;
     /** PRIVATE bridge and TASK work-item execution are distinct domains; this field never implies delivery. */
     private String executionMode;
+    /** Native6 business context: PRIVATE or TASK; historical rows retain NULL. */
+    private String businessScope;
     /** CONVERSATION-only immutable admission fence; never from a browser authorization flag. */
     private String taskGrantId;
     private Long taskGrantVersion;

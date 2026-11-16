@@ -433,7 +433,7 @@ public final class ChatConversationArchiveService {
                 && command.conversationId().equals(source.conversationId())
                 && source.conversationGeneration() >= 1 && exact(source.requestId(), 100)
                 && source.requestRevision() >= 1 && exact(source.stepId(), 64)
-                && exact(source.taskId(), 100) && exact(source.executionId(), 100)
+                && (source.taskId()==null || exact(source.taskId(), 100)) && exact(source.executionId(), 100)
                 && exact(source.runId(), 100) && exact(source.outputId(), 100)
                 && source.contentMimeType() != null
                 && source.contentMimeType().matches("[a-z0-9.+-]+/[a-z0-9.+-]+")
@@ -448,7 +448,7 @@ public final class ChatConversationArchiveService {
             failPermanently(scope,command.conversationId(),operationId,"SOURCE_UNAVAILABLE");throw unavailable();
         }
         PersonalWorkspaceExecutionService.ConversationDownload output;
-        try {output=executions.openConversationOutput(executionScope(scope),source.taskId(),source.runId(),source.outputId());}
+        try {output=executions.openConversationOutput(executionScope(scope),source.executionId(),source.runId(),source.outputId());}
         catch(PersonalWorkspaceExecutionService.Failure failure) {
             if(failure.getReason()==PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE
                     ||failure.getReason()==PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE)throw temporary(failure);

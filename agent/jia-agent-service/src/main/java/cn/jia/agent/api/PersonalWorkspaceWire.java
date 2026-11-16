@@ -8,8 +8,8 @@ public final class PersonalWorkspaceWire {
     private PersonalWorkspaceWire() { }
     public record FileView(String fileId, String sourceKind, String originKind, String displayName, String mediaFamily, String state, String metadataRevision, String latestVersion, long createdAt, PersonalWorkspaceViews.Capabilities capabilities) { }
     public static FileView from(PersonalWorkspaceViews.FileView v) { return v == null ? null : new FileView(v.fileId(), v.sourceKind(), v.originKind(), v.displayName(), v.mediaFamily(), v.state(), String.valueOf(v.metadataRevision()), String.valueOf(v.latestVersion()), v.createdAt(), v.capabilities()); }
-    public record VersionView(String fileId, String version, String originalFilename, String contentMimeType, String byteLength, String sha256, long createdAt, String previewState) { }
-    public static VersionView from(PersonalWorkspaceViews.VersionView v) { return v == null ? null : new VersionView(v.fileId(), String.valueOf(v.version()), v.originalFilename(), v.contentMimeType(), String.valueOf(v.byteLength()), v.sha256(), v.createdAt(), v.previewState()); }
+    public record VersionView(String fileId, String version, String originalFilename, String contentMimeType, String byteLength, String sha256, long createdAt) { }
+    public static VersionView from(PersonalWorkspaceViews.VersionView v) { return v == null ? null : new VersionView(v.fileId(), String.valueOf(v.version()), v.originalFilename(), v.contentMimeType(), String.valueOf(v.byteLength()), v.sha256(), v.createdAt()); }
     public record ListView(List<FileView> items, String nextCursor, boolean hasMore) { }
     public static ListView from(PersonalWorkspaceViews.ListView v) { return v == null ? null : new ListView(v.items().stream().map(PersonalWorkspaceWire::from).toList(), v.nextCursor(), v.nextCursor() != null); }
     public record FileDetailView(FileView file, VersionView latestVersion, List<VersionView> versions, List<Object> relations, List<Object> derivation) { }

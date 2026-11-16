@@ -74,3 +74,22 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 
 首次技能费用升级使用 `economy/jia-economy-mapper/src/main/resources/db/migration-hosting-initial-fee-v1.sql`。
 生产只读预检2026-11-11的报价表为0行；实际执行仍须在停旧writer和真实备份后复核为空，不能删除报价来满足前提。若有存量报价，停止该结构升级并明确历史数据处理，不猜测技能库存或重复收费。此脚本只补报价金额/库存列；租约锁定/交接列、TRANSITION可空资金列、统一调度表等各用原专项迁移，正常启动不得补DDL。
+
+
+## 2026-11-17 NF6候选：两处执行/会话维护器只核验
+
+本节覆盖前文“初始化方法保留安装/回填”的口径，但仅限
+`PersonalWorkspaceExecutionSchemaInitializer.afterPropertiesSet`和
+`ChatDeliberationSchemaInitializer.initializeSchema/ensureInitialized`。
+它们原来已经受`schema-maintenance`隔离，**不是本轮才从普通启动中移除DDL**。
+本轮候选进一步移除这两个维护入口的隐式安装/迁移：即便显式调用也只核验，不创建表、不回填。
+其它模块维护器不受此改动影响，不能据此调用整个应用作全库升级。
+
+- 先用既有受控维护流程完成原基础表及增量，再显式应用
+  `agent/jia-agent-service/src/main/resources/db/agent-personal-workspace-native-v6.sql`及
+  `chat/jia-chat-mapper/src/main/resources/db/chat-native-execution-v6.sql`，然后调用这两个核验器。
+- 新库测试必须显式准备基础DDL和全部实际增量；不得再靠这两个核验器建库。
+- `cyf.chat.deliberation-schema.allow-additive-migration`已无消费者，删除其生产/灰度配置及升级测试属性；typed-deliberation和delivery-review的同名独立配置不在本次删除范围。
+- 迁移前必须按NF设计收尾已接收的5执行、投影及用量；MySQL DDL可能部分提交，逐项读取实际catalog并保留恢复依据，不能把Java事务当DDL回滚保证。
+
+以上是未编译的源码候选和操作边界，尚未执行DDL、正式测试或生产部署；现有新库/升级测试的显式DDL准备仍待完整同步。

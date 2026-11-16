@@ -12,7 +12,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/internal/agent/tasks")
+@RequestMapping("/internal/agent/executions")
 public final class NativeProviderUsageCostController {
     public record Request(String executionId, NativeProviderUsageCostRecorder.Evidence observation) { }
     private final NativeProviderUsageCostRecorder recorder;
@@ -20,11 +20,11 @@ public final class NativeProviderUsageCostController {
     public NativeProviderUsageCostController(NativeProviderUsageCostRecorder recorder, AgentRuntimeAuthenticationService authentication) {
         this.recorder = recorder; this.authentication = authentication;
     }
-    @PostMapping(value="/{taskId}/runs/{runId}/conversation/provider-usage", consumes="application/json", produces="application/json")
-    public ResponseEntity<JsonResult<NativeExecutionUsageCostController.Receipt>> record(@PathVariable String taskId, @PathVariable String runId,
+    @PostMapping(value="/{executionId}/runs/{runId}/provider-usage", consumes="application/json", produces="application/json")
+    public ResponseEntity<JsonResult<NativeExecutionUsageCostController.Receipt>> record(@PathVariable String executionId, @PathVariable String runId,
             @RequestBody JsonRequest<Request> request, Authentication principal) {
         var body = request == null ? null : request.data();
-        if (body == null || !id(body.executionId()) || body.observation() == null) throw new IllegalArgumentException();
+        if (body == null || !java.util.Objects.equals(executionId,body.executionId()) || !id(body.executionId()) || body.observation() == null) throw new IllegalArgumentException();
         var item = body.observation();
         if (item.schemaVersion() != 1 || !id(item.invocationId()) || item.phase() == null || item.observedAt() < 0
                 || item.protocol() == null || item.requestedModel() == null || item.requestedModel().isBlank()
@@ -33,7 +33,7 @@ public final class NativeProviderUsageCostController {
         var receipt = authentication.withNativeFence(principal, () -> {
             var trusted = AgentRuntimeAuthenticationService.requireProof(principal).scope();
             return recorder.record(new PersonalWorkspaceExecutionService.RuntimeScope(trusted.tenantId(), trusted.clientId(),
-                    trusted.ownerJiacn(), trusted.agentId(), trusted.runtimeInstanceId()), taskId, runId, body.executionId(), item);
+                    trusted.ownerJiacn(), trusted.agentId(), trusted.runtimeInstanceId()), executionId, runId, item);
         });
         return ResponseEntity.ok().header("Cache-Control", "private, no-store").body(JsonResult.success(
                 new NativeExecutionUsageCostController.Receipt(body.executionId(), receipt.attemptId(), Long.toString(receipt.revision()),

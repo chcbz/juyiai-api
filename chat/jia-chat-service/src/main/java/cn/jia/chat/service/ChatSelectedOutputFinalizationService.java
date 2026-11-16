@@ -244,7 +244,7 @@ public final class ChatSelectedOutputFinalizationService {
                 var view=skills.result(owner,source.executionId());
                 if(view==null||!"COMPLETE".equals(view.phase()))throw sourceUnavailable();
                 var manifest=ChatSkillResultFacts.verifiedResult(view,source.executionId());
-                var outputs=executions.listConversationOutputs(owner,valid.taskId(),source.runId());
+                var outputs=executions.listConversationOutputs(owner,source.executionId(),source.runId());
                 if(outputs==null)throw sourceUnavailable();
                 ChatSkillResultFacts.verifyArtifacts(manifest,outputs);
                 var matches=outputs.stream().filter(o->selected.outputId().equals(o.outputId())).toList();
@@ -270,7 +270,7 @@ public final class ChatSelectedOutputFinalizationService {
     private java.io.InputStream openSelectedOutput(PersonalWorkspaceExecutionService.OwnerScope owner,String taskId,
             String executionId,String runId,String outputId,String hash,String mime,long length) {
         PersonalWorkspaceExecutionService.ConversationDownload output;
-        try {output=executions.openConversationOutput(owner,taskId,runId,outputId);}
+        try {output=executions.openConversationOutput(owner,executionId,runId,outputId);}
         catch(PersonalWorkspaceExecutionService.Failure failure) {
             if(failure.getReason()==PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE)throw failure;
             throw sourceUnavailable();

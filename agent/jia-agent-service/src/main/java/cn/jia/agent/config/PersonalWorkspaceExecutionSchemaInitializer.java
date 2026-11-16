@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 
-/** Installs only additive private-execution/grant/output tables. */
+/** Verifies the explicitly installed execution schema; never performs DDL or data migration. */
 @org.springframework.context.annotation.Profile("schema-maintenance")
 public final class PersonalWorkspaceExecutionSchemaInitializer implements InitializingBean {
     static final String RESOURCE = "db/agent-personal-workspace-v1_11-executions.sql";
@@ -31,24 +31,32 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
     private final JdbcTemplate jdbc;
     public PersonalWorkspaceExecutionSchemaInitializer(JdbcTemplate jdbc) { this.jdbc=Objects.requireNonNull(jdbc,"jdbc"); }
     @Override public void afterPropertiesSet() {
-        requireMySql(); List<String> present=presentTables();
-        if (present.isEmpty()) ddlStatements().forEach(jdbc::execute);
-        else if (!present.equals(TABLES)) throw new IllegalStateException("Personal workspace execution schema is partial: " + present);
-        if (!presentTables().equals(TABLES)) throw new IllegalStateException("Personal workspace execution schema is unavailable");
-        migrateOutputMime();
-        verifyOutputMime();
-        migrateTerminalState();
-        verifyTerminalState();
-        migrateTaskExecution();
-        migrateTaskPublication();
-        migrateConversationMode();
-        migrateConversationLease();
-        migrateConversationProviderStart();
-        verifyTaskExecution();
-        verifyTaskPublication();
-        verifyConversationMode();
-        verifyConversationLease();
-        verifyConversationProviderStart();
+        requireMySql();
+        if (!presentTables().equals(TABLES)) throw new IllegalStateException("Apply explicit workspace schema installation before startup");
+        verifyNativeScopeSchema();
+        verifyOutputMime();verifyTerminalState();verifyTaskExecution();verifyTaskPublication();
+        verifyConversationMode();verifyConversationLease();verifyConversationProviderStart();
+    }
+    private void verifyNativeScopeSchema() {
+        Integer columns=jdbc.queryForObject("""
+            SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()
+              AND table_name='agent_personal_workspace_execution' AND
+              ((column_name='task_id' AND data_type='varchar' AND character_maximum_length=100 AND is_nullable='YES')
+               OR (column_name='business_scope' AND data_type='varchar' AND character_maximum_length=16 AND is_nullable='YES'))
+            """,Integer.class);
+        if(!Objects.equals(columns,2))throw new IllegalStateException("Apply explicit agent-personal-workspace-native-v6.sql before startup");
+        Integer invalid=jdbc.queryForObject("""
+            SELECT COUNT(*) FROM agent_personal_workspace_execution
+            WHERE execution_protocol_version=6 AND
+              (execution_mode<>'CONVERSATION' OR business_scope IS NULL OR business_scope NOT IN ('PRIVATE','TASK')
+               OR conversation_id IS NULL OR grant_revision IS NULL OR grant_revision<1 OR permitted_operation<>'EXECUTE_SKILL'
+               OR permitted_operation IS NULL
+               OR (business_scope='PRIVATE' AND (task_id IS NOT NULL OR task_grant_id IS NOT NULL
+                   OR task_grant_version IS NOT NULL OR assignment_revision IS NOT NULL))
+               OR (business_scope='TASK' AND (task_id IS NULL OR task_grant_id IS NULL OR task_grant_version IS NULL
+                   OR task_grant_version<1 OR assignment_revision IS NULL OR assignment_revision<0)))
+            """,Integer.class);
+        if(!Objects.equals(invalid,0))throw new IllegalStateException("Native execution scope/authority row drift");
     }
     static List<String> ddlStatements() {
         final String source;
@@ -74,16 +82,6 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
         }
         return statement.substring(0, statement.length() - 1);
     }
-    private void migrateOutputMime() {
-        Integer present=jdbc.queryForObject("""
-                SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()
-                 AND table_name='agent_personal_workspace_execution' AND column_name='output_content_mime_type'
-                """, Integer.class);
-        if (present == null) throw new IllegalStateException("Execution output MIME schema discovery failed");
-        if (present == 0) jdbc.execute(outputMimeMigrationStatement());
-        else if (present != 1) throw new IllegalStateException("Execution output MIME column is ambiguous");
-    }
-
     static String terminalStateMigrationStatement() {
         final String source;
         try { source=new ClassPathResource(TERMINAL_STATE_MIGRATION_RESOURCE).getContentAsString(StandardCharsets.UTF_8); }
@@ -99,16 +97,6 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
             throw new IllegalStateException("Unsafe execution terminal-state migration");
         }
         return statement.substring(0, statement.length() - 1);
-    }
-    private void migrateTerminalState() {
-        Integer present=jdbc.queryForObject("""
-                SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()
-                 AND table_name='agent_personal_workspace_execution'
-                 AND column_name IN ('failure_code','failure_message','failed_at')
-                """, Integer.class);
-        if (present == null) throw new IllegalStateException("Execution terminal-state schema discovery failed");
-        if (present == 0) jdbc.execute(terminalStateMigrationStatement());
-        else if (present != 3) throw new IllegalStateException("Execution terminal-state schema is partial");
     }
     private void verifyTerminalState() {
         if (hasSkillProtocol()) { verifySkillTerminalState(); return; }
@@ -126,7 +114,7 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
         Integer invalid=jdbc.queryForObject("""
                 SELECT COUNT(*) FROM agent_personal_workspace_execution
                  WHERE execution_state NOT IN ('QUEUED','INPUTS_REVOKED','CANCELLED','OUTPUT_COMMITTED','RESULT_COMMITTED','FAILED')
-                    OR (execution_state='RESULT_COMMITTED' AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5)))
+                    OR (execution_state='RESULT_COMMITTED' AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5,6)))
                     OR (execution_state='FAILED' AND (failure_code IS NULL
                         OR failure_code <> 'AGENT_DELIVERY_FAILED' OR failure_message IS NULL OR failed_at IS NULL))
                     OR (execution_state<>'FAILED' AND (failure_code IS NOT NULL
@@ -152,22 +140,12 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
         }
         return statement.substring(0, statement.length() - 1);
     }
-    private void migrateTaskExecution() {
-        Integer present=jdbc.queryForObject("""
-                SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()
-                 AND table_name='agent_personal_workspace_execution'
-                 AND column_name IN ('execution_mode','work_item_id','lease_token','lease_work_item_version','lease_expires_at')
-                """, Integer.class);
-        if (present == null) throw new IllegalStateException("Task execution schema discovery failed");
-        if (present == 0) jdbc.execute(taskExecutionMigrationStatement());
-        else if (present != 5) throw new IllegalStateException("Task execution schema is partial");
-    }
     void verifyTaskExecution() {
         Integer invalid=jdbc.queryForObject("""
                 SELECT COUNT(*) FROM agent_personal_workspace_execution
                  WHERE execution_mode NOT IN ('PRIVATE','TASK','CONVERSATION')
                     OR execution_state NOT IN ('QUEUED','INPUTS_REVOKED','CANCELLED','OUTPUT_STAGED','OUTPUT_COMMITTED','RESULT_COMMITTED','FAILED')
-                    OR (execution_state='RESULT_COMMITTED' AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5)))
+                    OR (execution_state='RESULT_COMMITTED' AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5,6)))
                     OR (execution_mode='PRIVATE' AND (work_item_id IS NOT NULL OR lease_token IS NOT NULL
                         OR lease_work_item_version IS NOT NULL OR lease_expires_at IS NOT NULL))
                     OR (execution_mode='TASK' AND (work_item_id IS NULL OR lease_token IS NULL
@@ -175,9 +153,10 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
                         OR lease_expires_at IS NULL OR lease_expires_at <= 0))
                     OR (execution_mode='CONVERSATION' AND (work_item_id IS NOT NULL OR lease_token IS NOT NULL
                         OR lease_work_item_version IS NOT NULL OR lease_expires_at IS NOT NULL
-                        OR conversation_id IS NULL OR task_grant_id IS NULL OR task_grant_version IS NULL
-                        OR task_grant_version < 1 OR assignment_revision IS NULL OR assignment_revision < 0
-                        OR permitted_operation IS NULL))
+                        OR conversation_id IS NULL OR permitted_operation IS NULL
+                        OR ((execution_protocol_version IS NULL OR execution_protocol_version<>6 OR business_scope='TASK')
+                            AND (task_grant_id IS NULL OR task_grant_version IS NULL OR task_grant_version<1
+                                 OR assignment_revision IS NULL OR assignment_revision<0))))
                 """, Integer.class);
         if (invalid == null || invalid != 0) throw new IllegalStateException("Task execution schema is invalid");
     }
@@ -201,17 +180,6 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
         }
         return statement.substring(0, statement.length() - 1);
     }
-    private void migrateTaskPublication() {
-        Integer present=jdbc.queryForObject("""
-                SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE()
-                 AND table_name='agent_personal_workspace_execution_output'
-                 AND column_name IN ('artifact_id','artifact_version','formal_delivery_id','publication_state',
-                                     'publication_revision','publication_failure_code')
-                """, Integer.class);
-        if (present == null) throw new IllegalStateException("Task publication schema discovery failed");
-        if (present == 0) jdbc.execute(taskPublicationMigrationStatement());
-        else if (present != 6) throw new IllegalStateException("Task publication schema is partial");
-    }
     private void verifyTaskPublication() {
         Integer invalid=jdbc.queryForObject("""
                 SELECT COUNT(*) FROM agent_personal_workspace_execution_output
@@ -227,24 +195,7 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
     }
 
     /** Atomic ALTER on each table; a crash between the two is resumable, partial ALTER fails closed. */
-    private void migrateConversationMode() {
-        int executionColumns = requiredColumnCount("agent_personal_workspace_execution",
-                "'task_grant_id','task_grant_version','assignment_revision','permitted_operation'");
-        if (executionColumns == 0) jdbc.execute(conversationMigrationStatement(CONVERSATION_EXECUTION_RESOURCE,
-                "agent_personal_workspace_execution"));
-        else if (executionColumns != 4) throw new IllegalStateException("Conversation execution schema is partial");
-        int outputColumns = requiredColumnCount("agent_personal_workspace_execution_output", "'output_purpose'");
-        if (outputColumns == 0) jdbc.execute(conversationMigrationStatement(CONVERSATION_OUTPUT_RESOURCE,
-                "agent_personal_workspace_execution_output"));
-        else if (outputColumns != 1) throw new IllegalStateException("Conversation output schema is partial");
-    }
-    private int requiredColumnCount(String table, String columns) {
-        Integer count=jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.columns "
-                + "WHERE table_schema=DATABASE() AND table_name='"+table+"' AND column_name IN ("+columns+")",
-                Integer.class);
-        if (count==null) throw new IllegalStateException("Conversation schema discovery unavailable");
-        return count;
-    }
+
     static String conversationMigrationStatement(String resource,String table) {
         if (!List.of(CONVERSATION_EXECUTION_RESOURCE,CONVERSATION_OUTPUT_RESOURCE).contains(resource)
                 || !List.of("agent_personal_workspace_execution","agent_personal_workspace_execution_output").contains(table))
@@ -263,12 +214,6 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
         return statement.substring(0,statement.length()-1);
     }
     /** Single atomic ALTER, resumed by column discovery. */
-    private void migrateConversationLease() {
-        int columns=requiredColumnCount("agent_personal_workspace_execution",
-                "'conversation_lease_token','conversation_lease_runtime_id','conversation_lease_version','conversation_lease_expires_at'");
-        if (columns==0) jdbc.execute(conversationLeaseMigrationStatement());
-        else if (columns!=4) throw new IllegalStateException("Conversation lease schema is partial");
-    }
     static String conversationLeaseMigrationStatement() {
         final String source;
         try { source=new ClassPathResource(CONVERSATION_LEASE_RESOURCE).getContentAsString(StandardCharsets.UTF_8); }
@@ -305,12 +250,6 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
     }
 
     /** Existing execution rows remain unchanged; absent/partial migration fails closed. */
-    private void migrateConversationProviderStart() {
-        int columns=requiredColumnCount("agent_personal_workspace_execution",
-                "'conversation_provider_started_at','conversation_provider_lease_version'");
-        if (columns==0) jdbc.execute(conversationProviderStartMigrationStatement());
-        else if (columns!=2) throw new IllegalStateException("Conversation Provider START schema is partial");
-    }
     static String conversationProviderStartMigrationStatement() {
         final String source;
         try { source=new ClassPathResource(CONVERSATION_PROVIDER_START_RESOURCE)
@@ -344,10 +283,11 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
     void verifyConversationMode() {
         Integer invalid=jdbc.queryForObject("""
                 SELECT COUNT(*) FROM agent_personal_workspace_execution
-                 WHERE (execution_mode='CONVERSATION' AND (conversation_id IS NULL OR task_grant_id IS NULL
-                     OR task_grant_version IS NULL OR task_grant_version<1 OR assignment_revision IS NULL
-                     OR assignment_revision<0 OR permitted_operation IS NULL OR work_item_id IS NOT NULL
-                     OR lease_token IS NOT NULL OR lease_work_item_version IS NOT NULL OR lease_expires_at IS NOT NULL))
+                 WHERE (execution_mode='CONVERSATION' AND (conversation_id IS NULL OR permitted_operation IS NULL OR work_item_id IS NOT NULL
+                     OR lease_token IS NOT NULL OR lease_work_item_version IS NOT NULL OR lease_expires_at IS NOT NULL
+                     OR ((execution_protocol_version IS NULL OR execution_protocol_version<>6 OR business_scope='TASK')
+                         AND (task_grant_id IS NULL OR task_grant_version IS NULL OR task_grant_version<1
+                              OR assignment_revision IS NULL OR assignment_revision<0))))
                     OR (execution_mode<>'CONVERSATION' AND (task_grant_id IS NOT NULL
                      OR task_grant_version IS NOT NULL OR assignment_revision IS NOT NULL OR permitted_operation IS NOT NULL))
                 """,Integer.class);
@@ -382,7 +322,7 @@ public final class PersonalWorkspaceExecutionSchemaInitializer implements Initia
                       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                       'application/vnd.openxmlformats-officedocument.presentationml.presentation','text/plain'))
-                   AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5))
+                   AND (execution_protocol_version IS NULL OR execution_protocol_version NOT IN (4,5,6))
                 """, Integer.class);
         if (invalid == null || invalid != 0) throw new IllegalStateException("Execution output MIME schema is invalid");
     }

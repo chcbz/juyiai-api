@@ -24,10 +24,10 @@ public final class NativeProviderUsageCostRecorder {
     public NativeProviderUsageCostRecorder(PersonalWorkspaceExecutionDao executions, UsageCostService costs, ModelPriceCatalog prices) {
         this.executions = executions; this.costs = costs; this.prices = prices;
     }
-    public UsageCostService.Receipt record(PersonalWorkspaceExecutionService.RuntimeScope scope, String taskId,
-            String runId, String executionId, Evidence evidence) {
+    public UsageCostService.Receipt record(PersonalWorkspaceExecutionService.RuntimeScope scope, String executionId,
+            String runId, Evidence evidence) {
         var execution = executions.findForNativeUsageCost(scope.tenantId(), scope.clientId(), scope.executorOwnerJiacn(),
-                scope.agentId(), taskId, runId, executionId);
+                scope.agentId(), executionId, runId);
         if (execution == null) throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
         var binding = new UsageCostService.Binding(new EconomyScope(scope.tenantId(), scope.clientId()), execution.getOwnerJiacn(),
                 execution.getTaskId(), "NATIVE_PROVIDER_CALL", executionId + ":" + evidence.invocationId());

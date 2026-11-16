@@ -18,8 +18,8 @@ public class ChatInteractionStepStore {
 
     public record Step(String stepId, String tenantId, String ownerJiacn, String clientId,
             String requestId, long requestRevision, long stepNumber, String conversationId,
-            long conversationGeneration, String taskId, long assignmentRevision, String grantId,
-            long grantVersion, String targetAgentId, String kind, String state, long stateVersion,
+            long conversationGeneration, String taskId, Long assignmentRevision, String grantId,
+            Long grantVersion, String targetAgentId, String kind, String state, long stateVersion,
             String inputSnapshotDigest, long createdAt, long updatedAt) { }
 
     public record ExecutionLink(String executionIntentId, String tenantId, String ownerJiacn,
@@ -31,7 +31,7 @@ public class ChatInteractionStepStore {
                 rs.getString("client_id"), rs.getString("request_id"), rs.getLong("request_revision"),
                 rs.getLong("step_number"), rs.getString("conversation_id"),
                 rs.getLong("conversation_generation"), rs.getString("task_id"),
-                rs.getLong("assignment_revision"), rs.getString("grant_id"), rs.getLong("grant_version"),
+                rs.getObject("assignment_revision",Long.class), rs.getString("grant_id"), rs.getObject("grant_version",Long.class),
                 rs.getString("target_agent_id"), rs.getString("kind"), rs.getString("state"),
                 rs.getLong("state_version"), rs.getString("input_snapshot_digest"),
                 rs.getLong("created_at"), rs.getLong("updated_at"));

@@ -28,14 +28,14 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         this.inputs = Objects.requireNonNull(inputs, "inputs");
         this.outputs = Objects.requireNonNull(outputs, "outputs");
     }
-    @Override public List<PersonalWorkspaceExecutionEntity> lockUnfinishedTaskExecutions(
+    @Override public List<PersonalWorkspaceExecutionEntity> findUnfinishedTaskExecutions(
             String tenant, String client, String owner, String task) {
         scope(tenant, client, owner); id(task, "taskId");
-        return executions.lockUnfinishedTaskExecutions(tenant, client, owner, task);
+        return executions.findUnfinishedTaskExecutions(tenant, client, owner, task);
     }
-    @Override public boolean cancelLockedTaskExecution(PersonalWorkspaceExecutionEntity execution, long now) {
-        return executions.cancelLockedTaskExecution(execution.getTenantId(), execution.getClientId(),
-                execution.getOwnerJiacn(), execution.getTaskId(), execution.getExecutionId(),
+    @Override public boolean cancelLockedExecution(PersonalWorkspaceExecutionEntity execution, long now) {
+        return executions.cancelLockedExecution(execution.getTenantId(), execution.getClientId(),
+                execution.getOwnerJiacn(), execution.getExecutionId(),
                 execution.getExecutionState(), now) == 1;
     }
     @Override public PersonalWorkspaceExecutionEntity find(String tenantId, String clientId,
@@ -72,12 +72,12 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         return executions.findByRevokeIdempotency(tenantId, clientId, ownerJiacn, idempotencyKey);
     }
     @Override public PersonalWorkspaceExecutionEntity findForNativeUsageCost(String tenantId, String clientId,
-            String executorOwner, String agentId, String taskId, String runId, String executionId) {
-        return executions.findForNativeUsageCost(tenantId, clientId, executorOwner, agentId, taskId, runId, executionId);
+            String executorOwner, String agentId, String executionId, String runId) {
+        return executions.findForNativeUsageCost(tenantId, clientId, executorOwner, agentId, executionId, runId);
     }
     @Override public PersonalWorkspaceExecutionEntity findForRuntime(String tenantId,String clientId,
-            String executorOwner,String agentId,String taskId,String runId) {
-        return executions.findForRuntime(tenantId,clientId,executorOwner,agentId,taskId,runId);
+            String executorOwner,String agentId,String executionId,String runId) {
+        return executions.findForRuntime(tenantId,clientId,executorOwner,agentId,executionId,runId);
     }
     @Override public PersonalWorkspaceExecutionEntity findByTaskRun(String tenantId, String clientId,
             String ownerJiacn, String taskId, String runId) {
@@ -93,18 +93,6 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
             String ownerJiacn, String taskId, String runId) {
         scope(tenantId, clientId, ownerJiacn); id(taskId, "taskId"); id(runId, "runId");
         return executions.lockByTaskRun(tenantId, clientId, ownerJiacn, taskId, runId);
-    }
-    @Override public List<PersonalWorkspaceExecutionEntity> listQueuedByTarget(String tenantId, String clientId,
-            String ownerJiacn, String targetAgentId, int limit) {
-        scope(tenantId, clientId, ownerJiacn); id(targetAgentId, "targetAgentId");
-        return executions.listQueuedByTarget(tenantId, clientId, ownerJiacn, targetAgentId,
-                Math.max(1, Math.min(limit, 16)));
-    }
-    @Override public List<PersonalWorkspaceExecutionEntity> listQueuedByTargetAfter(String tenantId, String clientId,
-            String ownerJiacn, String targetAgentId, Long afterCreatedAt, String afterExecutionId, int limit) {
-        scope(tenantId, clientId, ownerJiacn); id(targetAgentId, "targetAgentId");
-        return executions.listQueuedByTargetAfter(tenantId,clientId,ownerJiacn,targetAgentId,
-                afterCreatedAt,afterExecutionId,Math.max(1,Math.min(limit,16)));
     }
     @Override public List<PersonalWorkspaceExecutionEntity> listQueuedConversationsByTarget(
             String tenantId, String clientId, String ownerJiacn, String targetAgentId,
@@ -123,24 +111,6 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
     }
     @Override public void insert(PersonalWorkspaceExecutionEntity execution) { init(execution); executions.insert(execution); }
     @Override public void update(PersonalWorkspaceExecutionEntity execution) { execution.setUpdateTime(DateUtil.nowTime()); executions.updateById(execution); }
-    @Override public boolean markControlledProviderStarted(String tenantId,String clientId,String ownerJiacn,
-            String taskId,String runId,String executionId,String consentId,long leaseVersion,long startedAt) {
-        scope(tenantId,clientId,ownerJiacn);id(taskId,"taskId");id(runId,"runId");
-        id(executionId,"executionId");id(consentId,"consentId");
-        if(leaseVersion<1||leaseVersion>9_007_199_254_740_991L||startedAt<1)
-            throw new IllegalArgumentException("controlled provider start");
-        return executions.markControlledProviderStarted(tenantId,clientId,ownerJiacn,taskId,runId,
-                executionId,consentId,leaseVersion,startedAt)==1;
-    }
-    @Override public boolean markControlledProviderStartedV3(String tenantId,String clientId,String ownerJiacn,
-            String taskId,String runId,String executionId,String consentId,String operationGrantId,
-            long leaseVersion,long startedAt) {
-        scope(tenantId,clientId,ownerJiacn);id(taskId,"taskId");id(runId,"runId");id(executionId,"executionId");
-        id(consentId,"consentId");id(operationGrantId,"operationGrantId");
-        if(leaseVersion<1||leaseVersion>9_007_199_254_740_991L||startedAt<1)throw new IllegalArgumentException("v3 provider start");
-        return executions.markControlledProviderStartedV3(tenantId,clientId,ownerJiacn,taskId,runId,
-                executionId,consentId,operationGrantId,leaseVersion,startedAt)==1;
-    }
     @Override public void insertInput(PersonalWorkspaceExecutionInputEntity input) { init(input); inputs.insert(input); }
     @Override public List<PersonalWorkspaceExecutionInputEntity> listInputs(String tenantId,
             String clientId, String ownerJiacn, String executionId) {

@@ -2,7 +2,6 @@ package cn.jia.agent.api;
 
 import cn.jia.core.security.TenantClaimPolicy;
 
-import cn.jia.agent.entity.AgentTaskArtifactContentDTO;
 import cn.jia.agent.entity.AgentTaskArtifactQueryDTO;
 import cn.jia.agent.entity.AgentTaskArtifactViewDTO;
 import cn.jia.agent.exception.AgentTaskCollaborationException;
@@ -23,9 +22,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -47,7 +43,6 @@ public class AgentTaskDeliverableController {
     static final String CACHE_CONTROL = "private, no-store";
     static final String NOSNIFF = "nosniff";
     static final int MAX_LIST_LIMIT = 100;
-    static final int MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
     private static final Set<String> LIST_QUERY_FIELDS = Set.of("workItemId", "limit");
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern MIME = Pattern.compile(
@@ -55,8 +50,6 @@ public class AgentTaskDeliverableController {
 
     private final AgentTaskArtifactService artifactService;
     private final AgentTaskArtifactContentService contentService;
-    private final AgentTaskDeliverablePreviewAdapter previewAdapter =
-            new AgentTaskDeliverablePreviewAdapter();
 
     public AgentTaskDeliverableController(AgentTaskArtifactService artifactService,
             AgentTaskArtifactContentService contentService) {
@@ -99,64 +92,6 @@ public class AgentTaskDeliverableController {
         }
     }
 
-    @GetMapping(value = "/{taskId}/deliverables/{artifactId}/versions/{artifactVersion}/preview",
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<PreviewResponse>> preview(
-            @PathVariable String taskId,
-            @PathVariable String artifactId,
-            @PathVariable String artifactVersion,
-            HttpServletRequest request,
-            Authentication authentication) {
-        Scope scope = requireJwtScope(authentication);
-        PreviewTarget previewTarget = requirePreviewTarget(
-                taskId, artifactId, artifactVersion, request);
-        AgentTaskDeliverablePreviewAdapter.Preview rendered =
-                renderPreview(scope, previewTarget.target());
-        List<AgentTaskDeliverablePreviewAdapter.Part> visibleParts = previewTarget.partsView()
-                ? rendered.parts() : rendered.legacyParts();
-        String representation = previewTarget.partsView()
-                ? rendered.representation() : rendered.legacyRepresentation();
-        return cn.jia.core.config.ApiJsonResponses.success(ok(new PreviewResponse(rendered.state(), representation,
-                visibleParts.stream()
-                        .map(part -> new PreviewPartResponse(part.partId(), part.contentMimeType()))
-                        .toList(),
-                rendered.partial(), rendered.reason())));
-    }
-
-    @GetMapping(value = "/{taskId}/deliverables/{artifactId}/versions/{artifactVersion}"
-            + "/preview/parts/{partId}")
-    public ResponseEntity<byte[]> previewContent(
-            @PathVariable String taskId,
-            @PathVariable String artifactId,
-            @PathVariable String artifactVersion,
-            @PathVariable String partId,
-            HttpServletRequest request,
-            Authentication authentication) {
-        Scope scope = requireJwtScope(authentication);
-        RequestTarget target = requireTarget(taskId, artifactId, artifactVersion, request);
-        requirePathId(partId, 100);
-
-        // Resolve the owner-scoped artifact before interpreting a syntactically safe part id.
-        // This prevents valid-looking unknown ids from becoming an artifact existence oracle.
-        VerifiedContent content = readContent(scope, target);
-        AgentTaskDeliverablePreviewAdapter.Preview rendered = renderPreview(content);
-        AgentTaskDeliverablePreviewAdapter.PartContent selected = rendered.readPart(partId);
-        if (selected == null) {
-            if (AgentTaskDeliverablePreviewAdapter.CONTENT_PART_ID.equals(partId)
-                    && "UNSUPPORTED".equals(rendered.state())) {
-                throw new PreviewPartUnavailable();
-            }
-            throw new PreviewPartNotFound();
-        }
-        byte[] bytes = selected.bytes();
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
-                .header("X-Content-Type-Options", NOSNIFF)
-                .contentType(MediaType.parseMediaType(selected.part().contentMimeType()))
-                .contentLength(bytes.length)
-                .body(bytes);
-    }
-
     @ExceptionHandler(AuthenticationFailure.class)
     public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> authentication(AuthenticationFailure failure) {
         return error(failure.forbidden ? HttpStatus.FORBIDDEN : HttpStatus.UNAUTHORIZED,
@@ -167,18 +102,6 @@ public class AgentTaskDeliverableController {
     @ExceptionHandler(RequestFailure.class)
     public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> badRequest(RequestFailure ignored) {
         return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Invalid deliverable request");
-    }
-
-    @ExceptionHandler(PreviewPartNotFound.class)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> previewPartNotFound(PreviewPartNotFound ignored) {
-        return error(HttpStatus.NOT_FOUND, "DELIVERABLE_PREVIEW_PART_NOT_FOUND",
-                "Deliverable preview content is unavailable");
-    }
-
-    @ExceptionHandler(PreviewPartUnavailable.class)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> previewPartUnavailable(PreviewPartUnavailable ignored) {
-        return error(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "DELIVERABLE_PREVIEW_UNSUPPORTED",
-                "Deliverable preview content is unavailable");
     }
 
     @ExceptionHandler(AgentTaskCollaborationException.class)
@@ -245,45 +168,6 @@ public class AgentTaskDeliverableController {
         return result.stream()
                 .map(artifact -> requireDeliverable(artifact, taskId, query.workItemId()))
                 .toList();
-    }
-
-    private AgentTaskDeliverablePreviewAdapter.Preview renderPreview(
-            Scope scope, RequestTarget target) {
-        return renderPreview(readContent(scope, target));
-    }
-
-    private AgentTaskDeliverablePreviewAdapter.Preview renderPreview(VerifiedContent content) {
-        return previewAdapter.render(content.mediaType().toString(), content.bytes());
-    }
-
-    private VerifiedContent readContent(Scope scope, RequestTarget target) {
-        AgentTaskArtifactContentDTO result = contentService.readContentForTaskOwner(
-                scope.tenantId(), scope.clientId(), scope.ownerJiacn(), target.taskId(),
-                target.artifactId(), target.artifactVersion());
-        return requireContent(result, target.artifactId(), target.artifactVersion());
-    }
-
-    private static PreviewTarget requirePreviewTarget(String taskId, String artifactId,
-            String artifactVersion, HttpServletRequest request) {
-        requireSafeRequestPath(request);
-        requirePathId(taskId, 100);
-        requirePathId(artifactId, 100);
-        boolean partsView = requirePartsView(request);
-        return new PreviewTarget(
-                new RequestTarget(taskId, artifactId, positiveVersion(artifactVersion)), partsView);
-    }
-
-    private static boolean requirePartsView(HttpServletRequest request) {
-        if (request.getParameterMap().isEmpty()) return false;
-        if (request.getParameterMap().size() != 1
-                || !request.getParameterMap().containsKey("view")) {
-            throw new RequestFailure();
-        }
-        String[] values = request.getParameterValues("view");
-        if (values == null || values.length != 1 || !"parts".equals(values[0])) {
-            throw new RequestFailure();
-        }
-        return true;
     }
 
     private static RequestTarget requireTarget(String taskId, String artifactId,
@@ -377,37 +261,6 @@ public class AgentTaskDeliverableController {
                 artifact.getCreatedAt());
     }
 
-    private static VerifiedContent requireContent(
-            AgentTaskArtifactContentDTO result, String artifactId, int artifactVersion) {
-        if (result == null
-                || !Objects.equals(artifactId, result.getArtifactId())
-                || !Objects.equals(artifactVersion, result.getArtifactVersion())
-                || result.getContentByteLength() == null
-                || result.getContentByteLength() < 0
-                || result.getContentByteLength() > MAX_DOWNLOAD_BYTES
-                || result.getContentHash() == null
-                || !SHA256.matcher(result.getContentHash()).matches()
-                || result.getContentMimeType() == null
-                || !MIME.matcher(result.getContentMimeType()).matches()) {
-            throw new IllegalStateException("Deliverable content result is inconsistent");
-        }
-        MediaType mediaType;
-        try {
-            mediaType = MediaType.parseMediaType(result.getContentMimeType());
-        } catch (IllegalArgumentException invalid) {
-            throw new IllegalStateException("Deliverable content MIME type is invalid");
-        }
-        if (!mediaType.getParameters().isEmpty()) {
-            throw new IllegalStateException("Deliverable content MIME parameters are unavailable");
-        }
-        byte[] content = result.getContent();
-        if (content == null || content.length != result.getContentByteLength()
-                || !result.getContentHash().equals(sha256(content))) {
-            throw new IllegalStateException("Deliverable content is inconsistent");
-        }
-        return new VerifiedContent(content, mediaType);
-    }
-
     private static int effectiveLimit(Integer limit) {
         return limit == null ? MAX_LIST_LIMIT : limit;
     }
@@ -476,14 +329,6 @@ public class AgentTaskDeliverableController {
         return Character.isWhitespace(codePoint) || Character.isSpaceChar(codePoint);
     }
 
-    private static String sha256(byte[] content) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException("SHA-256 is unavailable", impossible);
-        }
-    }
-
     private static <T> ResponseEntity<T> ok(T body) {
         return ResponseEntity.ok()
                 .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
@@ -514,12 +359,6 @@ public class AgentTaskDeliverableController {
     private record RequestTarget(String taskId, String artifactId, int artifactVersion) {
     }
 
-    private record PreviewTarget(RequestTarget target, boolean partsView) {
-    }
-
-    private record VerifiedContent(byte[] bytes, MediaType mediaType) {
-    }
-
     public record DeliverableListResponse(List<DeliverableResponse> items, String nextCursor) {
     }
 
@@ -527,13 +366,6 @@ public class AgentTaskDeliverableController {
             String producerAgentId, String artifactType, String title, String contentHash,
             Long contentByteLength, String contentMimeType, Integer artifactVersion,
             String visibility, Long createdAt) {
-    }
-
-    public record PreviewResponse(String state, String representation,
-            List<PreviewPartResponse> parts, boolean partial, String reason) {
-    }
-
-    public record PreviewPartResponse(String partId, String contentMimeType) {
     }
 
     public record ErrorBody(String code, String message) {
@@ -550,9 +382,5 @@ public class AgentTaskDeliverableController {
     private static final class RequestFailure extends RuntimeException {
     }
 
-    private static final class PreviewPartNotFound extends RuntimeException {
-    }
 
-    private static final class PreviewPartUnavailable extends RuntimeException {
-    }
 }

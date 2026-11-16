@@ -23,12 +23,13 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
         // Elsewhere X-Agent-Id alone grants no Runtime authority; ambiguous duplicates fail closed.
         return request.getRequestURI().startsWith(request.getContextPath()+"/internal/agent/hosting-leases/")
                 || request.getRequestURI().startsWith(request.getContextPath()+"/internal/agent/skill-management")
+                || request.getRequestURI().startsWith(request.getContextPath()+"/internal/agent/executions")
                 || request.getRequestURI().startsWith(request.getContextPath()+"/internal/archive/")
                 || request.getRequestURI().startsWith(request.getContextPath()+"/internal/agent/position-skills")
                 || request.getRequestURI().matches(request.getContextPath()+"/internal/agent/chat/requests/[^/]+/turns/[^/]+/tools(?:/.*)?")
                 || request.getRequestURI().matches(request.getContextPath()+"/internal/agent/chat/requests/[^/]+/turns/[^/]+/materials/inputs/[^/]+/content")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/tasks/[^/]+/work-items/[^/]+/reassignments/[^/]+/commands/[^/]+/(?:result-commit|lease)")
-                || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/tasks/[^/]+/runs/[^/]+/conversation/(?:usage|provider-usage)")
+                || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/executions/[^/]+/runs/[^/]+/(?:usage|provider-usage)")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/chat/dispatches/[^/]+/usage")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/skill-installations/[^/]+/package")
                 || request.getRequestURI().equals(request.getContextPath() + "/ws/agent/channel")
@@ -59,24 +60,15 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || "GET".equals(request.getMethod()) && path.equals("/ws/agent/channel")
                 || "POST".equals(request.getMethod()) && path.matches("/agent/runtime/v1/commands/" + id + "/acks")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/chat/dispatches/" + id + "/usage")
-                || "GET".equals(request.getMethod()) && path.equals("/internal/agent/tasks/conversation-executions/commands")
-                || "POST".equals(request.getMethod()) && path.matches("/internal/agent/tasks/" + id
-                + "/runs/" + id + "/conversation/(?:inputs(?:/" + id + "/content)?|lease(?:/renew)?|failure|resume|usage|provider-usage|effects/" + id + "/(?:start|result)|result-commits/" + id
+                || "GET".equals(request.getMethod()) && path.equals("/internal/agent/executions/commands")
+                || "POST".equals(request.getMethod()) && path.matches("/internal/agent/executions/" + id
+                + "/runs/" + id + "/(?:inputs(?:/" + id + "/content)?|lease(?:/renew)?|failure|resume|usage|provider-usage|effects/" + id + "/(?:start|result)|result-commits/" + id
                 + "|outputs/" + id + "/content)")
-                || "GET".equals(request.getMethod()) && path.equals("/internal/agent/tasks/workspace-executions/commands")
                 || "GET".equals(request.getMethod()) && path.matches("/agent/tasks/" + id + "/context-pack")
                 || "POST".equals(request.getMethod()) && path.matches("/agent/tasks/" + id
                 + "/work-items/" + id + "/reassignments/" + id + "/lease(?:/start|/heartbeat)?")
-                || "GET".equals(request.getMethod()) && path.matches("/internal/agent/tasks/" + id
-                + "/runs/" + id + "/inputs(?:/" + id + "/content)?")
                 || "GET".equals(request.getMethod()) && path.matches("/internal/agent/chat/requests/" + id
-                + "/turns/" + id + "/(?:inspection|materials)/inputs/" + id + "/content")
-                || "POST".equals(request.getMethod()) && path.matches("/internal/agent/tasks/" + id
-                + "/runs/" + id + "/outputs/" + id + "/content")
-                || "POST".equals(request.getMethod()) && path.matches("/internal/agent/tasks/" + id
-                + "/runs/" + id + "/output-commits/" + id)
-                || "POST".equals(request.getMethod()) && path.matches("/internal/agent/tasks/" + id
-                + "/runs/" + id + "/(?:failure|start)");
+                + "/turns/" + id + "/(?:inspection|materials)/inputs/" + id + "/content");
     }
 
     /** Evidence may arrive after the owned engine/channel stopped. This never admits
@@ -87,7 +79,7 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
         String id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
         return path.equals("/internal/agent/skill-management/results")
                 || path.matches("/internal/agent/chat/dispatches/" + id + "/usage")
-                || path.matches("/internal/agent/tasks/" + id + "/runs/" + id + "/conversation/(?:usage|provider-usage)");
+                || path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/(?:usage|provider-usage)");
     }
 
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -155,7 +147,7 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
         String id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
         String[] values = request.getParameterValues("token");
         return "POST".equals(request.getMethod())
-                && path.matches("/internal/agent/tasks/" + id + "/runs/" + id + "/conversation/outputs/" + id + "/content")
+                && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/outputs/" + id + "/content")
                 && values != null && values.length == 1
                 && values[0].matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     }

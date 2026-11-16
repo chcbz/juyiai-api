@@ -89,61 +89,24 @@ class PersonalWorkspaceConversationExecutionTest {
                 .setExecutionState("QUEUED").setGrantRevision(1L).setOutputContentMimeType("image/png");
         execution.setTenantId("0");execution.setClientId("client");execution.setOwnerJiacn("owner");
         when(rows.listInputs(eq("0"),eq("client"),eq("owner"),anyString())).thenReturn(List.of());
-        when(rows.findByTaskRun("0","client","owner","task-1","run-1")).thenReturn(execution);
-        when(rows.lockByTaskRun("0","client","owner","task-1","run-1")).thenReturn(execution);
+        when(rows.find("0","client","owner","exec-1")).thenReturn(execution);
+        when(rows.lock("0","client","owner","exec-1")).thenReturn(execution);
+        when(conversation.withLockedAccessible(any(),eq("42"),any())).thenAnswer(i ->
+                i.getArgument(2,java.util.function.Function.class).apply(conversation.requireAccessible(i.getArgument(0),"42")));
     }
 
-    private PersonalWorkspaceExecutionService.ConversationCreate textCommand() {
-        return new PersonalWorkspaceExecutionService.ConversationCreate("42","task-1","agent","text-intent","grant-1",1,7,
-                "GENERATE_TEXT_FILE","生成三行会议清单","text/plain");
+    @Test void retiredOutputProtocolsCannotFallThroughToFormatSpecificUpload() {
+        for (Integer protocol : new Integer[] {null, 1, 2, 3, 4, 5, 7}) {
+            execution.setExecutionProtocolVersion(protocol);
+            var rejected = assertThrows(PersonalWorkspaceExecutionService.Failure.class,
+                    () -> ReflectionTestUtils.invokeMethod(service, "validateOutputUpload",
+                            execution, "output_1", "result.txt", "text/plain", new byte[] {0}));
+            assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE,
+                    rejected.getReason());
+        }
+        verify(storage, never()).store(any(), any(byte[].class), anyString());
+        verify(rows, never()).insertOutput(any());
     }
-
-    @Test void retiredConversationCreateRejectsWithoutAuthorityOrWrites() {
-        var failure=assertThrows(PersonalWorkspaceExecutionService.Failure.class,
-                () -> service.createConversation(OWNER,textCommand()));
-        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE,failure.getReason());
-        verify(rows,never()).insert(any());verifyNoInteractions(writes);
-    }
-
-
-    @Test void utf8FormatIsStrictAndNeverAcceptedAsImage() {
-        byte[] text="确认议题\n通知参会人\n检查设备\n".getBytes(StandardCharsets.UTF_8);
-        assertTrue(PersonalWorkspaceOutputFormatValidator.isValid("text/plain",text));
-        assertFalse(PersonalWorkspaceOutputFormatValidator.isValid("image/png",text));
-        for(byte[] bad:List.of(new byte[0],new byte[]{0},new byte[]{(byte)0xc3,0x28}))
-            assertFalse(PersonalWorkspaceOutputFormatValidator.isValid("text/plain",bad));
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     @Test void cancelledTaskRetainsCommittedNativeOutputReadsWithoutExecutionGrant() throws Exception {
         byte[] bytes="{\"budget\":150,\"people\":10}\n".getBytes(StandardCharsets.UTF_8);
@@ -158,22 +121,22 @@ class PersonalWorkspaceConversationExecutionTest {
         when(rows.lockOutput("0","client","owner","exec-1","output_1")).thenReturn(output);
         when(storage.openStream(any(),eq("private/object"),eq(hash),eq((long)bytes.length),eq("application/json")))
                 .thenAnswer(i -> new java.io.ByteArrayInputStream(bytes));
-        assertEquals(hash,service.listConversationOutputs(OWNER,"task-1","run-1").getFirst().sha256());
-        try(var content=service.openConversationOutput(OWNER,"task-1","run-1","output_1").content()) {
+        assertEquals(hash,service.listConversationOutputs(OWNER,"exec-1","run-1").getFirst().sha256());
+        try(var content=service.openConversationOutput(OWNER,"exec-1","run-1","output_1").content()) {
             assertArrayEquals(bytes,content.readAllBytes());
         }
         verifyNoInteractions(grants);
         execution.setExecutionState("RUNNING");
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,
-                ()->service.openConversationOutput(OWNER,"task-1","run-1","output_1"));
+                ()->service.openConversationOutput(OWNER,"exec-1","run-1","output_1"));
         execution.setExecutionState("RESULT_COMMITTED");
         root.setOwnerJiacn("foreign");
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,
-                ()->service.openConversationOutput(OWNER,"task-1","run-1","output_1"));
+                ()->service.openConversationOutput(OWNER,"exec-1","run-1","output_1"));
         root.setOwnerJiacn("owner");
         // Cancellation does not override loss of the current owner's conversation access.
         when(conversation.requireAccessible(any(),eq("42"))).thenThrow(new IllegalStateException("ACL revoked"));
-        assertThrows(RuntimeException.class,()->service.openConversationOutput(OWNER,"task-1","run-1","output_1"));
+        assertThrows(RuntimeException.class,()->service.openConversationOutput(OWNER,"exec-1","run-1","output_1"));
         verify(storage,times(2)).openStream(any(),anyString(),anyString(),anyLong(),anyString());
     }
 
@@ -186,21 +149,21 @@ class PersonalWorkspaceConversationExecutionTest {
         when(rows.lockOutputs("0","client","owner","exec-1")).thenReturn(List.of(output));
         when(storage.openStream(any(),eq("private/object"),eq(hash),eq((long)bytes.length),eq("image/png")))
                 .thenAnswer(i -> new java.io.ByteArrayInputStream(bytes));
-        var listed=service.listConversationOutputs(OWNER,"task-1","run-1");
+        var listed=service.listConversationOutputs(OWNER,"exec-1","run-1");
         assertEquals(List.of(new PersonalWorkspaceExecutionService.ConversationOutputInfo(
                 "exec-1","output_1","image/png",hash,bytes.length,null,"读书会.png")),listed);
         assertFalse(listed.toString().contains("private/object"));
         root.setAssignedAgentId("different-agent");
         assertEquals(PersonalWorkspaceExecutionService.Reason.GRANT_REVOKED,assertThrows(
                 PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(
-                        OWNER,"task-1","run-1")).getReason());
+                        OWNER,"exec-1","run-1")).getReason());
         verify(storage,times(1)).openStream(any(),anyString(),anyString(),anyLong(),anyString());
         root.setAssignedAgentId("agent");
         when(storage.openStream(any(),eq("private/object"),eq(hash),eq((long)bytes.length),eq("image/png")))
                 .thenThrow(new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE));
         assertEquals(PersonalWorkspaceExecutionService.Reason.STORAGE_UNAVAILABLE,assertThrows(
                 PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(
-                        OWNER,"task-1","run-1")).getReason());
+                        OWNER,"exec-1","run-1")).getReason());
     }
 
     @Test void catalogVerifiesOutsideItsRootTransactionAndClosesBeforeRechecking() throws Exception {
@@ -222,7 +185,7 @@ class PersonalWorkspaceConversationExecutionTest {
                 @Override public void close() {closed.set(true);}
             };
         });
-        assertEquals(1,service.listConversationOutputs(OWNER,"task-1","run-1").size());
+        assertEquals(1,service.listConversationOutputs(OWNER,"exec-1","run-1").size());
         assertEquals(1,opens.get());assertTrue(closed.get());
         verify(storage,never()).read(any(),anyString(),anyString(),anyLong(),anyString());
     }
@@ -239,7 +202,7 @@ class PersonalWorkspaceConversationExecutionTest {
         });
         assertEquals(PersonalWorkspaceExecutionService.Reason.GRANT_REVOKED,assertThrows(
                 PersonalWorkspaceExecutionService.Failure.class,()->service.openConversationOutput(
-                        OWNER,"task-1","run-1","output_1")).getReason());
+                        OWNER,"exec-1","run-1","output_1")).getReason());
         assertTrue(closed.get());
         verify(storage,never()).read(any(),anyString(),anyString(),anyLong(),anyString());
     }
@@ -256,7 +219,7 @@ class PersonalWorkspaceConversationExecutionTest {
         });
         assertEquals(PersonalWorkspaceExecutionService.Reason.OUTPUT_CONFLICT,assertThrows(
                 PersonalWorkspaceExecutionService.Failure.class,()->service.openConversationOutput(
-                        OWNER,"task-1","run-1","output_1")).getReason());
+                        OWNER,"exec-1","run-1","output_1")).getReason());
         assertTrue(closed.get());
     }
 
@@ -300,7 +263,7 @@ class PersonalWorkspaceConversationExecutionTest {
 
     @Test void committedEditCatalogCarriesExactParentWithoutProviderOrPersonalSpace() throws Exception {
         committedEditFixture(false);
-        var result=service.listConversationOutputs(OWNER,"task-1","run-1").getFirst();
+        var result=service.listConversationOutputs(OWNER,"exec-1","run-1").getFirst();
         assertEquals(new PersonalWorkspaceExecutionService.OutputReplacement("prior-request","prior-step","prior-output","a".repeat(64)),result.replaces());
         verifyNoInteractions(writes,workspace,runtimes);
         verify(followup,never()).runtimeAuthority(any(),anyString(),anyString(),anyString());
@@ -309,19 +272,19 @@ class PersonalWorkspaceConversationExecutionTest {
     }
     @Test void editFromWorkspaceDoesNotReplaceUnrelatedConversationResult() throws Exception {
         committedEditFixture(true);
-        assertNull(service.listConversationOutputs(OWNER,"task-1","run-1").getFirst().replaces());
+        assertNull(service.listConversationOutputs(OWNER,"exec-1","run-1").getFirst().replaces());
         verifyNoInteractions(workspace,writes);
     }
     @Test void alteredOrForeignEditSourcesAndAmbiguousOutputCountFailBeforeReadingBytes() throws Exception {
         var source=committedEditFixture(false);
         source.setProducerOutputId("changed");
         assertEquals(PersonalWorkspaceExecutionService.Reason.GRANT_REVOKED,assertThrows(
-                PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"task-1","run-1")).getReason());
+                PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"exec-1","run-1")).getReason());
         source.setProducerOutputId("prior-output").setOwnerJiacn("foreign");
-        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"task-1","run-1"));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"exec-1","run-1"));
         source.setOwnerJiacn("owner");
         when(rows.lockOutputs("0","client","owner","exec-1")).thenReturn(List.of(output,output));
-        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"task-1","run-1"));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->service.listConversationOutputs(OWNER,"exec-1","run-1"));
         verify(storage,never()).read(any(),anyString(),anyString(),anyLong(),anyString());
     }
 
@@ -347,61 +310,16 @@ class PersonalWorkspaceConversationExecutionTest {
         }
     }
 
-
-
-
-
-
-
-    @Test void defaultOffAndLegacyUnfencedRuntimeLaneNeverStartsConversation() {
-        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE,assertThrows(
-                PersonalWorkspaceExecutionService.Failure.class,()-> service.claimConversationStart(
-                        RUNTIME,"task-1","run-1",commandId(),messageId())).getReason());
-        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND,assertThrows(
-                PersonalWorkspaceExecutionService.Failure.class,()-> service.start(
-                        RUNTIME,"task-1","run-1",commandId(),messageId())).getReason());
-        assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND,assertThrows(
-                PersonalWorkspaceExecutionService.Failure.class,()-> service.stageOutput(
-                        RUNTIME,"task-1","run-1","output_1","bird.png","image/png",new byte[]{1})).getReason());
-        // The unfenced failure endpoint rejects conversation mode without writing state.
-        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE,assertThrows(
-                PersonalWorkspaceExecutionService.Failure.class,()-> service.fail(
-                        RUNTIME,"task-1","run-1","AGENT_DELIVERY_FAILED")).getReason());
-        when(rows.listQueuedByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),anyInt()))
-                .thenReturn(List.of(execution));
-        assertTrue(service.runtimeQueuedCommands(RUNTIME,16).isEmpty());
-        verify(rows,never()).update(any());
-        verifyNoInteractions(writes);
+    @Test void historicalExecutionCannotClaimNativeLease() {
+        when(rows.findForRuntime("0","client","owner","agent","exec-1","run-1")).thenReturn(execution);
+        for(Integer protocol:new Integer[]{null,1,2,3,4,5}) {
+            execution.setExecutionProtocolVersion(protocol);
+            assertEquals(PersonalWorkspaceExecutionService.Reason.NOT_FOUND,assertThrows(
+                    PersonalWorkspaceExecutionService.Failure.class,()->service.claimConversationStart(
+                            RUNTIME,"exec-1","run-1",commandId(),messageId())).getReason());
+        }
+        verify(rows,never()).update(any());verifyNoInteractions(writes);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     private void startedV3() {
         execution.setExecutionProtocolVersion(3)
@@ -421,8 +339,6 @@ class PersonalWorkspaceConversationExecutionTest {
         when(followup.runtimeAuthority(any(),eq("task-1"),eq("run-1"),eq("FAILURE")))
                 .thenReturn(authority);
     }
-
-
 
     private void enable() { ReflectionTestUtils.setField(service,"conversationExecutionEnabled",true); }
     private static String commandId() { return "pwe_cmd_"+sha("command\nexec-1".getBytes(StandardCharsets.UTF_8)); }

@@ -154,6 +154,9 @@ class PersonalWorkspaceConversationLinkServiceImplTest {
     private static final class FakeConversations implements WorkspaceConversationAccessService {
         private final FakeDao dao;
         private FakeConversations(FakeDao dao) { this.dao = dao; }
+        @Override public <T> T withLockedAccessible(Scope scope,String conversationId,java.util.function.Function<ConversationView,T> action) {
+            return action.apply(requireAccessible(scope,conversationId));
+        }
         @Override public ConversationView requireAccessible(Scope scope, String conversationId) {
             if (!dao.conversationAccessible || !"0".equals(scope.tenantId())
                     || !"browser".equals(scope.clientId()) || !"owner-a".equals(scope.ownerJiacn())

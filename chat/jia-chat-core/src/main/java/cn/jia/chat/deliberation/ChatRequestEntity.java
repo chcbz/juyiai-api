@@ -18,6 +18,8 @@ public class ChatRequestEntity {
     private String requestId;
     private Long requestRevision;
     private String requestDigest;
+    /** Native private admission hashes the original intent, before allocating a conversation. */
+    private String clientIntentSha256;
     private String conversationId;
     private Long conversationGeneration;
     private Long userMessageId;

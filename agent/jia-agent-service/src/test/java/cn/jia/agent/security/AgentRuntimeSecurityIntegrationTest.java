@@ -1,6 +1,5 @@
 package cn.jia.agent.security;
 
-import cn.jia.agent.api.PersonalWorkspaceRuntimeFileController;
 import cn.jia.agent.api.PersonalWorkspaceConversationRuntimeController;
 import cn.jia.agent.common.AgentConstants;
 import cn.jia.agent.config.AgentRuntimeSecurityConfiguration;
@@ -81,7 +80,6 @@ class AgentRuntimeSecurityIntegrationTest {
     AccountSecurityService accounts;
     PersonalWorkspaceExecutionService workspaceExecutions;
     MockMvc mvc;
-    MockMvc runtimeFailureMvc;
     MockMvc conversationMvc;
     final Map<String, AgentRuntimeEntity> persisted = new HashMap<>();
     final Map<Long, AgentPersonaBindingEntity> persistedBindings = new HashMap<>();
@@ -224,9 +222,6 @@ class AgentRuntimeSecurityIntegrationTest {
         bind(auth, "socket-b", CLIENT_B, OWNER_B, B, "runtime-b", "key-b", TOKEN_B, () -> true);
         FilterChainProxy filters = context.getBean(FilterChainProxy.class);
         mvc = MockMvcBuilders.standaloneSetup(new RuntimeScopeProbeController())
-                .addFilters(filters).build();
-        runtimeFailureMvc = MockMvcBuilders.standaloneSetup(
-                        new PersonalWorkspaceRuntimeFileController(workspaceExecutions,auth))
                 .addFilters(filters).build();
         conversationMvc = MockMvcBuilders.standaloneSetup(
                         new PersonalWorkspaceConversationRuntimeController(workspaceExecutions,auth))
@@ -420,14 +415,22 @@ class AgentRuntimeSecurityIntegrationTest {
     void installationRevokedDuringFileSourceReadCannotDeliverPreparedBytes() throws Exception {
         var scope=new PersonalWorkspaceExecutionService.RuntimeScope(TENANT,CLIENT_A,OWNER_A,A,"runtime-a");
         String source="revoked-private-file";
-        when(workspaceExecutions.runtimeInputContent(scope,"task-a","run-a","input_1")).thenAnswer(call->{
+        var skills=(SkillExecutionService)workspaceExecutions;
+        var closed=new java.util.concurrent.atomic.AtomicBoolean();
+        var stream=new java.io.ByteArrayInputStream(source.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            @Override public void close() {closed.set(true);}
+        };
+        var fence=new PersonalWorkspaceExecutionService.ConversationFence(1L,"01234567-89ab-cdef-0123-456789abcdef");
+        when(skills.inputContent(scope,"task-a","run-a","input_1",fence)).thenAnswer(call->{
             installationRows.get(installationFor(A)).setStatus("REVOKED");
-            return new PersonalWorkspaceExecutionService.RuntimeContent("file.png","image/png",source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return new PersonalWorkspaceExecutionService.RuntimeDownload("file.png","image/png","a".repeat(64),source.length(),stream);
         });
-        var response=runtimeFailureMvc.perform(headers(get("/internal/agent/tasks/task-a/runs/run-a/inputs/input_1/content"),A,"runtime-a",TOKEN_A))
+        var response=conversationMvc.perform(headers(post("/internal/agent/tasks/task-a/runs/run-a/conversation/inputs/input_1/content"),A,"runtime-a",TOKEN_A)
+                .contentType("application/json").content("{\"protocolVersion\":1,\"requestId\":\"native-source-fence\",\"data\":{\"version\":\"1\",\"token\":\"01234567-89ab-cdef-0123-456789abcdef\"}}"))
                 .andExpect(status().isBadRequest()).andReturn().getResponse();
         assertFalse(response.getContentAsString().contains(source));
-        verify(workspaceExecutions).runtimeInputContent(scope,"task-a","run-a","input_1");
+        assertTrue(closed.get());
+        verify(skills).inputContent(scope,"task-a","run-a","input_1",fence);
     }
 
     @Test
@@ -622,21 +625,18 @@ class AgentRuntimeSecurityIntegrationTest {
     }
 
     @Test
-    void privateWorkspaceRuntimeFilePathsStayExactAndNativeOnly() throws Exception {
-        for (String path : List.of("/internal/agent/tasks/task-a/runs/run-a/inputs",
-                "/internal/agent/tasks/task-a/runs/run-a/inputs/input-a/content")) {
-            mvc.perform(headers(get(path), A, "runtime-a", TOKEN_A))
-                    .andExpect(status().isOk()).andExpect(jsonPath("$.agentId").value(A));
+    void retiredWorkspaceRuntimePathsAreNotAdmittedEvenForAuthenticRuntime() throws Exception {
+        for (String path : List.of("/internal/agent/tasks/workspace-executions/commands",
+                "/internal/agent/tasks/task-a/runs/run-a/inputs",
+                "/internal/agent/tasks/task-a/runs/run-a/inputs/input-a/content",
+                "/internal/agent/tasks/task-a/runs/run-a/outputs/output-a/content",
+                "/internal/agent/tasks/task-a/runs/run-a/output-commits/manifest-a",
+                "/internal/agent/tasks/task-a/runs/run-a/start",
+                "/internal/agent/tasks/task-a/runs/run-a/failure")) {
+            mvc.perform(headers(get(path), A, "runtime-a", TOKEN_A)).andExpect(status().isForbidden());
             mvc.perform(headers(post(path), A, "runtime-a", TOKEN_A)).andExpect(status().isForbidden());
         }
-        for (String path : List.of("/internal/agent/tasks/task-a/runs/run-a/outputs/output-a/content",
-                "/internal/agent/tasks/task-a/runs/run-a/output-commits/manifest-a")) {
-            mvc.perform(headers(post(path), A, "runtime-a", TOKEN_A))
-                    .andExpect(status().isOk()).andExpect(jsonPath("$.agentId").value(A));
-            mvc.perform(headers(get(path), A, "runtime-a", TOKEN_A)).andExpect(status().isForbidden());
-        }
-        mvc.perform(headers(get("/internal/agent/tasks/task-a/runs/run-a/inputs/input-a/content/extra"),
-                A, "runtime-a", TOKEN_A)).andExpect(status().isForbidden());
+        verifyNoInteractions(workspaceExecutions);
     }
 
 
@@ -703,10 +703,10 @@ class AgentRuntimeSecurityIntegrationTest {
     void proofRotatedAfterHttpAdmissionCannotMutateOriginalWorkspaceRun() {
         var admitted=authenticate(auth,A,"runtime-a",TOKEN_A);
         persisted.get(A).setRuntimeSessionGeneration(2L).setRuntimeInstanceId("replacement-boot");
-        var controller=new PersonalWorkspaceRuntimeFileController(workspaceExecutions,auth);
-        var request=new org.springframework.mock.web.MockHttpServletRequest("POST","/internal/agent/tasks/task-a/runs/run-a/failure");
-        assertThrows(RuntimeException.class,()->controller.failure("task-a","run-a",
-                new cn.jia.core.entity.JsonRequest<>(1, "test-request", new PersonalWorkspaceRuntimeFileController.FailureRequest("OUTPUT_MISSING")),request,admitted));
+        var controller=new PersonalWorkspaceConversationRuntimeController(workspaceExecutions,auth);
+        var request=new org.springframework.mock.web.MockHttpServletRequest("POST","/internal/agent/tasks/task-a/runs/run-a/conversation/lease");
+        assertThrows(RuntimeException.class,()->controller.claim("task-a","run-a",
+                new cn.jia.core.entity.JsonRequest<>(1, "test-request", new PersonalWorkspaceConversationRuntimeController.ClaimRequest("command","message")),request,admitted));
         verifyNoInteractions(workspaceExecutions);
     }
 

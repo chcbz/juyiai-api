@@ -155,7 +155,6 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     private boolean nativeWorkNotificationsEnabled;
     // Legacy job execution is retired; native maintenance is discovered in the current-turn tool catalog.
     private final Set<String> nativeWorkNotificationSessions = ConcurrentHashMap.newKeySet();
-    private final Set<String> workspaceFileWorkNotificationSessions = ConcurrentHashMap.newKeySet();
     private TypedDeliberationSessionRegistry typedDeliberationSessions;
     private TypedInspectionSessionRegistry typedInspectionSessions;
     private NativeTextFileSessionRegistry nativeTextFileSessions;
@@ -491,7 +490,6 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
         if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
         sessions.remove(session.getId());
         nativeWorkNotificationSessions.remove(session.getId());
-        workspaceFileWorkNotificationSessions.remove(session.getId());
         sessionAgentIds.remove(session.getId());
         successfullyRegisteredAgentIds.remove(session.getId());
         sessionRuntimeInstanceIds.remove(session.getId());
@@ -944,8 +942,6 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             boolean nativeWorkNotifications=nativeWorkNotificationsEnabled
                     && Integer.valueOf(1).equals(payload.get("nativeWorkNotifications"));
             if (nativeWorkNotifications) event.put("nativeWorkNotifications",1);
-            boolean workspaceFileWorkNotifications=Integer.valueOf(1).equals(payload.get("workspaceFileWorkNotifications"));
-            if (workspaceFileWorkNotifications) event.put("workspaceFileWorkNotifications",1);
             event.put("archiveJobDiscovery", 0);
             event.put("durableStateHealthy", Boolean.TRUE.equals(payload.get("durableStateHealthy")));
             event.put("runtimeCapabilities", runtimeCapabilities.normalizedForReceipt());
@@ -996,8 +992,6 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             sessionReadyCommandTypes.put(session.getId(), readyCommandTypes);
             if (nativeWorkNotifications) nativeWorkNotificationSessions.add(session.getId());
             else nativeWorkNotificationSessions.remove(session.getId());
-            if (workspaceFileWorkNotifications) workspaceFileWorkNotificationSessions.add(session.getId());
-            else workspaceFileWorkNotificationSessions.remove(session.getId());
             sessionNativeBountyExecution.put(session.getId(), nativeBountyExecution);
             sessionNativeProviderCredentialBinding.put(session.getId(), nativeProviderCredentialBinding);
             sessionControlledImageBountyExecution.put(session.getId(), controlledImageBountyExecution);
@@ -3069,15 +3063,14 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
 
     /** Lightweight local subscriptions only; the current persistent fence is checked on send. */
     public List<cn.jia.agent.entity.NativeConversationWorkAvailable> nativeWorkTargets() {
-        return sessions.values().stream().flatMap(session -> java.util.stream.Stream.of("NATIVE_CONVERSATION","WORKSPACE_FILE")
+        return sessions.values().stream().flatMap(session -> java.util.stream.Stream.of("NATIVE_CONVERSATION")
                 .filter(lane -> nativeWorkSubscribed(session,lane))
                 .map(lane -> new cn.jia.agent.entity.NativeConversationWorkAvailable(
                         sessionTenantId(session),sessionClientId(session),sessionAgentId(session),lane)))
                 .distinct().toList();
     }
     private boolean nativeWorkSubscribed(WebSocketSession session,String lane) {
-        var subscribers="WORKSPACE_FILE".equals(lane)?workspaceFileWorkNotificationSessions:
-                "NATIVE_CONVERSATION".equals(lane)?nativeWorkNotificationSessions:Set.<String>of();
+        var subscribers="NATIVE_CONVERSATION".equals(lane)?nativeWorkNotificationSessions:Set.<String>of();
         return session!=null && session.isOpen() && subscribers.contains(session.getId())
                 && successfullyRegisteredAgentIds(session.getId()).contains(sessionAgentId(session))
                 && Boolean.TRUE.equals(sessionDurableStateHealthy.get(session.getId()));

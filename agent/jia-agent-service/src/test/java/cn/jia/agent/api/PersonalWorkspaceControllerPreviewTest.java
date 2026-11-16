@@ -14,7 +14,6 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -104,43 +103,56 @@ class PersonalWorkspaceControllerPreviewTest {
     }
 
     @Test
-    void previewMetadataRequiresExplicitPartsOptInAndKeepsLegacyCatalogByDefault()
-            throws Exception {
-        PersonalWorkspaceViews.PreviewView multipart = new PersonalWorkspaceViews.PreviewView(
-                "READY",
-                List.of(
-                        new PersonalWorkspaceViews.PreviewPart("slide-1", "image/png"),
-                        new PersonalWorkspaceViews.PreviewPart("slide-2", "image/png"),
-                        new PersonalWorkspaceViews.PreviewPart("content", "text/plain")),
-                false, null);
-        PersonalWorkspaceService.Scope scope =
-                new PersonalWorkspaceService.Scope("0", CLIENT, OWNER);
-        when(service.preview(scope, FILE, 1)).thenReturn(multipart);
-
-        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
-                        FILE, 1).principal(jwt()))
+    void metadataKeepsOriginalIdentityWithoutClaimingBrowserPreviewSupport() throws Exception {
+        var scope = new PersonalWorkspaceService.Scope("0", CLIENT, OWNER);
+        var version = new PersonalWorkspaceViews.VersionView(FILE, 3, "budget.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 42, "a".repeat(64), 1);
+        var file = new PersonalWorkspaceViews.FileView(FILE, "UPLOAD", "USER_UPLOAD", "Budget",
+                "SPREADSHEET", "ACTIVE", 1, 3, 1,
+                new PersonalWorkspaceViews.Capabilities("AVAILABLE", "AVAILABLE", "UNVERIFIED", "AVAILABLE"));
+        when(service.get(scope, FILE)).thenReturn(new PersonalWorkspaceViews.FileDetailView(
+                file, version, List.of(version), List.of(), List.of()));
+        mvc.perform(get("/agent/personal-workspace/files/{fileId}", FILE).principal(jwt()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.parts.length()").value(3))
-                .andExpect(jsonPath("$.data.parts[0].partId").value("slide-1"))
-                .andExpect(jsonPath("$.data.parts[0].contentMimeType").value("image/png"));
+                .andExpect(jsonPath("$.data.latestVersion.version").value("3"))
+                .andExpect(jsonPath("$.data.latestVersion.byteLength").value("42"))
+                .andExpect(jsonPath("$.data.latestVersion.sha256").value("a".repeat(64)))
+                .andExpect(jsonPath("$.data.latestVersion.contentMimeType").value(version.contentMimeType()))
+                .andExpect(jsonPath("$.data.latestVersion.previewState").doesNotExist())
+                .andExpect(jsonPath("$.data.versions[0].previewState").doesNotExist())
+                .andExpect(jsonPath("$.data.file.capabilities.preview").doesNotExist())
+                .andExpect(jsonPath("$.data.file.capabilities.read").value("AVAILABLE"));
+    }
 
-        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
-                        FILE, 1).queryParam("view", "parts").principal(jwt()))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.parts.length()").value(3))
-                .andExpect(jsonPath("$.data.parts[0].partId").value("slide-1"))
-                .andExpect(jsonPath("$.data.parts[1].partId").value("slide-2"))
-                .andExpect(jsonPath("$.data.parts[2].partId").value("content"));
+    @Test
+    void retiredPreviewRoutesHaveNoMapping() throws Exception {
+        for (String suffix : List.of("preview", "preview?view=parts", "preview/parts/content")) {
+            mvc.perform(get("/agent/personal-workspace/files/file-a/versions/1/" + suffix)
+                    .principal(jwt())).andExpect(status().isNotFound());
+        }
+        org.mockito.Mockito.verifyNoInteractions(service);
+    }
 
-        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
-                        FILE, 1).queryParam("view", "legacy").principal(jwt()))
-                .andExpect(status().isBadRequest());
-        mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/{version}/preview",
-                        FILE, 1).queryParam("view", "parts")
-                        .queryParam("actorAgentId", "foreign").principal(jwt()))
-                .andExpect(status().isBadRequest());
-
-        verify(service, times(2)).preview(scope, FILE, 1);
+    @Test
+    void originalContentPreservesBytesMimeAndClosesStream() throws Exception {
+        var scope = new PersonalWorkspaceService.Scope("0", CLIENT, OWNER);
+        for (String mime : List.of("text/html", "text/plain",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
+            byte[] original = ("unparsed-original-" + mime).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            var closed = new java.util.concurrent.atomic.AtomicBoolean();
+            var stream = new java.io.ByteArrayInputStream(original) {
+                @Override public void close() { closed.set(true); }
+            };
+            when(service.download(scope, FILE, 1)).thenReturn(new PersonalWorkspaceService.Download(
+                    "original", mime, original.length, stream));
+            mvc.perform(get("/agent/personal-workspace/files/{fileId}/versions/1/content", FILE).principal(jwt()))
+                    .andExpect(status().isOk())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().bytes(original))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().contentType(mime))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Cache-Control", "private, no-store"));
+            org.junit.jupiter.api.Assertions.assertTrue(closed.get());
+        }
     }
 
     private static JwtAuthenticationToken jwt() {

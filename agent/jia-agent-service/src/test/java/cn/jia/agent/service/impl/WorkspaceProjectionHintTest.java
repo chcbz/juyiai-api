@@ -37,7 +37,11 @@ class WorkspaceProjectionHintTest {
     }
     @Test void nonConversationRetiredProtocolAndNonterminalDoNotSchedule() {
         row.setExecutionMode("PRIVATE");service.signalProjectionAfterCommit(row);
-        row.setExecutionMode("CONVERSATION").setExecutionProtocolVersion(4);service.signalProjectionAfterCommit(row);
+        row.setExecutionMode("CONVERSATION");
+        for (Integer protocol : new Integer[]{null, 1, 2, 3, 4, 6}) {
+            row.setExecutionProtocolVersion(protocol);
+            service.signalProjectionAfterCommit(row);
+        }
         row.setExecutionProtocolVersion(5).setExecutionState("QUEUED");service.signalProjectionAfterCommit(row);
         assertTrue(TransactionSynchronizationManager.getSynchronizations().isEmpty());
     }

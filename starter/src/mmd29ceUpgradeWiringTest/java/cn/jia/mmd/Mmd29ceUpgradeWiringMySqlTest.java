@@ -324,7 +324,6 @@ class Mmd29ceUpgradeWiringMySqlTest {
         properties.put("agent.task-deliberation-operation.read-enabled", "true");
         properties.put("agent.task-requirement-snapshot.read-enabled", "true");
         properties.put("agent.task-reference-inputs.enabled", Boolean.toString(fullFeatureWiring));
-        properties.put("cyf.chat.deliberation-schema.allow-additive-migration", "true");
         properties.put("chat.typed-deliberation.enabled", "true");
         properties.put("cyf.chat.typed-deliberation-schema.allow-additive-migration", "true");
         properties.put("chat.typed-inspection.enabled", "true");

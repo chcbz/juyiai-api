@@ -130,21 +130,6 @@ public class PersonalWorkspaceController {
         }
     }
 
-    @GetMapping(value = "/files/{fileId}/versions/{version}/preview", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<PersonalWorkspaceViews.PreviewView>> preview(@PathVariable String fileId,
-            @PathVariable String version, HttpServletRequest request,
-            Authentication authentication) {
-        PersonalWorkspaceService.Scope authenticatedScope = scope(authentication);
-        requirePartsView(request);
-        PersonalWorkspaceViews.PreviewView rendered =
-                service.preview(authenticatedScope, fileId, version(version));
-        return cn.jia.core.config.ApiJsonResponses.success(json(rendered));
-    }
-    @GetMapping("/files/{fileId}/versions/{version}/preview/parts/{partId}")
-    public ResponseEntity<byte[]> previewPart(@PathVariable String fileId, @PathVariable String version,
-            @PathVariable String partId, Authentication authentication) {
-        return binary(service.readPreviewPart(scope(authentication), fileId, version(version), partId), false);
-    }
     @GetMapping(value = "/files/{fileId}/usage", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<cn.jia.core.entity.JsonResult<PersonalWorkspaceWire.UsageView>> usage(@PathVariable String fileId, Authentication authentication) {
         return cn.jia.core.config.ApiJsonResponses.success(json(service.usage(scope(authentication), fileId)), PersonalWorkspaceWire::from);
@@ -195,19 +180,6 @@ public class PersonalWorkspaceController {
     @ExceptionHandler(Exception.class)
     public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> unexpected(Exception failure, HttpServletRequest request) { log.error("Personal workspace request failed: uri={}",request.getRequestURI(),failure); return error(HttpStatus.SERVICE_UNAVAILABLE,"WORKSPACE_UNAVAILABLE","Personal workspace is temporarily unavailable"); }
 
-    private static boolean requirePartsView(HttpServletRequest request) {
-        if (request.getParameterMap().isEmpty()) return false;
-        if (request.getParameterMap().size() != 1
-                || !request.getParameterMap().containsKey("view")) {
-            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.BAD_REQUEST);
-        }
-        String[] values = request.getParameterValues("view");
-        if (values == null || values.length != 1 || !"parts".equals(values[0])) {
-            throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.BAD_REQUEST);
-        }
-        return true;
-    }
-
     private PersonalWorkspaceService.Scope scope(Authentication authentication) {
         if(authentication==null||!authentication.isAuthenticated()||!(authentication instanceof JwtAuthenticationToken jwt)) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
         Map<String,Object> claims=jwt.getToken().getClaims(); Object owner=claims.get("jiacn"),client=claims.get("client_id");
@@ -241,11 +213,6 @@ public class PersonalWorkspaceController {
         return "image/jpg".equals(mime) ? "image/jpeg" : mime;
     }
     private static int version(String value){if(value==null||!value.matches("[1-9][0-9]{0,9}"))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.BAD_REQUEST);try{return Math.toIntExact(Long.parseLong(value));}catch(ArithmeticException ex){throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.BAD_REQUEST);}}
-    private static ResponseEntity<byte[]> binary(PersonalWorkspaceService.Content content,boolean attachment) {
-        MediaType type=MediaType.parseMediaType(content.contentMimeType()); ResponseEntity.BodyBuilder b=ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL,CACHE_CONTROL).header("X-Content-Type-Options",NOSNIFF).contentType(type).contentLength(content.bytes().length);
-        if(attachment)b.header(HttpHeaders.CONTENT_DISPOSITION,ContentDisposition.attachment().filename(safeFilename(content.filename()),StandardCharsets.UTF_8).build().toString());
-        return b.body(content.bytes());
-    }
     private static String safeFilename(String name){return name.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]","_").replaceAll("^\\.+","").trim();}
     private static <T> ResponseEntity<T> json(T body){return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL,CACHE_CONTROL).contentType(MediaType.APPLICATION_JSON).body(body);}
     private static ResponseEntity<cn.jia.core.entity.JsonResult<Void>> error(HttpStatus status,String code,String message){return ResponseEntity.status(status).header(HttpHeaders.CACHE_CONTROL,CACHE_CONTROL).contentType(new MediaType(MediaType.APPLICATION_JSON,StandardCharsets.UTF_8)).body(cn.jia.core.entity.JsonResult.<Void>failure(code,message));}

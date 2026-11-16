@@ -97,72 +97,85 @@ public class ChatBountyAssetProjector {
         return jdbc.query("""
                 SELECT s.tenant_id,s.owner_jiacn,s.client_id,s.request_id,s.step_id,l.execution_id
                 FROM chat_interaction_step s
-                JOIN chat_step_execution_link l ON l.step_id=s.step_id
-                  AND l.tenant_id=s.tenant_id AND l.owner_jiacn=s.owner_jiacn AND l.client_id=s.client_id
-                JOIN agent_personal_workspace_execution e ON e.execution_id=l.execution_id
-                  AND e.tenant_id=s.tenant_id AND e.client_id=s.client_id AND e.owner_jiacn=s.owner_jiacn
-                  AND e.execution_state IN ('OUTPUT_COMMITTED','RESULT_COMMITTED','FAILED','INPUTS_REVOKED','CANCELLED') AND e.execution_mode='CONVERSATION'
-                WHERE s.tenant_id=? AND BINARY s.tenant_id=BINARY ? AND e.execution_protocol_version<>4 AND s.kind='EXECUTE' AND l.state='RUNNING'
-                  AND (s.state='RUNNING' OR (s.state=e.execution_state AND e.execution_state IN ('OUTPUT_COMMITTED','RESULT_COMMITTED')))
+                JOIN chat_step_execution_link l ON BINARY l.step_id=BINARY s.step_id
+                  AND BINARY l.tenant_id=BINARY s.tenant_id AND BINARY l.owner_jiacn=BINARY s.owner_jiacn AND BINARY l.client_id=BINARY s.client_id
+                JOIN agent_personal_workspace_execution e ON BINARY e.execution_id=BINARY l.execution_id
+                  AND BINARY e.tenant_id=BINARY s.tenant_id AND BINARY e.client_id=BINARY s.client_id AND BINARY e.owner_jiacn=BINARY s.owner_jiacn
+                  AND e.execution_state IN ('RESULT_COMMITTED','FAILED','INPUTS_REVOKED','CANCELLED') AND e.execution_mode='CONVERSATION'
+                WHERE s.tenant_id=? AND BINARY s.tenant_id=BINARY ? AND e.execution_protocol_version=6 AND s.kind='EXECUTE' AND l.state='RUNNING'
+                  AND (s.state='RUNNING' OR (s.state=e.execution_state AND e.execution_state='RESULT_COMMITTED'))
                 """ + clientFilter + suffix, (rs, n) -> new Candidate(rs.getString(1), rs.getString(2), rs.getString(3),
                         rs.getString(4), rs.getString(5), rs.getString(6)), args.toArray());
     }
 
-    /** Task-root/grant and committed byte check precede the conversation lock and event insert.
-     * Per-output message, asset relation and journal frames commit atomically.
-     */
+    /** All projection writes share TASK -> conversation -> execution locks; PRIVATE
+     * begins at the conversation. Discovery is read-only and cannot select an old protocol. */
     @Transactional(rollbackFor = Exception.class)
     public int project(Candidate candidate) {
-        if (candidate == null) throw new IllegalArgumentException("Missing candidate");
-        if(taskMutations==null)throw new IllegalStateException("Task projection lock unavailable");
-        var roots=jdbc.queryForList("SELECT task_id FROM agent_personal_workspace_execution WHERE execution_protocol_version<>4 AND BINARY tenant_id=BINARY ? AND BINARY client_id=BINARY ? AND BINARY owner_jiacn=BINARY ? AND BINARY execution_id=BINARY ?",
-                candidate.tenantId(),candidate.clientId(),candidate.ownerJiacn(),candidate.executionId());
+        if(candidate==null)throw new IllegalArgumentException("Missing candidate");
+        if(!partition.businessTenantId().equals(candidate.tenantId())
+                ||partition.clientId()!=null&&!partition.clientId().equals(candidate.clientId()))return 0;
+        var roots=projectionRoot(candidate,false);
         if(roots.size()!=1)return 0;
+        var locator=roots.getFirst();String task=(String)locator.get("task_id");
+        String business=(String)locator.get("business_scope");
+        java.util.function.Supplier<Integer> inConversation=()->{
+            var live=conversations.lockScopedById(candidate.tenantId(),candidate.ownerJiacn(),candidate.clientId(),
+                    (String)locator.get("conversation_id"));
+            if(live==null||live.getDeletedAt()!=null||live.getLifecycleGeneration()==null
+                    ||!candidate.tenantId().equals(live.getTenantId())||!candidate.ownerJiacn().equals(live.getJiacn())
+                    ||!candidate.clientId().equals(live.getClientId()))return 0;
+            var locked=projectionRoot(candidate,true);
+            if(locked.size()!=1||!locator.equals(locked.getFirst()))throw new IllegalStateException("Projection root changed");
+            return projectWithinRoot(candidate,live);
+        };
+        if("PRIVATE".equals(business)&&task==null&&locator.get("task_grant_id")==null
+                &&locator.get("task_grant_version")==null&&locator.get("assignment_revision")==null)return inConversation.get();
+        if(!"TASK".equals(business)||task==null)return 0;
+        if(taskMutations==null)throw new IllegalStateException("Task projection lock unavailable");
         return taskMutations.executeWithLockedTaskRootInOwnerScope(candidate.tenantId(),candidate.clientId(),candidate.ownerJiacn(),
-                (String)roots.getFirst().get("task_id"),root->projectWithinRoot(candidate));
+                task,root->inConversation.get());
     }
-    private int projectWithinRoot(Candidate candidate) {
+    private List<Map<String,Object>> projectionRoot(Candidate candidate,boolean lock) {
+        return jdbc.queryForList("""
+                SELECT task_id,business_scope,conversation_id,target_agent_id,task_grant_id,task_grant_version,assignment_revision
+                FROM agent_personal_workspace_execution WHERE execution_protocol_version=6 AND execution_mode='CONVERSATION'
+                  AND BINARY tenant_id=BINARY ? AND BINARY client_id=BINARY ? AND BINARY owner_jiacn=BINARY ?
+                  AND BINARY execution_id=BINARY ?
+                """+(lock?" FOR UPDATE":""),candidate.tenantId(),candidate.clientId(),candidate.ownerJiacn(),candidate.executionId());
+    }
+    private int projectWithinRoot(Candidate candidate,ChatConversationEntity live) {
         var request = requests.getRequest(candidate.tenantId(), candidate.ownerJiacn(),
                 candidate.clientId(), candidate.requestId());
         if (request == null || request.steps() == null) return 0;
         var step = request.steps().stream().filter(value -> candidate.stepId().equals(value.stepId()))
                 .findFirst().orElse(null);
-        boolean repairLink = Set.of("OUTPUT_COMMITTED","RESULT_COMMITTED").contains(request.state()) && step != null
+        boolean repairLink = "RESULT_COMMITTED".equals(request.state()) && step != null
                 && request.state().equals(step.state()) && "RUNNING".equals(step.executionState());
         if (!candidate.requestId().equals(request.requestId())
                 || !("RUNNING".equals(request.state()) || repairLink)
                 || step == null || !"EXECUTE".equals(step.kind()) || !("RUNNING".equals(step.state()) || repairLink)
-                || !candidate.executionId().equals(step.executionId()) || step.taskId() == null
+                || !candidate.executionId().equals(step.executionId())
                 || step.targetAgentId() == null) return 0;
         var scope = new PersonalWorkspaceExecutionService.OwnerScope(candidate.tenantId(),
                 candidate.clientId(), candidate.ownerJiacn());
         var execution = executions.get(scope, candidate.executionId());
         if (execution == null || !"CONVERSATION".equals(execution.executionMode())
-                || !Set.of("OUTPUT_COMMITTED", "RESULT_COMMITTED", "FAILED", "INPUTS_REVOKED", "CANCELLED").contains(execution.state())
+                || !Set.of("RESULT_COMMITTED", "FAILED", "INPUTS_REVOKED", "CANCELLED").contains(execution.state())
                 || !candidate.executionId().equals(execution.executionId())
-                || !step.taskId().equals(execution.taskId())
+                || !Objects.equals(step.taskId(),execution.taskId())
                 || !request.conversationId().equals(execution.conversationId())
                 || !step.targetAgentId().equals(execution.targetAgentId())
                 || execution.runId() == null) return 0;
-        boolean generic="RESULT_COMMITTED".equals(execution.state());String terminal=generic?"RESULT_COMMITTED":"OUTPUT_COMMITTED";
-        if (repairLink && !request.state().equals(execution.state())) return 0;
-        if (!Set.of("OUTPUT_COMMITTED","RESULT_COMMITTED").contains(execution.state())) return projectFailure(candidate, request, step, execution.state());
-        cn.jia.agent.service.SkillExecutionService.ResultView resultView=generic?skills.result(scope,candidate.executionId()):null;
-        Map<String,Object> manifest=generic?ChatSkillResultFacts.verifiedResult(resultView,candidate.executionId()):null;
-        List<PersonalWorkspaceExecutionService.ConversationOutputInfo> outputs = executions.listConversationOutputs(scope, step.taskId(), execution.runId());
-        if(outputs==null||!generic&&outputs.isEmpty())throw new IllegalStateException("Committed output catalogue unavailable");
-        if(generic)ChatSkillResultFacts.verifyArtifacts(manifest,outputs);
-        // Runtime grant/root locks are acquired above. Other writers follow root -> conversation.
-        ChatConversationEntity live = conversations.lockScopedById(candidate.ownerJiacn(),
-                candidate.clientId(), request.conversationId());
-        if (live == null || live.getDeletedAt() != null || live.getLifecycleGeneration() == null
-                || !Objects.equals(request.conversationGeneration(), Long.toString(live.getLifecycleGeneration()))
-                || !candidate.tenantId().equals(live.getTenantId())
-                || !candidate.ownerJiacn().equals(live.getJiacn())
-                || !candidate.clientId().equals(live.getClientId())
-                || !step.taskId().equals(live.getTaskId())
-                || !"bounty".equals(live.getConversationScopeType())
-                || !Objects.equals(live.getConversationScopeKey(), "task:" + step.taskId())) return 0;
+        if(!liveScope(request,step,live))return 0;
+        String terminal="RESULT_COMMITTED";
+        if(repairLink&&!request.state().equals(execution.state()))return 0;
+        if(!terminal.equals(execution.state()))return projectFailure(candidate,request,step,execution.state(),live);
+        var resultView=skills.result(scope,candidate.executionId());
+        Map<String,Object> manifest=ChatSkillResultFacts.verifiedResult(resultView,candidate.executionId());
+        List<PersonalWorkspaceExecutionService.ConversationOutputInfo> outputs=executions.listConversationOutputs(scope,execution.executionId(),execution.runId());
+        if(outputs==null)throw new IllegalStateException("Committed output catalogue unavailable");
+        ChatSkillResultFacts.verifyArtifacts(manifest,outputs);
         int count = 0;
         for (var output : outputs) {
             if (output == null || !candidate.executionId().equals(output.executionId())
@@ -191,7 +204,7 @@ public class ChatBountyAssetProjector {
             // asset matches the native committed bytes. Never republish a missing asset.
             if (repairLink) throw new IllegalStateException("Committed projection asset is unavailable");
             long now = System.currentTimeMillis();
-            String messageText = "已生成成果；可预览或下载。";
+            String messageText = "已生成文件；可预览或保存到个人资料。";
             ChatMessageEntity message = new ChatMessageEntity().setConversationId(request.conversationId())
                     .setMessageType("ASSISTANT").setContent(messageText)
                     .setMetadata(JsonUtil.toJson(Map.of("requestId", candidate.requestId(),
@@ -240,7 +253,7 @@ public class ChatBountyAssetProjector {
                 TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                     @Override public void afterCommit() {
                         broker.publishIfSubscribed(request.conversationId(), generation, () -> {
-                            var current = conversations.findScopedById(candidate.ownerJiacn(), candidate.clientId(),
+                            var current = conversations.findScopedById(candidate.tenantId(), candidate.ownerJiacn(), candidate.clientId(),
                                     request.conversationId());
                             return current != null && current.getDeletedAt() == null
                                     && Objects.equals(current.getLifecycleGeneration(), generation)
@@ -251,13 +264,13 @@ public class ChatBountyAssetProjector {
             }
             count++;
         }
-        if (generic) count+=projectData(candidate,request,step,live,manifest,repairLink);
+        count+=projectData(candidate,request,step,live,manifest,repairLink);
         if (repairLink) {
             finalizeExecutionLink(candidate, terminal, System.currentTimeMillis());
-            if(generic)skills.markProjected(scope,candidate.executionId(),(String)manifest.get("resultDigest"));
+            skills.markProjected(scope,candidate.executionId(),(String)manifest.get("resultDigest"));
             return 1; // Progress only; no new message, asset, event or provider request.
         }
-        if (count > 0 || generic) {
+        {
             finalizeExecutionLink(candidate, terminal, System.currentTimeMillis());
             // The source catalogue was checked against committed bytes and an immutable intent.
             // A later GET or SSE replay only reads this projection; it never starts execution.
@@ -279,7 +292,7 @@ public class ChatBountyAssetProjector {
                     || events.updateRequestState(requestRow, terminal, System.currentTimeMillis()) != 1)
                 throw new IllegalStateException("Unable to finalize request projection");
         }
-        if(generic)skills.markProjected(scope,candidate.executionId(),(String)manifest.get("resultDigest"));
+        skills.markProjected(scope,candidate.executionId(),(String)manifest.get("resultDigest"));
         return count;
     }
 
@@ -295,15 +308,20 @@ public class ChatBountyAssetProjector {
             var prior=ChatSkillSnapshotJson.object((String)existing.getFirst().get("payload_json"));
             if(!c.executionId().equals(prior.get("executionId"))||!manifest.get("resultDigest").equals(prior.get("resultDigest"))
                     ||!request.conversationId().equals(prior.get("conversationId"))||!c.requestId().equals(prior.get("requestId"))
-                    ||!ChatSkillSnapshotJson.write(manifest.get("data")).equals(ChatSkillSnapshotJson.write(prior.get("data"))))throw new IllegalStateException("Projected result differs");return 0;
+                    ||!ChatSkillSnapshotJson.write(manifest.get("data")).equals(ChatSkillSnapshotJson.write(prior.get("data"))))throw new IllegalStateException("Projected result differs");
+            finishPrivateTurn(c,request,step,"FINAL_PERSISTED",Long.parseLong((String)prior.get("messageId")),(String)manifest.get("resultDigest"));
+            return 0;
         }
         if(repair)throw new IllegalStateException("Result data message missing");
-        String text=manifest.get("data")==null?"执行结果已登记。":ChatSkillSnapshotJson.write(manifest.get("data"));
+        Object data=manifest.get("data");
+        String text=data==null?"执行结果已登记。":data instanceof Map<?,?> answer&&answer.size()==1&&answer.get("answer") instanceof String value
+                ?value:ChatSkillSnapshotJson.write(data);
         var metadata=new java.util.LinkedHashMap<String,Object>();metadata.put("requestId",c.requestId());metadata.put("stepId",c.stepId());
         metadata.put("agentId",step.targetAgentId());metadata.put("executionId",c.executionId());metadata.put("resultDigest",manifest.get("resultDigest"));metadata.put("data",manifest.get("data"));
         var message=new ChatMessageEntity().setConversationId(request.conversationId()).setMessageType("ASSISTANT").setContent(text)
                 .setMetadata(JsonUtil.toJson(metadata)).setJiacn(c.ownerJiacn()).setSyncStatus("PENDING").setConversationType("juyiting").setSenderType("agent").setSenderName("好汉");
         message.init4Creation();if(messages.insertScoped(c.tenantId(),c.clientId(),message)!=1||message.getId()==null)throw new IllegalStateException("Result message persistence failed");
+        finishPrivateTurn(c,request,step,"FINAL_PERSISTED",message.getId(),(String)manifest.get("resultDigest"));
         var frame=new java.util.LinkedHashMap<String,Object>(metadata);frame.put("type","agent_message");frame.put("conversationId",request.conversationId());
         frame.put("messageId",Long.toString(message.getId()));frame.put("senderType","agent");frame.put("senderName","好汉");frame.put("content",text);frame.put("parts",List.of());
         var event=new ChatConversationEventEntity().setEventId(id).setTenantId(c.tenantId()).setOwnerJiacn(c.ownerJiacn()).setClientId(c.clientId())
@@ -314,11 +332,48 @@ public class ChatBountyAssetProjector {
             var signal=new java.util.LinkedHashMap<String,Object>(frame);signal.put("eventId",id);signal.put("eventSequence",Long.toString(event.getEventSequence()));signal.put("eventVersion",Long.toString(event.getEventSequence()));
             long generation=live.getLifecycleGeneration();TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override public void afterCommit() {broker.publishIfSubscribed(request.conversationId(),generation,()->{
-                    var current=conversations.findScopedById(c.ownerJiacn(),c.clientId(),request.conversationId());return current!=null&&current.getDeletedAt()==null
+                    var current=conversations.findScopedById(c.tenantId(),c.ownerJiacn(),c.clientId(),request.conversationId());return current!=null&&current.getDeletedAt()==null
                             &&c.tenantId().equals(current.getTenantId())&&Objects.equals(generation,current.getLifecycleGeneration());},signal);}
             });
         }
         return 1;
+    }
+
+    private boolean liveScope(ChatDeliberationService.RequestView request,
+            ChatDeliberationService.StepView step,ChatConversationEntity live) {
+        if(!request.conversationId().equals(String.valueOf(live.getId()))
+                ||!request.conversationGeneration().equals(Long.toString(live.getLifecycleGeneration()))
+                ||!Objects.equals(step.taskId(),live.getTaskId())||!"juyiting".equals(live.getConversationType()))return false;
+        if(step.taskId()!=null)return "bounty".equals(live.getConversationScopeType())
+                &&("task:"+step.taskId()).equals(live.getConversationScopeKey());
+        if(!"private".equals(live.getConversationScopeType())||!step.targetAgentId().equals(live.getTargetAgentId())
+                ||!("agent:"+step.targetAgentId()).equals(live.getConversationScopeKey()))return false;
+        try {return List.of(step.targetAgentId()).equals(JsonUtil.getMapper().readValue(live.getTargetAgentIds(),List.class));}
+        catch(RuntimeException malformed){return false;}
+    }
+
+    /** PRIVATE has one native EXECUTE turn, not a second CHAT invocation. Its final message
+     * and terminal state commit with the result projection, so HTTP/SSE replay can finish. */
+    private void finishPrivateTurn(Candidate c,ChatDeliberationService.RequestView request,
+            ChatDeliberationService.StepView step,String state,Long messageId,String resultDigest) {
+        if(step.taskId()!=null)return;
+        var turns=events.findTurnsByRequest(c.tenantId(),c.ownerJiacn(),c.clientId(),c.requestId());
+        if(turns.size()!=1)throw new IllegalStateException("Private execution turn missing");
+        var turn=events.lockTurn(c.tenantId(),c.ownerJiacn(),c.clientId(),turns.getFirst().getTurnId());
+        if(turn==null||!"EXECUTE".equals(turn.getRoute())||!c.requestId().equals(turn.getRequestId())
+                ||!request.requestRevision().equals(String.valueOf(turn.getRequestRevision()))
+                ||!request.conversationId().equals(turn.getConversationId())
+                ||!request.conversationGeneration().equals(String.valueOf(turn.getConversationGeneration()))
+                ||!step.targetAgentId().equals(turn.getTargetAgentId()))throw new IllegalStateException("Private execution turn scope changed");
+        if("FINAL_PERSISTED".equals(state)) {
+            if(messageId==null||resultDigest==null)throw new IllegalStateException("Private result message missing");
+            if(Set.of("FINAL_PERSISTED","PUBLISHED").contains(turn.getState())) {
+                if(!messageId.equals(turn.getFinalMessageId())||!resultDigest.equals(turn.getFinalDigest()))throw new IllegalStateException("Private turn result differs");
+                return;
+            }
+            if(events.persistFinal(turn,resultDigest,messageId,System.currentTimeMillis())!=1)throw new IllegalStateException("Private turn final CAS failed");
+        } else if(!state.equals(turn.getState())&&events.updateTurnState(turn,state,"NATIVE_EXECUTION_"+state,System.currentTimeMillis())!=1)
+            throw new IllegalStateException("Private turn terminal CAS failed");
     }
 
     /** Exact monotone link CAS follows the existing owner/root/conversation locks.
@@ -336,15 +391,7 @@ public class ChatBountyAssetProjector {
     /** A confirmed execution terminal state is also a durable conversation fact, not an endless spinner.
      * Unknown transport outcomes are NOT candidates; no retry or provider operation occurs here. */
     private int projectFailure(Candidate candidate, ChatDeliberationService.RequestView request,
-            ChatDeliberationService.StepView step, String executionState) {
-        var live = conversations.lockScopedById(candidate.ownerJiacn(), candidate.clientId(), request.conversationId());
-        if (live == null || live.getDeletedAt() != null || live.getLifecycleGeneration() == null
-                || !request.conversationId().equals(String.valueOf(live.getId()))
-                || !request.conversationGeneration().equals(Long.toString(live.getLifecycleGeneration()))
-                || !candidate.tenantId().equals(live.getTenantId()) || !candidate.ownerJiacn().equals(live.getJiacn())
-                || !candidate.clientId().equals(live.getClientId()) || !step.taskId().equals(live.getTaskId())
-                || !"bounty".equals(live.getConversationScopeType())
-                || !("task:" + step.taskId()).equals(live.getConversationScopeKey())) return 0;
+            ChatDeliberationService.StepView step, String executionState,ChatConversationEntity live) {
         var row = events.findRequest(candidate.tenantId(), candidate.ownerJiacn(), candidate.clientId(), candidate.requestId());
         if (row == null || !"RUNNING".equals(row.getAggregateState())) return 0; // Another consumer already projected it.
         if (!candidate.tenantId().equals(row.getTenantId()) || !candidate.ownerJiacn().equals(row.getOwnerJiacn())
@@ -356,6 +403,7 @@ public class ChatBountyAssetProjector {
         String state = Set.of("INPUTS_REVOKED", "CANCELLED").contains(executionState) ? "CANCELLED" : "FAILED";
         long now = System.currentTimeMillis();
         finalizeExecutionLink(candidate, executionState, now);
+        finishPrivateTurn(candidate,request,step,state,null,null);
         if (jdbc.update("""
                 UPDATE chat_interaction_step SET state=?,state_version=state_version+1,updated_at=?
                 WHERE step_id=? AND tenant_id=? AND owner_jiacn=? AND client_id=? AND state='RUNNING' AND state_version=?
@@ -382,7 +430,7 @@ public class ChatBountyAssetProjector {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override public void afterCommit() {
                     broker.publishIfSubscribed(request.conversationId(), live.getLifecycleGeneration(), () -> {
-                        var current = conversations.findScopedById(candidate.ownerJiacn(), candidate.clientId(), request.conversationId());
+                        var current = conversations.findScopedById(candidate.tenantId(), candidate.ownerJiacn(), candidate.clientId(), request.conversationId());
                         return current != null && current.getDeletedAt() == null && candidate.tenantId().equals(current.getTenantId())
                                 && candidate.ownerJiacn().equals(current.getJiacn()) && candidate.clientId().equals(current.getClientId())
                                 && Objects.equals(current.getLifecycleGeneration(), live.getLifecycleGeneration());

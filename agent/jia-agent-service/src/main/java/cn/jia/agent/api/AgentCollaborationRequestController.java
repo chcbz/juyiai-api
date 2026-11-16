@@ -10,15 +10,13 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.List;
 import java.util.Objects;
 
-/** Explicit direct-@ / private-meeting execution entry; it never routes through Song Jiang. */
+/** Authenticated historical collaboration reads; no execution admission endpoint. */
 @RestController
 @RequestMapping("/agent/hall/collaboration")
 public class AgentCollaborationRequestController {
@@ -27,25 +25,6 @@ public class AgentCollaborationRequestController {
 
     public AgentCollaborationRequestController(AgentCollaborationRequestService service) {
         this.service = Objects.requireNonNull(service, "service");
-    }
-
-    @PostMapping(value = "/requests", consumes = MediaType.APPLICATION_JSON_VALUE,
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<AgentCollaborationRequestService.RequestView>> submit(
-            @RequestHeader(value = "Idempotency-Key", required = false) String key,
-            HttpServletRequest request, Authentication authentication) {
-        HallRequestDraftController.requireNoQuery(request);
-        CreateRequest body = HallRequestDraftController.parse(
-                HallRequestDraftController.readBounded(request), CreateRequest.class);
-        if (body == null || body.inputs() == null) throw new RequestFailure();
-        return cn.jia.core.config.ApiJsonResponses.success(ResponseEntity.status(HttpStatus.ACCEPTED).header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
-                .contentType(MediaType.APPLICATION_JSON).body(service.submit(scope(authentication),
-                        new AgentCollaborationRequestService.RequestCommand(body.conversationId(),
-                                body.targetAgentId(), body.instruction(), body.outputContentMimeType(),
-                                body.inputs().stream().map(input -> {
-                                    if (input == null || input.version() == null) throw new RequestFailure();
-                                    return new AgentCollaborationRequestService.InputSelection(input.fileId(), input.version());
-                                }).toList()), key)));
     }
 
     @GetMapping(value = "/requests/{requestId}", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -114,9 +93,6 @@ public class AgentCollaborationRequestController {
                 .contentType(MediaType.APPLICATION_JSON).body(cn.jia.core.entity.JsonResult.<Void>failure(code, message));
     }
 
-    public record CreateRequest(String conversationId, String targetAgentId, String instruction,
-            String outputContentMimeType, List<InputRequest> inputs) { }
-    public record InputRequest(String fileId, Integer version) { }
     public record ErrorBody(String code, String message) { }
     private static final class RequestFailure extends RuntimeException { }
 }

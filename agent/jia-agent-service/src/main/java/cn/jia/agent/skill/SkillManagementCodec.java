@@ -75,15 +75,24 @@ public final class SkillManagementCodec {
         require(schema.validate(node.toString(),InputFormat.JSON).isEmpty(),400,"BAD_REQUEST");
         unicode(node);
     }
-    /** Separate v5 execution binding; the frozen v1 definition and its digest remain unchanged. */
-    public static void validateNativeTaskBinding(Object value) {
+    /** Separate v6 execution binding; the frozen v1 definition and its digest remain unchanged. */
+    public static void validateExecutionBinding(Object value) {
         var node=value instanceof JsonNode n?n:JSON.valueToTree(value);
-        var schema=DEFINITIONS.computeIfAbsent("NativeTaskSkillBindingV5",name->{
+        var schema=DEFINITIONS.computeIfAbsent("ExecutionBindingV6",name->{
             var root=((ObjectNode)SCHEMA).deepCopy();
             root.put("$id",SCHEMA.path("$id").asText()+"?definition="+name);
             var definitions=(ObjectNode)root.get("definitions");
             var binding=((ObjectNode)definitions.get("TaskSkillBinding")).deepCopy();
-            var manifest=((ObjectNode)binding.get("properties")).putObject("manifestSha256");
+            var required=(com.fasterxml.jackson.databind.node.ArrayNode)binding.get("required");
+            for(int i=0;i<required.size();i++) {
+                if("taskGrantId".equals(required.get(i).asText()))required.set(i,JSON.getNodeFactory().textNode("scopeSha256"));
+                else if("taskGrantVersion".equals(required.get(i).asText()))required.set(i,JSON.getNodeFactory().textNode("grantRevision"));
+            }
+            var properties=(ObjectNode)binding.get("properties");
+            properties.remove("taskGrantId");properties.remove("taskGrantVersion");
+            properties.putObject("scopeSha256").put("$ref","#/definitions/Sha256");
+            properties.putObject("grantRevision").put("$ref","#/definitions/PositiveRevision");
+            var manifest=properties.putObject("manifestSha256");
             var options=manifest.putArray("anyOf");
             options.addObject().put("$ref","#/definitions/Sha256");
             options.addObject().put("type","null");

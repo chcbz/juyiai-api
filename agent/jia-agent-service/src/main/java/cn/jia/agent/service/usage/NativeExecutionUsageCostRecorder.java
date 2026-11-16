@@ -30,9 +30,11 @@ public final class NativeExecutionUsageCostRecorder {
      * state/version. No task/grant/lease writes or provider calls occur in this adapter.
      */
     public UsageCostService.Receipt record(PersonalWorkspaceExecutionService.RuntimeScope scope,
-            String taskId, String runId, Evidence evidence) {
+            String executionId, String runId, Evidence evidence) {
+        if(evidence==null||!java.util.Objects.equals(executionId,evidence.executionId()))
+            throw new IllegalArgumentException("Execution identity mismatch");
         var execution = executions.findForNativeUsageCost(scope.tenantId(), scope.clientId(),
-                scope.executorOwnerJiacn(), scope.agentId(), taskId, runId, evidence.executionId());
+                scope.executorOwnerJiacn(), scope.agentId(), executionId, runId);
         if (execution == null) throw new PersonalWorkspaceExecutionService.Failure(
                 PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
         var binding = new UsageCostService.Binding(new EconomyScope(scope.tenantId(), scope.clientId()),

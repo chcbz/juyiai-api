@@ -21,7 +21,7 @@ public class StreamingFileMultipartConfiguration {
         String path=request.getRequestURI().substring(request.getContextPath().length());
         return path.equals("/agent/personal-workspace/files")
                 ||path.matches("/agent/personal-workspace/files/[^/]+/versions")
-                ||path.matches("/internal/agent/tasks/[^/]+/runs/[^/]+/conversation/outputs/[^/]+/content");
+                ||path.matches("/internal/agent/executions/[^/]+/runs/[^/]+/outputs/[^/]+/content");
     }
     static final class Resolver extends StandardServletMultipartResolver {
         @Override public MultipartHttpServletRequest resolveMultipart(HttpServletRequest request) {

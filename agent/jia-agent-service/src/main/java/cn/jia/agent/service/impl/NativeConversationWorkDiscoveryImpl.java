@@ -35,7 +35,8 @@ public final class NativeConversationWorkDiscoveryImpl implements NativeConversa
         });
     }
     @Override public List<NativeConversationWorkAvailable> pendingFor(List<NativeConversationWorkAvailable> targets) {
-        var admitted=targets.stream().filter(target -> partition.businessTenantId().equals(target.tenantId())
+        var admitted=targets.stream().filter(target -> "NATIVE_CONVERSATION".equals(target.lane())
+                && partition.businessTenantId().equals(target.tenantId())
                 && (partition.clientId()==null || partition.clientId().equals(target.clientId()))).distinct().toList();
         if (admitted.isEmpty()) return List.of();
         return mapper.pendingFor(partition.businessTenantId(),admitted);

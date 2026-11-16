@@ -19,10 +19,10 @@ class NativeExecutionUsageCostRecorderTest {
             new NativeExecutionUsageCostRecorder.Evidence("exec", NativeExecutionUsageCostRecorder.Phase.TERMINAL, "requested-only", "{\"status\":\"UNVERIFIED\",\"tokenUsage\":{\"last\":{\"inputTokens\":12},\"total\":{\"inputTokens\":90}}}");
 
     @Test void cancelledExecutionUsesHistoricalOwnerAndNeverGuessesUsagePriceOrReopensBusiness() {
-        when(executions.findForNativeUsageCost("0", "client", "executor", "agent", "task", "run", "exec"))
+        when(executions.findForNativeUsageCost("0", "client", "executor", "agent", "exec", "run"))
                 .thenReturn(new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setTaskId("task")
                         .setRunId("run").setOwnerJiacn("task-owner").setExecutionState("CANCELLED"));
-        recorder.record(scope, "task", "run", evidence);
+        recorder.record(scope, "exec", "run", evidence);
         var saved = ArgumentCaptor.forClass(UsageCostService.Observation.class);
         verify(costs).record(saved.capture());
         assertEquals("task-owner", saved.getValue().binding().ownerJiacn());
@@ -33,15 +33,15 @@ class NativeExecutionUsageCostRecorderTest {
         assertNull(saved.getValue().normalizedUsage()); assertNull(saved.getValue().price());
         assertTrue(saved.getValue().rawUsageJson().contains("requested-only"));
         assertTrue(saved.getValue().rawUsageJson().contains("\"total\""));
-        verify(executions).findForNativeUsageCost("0", "client", "executor", "agent", "task", "run", "exec");
+        verify(executions).findForNativeUsageCost("0", "client", "executor", "agent", "exec", "run");
         verifyNoMoreInteractions(executions, costs);
     }
 
     @Test void startedObservationCreatesSamePendingAttemptBeforeAnyKnownUsage() {
-        when(executions.findForNativeUsageCost("0", "client", "executor", "agent", "task", "run", "exec"))
+        when(executions.findForNativeUsageCost("0", "client", "executor", "agent", "exec", "run"))
                 .thenReturn(new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setTaskId("task")
                         .setRunId("run").setOwnerJiacn("task-owner"));
-        recorder.record(scope, "task", "run", new NativeExecutionUsageCostRecorder.Evidence(
+        recorder.record(scope, "exec", "run", new NativeExecutionUsageCostRecorder.Evidence(
                 "exec", NativeExecutionUsageCostRecorder.Phase.STARTED, "requested-only", "null"));
         var saved = ArgumentCaptor.forClass(UsageCostService.Observation.class);
         verify(costs).record(saved.capture());
@@ -51,8 +51,24 @@ class NativeExecutionUsageCostRecorderTest {
         assertNull(saved.getValue().normalizedUsage()); assertNull(saved.getValue().price());
     }
 
+    @Test void privateEvidenceHasOwnerButNeverInventsTaskOrWalletCharge() {
+        when(executions.findForNativeUsageCost("0","client","executor","agent","exec","run"))
+                .thenReturn(new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setRunId("run")
+                        .setOwnerJiacn("executor").setBusinessScope("PRIVATE").setTaskId(null));
+        recorder.record(scope,"exec","run",evidence);
+        var saved=ArgumentCaptor.forClass(UsageCostService.Observation.class);
+        verify(costs).record(saved.capture());
+        assertNull(saved.getValue().binding().taskId());
+        assertEquals("executor",saved.getValue().binding().ownerJiacn());
+        assertNull(saved.getValue().normalizedUsage());assertNull(saved.getValue().price());
+    }
+    @Test void routeExecutionCannotBeReplacedByEvidenceBody() {
+        assertThrows(IllegalArgumentException.class,()->recorder.record(scope,"another","run",evidence));
+        verifyNoInteractions(executions,costs);
+    }
+
     @Test void missingHistoricalAuthorityNeverWritesCosts() {
-        assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> recorder.record(scope, "task", "run", evidence));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> recorder.record(scope, "exec", "run", evidence));
         verifyNoInteractions(costs);
     }
 }

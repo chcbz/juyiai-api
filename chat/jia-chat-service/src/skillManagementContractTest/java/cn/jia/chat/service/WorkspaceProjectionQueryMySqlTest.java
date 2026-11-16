@@ -35,8 +35,8 @@ class WorkspaceProjectionQueryMySqlTest extends SkillManagementMySqlFixture {
         jdbc.update("INSERT INTO agent_personal_workspace_execution VALUES ('0','client','owner',?,'CONVERSATION',?,?)",id,state,protocol);
     }
     @Test void exactLookupAndCompensationShareTerminalPredicate() {
-        row("ok","RESULT_COMMITTED",5);row("failed","FAILED",5);row("revoked","INPUTS_REVOKED",5);row("cancelled","CANCELLED",5);
-        row("queued","QUEUED",5);row("retired","RESULT_COMMITTED",4);
+        row("ok","RESULT_COMMITTED",6);row("failed","FAILED",6);row("revoked","INPUTS_REVOKED",6);row("cancelled","CANCELLED",6);
+        row("queued","QUEUED",6);row("retired","RESULT_COMMITTED",4);row("retired5","RESULT_COMMITTED",5);
         var hint=new WorkspaceExecutionProjectionHint("0","client","owner","ok");
         assertEquals(List.of("ok"),projector.pendingExecution(hint).stream().map(ChatBountyAssetProjector.Candidate::executionId).toList());
         assertEquals(Set.of("ok","failed","revoked","cancelled"),new HashSet<>(projector.pending(null,64).stream().map(ChatBountyAssetProjector.Candidate::executionId).toList()));
@@ -46,7 +46,7 @@ class WorkspaceProjectionQueryMySqlTest extends SkillManagementMySqlFixture {
         assertTrue(projector.pendingExecution(hint).isEmpty());
     }
     @Test void exactScopeRejectsCaseAndTrailingSpaceAliases() {
-        row("exec","RESULT_COMMITTED",5);
+        row("exec","RESULT_COMMITTED",6);
         for(var hint:List.of(new WorkspaceExecutionProjectionHint("0","CLIENT","owner","exec"),
                 new WorkspaceExecutionProjectionHint("0 ","client","owner","exec"),
                 new WorkspaceExecutionProjectionHint("0","client","Owner","exec"),
@@ -55,8 +55,8 @@ class WorkspaceProjectionQueryMySqlTest extends SkillManagementMySqlFixture {
             assertTrue(projector.pendingExecution(hint).isEmpty());
     }
     @Test void recoveryPartitionsBeforeLimitAndExactHintCannotOverrideProcessScope() {
-        row("a-foreign","RESULT_COMMITTED",5); row("b-other-client","RESULT_COMMITTED",5);
-        row("c-local","RESULT_COMMITTED",5);
+        row("a-foreign","RESULT_COMMITTED",6); row("b-other-client","RESULT_COMMITTED",6);
+        row("c-local","RESULT_COMMITTED",6);
         for (String table : List.of("chat_interaction_step", "chat_step_execution_link", "agent_personal_workspace_execution")) {
             String key = table.equals("chat_interaction_step") ? "step_id" : "execution_id";
             jdbc.update("UPDATE " + table + " SET tenant_id='other' WHERE " + key + "=?",

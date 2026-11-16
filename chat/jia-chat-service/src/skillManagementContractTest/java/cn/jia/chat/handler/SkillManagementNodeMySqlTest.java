@@ -154,7 +154,7 @@ public class SkillManagementNodeMySqlTest extends SkillManagementWireMySqlTest {
         pdfFirstInstall=true;publishInstruction("1.0.0",1);
         try(var node=new NodeSession(false)) {
             var first=node.complete(installOverHttp(),true);String old=text(object(first.get("target")),"skillInstallationId");
-            var binding=service.admitNative(scope(),"pdf-export",old,()->service.nativeTaskBinding("0",ACTOR.clientId(),"old-execution","old-grant",1,AGENT,old));
+            var binding=service.admitNative(scope(),"pdf-export",old,()->service.executionBinding("0",ACTOR.clientId(),"old-execution","a".repeat(64),1,AGENT,old));
             publishInstruction("2.0.0",2);
             jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","COVERED");
             var upgrade=packageChange("UPGRADE",old,text(first,"skillRevision"),"spv_pdf_2");node.supply(upgrade);
@@ -163,11 +163,11 @@ public class SkillManagementNodeMySqlTest extends SkillManagementWireMySqlTest {
             assertThrows(cn.jia.agent.skill.SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",old,()->"never"));
             recovery.recover();upgrade=current(upgrade);assertEquals("SUCCEEDED",upgrade.get("status"));
             assertNotEquals(old,object(upgrade.get("target")).get("skillInstallationId"));
-            assertEquals(binding,service.nativeTaskBinding("0",ACTOR.clientId(),"old-execution","old-grant",1,AGENT,old));
+            assertEquals(binding,service.executionBinding("0",ACTOR.clientId(),"old-execution","a".repeat(64),1,AGENT,old));
             var disabled=policyChange("DISABLE",upgrade);String active=text(object(upgrade.get("target")),"skillInstallationId");
             assertThrows(cn.jia.agent.skill.SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",active,()->"never"));
             disabled=node.complete(disabled,false);assertEquals(false,disabled.get("desiredEnabled"));
-            var resolved=node.peer.call(map("op","resolveNativeTask","taskSkillBinding",binding));
+            var resolved=node.peer.call(map("op","resolveNativeTask","executionBinding",binding));
             var exact=object(resolved.stream().filter(r->"taskPackage".equals(r.get("kind"))).findFirst().orElseThrow().get("value"));
             for(String field:List.of("skillInstallationId","productVersionId","skillKey","skillVersion","packageSha256","manifestSha256","approvedPermissionsSha256"))
                 assertEquals(binding.get(field),exact.get(field),field);

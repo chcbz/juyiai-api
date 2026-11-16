@@ -105,6 +105,20 @@ public class JuyitingAgentRelayService {
                 Flux.fromIterable(accepted).concatWith(durableEvents));
     }
 
+    /** Observe a committed private native request, never invoke the CHAT relay as a fallback. */
+    public JuyitingAgentRelayResult acceptedPrivate(ChatDeliberationService.Admission admission,
+            String tenantId,ServerResolvedSender sender) {
+        var trusted=requireTrustedSender(sender);
+        if(admission==null||admission.route()!=InteractionRoute.EXECUTE||admission.dispatches().size()!=1)
+            throw new IllegalArgumentException("Invalid private native admission");
+        if(admission.replay())return replayAdmission(admission);
+        var accepted=admission.dispatches().stream().map(dispatch->buildAgentDeliveryEventJson(
+                admission.conversationId(),dispatch.targetAgentId(),false,dispatch)).toList();
+        return new JuyitingAgentRelayResult(true,Mono.just(true),Flux.fromIterable(accepted).concatWith(
+                requestScopedEvents(admission,tenantId,trusted.jiacn(),trusted.clientId(),
+                        admission.conversationId(),admission.conversationGeneration())));
+    }
+
     /** One POST owns one buffer; the independent conversation events stream stays live. */
     private Flux<String> requestScopedEvents(ChatDeliberationService.Admission admission,
             String tenantId, String ownerJiacn, String clientId, String conversationId, long generation) {
@@ -146,9 +160,15 @@ public class JuyitingAgentRelayService {
                     || !expectedGeneration.equals(view.conversationGeneration())) {
                 throw new IllegalStateException("Request scope unavailable");
             }
-            // This completion rule is only for CHAT/INSPECT. Typed EXECUTE owns a different
-            // lifecycle: even terminal CHAT turns must not settle its execution-state stream.
-            if (view.steps() == null || view.steps().stream().anyMatch(step -> step == null
+            if(admission.route()==InteractionRoute.EXECUTE) {
+                if(view.steps()==null||view.steps().size()!=1)throw new IllegalStateException("Private execution step missing");
+                var step=view.steps().getFirst();
+                if(step==null||!"EXECUTE".equals(step.kind())||step.taskId()!=null||step.executionId()==null)
+                    throw new IllegalStateException("Private execution scope mismatch");
+                String expectedStep="INPUTS_REVOKED".equals(step.executionState())?"CANCELLED":step.executionState();
+                if(!Set.of("RESULT_COMMITTED","FAILED","CANCELLED").contains(step.state())
+                        ||!Objects.equals(step.state(),expectedStep))return false;
+            } else if (view.steps() == null || view.steps().stream().anyMatch(step -> step == null
                     || !("CHAT".equals(step.kind()) || "INSPECT".equals(step.kind())))) return false;
             if (view.turns() == null || view.turns().isEmpty() || admission.dispatches().isEmpty()) return false;
             Set<String> seen = new HashSet<>();
@@ -170,7 +190,9 @@ public class JuyitingAgentRelayService {
                     throw new IllegalStateException("Request turn target unavailable");
                 }
             }
-            return view.state() != null && TERMINAL_REQUEST_STATES.contains(view.state()) && allTerminal;
+            boolean terminalRequest=view.state()!=null&&(TERMINAL_REQUEST_STATES.contains(view.state())
+                    ||admission.route()==InteractionRoute.EXECUTE&&"RESULT_COMMITTED".equals(view.state()));
+            return terminalRequest && allTerminal;
         }).subscribeOn(Schedulers.boundedElastic());
     }
 

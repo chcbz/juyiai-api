@@ -8,11 +8,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Objects;
 
-/**
- * Binds an explicit Hall target to the existing durable workspace-execution queue.
- * The conversation ACL is checked before an execution exists; the execution service then checks
- * exact target ownership and preserves idempotency. No chat message is used as an execution trigger.
- */
+/** Read-only reconciliation of historical collaboration facts, preserving conversation ACL. */
 @Service
 public class AgentCollaborationRequestServiceImpl implements AgentCollaborationRequestService {
     static final String DISPATCH_MODE = "RUNTIME_COMMAND_DISPATCH";
@@ -23,31 +19,6 @@ public class AgentCollaborationRequestServiceImpl implements AgentCollaborationR
             PersonalWorkspaceExecutionService executions) {
         this.conversations = Objects.requireNonNull(conversations, "conversations");
         this.executions = Objects.requireNonNull(executions, "executions");
-    }
-
-    @Override
-    public RequestView submit(OwnerScope scope, RequestCommand command, String idempotencyKey) {
-        validateScope(scope);
-        validateCommand(command);
-        validateKey(idempotencyKey);
-        WorkspaceConversationAccessService.ConversationView conversation = conversation(scope,
-                command.conversationId());
-        requireTarget(conversation, command.targetAgentId());
-        try {
-            PersonalWorkspaceExecutionService.ExecutionView execution = executions.create(
-                    new PersonalWorkspaceExecutionService.OwnerScope(
-                            scope.tenantId(), scope.clientId(), scope.ownerJiacn()),
-                    new PersonalWorkspaceExecutionService.CreateCommand(
-                            command.conversationId(), command.targetAgentId(), conversation.taskId(),
-                            command.instruction(), command.outputContentMimeType(), command.inputs().stream()
-                                    .map(input -> new PersonalWorkspaceExecutionService.InputSelection(
-                                            input.fileId(), input.version()))
-                                    .toList()),
-                    idempotencyKey);
-            return view(scope, conversation, execution);
-        } catch (PersonalWorkspaceExecutionService.Failure failure) {
-            throw map(failure);
-        }
     }
 
     @Override
@@ -156,19 +127,6 @@ public class AgentCollaborationRequestServiceImpl implements AgentCollaborationR
         if (scope == null || !"0".equals(scope.tenantId()) || !isExact(scope.clientId(), 50)
                 || !isExact(scope.ownerJiacn(), 50) || "0".equals(scope.ownerJiacn())) {
             throw new Failure(Reason.BAD_REQUEST);
-        }
-    }
-
-    private void validateCommand(RequestCommand command) {
-        if (command == null || command.inputs() == null) throw new Failure(Reason.BAD_REQUEST);
-        exact(command.conversationId(), "conversationId", 100);
-        exact(command.targetAgentId(), "targetAgentId", 100);
-        exact(command.instruction(), "instruction", 16_000);
-        exact(command.outputContentMimeType(), "outputContentMimeType", 160);
-        if (command.inputs().size() > 32) throw new Failure(Reason.BAD_REQUEST);
-        for (InputSelection input : command.inputs()) {
-            if (input == null || input.version() < 1) throw new Failure(Reason.BAD_REQUEST);
-            exact(input.fileId(), "fileId", 100);
         }
     }
 

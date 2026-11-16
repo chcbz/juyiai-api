@@ -55,7 +55,7 @@ class TaskExecutionCancellationMySqlTest {
         for(String name:List.of("agent-personal-workspace-v1_11-executions.sql", "agent-personal-workspace-v1_13-task-execution.sql",
                 "agent-personal-workspace-v1_13-task-publication.sql", "agent-personal-workspace-v1_14-conversation-execution.sql",
                 "agent-personal-workspace-v1_14-conversation-output.sql", "agent-personal-workspace-v1_15-conversation-lease.sql",
-                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql"))
+                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql"))
             schema.addScript(new ClassPathResource("db/"+name));
         schema.execute(source);
         new ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
@@ -69,7 +69,7 @@ class TaskExecutionCancellationMySqlTest {
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class)));
         skills=new SkillExecutionDaoImpl(sql.getMapper(SkillExecutionMapper.class)); events=mock(ApplicationEventPublisher.class);
         var manager=new DataSourceTransactionManager(source); tx=new TransactionTemplate(manager);
-        var proxy=new ProxyFactory(new TaskExecutionCancellationServiceImpl(executions,skills,events));
+        var proxy=new ProxyFactory(new TaskExecutionCancellationServiceImpl(executions,NativeCancellationFixture.create(jdbc,executions,skills,events,"0","client","owner","task","agent",null)));
         proxy.addAdvice(new TransactionInterceptor(manager,new AnnotationTransactionAttributeSource()));
         service=(TaskExecutionCancellationService)proxy.getProxy();
         var consentProxy=new ProxyFactory(new AgentTaskProviderCostConsentServiceImpl(
@@ -94,10 +94,11 @@ class TaskExecutionCancellationMySqlTest {
              conversation_lease_token,conversation_lease_version,conversation_lease_expires_at,conversation_provider_started_at,conversation_provider_lease_version)
             VALUES (?,'0','client',?,?,?,'agent','original instruction','text/plain',?,7,?,REPEAT('a',64),100,?,?, 'original-lease',3,9000,123,3)
             """,id,owner,task,"run-"+id,state,"key-"+id,mode,protocol==null?1:protocol);
+        if(Integer.valueOf(6).equals(protocol))jdbc.update("UPDATE agent_personal_workspace_execution SET business_scope='TASK',conversation_id='42',assignment_revision=7 WHERE execution_id=?",id);
     }
     void skill(String id,String phase) {
         skills.insertReady(new SkillExecutionEntity().setTenantId("0").setClientId("client").setOwnerJiacn("owner").setExecutionId(id)
-                .setSnapshotJson("{}").setSnapshotSha256("a".repeat(64)).setEffectsJson("{\"external\":{\"status\":\"UNKNOWN\"}}")
+                .setSnapshotJson(NativeCancellationFixture.snapshot("task")).setSnapshotSha256("a".repeat(64)).setEffectsJson("{\"external\":{\"status\":\"UNKNOWN\"}}")
                 .setResultManifestJson("{\"preserved\":true}").setPhase(phase).setVersion(2L).setCreatedAt(100L).setUpdatedAt(100L));
         // Production insertion owns READY defaults; fixtures seed an already accepted phase explicitly.
         jdbc.update("UPDATE agent_skill_execution SET phase=?,version=2,effects_json='{\"external\":{\"status\":\"UNKNOWN\"}}',result_manifest_json='{\"preserved\":true}' WHERE execution_id=?",phase,id);
@@ -142,26 +143,26 @@ class TaskExecutionCancellationMySqlTest {
             VALUES('grant','0','client','owner','task',1,1,'agent','executor',77,'[]','policy','{}',
               'action','key',REPEAT('a',64),'policy',1,'ACTIVE','owner',1)
             """);
-        row("late", "owner", "task", "CONVERSATION", "QUEUED", 5);
-        jdbc.update("UPDATE agent_personal_workspace_execution SET task_grant_id='grant',task_grant_version=1 WHERE execution_id='late'");
-        assertNotNull(executions.findForRuntime("0","client","executor","agent","task","run-late"));
+        row("late", "owner", "task", "CONVERSATION", "QUEUED", 6);
+        jdbc.update("UPDATE agent_personal_workspace_execution SET business_scope='TASK',task_grant_id='grant',task_grant_version=1 WHERE execution_id='late'");
+        assertNotNull(executions.findForRuntime("0","client","executor","agent","late","run-late"));
         for (String state : List.of("CANCELLED", "RESULT_COMMITTED", "FAILED")) {
             jdbc.update("UPDATE agent_personal_workspace_execution SET execution_state=? WHERE execution_id='late'", state);
             jdbc.update("UPDATE agent_task_execution_grant SET state='REVOKED',grant_version=2");
-            assertNull(executions.findForRuntime("0","client","executor","agent","task","run-late"));
-            var historical = executions.findForNativeUsageCost("0","client","executor","agent","task","run-late","late");
+            assertNull(executions.findForRuntime("0","client","executor","agent","late","run-late"));
+            var historical = executions.findForNativeUsageCost("0","client","executor","agent","late","run-late");
             assertNotNull(historical); assertEquals("owner", historical.getOwnerJiacn());
             assertEquals(state, historical.getExecutionState());
         }
-        assertNull(executions.findForNativeUsageCost("other","client","executor","agent","task","run-late","late"));
-        assertNull(executions.findForNativeUsageCost("0","other","executor","agent","task","run-late","late"));
-        assertNull(executions.findForNativeUsageCost("0","client","intruder","agent","task","run-late","late"));
-        assertNull(executions.findForNativeUsageCost("0","client","executor","other","task","run-late","late"));
-        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","Task","run-late","late"));
-        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","task","other","late"));
-        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","task","run-late","other"));
+        assertNull(executions.findForNativeUsageCost("other","client","executor","agent","late","run-late"));
+        assertNull(executions.findForNativeUsageCost("0","other","executor","agent","late","run-late"));
+        assertNull(executions.findForNativeUsageCost("0","client","intruder","agent","late","run-late"));
+        assertNull(executions.findForNativeUsageCost("0","client","executor","other","late","run-late"));
+        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","Late","run-late"));
+        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","late","other"));
+        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","other","run-late"));
         jdbc.update("UPDATE agent_runtime SET binding_id=88");
-        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","task","run-late","late"));
+        assertNull(executions.findForNativeUsageCost("0","client","executor","agent","late","run-late"));
         assertEquals("REVOKED", jdbc.queryForObject("SELECT state FROM agent_task_execution_grant",String.class));
     }
 
@@ -178,7 +179,7 @@ class TaskExecutionCancellationMySqlTest {
         assertEquals(rows,jdbc.queryForList("SELECT * FROM agent_task_provider_cost_consent ORDER BY consent_id"));
     }
     @Test void taskConsentAndExecutionCancellationRollBackTogether() {
-        consent("unused","FOLLOWUP_EXECUTE","RESERVED");row("active","owner","task","CONVERSATION","QUEUED",5);skill("active","RUNNING");
+        consent("unused","FOLLOWUP_EXECUTE","RESERVED");row("active","owner","task","CONVERSATION","QUEUED",6);skill("active","RUNNING");
         assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(s->{
             service.cancelTaskExecutions("0","client","owner","task");cancelConsents();
             throw new IllegalStateException("later wallet release failed");
@@ -207,7 +208,7 @@ class TaskExecutionCancellationMySqlTest {
     }
 
     @Test void exactTaskCancellationPreservesTerminalsPrivateExecutionsAndHistoricalPaidFacts() {
-        row("active","owner","task","CONVERSATION","QUEUED",5); skill("active","RESULT_UNKNOWN");
+        row("active","owner","task","CONVERSATION","QUEUED",6); skill("active","RESULT_UNKNOWN");
         row("staged","owner","task","TASK","OUTPUT_STAGED",1);
         for(String terminal:List.of("OUTPUT_COMMITTED","RESULT_COMMITTED","FAILED","INPUTS_REVOKED","CANCELLED"))
             row(terminal,"owner","task","CONVERSATION",terminal,1);
@@ -219,9 +220,11 @@ class TaskExecutionCancellationMySqlTest {
             VALUES ('saved-output','active','owner','draft.txt','text/plain',12,REPEAT('b',64),'fixture://retained','STAGED',200,'0','client')
             """);
         var outputBefore=jdbc.queryForMap("SELECT * FROM agent_personal_workspace_execution_output WHERE output_id='saved-output'");
-        var before=jdbc.queryForMap("SELECT conversation_lease_token,conversation_lease_version,conversation_lease_expires_at,conversation_provider_started_at,conversation_provider_lease_version,grant_revision,request_hash FROM agent_personal_workspace_execution WHERE execution_id='active'");
-        cancel(); assertEquals(outputBefore,jdbc.queryForMap("SELECT * FROM agent_personal_workspace_execution_output WHERE output_id='saved-output'")); assertEquals("CANCELLED",state("active")); assertEquals("CANCELLED",state("staged"));
-        assertEquals(before,jdbc.queryForMap("SELECT conversation_lease_token,conversation_lease_version,conversation_lease_expires_at,conversation_provider_started_at,conversation_provider_lease_version,grant_revision,request_hash FROM agent_personal_workspace_execution WHERE execution_id='active'"));
+        var before=jdbc.queryForMap("SELECT conversation_lease_version,conversation_provider_started_at,conversation_provider_lease_version,grant_revision,request_hash FROM agent_personal_workspace_execution WHERE execution_id='active'");
+        cancel(); assertEquals(outputBefore,jdbc.queryForMap("SELECT * FROM agent_personal_workspace_execution_output WHERE output_id='saved-output'")); assertEquals("CANCELLED",state("active")); assertEquals("OUTPUT_STAGED",state("staged"));
+        assertEquals(before,jdbc.queryForMap("SELECT conversation_lease_version,conversation_provider_started_at,conversation_provider_lease_version,grant_revision,request_hash FROM agent_personal_workspace_execution WHERE execution_id='active'"));
+        assertNull(jdbc.queryForObject("SELECT conversation_lease_token FROM agent_personal_workspace_execution WHERE execution_id='active'",String.class));
+        assertNull(jdbc.queryForObject("SELECT conversation_lease_expires_at FROM agent_personal_workspace_execution WHERE execution_id='active'",Long.class));
         var attachment=skills.find("0","client","owner","active");assertEquals("CANCELLED",attachment.getPhase());
         assertTrue(attachment.getEffectsJson().contains("UNKNOWN")); assertTrue(attachment.getResultManifestJson().contains("preserved"));assertEquals(3L,attachment.getVersion());
         for(String terminal:List.of("OUTPUT_COMMITTED","RESULT_COMMITTED","FAILED","INPUTS_REVOKED","CANCELLED"))assertEquals(terminal,state(terminal));
@@ -231,7 +234,7 @@ class TaskExecutionCancellationMySqlTest {
     }
     @Test void allUncommittedSkillPhasesCancelWithoutClearingUnknownEffectsOrProposals() {
         for(String phase:List.of("READY","RUNNING","WAITING_PROVIDER","RESULT_UNKNOWN","RESULT_READY")) {
-            row(phase,"owner","task","CONVERSATION","QUEUED",5);skill(phase,phase);
+            row(phase,"owner","task","CONVERSATION","QUEUED",6);skill(phase,phase);
         }
         cancel();
         for(String phase:List.of("READY","RUNNING","WAITING_PROVIDER","RESULT_UNKNOWN","RESULT_READY")) {
@@ -239,16 +242,16 @@ class TaskExecutionCancellationMySqlTest {
         }
     }
     @Test void outerTaskRollbackRestoresExecutionAndSkillAndEmitsNoHint() {
-        row("active","owner","task","CONVERSATION","QUEUED",5);skill("active","RUNNING");
+        row("active","owner","task","CONVERSATION","QUEUED",6);skill("active","RUNNING");
         assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(s->{
             service.cancelTaskExecutions("0","client","owner","task");throw new IllegalStateException("wallet release fixture failure");
         }));
         assertEquals("QUEUED",state("active"));assertEquals("RUNNING",skills.find("0","client","owner","active").getPhase());verifyNoInteractions(events);
     }
     @Test void executionCasFailureRollsBackPriorSkillMutation() {
-        row("active","owner","task","CONVERSATION","QUEUED",5);skill("active","RUNNING");
-        doReturn(false).when(executions).cancelLockedTaskExecution(any(),anyLong());
-        assertThrows(IllegalStateException.class,this::cancel);
+        row("active","owner","task","CONVERSATION","QUEUED",6);skill("active","RUNNING");
+        doReturn(false).when(executions).cancelLockedExecution(any(),anyLong());
+        assertThrows(cn.jia.agent.service.PersonalWorkspaceExecutionService.Failure.class,this::cancel);
         assertEquals("RUNNING",skills.find("0","client","owner","active").getPhase());
         assertEquals("QUEUED",state("active"));verifyNoInteractions(events);
     }
@@ -260,7 +263,7 @@ class TaskExecutionCancellationMySqlTest {
         assertEquals("QUEUED",state("active"));verifyNoInteractions(events);
     }
     @Test void concurrentCancellationCommitsOneStateChangeAndOneWakeup() throws Exception {
-        row("active","owner","task","CONVERSATION","QUEUED",5);skill("active","RUNNING");
+        row("active","owner","task","CONVERSATION","QUEUED",6);skill("active","RUNNING");
         try(var pool=java.util.concurrent.Executors.newFixedThreadPool(2)) {
             var start=new java.util.concurrent.CountDownLatch(2);
             java.util.concurrent.Callable<Void> operation=()->{start.countDown();assertTrue(start.await(10,java.util.concurrent.TimeUnit.SECONDS));cancel();return null;};

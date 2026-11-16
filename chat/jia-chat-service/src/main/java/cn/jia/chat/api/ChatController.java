@@ -186,7 +186,12 @@ public class ChatController {
         InteractionRoute route = interactionRouter.routeStream(chatMessage);
         EsContext context = EsContextHolder.getContext();
         ServerResolvedSender sender = humanSenderIdentityResolver.resolve(context);
-        ChatConversationEntity conversation = getOrCreateConversation(chatMessage, sender);
+        // Private native admission owns first-conversation creation and the durable request transaction.
+        // Never create a standalone conversation first or dispatch a second CHAT invocation afterward.
+        boolean privateNative=isPrivateNativeRequest(chatMessage);
+        ChatDeliberationService.PrivateAccepted privateAccepted=privateNative
+                ? requireDeliberationService().admitPrivate(requireIdentityPart(context.getTenantId()),sender,chatMessage):null;
+        ChatConversationEntity conversation = privateAccepted==null?getOrCreateConversation(chatMessage, sender):privateAccepted.conversation();
         boolean needSummary = StringUtil.isBlank(conversation.getTitle());
         StringBuilder summary = new StringBuilder();
         String conversationId = String.valueOf(conversation.getId());
@@ -196,8 +201,9 @@ public class ChatController {
         long generation = lifecycleGeneration(conversation);
 
         Flux<String> cancelSignal = redisService.subscribeToChannel(conversationId);
-        JuyitingAgentRelayResult agentDelivery = juyitingAgentRelayService.relay(
-                chatMessage, conversationId, sender, route);
+        JuyitingAgentRelayResult agentDelivery = privateAccepted==null?juyitingAgentRelayService.relay(
+                chatMessage, conversationId, sender, route):juyitingAgentRelayService.acceptedPrivate(
+                        privateAccepted.admission(),ownerTenantId,sender);
         boolean skipAdvisorUserPersistence = agentDelivery.attempted();
         Flux<String> aiStream = agentDelivery.delivered().flatMapMany(delivered -> delivered
                 ? Flux.empty()
@@ -283,6 +289,19 @@ public class ChatController {
                 + "\", \"conversationId\": \"" + escapeJson(conversationId)
                 + "\", \"conversationType\": \""
                 + escapeJson(resolveConversationType(conversation)) + "\"}";
+    }
+
+    private boolean isPrivateNativeRequest(ChatMessageDTO input) {
+        if (StringUtil.isNotBlank(input.getConversationId()) && !Boolean.TRUE.equals(input.getForceNewConversation())) {
+            // The existing service supplies owner ACL. Missing/spoofed client scope must never
+            // send a persisted private conversation through the retired CHAT execution lane.
+            var persisted=chatConversationService.get(input.getConversationId());
+            if (CONVERSATION_TYPE_JUYITING.equals(persisted.getConversationType())
+                    && JuyitingConversationScopeService.SCOPE_PRIVATE.equals(persisted.getConversationScopeType())) return true;
+        }
+        return CONVERSATION_TYPE_JUYITING.equals(input.getConversationType())
+                && JuyitingConversationScopeService.SCOPE_PRIVATE.equals(
+                        juyitingConversationScopeService.resolve(input).scopeType());
     }
 
     private ChatConversationEntity getOrCreateConversation(

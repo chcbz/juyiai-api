@@ -12,6 +12,8 @@
 
 ## 1. 从哪里看
 
+- **2026-11-16当前变更：** [NF-WIRE](critical-contracts.md#nf-wire)定义原文件预览/旧执行退役；该局部候选尚未实现或部署，不改下方历史统计。
+
 - [开发前源码核对](predevelopment-review-20261014.md)：本轮实际返回/调用/重放入口、已确定处理、前置验收及未闭合项；[机器核对表](predevelopment-audit.json)明确开工状态，不以扫描代替对齐。
 
 - [统一公共规范1.2](../interface-standard.md)：所有接口共享，不复制各模块方言。

@@ -33,41 +33,6 @@ class AgentCollaborationRequestServiceImplTest {
     }
 
     @Test
-    void privateMeetingDispatchesOnlyToItsExactTargetAndNeverSelectsSongJiang() {
-        var conversation = privateConversation("99", "agent-husan-niang");
-        when(conversations.requireAccessible(any(), eq("99"))).thenReturn(conversation);
-        when(executions.create(any(), any(), eq("direct-key"))).thenReturn(execution(
-                "pwe_direct", "99", "agent-husan-niang", "PRIVATE", null));
-
-        var accepted = service.submit(SCOPE, new AgentCollaborationRequestService.RequestCommand(
-                "99", "agent-husan-niang", "只执行相关测试并回传结果", DOCX, List.of()), "direct-key");
-
-        assertEquals("pwe_direct", accepted.requestId());
-        assertEquals("agent-husan-niang", accepted.targetAgentId());
-        assertEquals("private", accepted.conversationScopeType());
-        assertEquals("RUNTIME_COMMAND_DISPATCH", accepted.dispatchMode());
-        var command = org.mockito.ArgumentCaptor.forClass(PersonalWorkspaceExecutionService.CreateCommand.class);
-        verify(executions).create(eq(new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a")),
-                command.capture(), eq("direct-key"));
-        assertEquals("agent-husan-niang", command.getValue().targetAgentId());
-        assertEquals(null, command.getValue().taskId());
-        org.mockito.Mockito.verifyNoMoreInteractions(executions);
-    }
-
-    @Test
-    void privateMeetingCannotBeSharedToThirdAgentWithoutCreatingANewScope() {
-        when(conversations.requireAccessible(any(), eq("99"))).thenReturn(
-                privateConversation("99", "agent-husan-niang"));
-
-        var failure = assertThrows(AgentCollaborationRequestService.Failure.class, () -> service.submit(
-                SCOPE, new AgentCollaborationRequestService.RequestCommand("99", "agent-wuyong",
-                        "不要泄露密议", DOCX, List.of()), "direct-key"));
-
-        assertEquals(AgentCollaborationRequestService.Reason.NOT_FOUND, failure.reason());
-        verifyNoInteractions(executions);
-    }
-
-    @Test
     void recoveryRefusesExecutionWhoseConversationOrTaskBindingNoLongerMatches() {
         when(executions.get(any(), eq("pwe_1"))).thenReturn(execution(
                 "pwe_1", "99", "agent-husan-niang", "TASK", "task-9"));

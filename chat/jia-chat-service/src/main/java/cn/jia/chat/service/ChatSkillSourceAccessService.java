@@ -22,6 +22,39 @@ public final class ChatSkillSourceAccessService implements SkillSourceAccessServ
     private ChatFormalDeliveryRetentionService formalSources() {
         var service=formalSources==null?null:formalSources.getIfAvailable();if(service==null)throw missing();return service;
     }
+    private cn.jia.agent.service.PersonalWorkspaceService workspaceFiles;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setWorkspaceFiles(cn.jia.agent.service.PersonalWorkspaceService value) {workspaceFiles=Objects.requireNonNull(value);}
+
+    /** Freeze only the user's explicit selections; never discover latest files or infer a task. */
+    public List<Map<String,Object>> resolvePrivateMaterials(PersonalWorkspaceExecutionService.OwnerScope owner,
+            String conversationId,long generation,List<Map<String,Object>> refs) {
+        String target=conversation(owner,null,conversationId,generation);
+        var result=new ArrayList<Map<String,Object>>();var seen=new HashSet<String>();
+        for(var ref:refs) {
+            if(ref==null||!seen.add(ChatSkillSnapshotJson.write(ref)))throw missing();
+            String kind=text(ref,"kind");Map<String,Object> identity;String mime,hash;long length;
+            if("WORKSPACE_VERSION".equals(kind)) {
+                if(!ref.keySet().equals(Set.of("kind","fileId","version"))||workspaceFiles==null)throw missing();
+                long version=decimal(ref.get("version"));if(version<1||version>Integer.MAX_VALUE)throw missing();
+                var v=workspaceFiles.readableVersion(new cn.jia.agent.service.PersonalWorkspaceService.Scope(
+                        owner.tenantId(),owner.clientId(),owner.ownerJiacn()),text(ref,"fileId"),(int)version);
+                if(v==null||!text(ref,"fileId").equals(v.fileId())||v.version()!=version)throw missing();
+                identity=Map.of("kind",kind,"fileId",v.fileId(),"version",Long.toString(version));
+                mime=v.contentMimeType();hash=v.sha256();length=v.byteLength();
+            } else if("CURRENT_CONVERSATION_ASSET".equals(kind)) {
+                if(!ref.keySet().equals(Set.of("kind","assetId","revision")))throw missing();
+                long revision=decimal(ref.get("revision"));if(revision<1)throw missing();
+                var source=asset(owner,null,conversationId,generation,target,
+                        Map.of("assetId",text(ref,"assetId"),"assetRevision",Long.toString(revision)));
+                identity=assetIdentity(source);mime=source.contentMimeType();hash=source.sha256();length=source.byteLength();
+            } else throw missing();
+            if(mime==null||mime.isBlank()||hash==null||!hash.matches("[0-9a-f]{64}")||length<0)throw missing();
+            result.add(Map.of("inputRef","input_"+(result.size()+1),"sourceKind",kind,"sourceIdentity",identity,
+                    "contentMimeType",mime,"sha256",hash,"byteLength",Long.toString(length)));
+        }
+        return List.copyOf(result);
+    }
     private final ChatConversationDao conversations;
     private final JuyitingConversationScopeService scopes;
     private final ChatConversationArchiveStore archive;
@@ -38,6 +71,7 @@ public final class ChatSkillSourceAccessService implements SkillSourceAccessServ
             String conversation,long generation,Map<String,Object> input) {
         String target=conversation(scope,task,conversation,generation);
         var identity=object(input.get("sourceIdentity"));String kind=(String)input.get("sourceKind");
+        if(task==null&&!"CURRENT_CONVERSATION_ASSET".equals(kind))throw missing();
         if("TASK_LINKED_WORKSPACE_VERSION".equals(kind)) {workspace(scope,task,identity,input);}
         else if("CURRENT_CONVERSATION_ASSET".equals(kind)) {
             var source=asset(scope,task,conversation,generation,target,identity);
@@ -64,7 +98,7 @@ public final class ChatSkillSourceAccessService implements SkillSourceAccessServ
             } catch(TaskLinkedMaterialReader.Failure error) {throw materialFailure(error);}
         } else if("CURRENT_CONVERSATION_ASSET".equals(input.get("sourceKind"))) {
             var source=asset(scope,task,conversation,generation,conversation(scope,task,conversation,generation),identity);
-            var output=files.openConversationOutput(scope,task,source.runId(),source.outputId());
+            var output=files.openConversationOutput(scope,source.executionId(),source.runId(),source.outputId());
             try {
                 if(!source.executionId().equals(output.executionId())||!source.outputId().equals(output.outputId()))throw missing();
                 content=new PersonalWorkspaceExecutionService.RuntimeDownload(output.originalFilename(),output.contentMimeType(),output.sha256(),output.byteLength(),output.content());
@@ -115,19 +149,23 @@ public final class ChatSkillSourceAccessService implements SkillSourceAccessServ
         };
     }
     public String conversation(PersonalWorkspaceExecutionService.OwnerScope s,String task,String id,long generation) {
-        var c=conversations.findScopedById(s.ownerJiacn(),s.clientId(),id);
+        var c=conversations.findScopedById(s.tenantId(),s.ownerJiacn(),s.clientId(),id);
         if(c==null||c.getId()==null||!id.equals(Long.toString(c.getId()))||!s.tenantId().equals(c.getTenantId())
                 ||!s.ownerJiacn().equals(c.getJiacn())||!s.clientId().equals(c.getClientId())||c.getDeletedAt()!=null
-                ||!Objects.equals(generation,c.getLifecycleGeneration())||!task.equals(c.getTaskId())
-                ||!"juyiting".equals(c.getConversationType())||!"bounty".equals(c.getConversationScopeType())
-                ||!("task:"+task).equals(c.getConversationScopeKey()))throw missing();
-        var targets=scopes.parsePersistedTargetAgentIds(c.getTargetAgentIds());if(targets.size()!=1)throw missing();return targets.getFirst();
+                ||!Objects.equals(generation,c.getLifecycleGeneration())||!Objects.equals(task,c.getTaskId())
+                ||!"juyiting".equals(c.getConversationType()))throw missing();
+        var targets=scopes.parsePersistedTargetAgentIds(c.getTargetAgentIds());if(targets.size()!=1)throw missing();
+        if(task==null) {
+            if(!"private".equals(c.getConversationScopeType())||!("agent:"+targets.getFirst()).equals(c.getConversationScopeKey())
+                    ||!targets.getFirst().equals(c.getTargetAgentId()))throw missing();
+        } else if(!"bounty".equals(c.getConversationScopeType())||!("task:"+task).equals(c.getConversationScopeKey()))throw missing();
+        return targets.getFirst();
     }
     ChatConversationArchiveStore.Source asset(PersonalWorkspaceExecutionService.OwnerScope s,String task,
             String conversation,long generation,String target,Map<String,Object> identity) {
         var source=archive.findAuthorizedSource(new ChatConversationArchiveStore.Scope(s.tenantId(),s.ownerJiacn(),s.clientId()),
                 conversation,text(identity,"assetId"),decimal(identity.get("assetRevision")),target);
-        if(source==null||!task.equals(source.taskId())||!conversation.equals(source.conversationId())||generation!=source.conversationGeneration())throw missing();
+        if(source==null||!Objects.equals(task,source.taskId())||!conversation.equals(source.conversationId())||generation!=source.conversationGeneration())throw missing();
         return source;
     }
     ChatConversationArchiveStore.Source outputAsset(PersonalWorkspaceExecutionService.OwnerScope scope, String task,
@@ -166,7 +204,7 @@ public final class ChatSkillSourceAccessService implements SkillSourceAccessServ
             WHERE BINARY l.tenant_id=BINARY ? AND BINARY l.client_id=BINARY ? AND BINARY l.owner_jiacn=BINARY ?
               AND BINARY e.execution_id=BINARY ? AND BINARY p.task_id=BINARY ? AND BINARY e.task_id=BINARY ?
               AND BINARY p.conversation_id=BINARY ? AND BINARY e.conversation_id=BINARY ? AND p.conversation_generation=?
-              AND p.kind='EXECUTE' AND e.execution_protocol_version IN (4,5) AND e.execution_state='RESULT_COMMITTED'
+              AND p.kind='EXECUTE' AND e.execution_protocol_version IN (4,5,6) AND e.execution_state='RESULT_COMMITTED'
               AND p.state='RESULT_COMMITTED' AND l.state='RESULT_COMMITTED'
             """,s.tenantId(),s.clientId(),s.ownerJiacn(),execution,task,task,conversation,conversation,generation);
         if(rows.size()!=1)throw missing();

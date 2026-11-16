@@ -42,45 +42,6 @@ class PersonalWorkspaceExecutionControllerTest {
     }
 
     @Test
-    void capabilitiesReturnOnlyServerConfirmedFormatsWithPrivateNoStoreResponse() {
-        when(service.capabilities()).thenReturn(new PersonalWorkspaceExecutionService.ExecutionCapabilities(
-                List.of(PersonalWorkspaceExecutionProperties.DOCX),
-                List.of("application/pdf", PersonalWorkspaceExecutionProperties.DOCX), true));
-
-        var response = controller.capabilities(jwt());
-
-        assertEquals(HttpStatus.OK, response.getStatusCode());
-        assertEquals("private, no-store", response.getHeaders().getFirst(HttpHeaders.CACHE_CONTROL));
-        assertEquals(List.of(PersonalWorkspaceExecutionProperties.DOCX), response.getBody().getData().allowedMimeTypes());
-        assertEquals(List.of("application/pdf", PersonalWorkspaceExecutionProperties.DOCX),
-                response.getBody().getData().inputMimeTypes());
-        assertEquals(true, response.getBody().getData().generationEnabled());
-        verify(service).capabilities();
-    }
-
-    @Test
-    void explicitEmptyInputListCreatesAFileGenerationCommand() {
-        PersonalWorkspaceExecutionService.ExecutionView accepted = executionView("pwe_1");
-        when(service.create(any(), any(), eq("create-key"))).thenReturn(accepted);
-
-        var response = controller.create(new cn.jia.core.entity.JsonRequest<>(1, "test-request", new PersonalWorkspaceExecutionController.CreateRequest(null, "agent-a", null,
-                "生成项目介绍文档", PersonalWorkspaceExecutionProperties.DOCX, List.of())), "create-key", jwt());
-
-        assertEquals(HttpStatus.ACCEPTED, response.getStatusCode());
-        assertEquals("private, no-store", response.getHeaders().getFirst(HttpHeaders.CACHE_CONTROL));
-        assertEquals("pwe_1", response.getBody().getData().executionId());
-        assertEquals(List.of(), response.getBody().getData().inputs());
-        ArgumentCaptor<PersonalWorkspaceExecutionService.OwnerScope> scope = ArgumentCaptor.forClass(
-                PersonalWorkspaceExecutionService.OwnerScope.class);
-        ArgumentCaptor<PersonalWorkspaceExecutionService.CreateCommand> command = ArgumentCaptor.forClass(
-                PersonalWorkspaceExecutionService.CreateCommand.class);
-        verify(service).create(scope.capture(), command.capture(), eq("create-key"));
-        assertEquals(new PersonalWorkspaceExecutionService.OwnerScope("0", "client-a", "owner-a"), scope.getValue());
-        assertEquals(List.of(), command.getValue().inputs());
-        assertEquals(PersonalWorkspaceExecutionProperties.DOCX, command.getValue().outputContentMimeType());
-    }
-
-    @Test
     void historyDefaultsToTwentyAndSerializesOnlyTheFrozenSummaryAllowList() throws Exception {
         var summary = new PersonalWorkspaceExecutionService.ExecutionSummary(
                 "pwe_fbdca6bb2b654ee2ad555c576af7d74c", "agent-a", "QUEUED",
@@ -205,6 +166,15 @@ class PersonalWorkspaceExecutionControllerTest {
             mvc.perform(get("/agent/personal-workspace/executions").principal(tenantJwt(claims)))
                     .andExpect(status().isForbidden()).andExpect(jsonPath("$.code").value("EXECUTION_FORBIDDEN"));
         }
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void retiredExecutionWritesHaveNoHttpHandler() throws Exception {
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/agent/personal-workspace/executions").principal(jwt()).contentType("application/json").content("{}"))
+                .andExpect(status().isMethodNotAllowed());
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/agent/personal-workspace/executions/pwe_old/revoke-inputs").principal(jwt()).contentType("application/json").content("{}"))
+                .andExpect(status().isNotFound());
         verifyNoInteractions(service);
     }
 

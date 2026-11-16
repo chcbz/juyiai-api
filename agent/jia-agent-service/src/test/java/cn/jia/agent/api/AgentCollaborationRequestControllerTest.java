@@ -35,44 +35,6 @@ class AgentCollaborationRequestControllerTest {
     }
 
     @Test
-    void directRequestUsesJwtScopeAndReturnsNoStoreReceiptWithoutCoordinator() throws Exception {
-        when(service.submit(any(), any(), eq("idempotency-1"))).thenReturn(view("pwe_1"));
-
-        mvc.perform(post("/agent/hall/collaboration/requests")
-                        .header("Idempotency-Key", "idempotency-1")
-                        .contentType("application/json")
-                        .content("""
-                                {"protocolVersion":1,"requestId":"test-request","data":{"conversationId":"99","targetAgentId":"agent-husan-niang",
-                                 "instruction":"执行测试","outputContentMimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                 "inputs":[]}}
-                                """)
-                        .principal(jwt()))
-                .andExpect(status().isAccepted())
-                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "private, no-store"))
-                .andExpect(jsonPath("$.data.requestId").value("pwe_1"))
-                .andExpect(jsonPath("$.data.targetAgentId").value("agent-husan-niang"))
-                .andExpect(jsonPath("$.data.dispatchMode").value("RUNTIME_COMMAND_DISPATCH"))
-                .andExpect(jsonPath("$.data.coordinatorAgentId").doesNotExist());
-        verify(service).submit(eq(new AgentCollaborationRequestService.OwnerScope("0", "client-a", "owner-a")),
-                any(), eq("idempotency-1"));
-    }
-
-    @Test
-    void strictPayloadRejectsUnknownFieldsBeforeAnyExecutionAdmission() throws Exception {
-        mvc.perform(post("/agent/hall/collaboration/requests")
-                        .header("Idempotency-Key", "idempotency-1").contentType("application/json")
-                        .content("""
-                                {"protocolVersion":1,"requestId":"test-request","data":{"conversationId":"99","targetAgentId":"agent-husan-niang",
-                                 "instruction":"执行测试","outputContentMimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                 "inputs":[],"coordinatorAgentId":"songjiang"}}
-                                """)
-                        .principal(jwt()))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("COLLABORATION_BAD_REQUEST"));
-        verifyNoInteractions(service);
-    }
-
-    @Test
     void idempotencyRecoveryUsesDedicatedLiteralRoute() throws Exception {
         when(service.getByIdempotencyKey(any(), eq("idempotency-1"))).thenReturn(view("pwe_1"));
         mvc.perform(get("/agent/hall/collaboration/requests/request")
@@ -81,6 +43,13 @@ class AgentCollaborationRequestControllerTest {
                 .andExpect(jsonPath("$.data.requestId").value("pwe_1"));
         verify(service).getByIdempotencyKey(eq(new AgentCollaborationRequestService.OwnerScope(
                 "0", "client-a", "owner-a")), eq("idempotency-1"));
+    }
+
+    @Test
+    void retiredExecutionWritesHaveNoHttpHandler() throws Exception {
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post("/agent/hall/collaboration/requests").principal(jwt()).contentType("application/json").content("{}"))
+                .andExpect(status().isNotFound());
+        org.mockito.Mockito.verifyNoInteractions(service);
     }
 
     private static AgentCollaborationRequestService.RequestView view(String id) {

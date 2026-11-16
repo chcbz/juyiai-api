@@ -2,11 +2,8 @@ package cn.jia.agent.service;
 
 import java.util.List;
 
-/** Owner-scoped private file execution and narrow runtime bridge contract. */
+/** Owner-scoped historical reads and the current native runtime lease/output boundary. */
 public interface PersonalWorkspaceExecutionService {
-    ExecutionView create(OwnerScope scope, CreateCommand command, String idempotencyKey);
-    /** Trusted Agent/Chat application entry only: no browser-provided authority, no Provider invocation. */
-    ExecutionView createConversation(OwnerScope scope, ConversationCreate command);
     /** Stable owner-scoped identity for the zero-input text action and its immutable Chat link. */
     static String textFileExecutionId(OwnerScope scope, String intentId) {
         try {
@@ -21,9 +18,9 @@ public interface PersonalWorkspaceExecutionService {
         } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
     /** Trusted Chat consumer obtains exact bytes only after owner/grant re-admission; not a public URL. */
-    ConversationOutput readConversationOutput(OwnerScope scope, String taskId, String runId, String outputId);
+    ConversationOutput readConversationOutput(OwnerScope scope, String executionId, String runId, String outputId);
     /** Verified descriptor; caller closes it. File I/O does not hold this service's root locks. */
-    ConversationDownload openConversationOutput(OwnerScope scope, String taskId, String runId, String outputId);
+    ConversationDownload openConversationOutput(OwnerScope scope, String executionId, String runId, String outputId);
 
     record ConversationDownload(String executionId, String outputId, String originalFilename,
             String contentMimeType, String sha256, long byteLength, java.io.InputStream content)
@@ -32,7 +29,7 @@ public interface PersonalWorkspaceExecutionService {
     }
 
     /** Committed conversation-only outputs whose bytes were checked under the same owner/grant fence. */
-    List<ConversationOutputInfo> listConversationOutputs(OwnerScope scope, String taskId, String runId);
+    List<ConversationOutputInfo> listConversationOutputs(OwnerScope scope, String executionId, String runId);
     /** Exact earlier result replaced by this edit, never an input/reference used for generation. */
     record OutputReplacement(String requestId, String stepId, String outputId, String sha256) { }
     record ConversationOutputInfo(String executionId, String outputId, String contentMimeType,
@@ -48,94 +45,24 @@ public interface PersonalWorkspaceExecutionService {
     }
     /** Native runtime inbox; intentionally separate from legacy unfenced commands. */
     List<? extends ConversationCommandView> runtimeConversationCommandViews(RuntimeScope scope,int limit);
-    sealed interface ConversationCommandView permits ConversationRuntimeCommand,ControlledConversationRuntimeCommand,ControlledConversationRuntimeCommandV3,SkillExecutionService.Command { }
-    record ConversationRuntimeCommand(int schemaVersion, String taskId, String runId,
-            String conversationId, String commandId, String messageId, String instruction,
-            String outputContentMimeType, String outputId) implements ConversationCommandView { }
-    record ProviderExecution(String providerLane,String consentId,String bindingId,String bindingEpoch,
-            String modelId,int maxInputItems,int maxOutboundRequestAttempts,int precallFenceVersion) { }
-    record ControlledConversationRuntimeCommand(int schemaVersion,String taskId,String runId,
-            String conversationId,String commandId,String messageId,String instruction,
-            String outputContentMimeType,String outputId,ProviderExecution providerExecution)
-            implements ConversationCommandView { }
-    record ControlledConversationRuntimeCommandV3(int schemaVersion,String executionId,String taskId,
-            String runId,String conversationId,String commandId,String messageId,String operation,
-            String instruction,String inputSnapshotDigest,String outputContentMimeType,String outputId,
-            ProviderExecution providerExecution) implements ConversationCommandView { }
-    record ControlledProviderStart(int schemaVersion,String commandId,String messageId,String executionId,
-            ProviderExecution providerExecution,ConversationFence fence) { }
-    record ControlledProviderStartReceipt(int schemaVersion,boolean started,String taskId,String runId,
-            String executionId,String commandId,String messageId,ProviderExecution providerExecution,
-            long leaseVersion) { }
-    record ControlledProviderStartV3(int schemaVersion,String commandId,String messageId,
-            String executionId,String operation,String inputSnapshotDigest,
-            ProviderExecution providerExecution,ConversationFence fence) { }
-    record ControlledProviderStartReceiptV3(int schemaVersion,boolean started,String taskId,String runId,
-            String conversationId,String executionId,String commandId,String messageId,String operation,
-            String inputSnapshotDigest,ProviderExecution providerExecution,long leaseVersion) { }
+    sealed interface ConversationCommandView permits SkillExecutionService.Command { }
     /** Trusted native runtime only; lease token is never sent to browsers or legacy inbox. */
-    ConversationLease claimConversationStart(RuntimeScope scope, String taskId, String runId,
+    ConversationLease claimConversationStart(RuntimeScope scope, String executionId, String runId,
             String commandId, String messageId);
-    ConversationLease renewConversationLease(RuntimeScope scope, String taskId, String runId, ConversationFence fence);
-    record ConversationInputSnapshot(String executionId, long leaseVersion, boolean noReferencedMaterials,
-            List<RuntimeInput> inputs) {
-        public ConversationInputSnapshot { inputs = List.copyOf(inputs); }
-    }
-    record ConversationInputSnapshotV3(int schemaVersion,String executionId,long leaseVersion,
-            String operation,String inputSnapshotDigest,boolean noReferencedMaterials,
-            List<RuntimeInputV3> inputs) { public ConversationInputSnapshotV3 { inputs=List.copyOf(inputs); } }
-    record RuntimeInputV3(String inputRef,RuntimeSource source,String contentMimeType,
-            String byteLength,String sha256) { }
-    // Each source kind has an exact wire field set; absent union arms must not become JSON nulls.
-    @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
-    record RuntimeSource(String kind,String fileId,String version,String purpose,String conversationId,
-            String conversationGeneration,String assetId,String assetRevision,String producerRequestId,
-            String producerStepId,String producerExecutionId,String producerRunId,String producerOutputId) { }
-    StagedOutput stageConversationOutput(RuntimeScope scope, String taskId, String runId, ConversationFence fence,
+    ConversationLease renewConversationLease(RuntimeScope scope, String executionId, String runId, ConversationFence fence);
+    StagedOutput stageConversationOutput(RuntimeScope scope, String executionId, String runId, ConversationFence fence,
             String outputId, String filename, String contentMimeType, byte[] content);
-    StagedOutput stageConversationOutputStream(RuntimeScope scope, String taskId, String runId,
+    StagedOutput stageConversationOutputStream(RuntimeScope scope, String executionId, String runId,
             ConversationFence fence, String outputId, String filename, String contentMimeType,
             PersonalWorkspaceService.UploadSource content, long byteLength, String sha256);
-    record ConversationResultRecovery(String executionId, String commandId, String messageId,
-            String inputSnapshotDigest, List<OutputDeclaration> outputs) { }
-    ExecutionView failConversation(RuntimeScope scope, String taskId, String runId, ConversationFence fence,
+    record RuntimeFailure(String executionId,String runId,SkillExecutionService.ScopeView scope,
+            String targetAgentId,String state,String failureCode) { }
+    RuntimeFailure failConversation(RuntimeScope scope, String executionId, String runId, ConversationFence fence,
             String code);
     /** Never put these values in a browser response, ordinary queue payload or logs. */
     record ConversationFence(long version, String token) { }
     record ConversationLease(String executionId, long version, String token, long expiresAt) {
         public ConversationFence fence() { return new ConversationFence(version, token); }
-    }
-    /** Trusted coordinator's expected material list, checked byte-for-byte against the grant. */
-    record ReferenceSelection(String fileId, int version, String purpose, String contentMimeType,
-            long byteLength, String contentHash) { }
-    record ConversationCreate(String conversationId, String taskId, String targetAgentId,
-            String intentId, String grantId, long grantVersion, long assignmentRevision,
-            String permittedOperation, String instruction, String outputContentMimeType,
-            List<ReferenceSelection> references, boolean controlledImage,
-            int controlledImageProtocolVersion) {
-        public ConversationCreate { references = List.copyOf(references); }
-        /** Legacy constructor preserves protocol-v2 behavior byte-for-byte. */
-        public ConversationCreate(String conversationId,String taskId,String targetAgentId,String intentId,
-                String grantId,long grantVersion,long assignmentRevision,String permittedOperation,
-                String instruction,String outputContentMimeType,List<ReferenceSelection> references,
-                boolean controlledImage) {
-            this(conversationId,taskId,targetAgentId,intentId,grantId,grantVersion,assignmentRevision,
-                    permittedOperation,instruction,outputContentMimeType,references,controlledImage,
-                    controlledImage?2:1);
-        }
-        public ConversationCreate(String conversationId,String taskId,String targetAgentId,String intentId,
-                String grantId,long grantVersion,long assignmentRevision,String permittedOperation,
-                String instruction,String outputContentMimeType,List<ReferenceSelection> references) {
-            this(conversationId,taskId,targetAgentId,intentId,grantId,grantVersion,assignmentRevision,
-                    permittedOperation,instruction,outputContentMimeType,references,false,1);
-        }
-        public ConversationCreate(String conversationId, String taskId, String targetAgentId,
-                String intentId, String grantId, long grantVersion, long assignmentRevision,
-                String permittedOperation, String instruction, String outputContentMimeType) {
-            this(conversationId, taskId, targetAgentId, intentId, grantId, grantVersion,
-                    assignmentRevision, permittedOperation, instruction, outputContentMimeType,
-                    List.of(),false,1);
-        }
     }
     record ConversationOutput(String executionId, String outputId, String originalFilename,
             String contentMimeType, String sha256, long byteLength, byte[] bytes) {
@@ -143,12 +70,6 @@ public interface PersonalWorkspaceExecutionService {
         @Override public byte[] bytes() { return bytes == null ? null : bytes.clone(); }
     }
 
-    /**
-     * Browser-safe MIME matrix. Output formats remain explicitly enabled by the execution
-     * allow-list; input formats describe only fixed-version materials the bridge can expose to an
-     * authenticated runtime and do not claim that a Provider completed any operation.
-     */
-    ExecutionCapabilities capabilities();
     /** Server-side native admission capabilities; never Provider authority. */
     default ExecutionCapabilities nativeLocalFileCapabilities() { return new ExecutionCapabilities(List.of(),List.of(),false); }
     /** Bounded, newest-first owner history. The summary is an explicit browser-safe allow-list. */
@@ -157,22 +78,6 @@ public interface PersonalWorkspaceExecutionService {
     /** Read-only reconciliation of an already persisted create request. */
     ExecutionView getByIdempotencyKey(OwnerScope scope, String idempotencyKey);
     ExecutionView get(OwnerScope scope, String executionId);
-    ExecutionView revokeInputs(OwnerScope scope, String executionId, long expectedGrantRevision,
-            String idempotencyKey);
-    /** Native execution-start fact, exact-command bound; never invoked by an owner GET. */
-    RuntimeStartView start(RuntimeScope scope, String taskId, String runId, String commandId, String messageId);
-    record RuntimeStartView(String executionId, String taskId, String runId, String state) { }
-    List<RuntimeInput> runtimeInputs(RuntimeScope scope, String taskId, String runId);
-    /** Durable, agent-scoped pickup lane. The returned command payload is usable only with runtime credentials. */
-    List<RuntimeQueuedCommand> runtimeQueuedCommands(RuntimeScope scope, int limit);
-    RuntimeContent runtimeInputContent(RuntimeScope scope, String taskId, String runId, String inputRef);
-    StagedOutput stageOutput(RuntimeScope scope, String taskId, String runId, String outputId,
-            String originalFilename, String contentMimeType, byte[] content);
-    CommitView commitOutputs(RuntimeScope scope, String taskId, String runId, String manifestId,
-            List<OutputDeclaration> outputs);
-    /** Runtime-only terminal report. It is idempotent for the same exact owner/agent execution. */
-    ExecutionView fail(RuntimeScope scope, String taskId, String runId, String code);
-
     record OwnerScope(String tenantId, String clientId, String ownerJiacn) { }
     /** ownerJiacn is the data scope; executorOwnerJiacn always remains the native authenticated subject.
      * The five-argument constructor is the authentication boundary, before resolving a persisted run. */
@@ -182,18 +87,6 @@ public interface PersonalWorkspaceExecutionService {
             this(tenantId,clientId,ownerJiacn,agentId,runtimeInstanceId,ownerJiacn);
         }
     }
-    record InputSelection(String fileId, int version) { }
-    record CreateCommand(String conversationId, String targetAgentId, String taskId,
-            String instruction, String outputContentMimeType, List<InputSelection> inputs,
-            SourceOutputRef sourceOutputRef) {
-        public CreateCommand(String conversationId, String targetAgentId, String taskId,
-                String instruction, String outputContentMimeType, List<InputSelection> inputs) {
-            this(conversationId, targetAgentId, taskId, instruction, outputContentMimeType, inputs, null);
-        }
-    }
-    /** Exact prior output/decision binding used only for a server-authorized rework execution. */
-    record SourceOutputRef(String formalDeliveryId, long decisionVersion, String outputId,
-            String fileId, int fileVersion) { }
     record ExecutionSummary(String executionId, String targetAgentId, String state,
             String outputContentMimeType, long createdAt) { }
     record ExecutionCursor(long createdAt, String executionId) { }
@@ -204,27 +97,17 @@ public interface PersonalWorkspaceExecutionService {
     }
     record RuntimeInput(String inputRef, String fileId, int version, String originalFilename,
             String contentMimeType, long byteLength, String sha256) { }
-    record RuntimeOutput(String outputId, String relativePath, String contentType, long maxLength,
-            String uploadPath) { }
-    /** A stable command envelope for the client persistent inbox; no user credential or secret is included. */
-    record RuntimeQueuedCommand(int schemaVersion, String messageType, String messageId, String commandId,
-            String tenantId, String clientId, String ownerJiacn, String taskId, String runId,
-            String targetAgentId, String commandType, String instruction, RuntimeCommand payload) { }
-    record RuntimeCommand(String taskId, String runId, List<RuntimeInputCommand> inputManifest,
-            List<RuntimeOutput> outputManifest) { }
-    record RuntimeInputCommand(String inputId, String relativePath, String downloadPath, long length,
-            String sha256) { }
     /** Browser-safe state projection. Task lease credentials and storage URIs are intentionally absent. */
     record ExecutionView(String executionId, String taskId, String runId, String conversationId,
             String targetAgentId, String state, String failureCode, String failureMessage, long grantRevision,
-            String outputContentMimeType, List<RuntimeInput> inputs, RuntimeCommand runtimeCommand,
+            String outputContentMimeType, List<RuntimeInput> inputs, Void runtimeCommand,
             String executionMode, String businessTaskId, String workItemId, String workItemState,
             @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
             String recoveryStatus) {
         /** Existing adapters retain their original constructor and wire semantics. */
         public ExecutionView(String executionId, String taskId, String runId, String conversationId,
                 String targetAgentId, String state, String failureCode, String failureMessage, long grantRevision,
-                String outputContentMimeType, List<RuntimeInput> inputs, RuntimeCommand runtimeCommand,
+                String outputContentMimeType, List<RuntimeInput> inputs, Void runtimeCommand,
                 String executionMode, String businessTaskId, String workItemId, String workItemState) {
             this(executionId, taskId, runId, conversationId, targetAgentId, state, failureCode,
                     failureMessage, grantRevision, outputContentMimeType, inputs, runtimeCommand,
@@ -233,7 +116,7 @@ public interface PersonalWorkspaceExecutionService {
         /** Source-compatible private-mode constructor for existing adapters and clients. */
         public ExecutionView(String executionId, String taskId, String runId, String conversationId,
                 String targetAgentId, String state, String failureCode, String failureMessage, long grantRevision,
-                String outputContentMimeType, List<RuntimeInput> inputs, RuntimeCommand runtimeCommand) {
+                String outputContentMimeType, List<RuntimeInput> inputs, Void runtimeCommand) {
             this(executionId, taskId, runId, conversationId, targetAgentId, state, failureCode,
                     failureMessage, grantRevision, outputContentMimeType, inputs, runtimeCommand,
                     "PRIVATE", null, null, null);
@@ -257,11 +140,6 @@ public interface PersonalWorkspaceExecutionService {
     }
     record StagedOutput(String outputId, String sha256, long byteLength, String state) { }
     record OutputDeclaration(String outputId, String sha256, long byteLength) { }
-    /** File reference is absent for CONVERSATION output; version must not unbox null. */
-    record CommitItem(String outputId, String fileId, Integer fileVersion, String sha256,
-                      String contentMimeType, long byteLength) { }
-    record CommitView(String manifestId, String state, List<CommitItem> items) { }
-
     final class Failure extends RuntimeException {
         private final Reason reason;
         public Failure(Reason reason) { super(reason.name()); this.reason = reason; }

@@ -153,6 +153,195 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         this.agentService = agentService;
     }
 
+    private org.springframework.transaction.support.TransactionTemplate privateAdmissionTransaction;
+    private cn.jia.agent.service.SkillExecutionService nativeExecutions;
+    private ChatSkillSourceAccessService nativeSources;
+    private cn.jia.chat.handler.TypedDeliberationSessionRegistry nativeSessions;
+    @Autowired public void setPrivateNativeAdmission(org.springframework.transaction.PlatformTransactionManager manager,
+            @org.springframework.context.annotation.Lazy cn.jia.agent.service.SkillExecutionService executions,
+            ChatSkillSourceAccessService sources,cn.jia.chat.handler.TypedDeliberationSessionRegistry sessions) {
+        privateAdmissionTransaction=new org.springframework.transaction.support.TransactionTemplate(manager);
+        nativeExecutions=executions;nativeSources=sources;nativeSessions=sessions;
+    }
+
+    public record PrivateAccepted(Admission admission,ChatConversationEntity conversation) { }
+    private record PrivateIntent(String conversationId,String requestId,String target,String content,
+            List<Map<String,Object>> materialRefs,String sha256) { }
+
+    /** One transaction owns the first conversation, request, turn, native execution and link.
+     * There is no CHAT dispatch/outbox and no provider/model invocation on this admission path. */
+    public PrivateAccepted admitPrivate(String tenantId,ServerResolvedSender sender,ChatMessageDTO input) {
+        requireIdentity(tenantId,50);var trusted=requireHumanSender(sender);
+        var intent=privateIntent(input);
+        if(privateAdmissionTransaction==null||nativeExecutions==null||nativeSources==null||nativeSessions==null||interactionSteps==null)
+            throw persistence("Private native admission is unavailable");
+        if(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw persistence("Private admission must own its transaction for whole-transaction replay");
+        var known=dao.findRequest(tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId());
+        if(known!=null)return privateAdmissionTransaction.execute(status->replayPrivate(tenantId,trusted,intent));
+        // This lane selects no package by name: plain native local-file tools use the same engine.
+        // No package I/O, provider call or conversation write occurs during readiness observation.
+        var observed=privateRuntime(tenantId,trusted,intent.target());
+        try {
+            return privateAdmissionTransaction.execute(status->{
+                var prior=dao.findRequest(tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId());
+                if(prior!=null)return replayPrivate(tenantId,trusted,intent);
+                ChatConversationEntity conversation;
+                if(intent.conversationId()==null) {
+                    conversation=new ChatConversationEntity().setJiacn(trusted.jiacn()).setConversationType("juyiting")
+                            .setConversationScopeType("private").setConversationScopeKey("agent:"+intent.target())
+                            .setTargetAgentId(intent.target()).setTargetAgentIds(CanonicalContextJson.write(List.of(intent.target())))
+                            .setTaskId(null).setLifecycleGeneration(1L).setStatus(0);
+                    String title=intent.content().isBlank()?"密议":intent.content();
+                    int count=title.codePointCount(0,title.length());
+                    conversation.setTitle(title.substring(0,title.offsetByCodePoints(0,Math.min(count,500))));
+                    conversation.setTenantId(tenantId);conversation.setClientId(trusted.clientId());conversation.init4Creation();
+                    if(conversationDao.insert(conversation)!=1||conversation.getId()==null)throw persistence("Unable to create private conversation");
+                } else {
+                    conversation=conversationDao.lockScopedById(tenantId,trusted.jiacn(),trusted.clientId(),intent.conversationId());
+                }
+                requirePrivateConversation(conversation,tenantId,trusted,intent.target());
+                String id=Long.toString(conversation.getId());long generation=conversation.getLifecycleGeneration();
+                var scope=new JuyitingConversationScope("private","agent:"+intent.target(),null,intent.target(),List.of(intent.target()),List.of(intent.target()));
+                var current=privateRuntime(tenantId,trusted,intent.target());
+                if(!observed.equals(current))throw conflict("Native session changed before admission");
+                agentService.requireHostingNewWork(tenantId,trusted.clientId(),intent.target());
+                var owner=new cn.jia.agent.service.PersonalWorkspaceExecutionService.OwnerScope(tenantId,trusted.clientId(),trusted.jiacn());
+                var inputs=nativeSources.resolvePrivateMaterials(owner,id,generation,intent.materialRefs());
+                long now=System.currentTimeMillis();
+                var message=new ChatMessageEntity().setConversationId(id).setMessageType("USER").setContent(intent.content())
+                        .setJiacn(trusted.jiacn()).setSyncStatus("PENDING").setConversationType("juyiting")
+                        .setSenderType(trusted.type()).setSenderName(trusted.displayName())
+                        .setMetadata(CanonicalContextJson.write(Map.of("requestId",intent.requestId(),"requestRevision","1",
+                                "route","EXECUTE","materialRefs",intent.materialRefs())));
+                message.setTenantId(tenantId);message.setClientId(trusted.clientId());message.init4Creation();
+                if(messageDao.insertScoped(tenantId,trusted.clientId(),message)!=1||message.getId()==null)throw persistence("Unable to persist private message");
+                var history=admissionHistory(tenantId,trusted.jiacn(),trusted.clientId(),id).stream()
+                        .filter(item->!Objects.equals(item.getId(),message.getId())).toList();
+                var context=new LinkedHashMap<>(authorizedContext(tenantId,trusted.jiacn(),trusted.clientId(),id,
+                        intent.target(),history,message,List.of(),null));
+                // CHAT's bounded context can reference dispatch.content. Native execution has no CHAT
+                // dispatch, so its current user message must be carried in full in the frozen parameters.
+                context.put("currentUserMessage",messageView(message,"USER"));
+                var vector=sourceVector(generation,message.getId(),null,context);
+                var facts=factsManifest(conversation,scope,intent.target(),null,null,context,
+                        cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
+                String contextHash=contextDigest(vector,facts);
+                String turnId=stableId("turn",tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId(),intent.target());
+                String dispatchId=stableId("dispatch",tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId(),intent.target());
+                String snapshotId=stableId("ctx",turnId,contextHash),stepId=stableId("step",turnId),actionId=stableId("native",turnId);
+                var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);
+                snapshot.put("actionEventId",actionId);snapshot.put("scope",new cn.jia.agent.service.SkillExecutionService.ScopeView("PRIVATE",id,Long.toString(generation),null).asMap());
+                snapshot.put("targetAgentId",intent.target());snapshot.put("toolPolicyRef",cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
+                snapshot.put("skills",List.of());snapshot.put("parameters",Map.of("authorizedContext",context));
+                // The complete user text is frozen in authorizedContext.currentUserMessage. Do not
+                // duplicate it into the bounded tool instruction or truncate long chat messages.
+                snapshot.put("instruction","请按 parameters.authorizedContext.currentUserMessage 中的用户请求，结合已授权会话上下文和明确选择的资料回复。意图不明确时先询问；不得声称已读取未提供的文件。");
+                snapshot.put("inputs",inputs);snapshot.put("sourceSnapshotDigest",ChatSkillSnapshotJson.sha(inputs));
+                var declaration=ChatSkillSourceAccessService.object(current.frozenDeclaration().get("nativeExecution"));
+                snapshot.put("outputs",Map.of("mimeTypes",declaration.get("outputMimeTypes"),"multiple",true,"artifactsRequired",false,
+                        "dataSchema",Map.of("$schema","https://json-schema.org/draft/2020-12/schema","type","object",
+                                "properties",Map.of("answer",Map.of("type","string")),"required",List.of("answer"),"additionalProperties",false)));
+                String digest=ChatSkillSnapshotJson.sha(snapshot);
+                var request=new ChatRequestEntity().setTenantId(tenantId).setOwnerJiacn(trusted.jiacn()).setClientId(trusted.clientId())
+                        .setRequestId(intent.requestId()).setRequestRevision(1L).setClientIntentSha256(intent.sha256()).setRequestDigest(digest)
+                        .setConversationId(id).setConversationGeneration(generation).setUserMessageId(message.getId())
+                        .setAggregateState("RUNNING").setStateVersion(0L).setCreatedAt(now).setUpdatedAt(now);
+                // A competing unique-key insert aborts this entire transaction, including the newly created conversation.
+                if(dao.insertRequest(request)!=1||request.getId()==null)throw persistence("Unable to persist private request");
+                var contextSnapshot=new ChatContextSnapshotEntity().setSnapshotId(snapshotId).setTenantId(tenantId)
+                        .setOwnerJiacn(trusted.jiacn()).setClientId(trusted.clientId()).setConversationId(id).setConversationGeneration(generation)
+                        .setRequestId(intent.requestId()).setRequestRevision(1L).setTargetAgentId(intent.target()).setRoute("EXECUTE")
+                        .setSourceVectorJson(CanonicalContextJson.write(vector)).setFactsManifestJson(CanonicalContextJson.write(facts))
+                        .setContextDigest(contextHash).setCreatedAt(now);
+                var turn=new ChatTurnEntity().setTurnId(turnId).setTenantId(tenantId).setOwnerJiacn(trusted.jiacn()).setClientId(trusted.clientId())
+                        .setRequestId(intent.requestId()).setRequestRevision(1L).setConversationId(id).setConversationGeneration(generation)
+                        .setTargetAgentId(intent.target()).setSnapshotId(snapshotId).setContextDigest(contextHash).setDispatchId(dispatchId)
+                        .setRoute("EXECUTE").setState(ChatDeliberationStates.RECEIVED).setStateVersion(0L).setLastDeltaSeq(0L).setCreatedAt(now).setUpdatedAt(now);
+                if(dao.insertSnapshot(contextSnapshot)!=1||dao.insertTurn(turn)!=1)throw persistence("Unable to persist private turn");
+                var created=nativeExecutions.create(owner,new cn.jia.agent.service.SkillExecutionService.Create(actionId,
+                        new cn.jia.agent.service.SkillExecutionService.PrivateScope(id,generation),intent.target(),snapshot));
+                if(created==null||!id.equals(created.conversationId())||created.taskId()!=null||!digest.equals(created.snapshotDigest())
+                        ||!intent.target().equals(created.targetAgentId())||!"QUEUED".equals(created.state()))throw persistence("Invalid private execution receipt");
+                var step=new ChatInteractionStepStore.Step(stepId,tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId(),1,1,id,generation,
+                        null,null,null,null,intent.target(),"EXECUTE","RUNNING",0,(String)snapshot.get("sourceSnapshotDigest"),now,now);
+                if(interactionSteps.insertStep(step)!=1||interactionSteps.insertLink(new ChatInteractionStepStore.ExecutionLink(
+                        stableId("intent",turnId),tenantId,trusted.jiacn(),trusted.clientId(),stepId,created.executionId(),"RUNNING",0,now,now))!=1)
+                    throw persistence("Unable to bind private execution");
+                return new PrivateAccepted(new Admission(intent.requestId(),1,Long.toString(message.getId()),id,generation,
+                        InteractionRoute.EXECUTE,List.of(toDispatch(turn,contextSnapshot)),false),conversation);
+            });
+        } catch(org.springframework.dao.DuplicateKeyException raced) {
+            // The failed template has already rolled back. Never swallow a duplicate in its rollback-only transaction.
+            return privateAdmissionTransaction.execute(status->{
+                if(dao.findRequest(tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId())==null)throw raced;
+                return replayPrivate(tenantId,trusted,intent);
+            });
+        }
+    }
+
+    private cn.jia.chat.handler.TypedDeliberationSessionRegistry.Ready privateRuntime(String tenant,ServerResolvedSender sender,String agent) {
+        var ready=nativeSessions.requireSingleReady(new cn.jia.chat.handler.TypedDeliberationSessionRegistry.Scope(tenant,sender.jiacn(),sender.clientId()),agent);
+        var declaration=ChatSkillSourceAccessService.object(ready.frozenDeclaration().get("nativeExecution"));
+        if(!Integer.valueOf(6).equals(declaration.get("executionProtocolVersion"))
+                ||!cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY.equals(declaration.get("toolPolicyRef"))
+                ||!(declaration.get("outputMimeTypes") instanceof List<?>))throw unavailable();
+        return ready;
+    }
+    private PrivateAccepted replayPrivate(String tenant,ServerResolvedSender sender,PrivateIntent intent) {
+        var request=dao.findRequest(tenant,sender.jiacn(),sender.clientId(),intent.requestId());
+        if(request==null||!Objects.equals(1L,request.getRequestRevision())||!intent.sha256().equals(request.getClientIntentSha256()))
+            throw conflict("Private request key conflicts with its original intent");
+        var conversation=requireLockedConversation(tenant,sender.jiacn(),sender.clientId(),request.getConversationId(),request.getConversationGeneration());
+        requirePrivateConversation(conversation,tenant,sender,intent.target());
+        var admission=loadAdmission(tenant,request,true);
+        if(admission.route()!=InteractionRoute.EXECUTE||admission.dispatches().size()!=1
+                ||!intent.target().equals(admission.dispatches().getFirst().targetAgentId()))throw persistence("Invalid private admission receipt");
+        var step=interactionSteps.findStep(tenant,sender.jiacn(),sender.clientId(),intent.requestId(),1,1);
+        if(step==null||!"EXECUTE".equals(step.kind())||step.taskId()!=null||step.grantId()!=null||step.grantVersion()!=null||step.assignmentRevision()!=null
+                ||interactionSteps.findLink(tenant,sender.jiacn(),sender.clientId(),step.stepId())==null)throw persistence("Private execution link is missing");
+        return new PrivateAccepted(admission,conversation);
+    }
+    private void requirePrivateConversation(ChatConversationEntity c,String tenant,ServerResolvedSender sender,String target) {
+        if(c==null||c.getId()==null||!tenant.equals(c.getTenantId())||!sender.jiacn().equals(c.getJiacn())||!sender.clientId().equals(c.getClientId())
+                ||c.getDeletedAt()!=null||c.getLifecycleGeneration()==null||c.getLifecycleGeneration()<1||c.getTaskId()!=null
+                ||!"juyiting".equals(c.getConversationType())||!"private".equals(c.getConversationScopeType())
+                ||!("agent:"+target).equals(c.getConversationScopeKey())||!target.equals(c.getTargetAgentId()))throw unavailable();
+        try {
+            if(!List.of(target).equals(JsonUtil.getMapper().readValue(c.getTargetAgentIds(),List.class)))throw unavailable();
+        } catch (Exception malformed) { throw unavailable(); }
+    }
+    private PrivateIntent privateIntent(ChatMessageDTO input) {
+        if(input==null||!"juyiting".equals(input.getConversationType())||!"private".equals(input.getConversationScopeType())
+                ||input.getTaskId()!=null||input.getInputRefs()!=null&&!input.getInputRefs().isEmpty()
+                ||input.getMaterialRefs()==null||input.getMaterialRefs().size()>32
+                ||input.getRequestRevision()!=null&&input.getRequestRevision()!=1L)throw invalid("Invalid private native request");
+        String target=requireIdentity(input.getTargetAgentId(),MAX_ID),request=requireIdentity(input.getRequestId(),MAX_ID);
+        String conversation=input.getConversationId();if(conversation!=null)requireIdentity(conversation,MAX_ID);
+        if(Boolean.TRUE.equals(input.getForceNewConversation())&&conversation!=null)throw invalid("New private conversation must not supply an existing ID");
+        if(input.getConversationScopeKey()!=null&&!("agent:"+target).equals(input.getConversationScopeKey())
+                ||input.getTargetAgentIds()!=null&&!input.getTargetAgentIds().equals(List.of(target)))throw invalid("Conflicting private target");
+        var refs=new ArrayList<Map<String,Object>>();var selectedRefs=new LinkedHashSet<String>();
+        for(var ref:input.getMaterialRefs()) {
+            if(ref==null)throw invalid("Invalid private material reference");
+            Object kind=ref.get("kind");String revisionKey;
+            if("WORKSPACE_VERSION".equals(kind)&&ref.keySet().equals(Set.of("kind","fileId","version"))) {
+                requireIdentity(ChatSkillSourceAccessService.text(ref,"fileId"),MAX_ID);revisionKey="version";
+            } else if("CURRENT_CONVERSATION_ASSET".equals(kind)&&ref.keySet().equals(Set.of("kind","assetId","revision"))) {
+                requireIdentity(ChatSkillSourceAccessService.text(ref,"assetId"),MAX_ID);revisionKey="revision";
+            } else throw invalid("Unsupported private material reference");
+            if(!(ref.get(revisionKey) instanceof String decimal)||!decimal.matches("[1-9][0-9]*"))throw invalid("Material version must be a positive decimal string");
+            long version=ChatSkillSourceAccessService.decimal(decimal);if(version<1||"version".equals(revisionKey)&&version>Integer.MAX_VALUE)throw invalid("Invalid material version");
+            if("CURRENT_CONVERSATION_ASSET".equals(kind)&&conversation==null)throw invalid("Conversation asset requires an existing conversation");
+            if(!selectedRefs.add(ChatSkillSnapshotJson.write(ref)))throw invalid("Duplicate material reference");
+            refs.add(Map.copyOf(ref));
+        }
+        String content=requireContent(input.getContent());
+        var original=new LinkedHashMap<String,Object>();original.put("conversationId",conversation);original.put("requestId",request);
+        original.put("requestRevision","1");original.put("targetAgentId",target);original.put("content",content);original.put("materialRefs",refs);
+        return new PrivateIntent(conversation,request,target,content,List.copyOf(refs),ChatSkillSnapshotJson.sha(original));
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public Admission admit(String tenantId, ServerResolvedSender sender, String conversationId,
             long expectedGeneration, JuyitingConversationScope scope,
@@ -324,6 +513,9 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         requireIdentity(conversationId, MAX_ID);
         if (expectedGeneration < 1 || scope == null || route == null || route == InteractionRoute.EXECUTE) {
             throw invalid("Invalid chat admission scope");
+        }
+        if ("private".equals(scope.scopeType())) {
+            throw invalid("Private conversations require native admission");
         }
         // Only server-resolved typed catalogues can admit an empty USER body. Browser metadata
         // and generic chat/inspection callers do not acquire this capability.
@@ -989,6 +1181,8 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             Long expectedStateVersion, Long expectedLastDeltaSeq, String reason) {
         ChatTurnEntity visible = requireVisibleTurn(tenantId, ownerJiacn, clientId, turnId);
         var conversation = requireLockedConversation(tenantId, ownerJiacn, clientId, visible.getConversationId(), visible.getConversationGeneration());
+        if(InteractionRoute.EXECUTE.name().equals(visible.getRoute()))
+            return turnView(cancelPrivateNativeTurn(tenantId,ownerJiacn,clientId,visible,expectedStateVersion));
         ChatTurnEntity turn = requireLockedTurn(tenantId, ownerJiacn, clientId, turnId);
         if (!terminal(turn.getState())) {
             if (expectedStateVersion != null && !expectedStateVersion.equals(turn.getStateVersion())) {
@@ -1018,12 +1212,20 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         }
         String safeReason = normalizeCancelReason(reason);
         long now = System.currentTimeMillis();
+        boolean nativeRequest=turns.stream().anyMatch(t->InteractionRoute.EXECUTE.name().equals(t.getRoute()));
+        if(nativeRequest&&turns.size()!=1)throw persistence("Invalid private execution turn set");
         for (ChatTurnEntity candidate : turns) {
             if (!selected.isEmpty() && !selected.contains(candidate.getTurnId())) continue;
+            if(nativeRequest) {
+                cancelPrivateNativeTurn(tenantId,ownerJiacn,clientId,candidate,null);
+                continue;
+            }
             ChatTurnEntity turn = requireLockedTurn(tenantId, ownerJiacn, clientId, candidate.getTurnId());
             if (!terminal(turn.getState())) cancelLockedTurn(turn, safeReason, now, conversation.getConversationType());
         }
-        refreshAggregate(tenantId, ownerJiacn, clientId, requestId, now);
+        // Native cancellation and already-committed results are projected by the same durable
+        // consumer. Never synthesize a CHAT cancellation or overwrite RESULT_COMMITTED here.
+        if(!nativeRequest)refreshAggregate(tenantId, ownerJiacn, clientId, requestId, now);
         ChatRequestEntity refreshed = dao.findRequest(tenantId, ownerJiacn, clientId, requestId);
         return requestView(refreshed, dao.findTurnsByRequest(tenantId, ownerJiacn, clientId, requestId));
     }
@@ -1168,6 +1370,26 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
     private ChatDispatchAuthorityService requireDispatchAuthority() {
         if (dispatchAuthority == null) throw unavailable();
         return dispatchAuthority;
+    }
+
+    /** Called beneath the conversation lock, before taking any turn/step write locks. */
+    private ChatTurnEntity cancelPrivateNativeTurn(String tenant,String owner,String client,ChatTurnEntity visible,Long expectedVersion) {
+        if(nativeExecutions==null||interactionSteps==null)throw persistence("Native cancellation unavailable");
+        var current=requireVisibleTurn(tenant,owner,client,visible.getTurnId());
+        if(terminal(current.getState()))return current;
+        if(expectedVersion!=null&&!expectedVersion.equals(current.getStateVersion()))throw conflict("Turn state version changed");
+        var step=interactionSteps.findStep(tenant,owner,client,current.getRequestId(),current.getRequestRevision(),1);
+        if(step==null||!"EXECUTE".equals(step.kind())||step.taskId()!=null||step.grantId()!=null
+                ||step.grantVersion()!=null||step.assignmentRevision()!=null
+                ||!current.getConversationId().equals(step.conversationId())
+                ||current.getConversationGeneration()!=step.conversationGeneration()
+                ||!current.getTargetAgentId().equals(step.targetAgentId()))throw unavailable();
+        var link=interactionSteps.findLink(tenant,owner,client,step.stepId());
+        if(link==null||link.executionId()==null)throw persistence("Private execution link unavailable");
+        nativeExecutions.cancel(new cn.jia.agent.service.PersonalWorkspaceExecutionService.OwnerScope(tenant,client,owner),link.executionId());
+        // The native engine now holds the execution lock; only then may this path lock the turn.
+        // A committed result wins a race with cancellation and remains a result, not CANCELLED.
+        return requireLockedTurn(tenant,owner,client,current.getTurnId());
     }
 
     private void cancelLockedTurn(ChatTurnEntity turn, String reason, long now, String conversationType) {
@@ -1572,6 +1794,12 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
     private Map<String, Object> factsManifest(ChatConversationEntity conversation,
             JuyitingConversationScope scope, String targetAgentId, AgentTaskDTO task,
             Map<String, Object> taskMaterials, Map<String, Object> authorizedContext) {
+        return factsManifest(conversation,scope,targetAgentId,task,taskMaterials,authorizedContext,"read-only-constrained");
+    }
+
+    private Map<String, Object> factsManifest(ChatConversationEntity conversation,
+            JuyitingConversationScope scope, String targetAgentId, AgentTaskDTO task,
+            Map<String, Object> taskMaterials, Map<String, Object> authorizedContext, String toolPolicy) {
         Map<String, Object> facts = new LinkedHashMap<>();
         facts.put("schemaVersion", "2");
         facts.put("conversation", Map.of(
@@ -1584,7 +1812,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         facts.put("taskMaterials", sanitizeTaskMaterials(taskMaterials));
         facts.put("authorizedContext", authorizedContext);
         facts.put("responsePolicy", Map.of(
-                "toolPolicy", "read-only-constrained",
+                "toolPolicy", toolPolicy,
                 "strictNoToolsVerified", false,
                 "mustNotClaimUnmaterializedReferenceRead", true,
                 "mustStateMissingFacts", true));
@@ -2083,7 +2311,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
                 throw persistence("Interaction execution link unavailable");
             }
             result.add(new StepView(step.stepId(), Long.toString(step.stepNumber()), step.taskId(),
-                    Long.toString(step.assignmentRevision()), step.targetAgentId(),
+                    step.assignmentRevision()==null?null:Long.toString(step.assignmentRevision()), step.targetAgentId(),
                     step.kind(), step.state(), Long.toString(step.stateVersion()),
                     link == null ? null : link.executionIntentId(),
                     link == null ? null : link.executionId(),

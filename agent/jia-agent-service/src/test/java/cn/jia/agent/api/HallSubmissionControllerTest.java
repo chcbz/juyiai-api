@@ -82,7 +82,7 @@ class HallSubmissionControllerTest {
                                 execution("execution-1", "PRIVATE", null)),
                         new HallRequestDraftService.CaseExecutionView(2, "execution-1", source,
                                 execution("execution-2", "PRIVATE", null))),
-                List.of("VIEW", "CREATE_REVISION"),
+                List.of("VIEW"),
                 new HallRequestDraftService.CaseSourceRef("results"));
         when(service.getCase(scope, "hpc_1")).thenReturn(view);
 
@@ -96,7 +96,7 @@ class HallSubmissionControllerTest {
                 .andExpect(jsonPath("$.data.revision").value("2"))
                 .andExpect(jsonPath("$.data.executions[1].parentExecutionId").value("execution-1"))
                 .andExpect(jsonPath("$.data.executions[1].sourceOutputRef.outputId").value("output-1"))
-                .andExpect(jsonPath("$.data.allowedActions[1]").value("CREATE_REVISION"));
+                .andExpect(jsonPath("$.data.allowedActions[1]").doesNotExist());
     }
 
     @Test
@@ -123,7 +123,7 @@ class HallSubmissionControllerTest {
                 List.of(new HallRequestDraftService.ResultItemView(
                         "output_1", "file-1", 1, "application/pdf", "result.pdf",
                         512, "a".repeat(64), "AVAILABLE")),
-                List.of("VIEW", "CREATE_REVISION"));
+                List.of("VIEW"));
         when(service.getExecutionResults(scope, "execution-1")).thenReturn(view);
 
         mvc.perform(get("/agent/hall/executions/execution-1/results").principal(jwt()))

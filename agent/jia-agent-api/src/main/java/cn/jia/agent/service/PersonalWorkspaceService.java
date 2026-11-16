@@ -4,7 +4,6 @@ import cn.jia.agent.entity.PersonalWorkspaceViews.FileDetailView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.FileView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.ListView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.OperationView;
-import cn.jia.agent.entity.PersonalWorkspaceViews.PreviewView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.UploadView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.UsageView;
 import cn.jia.agent.entity.PersonalWorkspaceViews.VersionView;
@@ -17,6 +16,8 @@ public interface PersonalWorkspaceService {
     ListView list(Scope scope, ListQuery query);
     FileDetailView get(Scope scope, String fileId);
     List<VersionView> versions(Scope scope, String fileId);
+    /** Exact active-file metadata only; no latest substitution or content conversion. */
+    VersionView readableVersion(Scope scope, String fileId, int version);
     VersionPage versionsPage(Scope scope, String fileId, String cursor);
     UploadView create(Scope scope, UploadCommand command);
     /** Trusted server-side archive of an already authorized, immutable conversation asset.
@@ -35,8 +36,6 @@ public interface PersonalWorkspaceService {
     FileView restore(Scope scope, String fileId, String ifMatch, Idempotency idempotency);
     Content readContent(Scope scope, String fileId, int version);
     Download download(Scope scope, String fileId, int version);
-    PreviewView preview(Scope scope, String fileId, int version);
-    Content readPreviewPart(Scope scope, String fileId, int version, String partId);
     UsageView usage(Scope scope, String fileId);
     OperationView operation(Scope scope, String operationId);
 

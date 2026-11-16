@@ -25,12 +25,8 @@ class ControlledImageConversationStartTest {
         var service=new PersonalWorkspaceExecutionServiceImpl(rows,workspace,links,runtimes,storage,writes,
                 new PersonalWorkspaceExecutionProperties(List.of("image/png")));
         clearInvocations(storage); // Constructor reads the configured storage limit.
-        var scope=new PersonalWorkspaceExecutionService.OwnerScope("0","client","owner");
-
-        var failure=assertThrows(PersonalWorkspaceExecutionService.Failure.class,
-                () -> service.createConversation(scope,null));
-
-        assertEquals(PersonalWorkspaceExecutionService.Reason.CAPABILITY_UNAVAILABLE,failure.getReason());
+        assertFalse(java.util.Arrays.stream(PersonalWorkspaceExecutionService.class.getMethods())
+                .anyMatch(method -> method.getName().equals("createConversation")));
         verifyNoInteractions(rows,workspace,links,runtimes,storage,writes);
     }
 }

@@ -35,11 +35,11 @@ public interface ChatDeliberationMapper {
 
     @Insert("""
             INSERT INTO chat_request
-              (tenant_id,owner_jiacn,client_id,request_id,request_revision,request_digest,
+              (tenant_id,owner_jiacn,client_id,request_id,request_revision,request_digest,client_intent_sha256,
                conversation_id,conversation_generation,user_message_id,aggregate_state,state_version,
                created_at,updated_at)
             VALUES
-              (#{tenantId},#{ownerJiacn},#{clientId},#{requestId},#{requestRevision},#{requestDigest},
+              (#{tenantId},#{ownerJiacn},#{clientId},#{requestId},#{requestRevision},#{requestDigest},#{clientIntentSha256},
                #{conversationId},#{conversationGeneration},#{userMessageId},#{aggregateState},#{stateVersion},
                #{createdAt},#{updatedAt})
             """)

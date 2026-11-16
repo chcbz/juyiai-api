@@ -74,11 +74,11 @@ public final class TypedDeliberationDeclaration {
     private static Map<String,Object> nativeExecution(Object raw) {
         if(!(raw instanceof Map<?,?> m)||!m.keySet().containsAll(Set.of("schemaVersion","executionProtocolVersion","toolPolicyRef","outputMimeTypes"))
                 ||!m.keySet().stream().allMatch(String.class::isInstance))throw invalid();
-        exactInteger(m.get("schemaVersion"),1);exactInteger(m.get("executionProtocolVersion"),5);exact(m.get("toolPolicyRef"),"NATIVE_LOCAL_FILES_V1");
+        exactInteger(m.get("schemaVersion"),1);exactInteger(m.get("executionProtocolVersion"),6);exact(m.get("toolPolicyRef"),"NATIVE_LOCAL_FILES_V1");
         if(!(m.get("outputMimeTypes") instanceof List<?> types)||types.stream().anyMatch(x->!concreteMime(x))
                 ||new java.util.HashSet<>(types).size()!=types.size())throw invalid();
         var result=new java.util.LinkedHashMap<String,Object>();
-        result.put("schemaVersion",1);result.put("executionProtocolVersion",5);result.put("toolPolicyRef","NATIVE_LOCAL_FILES_V1");result.put("outputMimeTypes",List.copyOf(types));
+        result.put("schemaVersion",1);result.put("executionProtocolVersion",6);result.put("toolPolicyRef","NATIVE_LOCAL_FILES_V1");result.put("outputMimeTypes",List.copyOf(types));
         if(m.containsKey("supportedToolPolicyRefs")) {
             if(!(m.get("supportedToolPolicyRefs") instanceof List<?> refs)||refs.stream().anyMatch(x->!"NATIVE_SKILL_SCRIPT_V1".equals(x))||new java.util.HashSet<>(refs).size()!=refs.size())throw invalid();
             result.put("supportedToolPolicyRefs",List.copyOf(refs));

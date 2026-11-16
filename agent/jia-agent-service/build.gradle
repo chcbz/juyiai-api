@@ -146,8 +146,6 @@ def v1131AcceptanceSourceSet = sourceSets.create('v1131Acceptance') {
         include 'cn/jia/agent/service/impl/PersonalWorkspaceStorageBoundaryTest.java'
         include 'cn/jia/agent/service/impl/FileSystemPersonalWorkspaceStorageTest.java'
         include 'cn/jia/agent/service/impl/TaskLinkedMaterialReaderMySqlTest.java'
-        include 'cn/jia/agent/service/impl/PersonalWorkspacePreviewRendererTest.java'
-        include 'cn/jia/agent/service/impl/PersonalWorkspaceOutputFormatValidatorTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskArtifactStorageF02Test.java'
         include 'cn/jia/agent/service/impl/AgentTaskArtifactOutcomeServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskFormalDeliveryDecisionServiceImplTest.java'
@@ -401,7 +399,6 @@ def bf08FormalFlowSourceSet = sourceSets.create('bf08FormalFlow') {
         include 'cn/jia/agent/service/impl/AgentTaskFormalDeliveryDecisionServiceImplTest.java'
         include 'cn/jia/agent/api/AgentTaskFormalDeliveryControllerTest.java'
         include 'cn/jia/agent/config/AgentTaskFormalDeliveryProfileTest.java'
-        include 'cn/jia/agent/service/impl/AgentTaskReworkExecutionServiceImplTest.java'
         include 'cn/jia/agent/service/impl/PersonalWorkspaceTaskLinkServiceImplTest.java'
         include 'cn/jia/agent/service/impl/PersonalWorkspaceExecutionServiceImplTest.java'
     }
@@ -545,7 +542,7 @@ def mmdU1BootstrapOutboxSourceSet = sourceSets.create('mmdU1BootstrapOutbox') {
         include 'cn/jia/agent/service/impl/TaskBootstrapTenantIsolationMySqlTest.java'
         include 'cn/jia/agent/service/impl/NativeConversationWorkDiscoveryMySqlTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskEventHeadMySqlTest.java'
-        include 'cn/jia/agent/service/impl/WorkspaceFileQueueMySqlTest.java'
+        include 'cn/jia/agent/service/impl/NativeConversationQueueMySqlTest.java'
         include 'cn/jia/agent/service/impl/WorkspaceProjectionHintTest.java'
         include 'cn/jia/agent/service/impl/PersonalWorkspaceExecutionServiceImplTest.java'
         // The existing unfiltered recovery slice also covers SSE compensation and its DAO.

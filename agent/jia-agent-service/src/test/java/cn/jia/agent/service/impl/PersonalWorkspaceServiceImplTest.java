@@ -69,7 +69,7 @@ class PersonalWorkspaceServiceImplTest {
     }
 
     @Test
-    void arbitraryFormatsAndExtensionlessFilesRoundTripWithoutEnablingPreview() {
+    void arbitraryFormatsAndExtensionlessFilesRoundTripWithoutFormatParsing() {
         Fixture fixture = new Fixture();
         String[][] cases = {{"data.custom", "application/x-custom"}, {"page.html", "text/html"},
                 {"icon.svg", "image/svg+xml"}, {"archive.zip", "application/zip"},
@@ -81,9 +81,6 @@ class PersonalWorkspaceServiceImplTest {
             var saved = fixture.service.create(OWNER_A, upload("arbitrary-" + i, cases[i][0], cases[i][1], content));
             String mime = cases[i][1].isEmpty() ? "application/octet-stream" : cases[i][1];
             assertEquals(mime, saved.version().contentMimeType());
-            assertEquals("UNSUPPORTED", saved.version().previewState());
-            if (cases[i][0].startsWith("deck.")) assertEquals("UNSUPPORTED", saved.file().capabilities().preview());
-            assertEquals("UNSUPPORTED", fixture.service.preview(OWNER_A, saved.file().fileId(), 1).state());
             assertArrayEquals(content, fixture.service.readContent(OWNER_A, saved.file().fileId(), 1).bytes());
             assertReason(PersonalWorkspaceException.Reason.NOT_FOUND,
                     () -> fixture.service.readContent(OWNER_B, saved.file().fileId(), 1));
@@ -274,7 +271,7 @@ class PersonalWorkspaceServiceImplTest {
     }
 
     @Test
-    void ownerCanArchiveAndPreviewConfiguredAudioAndRasterConversationAssets() {
+    void ownerCanArchiveAndReadConfiguredAudioAndRasterConversationAssets() {
         Fixture fixture = new Fixture();
         Map<String, String> formats = Map.of(
                 "audio/mpeg", "mp3", "audio/ogg", "ogg", "audio/wav", "wav",
@@ -291,17 +288,9 @@ class PersonalWorkspaceServiceImplTest {
             var saved = fixture.service.archiveConversationAsset(OWNER_A, command);
             assertEquals("AGENT_DELIVERY", saved.file().originKind());
             assertEquals(format.getKey().startsWith("audio/") ? "AUDIO" : "IMAGE", saved.file().mediaFamily());
-            assertEquals("AVAILABLE", saved.file().capabilities().preview());
-            assertEquals("READY", saved.version().previewState());
-            var preview = fixture.service.preview(OWNER_A, saved.file().fileId(), 1);
-            assertEquals("READY", preview.state());
-            assertEquals(format.getKey(), preview.parts().getFirst().contentMimeType());
-            assertArrayEquals(content, fixture.service.readPreviewPart(OWNER_A, saved.file().fileId(), 1,
-                    PersonalWorkspacePreviewRenderer.CONTENT_PART_ID).bytes());
             assertArrayEquals(content, fixture.service.readContent(OWNER_A, saved.file().fileId(), 1).bytes());
             assertReason(PersonalWorkspaceException.Reason.NOT_FOUND,
-                    () -> fixture.service.readPreviewPart(OWNER_B, saved.file().fileId(), 1,
-                            PersonalWorkspacePreviewRenderer.CONTENT_PART_ID));
+                    () -> fixture.service.readContent(OWNER_B, saved.file().fileId(), 1));
             assertEquals(saved.file().fileId(), fixture.service.archiveConversationAsset(OWNER_A, command).file().fileId());
         }
         assertEquals(7, fixture.storage.storeCount, "archive replay must not allocate another file");
@@ -316,40 +305,16 @@ class PersonalWorkspaceServiceImplTest {
     }
 
     @Test
-    void multipartPreviewKeepsContentCompatibilityAndChecksAclBeforeExactPartLookup() throws Exception {
+    void spreadsheetContentPreservesExactContainerAndOwnerIsolation() throws Exception {
         Fixture fixture = new Fixture();
-        byte[] workbook = xlsxWithTwoSheetsAndFormula();
-        String fileId = fixture.service.create(OWNER_A, upload(
-                "create-workbook", "workbook.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", workbook))
-                .file().fileId();
-
-        var detail = fixture.service.get(OWNER_A, fileId);
-        assertEquals("AVAILABLE", detail.file().capabilities().preview());
-        assertEquals("READY", detail.latestVersion().previewState());
-        assertEquals(List.of("sheet-1", "sheet-2", "content"),
-                fixture.service.preview(OWNER_A, fileId, 1).parts().stream()
-                        .map(part -> part.partId()).toList());
-
-        String sheet = new String(fixture.service.readPreviewPart(
-                OWNER_A, fileId, 1, "sheet-2").bytes(), StandardCharsets.UTF_8);
-        String content = new String(fixture.service.readPreviewPart(
-                OWNER_A, fileId, 1, "content").bytes(), StandardCharsets.UTF_8);
-        assertTrue(sheet.contains("[公式未执行] =Inputs!A1*2"));
-        assertTrue(content.contains("工作表：Inputs"));
-        assertTrue(content.contains("工作表：Summary"));
-
-        int readsBeforeUnknownPart = fixture.storage.readCount;
+        byte[] original = xlsxWithTwoSheetsAndFormula();
+        var saved = fixture.service.create(OWNER_A, upload("xlsx-original", "sheet.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", original));
+        assertArrayEquals(original, fixture.service.readContent(OWNER_A, saved.file().fileId(), 1).bytes());
+        int reads = fixture.storage.readCount;
         assertReason(PersonalWorkspaceException.Reason.NOT_FOUND,
-                () -> fixture.service.readPreviewPart(OWNER_A, fileId, 1, "sheet-99"));
-        assertEquals(readsBeforeUnknownPart + 1, fixture.storage.readCount,
-                "authorized content must be resolved before an unknown logical part is rejected");
-
-        int readsBeforeForeignPart = fixture.storage.readCount;
-        assertReason(PersonalWorkspaceException.Reason.NOT_FOUND,
-                () -> fixture.service.readPreviewPart(OWNER_B, fileId, 1, "sheet-2"));
-        assertEquals(readsBeforeForeignPart, fixture.storage.readCount,
-                "foreign scope must fail at owner metadata before private bytes are read");
+                () -> fixture.service.readContent(OWNER_B, saved.file().fileId(), 1));
+        assertEquals(reads, fixture.storage.readCount);
     }
 
     @Test
@@ -530,7 +495,7 @@ class PersonalWorkspaceServiceImplTest {
     }
 
     @Test
-    void textPreviewReadsBoundedPrefixAndClosesSourceWithoutBufferedFileRead() {
+    void textDownloadStreamsWholeOriginalAndClosesSourceWithoutBufferedFileRead() throws Exception {
         Fixture fixture = new Fixture();
         byte[] content = bytes("中文".repeat(450_000));
         var saved = fixture.service.archiveConversationText(OWNER_A,
@@ -554,11 +519,10 @@ class PersonalWorkspaceServiceImplTest {
         var service = new PersonalWorkspaceServiceImpl(fixture.dao, streaming,
                 new PersonalWorkspaceWriteService(fixture.dao,
                         new PersonalWorkspaceOperationClaimTx(fixture.dao)));
-        var preview = service.preview(OWNER_A, saved.file().fileId(), 1);
-        assertEquals("READY", preview.state());
-        assertTrue(preview.partial());
-        assertTrue(reads.get() > 0);
-        assertTrue(reads.get() <= 4 * (PersonalWorkspacePreviewRenderer.MAX_TEXT_CODE_POINTS + 1));
+        try (var download = service.download(OWNER_A, saved.file().fileId(), 1)) {
+            assertArrayEquals(content, download.content().readAllBytes());
+            assertEquals(content.length, download.byteLength());
+        }
         assertEquals(1, closed.get());
         org.mockito.Mockito.verify(streaming, org.mockito.Mockito.never()).read(
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString(),

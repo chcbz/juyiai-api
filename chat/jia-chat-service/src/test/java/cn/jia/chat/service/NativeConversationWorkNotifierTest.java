@@ -35,17 +35,16 @@ class NativeConversationWorkNotifierTest {
         drains.get(0).run();assertEquals(2,drains.size());drains.get(1).run();
         verify(sockets,times(2)).notifyNativeWork(local);verifyNoInteractions(discovery);
     }
-    @Test void bothLanesUseOneDurableRecoveryAndOneQuery() {
-        var file=new cn.jia.agent.entity.NativeConversationWorkAvailable("0","client","local","WORKSPACE_FILE");
-        when(sockets.nativeWorkTargets()).thenReturn(List.of(local,file));
-        when(discovery.pendingFor(List.of(local,file))).thenReturn(List.of(local,file));
-        recover();
-        verify(discovery).pendingFor(List.of(local,file));
-        verify(sockets).notifyNativeWork(local);verify(sockets).notifyNativeWork(file);
-        verify(worker,never()).scheduleWithFixedDelay(any(Runnable.class),anyLong(),anyLong(),any());
-        for(int i=0;i<1000;i++){notifier.available(local);notifier.available(file);}
-        assertEquals(1,drains.size());drains.get(0).run();
-        verify(sockets,times(2)).notifyNativeWork(local);verify(sockets,times(2)).notifyNativeWork(file);
+    @Test void retiredFileLaneCannotScheduleWorkWithoutACurrentSubscription() {
+        var retired=new cn.jia.agent.entity.NativeConversationWorkAvailable("0","client","local","WORKSPACE_FILE");
+        for(int i=0;i<1000;i++)notifier.available(retired);
+        assertTrue(drains.isEmpty());
+        verify(sockets,never()).notifyNativeWork(any());
+        verifyNoInteractions(discovery);
+        notifier.available(local);
+        assertEquals(1,drains.size());drains.getFirst().run();
+        verify(sockets).notifyNativeWork(local);
+        verify(sockets,never()).notifyNativeWork(retired);
     }
     @Test void missedOrRemoteCommitIsRecoveredByOneLocalSubscriptionQuery() {
         when(discovery.pendingFor(List.of(local))).thenReturn(List.of(local));

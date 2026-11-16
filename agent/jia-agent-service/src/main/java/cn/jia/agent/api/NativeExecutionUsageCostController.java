@@ -13,7 +13,7 @@ import tools.jackson.databind.JsonNode;
 
 /** Cost evidence delivery does not claim, resume or finish an execution. */
 @RestController
-@RequestMapping("/internal/agent/tasks")
+@RequestMapping("/internal/agent/executions")
 public final class NativeExecutionUsageCostController {
     public record Request(String executionId, NativeExecutionUsageCostRecorder.Phase phase, String requestedModel, JsonNode usageEvidence) { }
     public record Receipt(String executionId, String attemptId, String revision, String status, String costYuan) { }
@@ -24,11 +24,11 @@ public final class NativeExecutionUsageCostController {
         this.recorder = recorder; this.authentication = authentication;
     }
 
-    @PostMapping(value="/{taskId}/runs/{runId}/conversation/usage", consumes="application/json", produces="application/json")
-    public ResponseEntity<JsonResult<Receipt>> record(@PathVariable String taskId, @PathVariable String runId,
+    @PostMapping(value="/{executionId}/runs/{runId}/usage", consumes="application/json", produces="application/json")
+    public ResponseEntity<JsonResult<Receipt>> record(@PathVariable String executionId, @PathVariable String runId,
             @RequestBody JsonRequest<Request> protocolRequest, Authentication principal) {
         var body = protocolRequest == null ? null : protocolRequest.data();
-        if (body == null || body.phase() == null || body.executionId() == null || !body.executionId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
+        if (body == null || !java.util.Objects.equals(executionId,body.executionId()) || body.phase() == null || body.executionId() == null || !body.executionId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
                 || body.phase() == NativeExecutionUsageCostRecorder.Phase.STARTED && body.usageEvidence() != null && !body.usageEvidence().isNull()
                 || body.usageEvidence() != null && !body.usageEvidence().isNull() && !body.usageEvidence().isObject())
             throw new IllegalArgumentException("Invalid native usage evidence");
@@ -36,7 +36,7 @@ public final class NativeExecutionUsageCostController {
             var trusted = AgentRuntimeAuthenticationService.requireProof(principal).scope();
             var scope = new PersonalWorkspaceExecutionService.RuntimeScope(trusted.tenantId(), trusted.clientId(),
                     trusted.ownerJiacn(), trusted.agentId(), trusted.runtimeInstanceId());
-            return recorder.record(scope, taskId, runId, new NativeExecutionUsageCostRecorder.Evidence(
+            return recorder.record(scope, executionId, runId, new NativeExecutionUsageCostRecorder.Evidence(
                     body.executionId(), body.phase(), body.requestedModel(), body.usageEvidence() == null ? "null" : body.usageEvidence().toString()));
         });
         return ResponseEntity.ok().header("Cache-Control", "private, no-store").body(JsonResult.success(

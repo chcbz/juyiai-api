@@ -26,7 +26,7 @@ class RecommendationMaterialsTest {
         return new LinkView(id, "task", "file", 1, role, state, 1, 123);
     }
     private static VersionView version(int n, String mime) {
-        return new VersionView("file", n, "original.png", mime, 30, "sha" + n, 123, "READY");
+        return new VersionView("file", n, "original.png", mime, 30, "sha" + n, 123);
     }
     private static FileDetailView detail(String name, long revision, List<VersionView> versions) {
         return new FileDetailView(new FileView("file", "UPLOAD", "USER", name, "document", "ACTIVE",
@@ -84,7 +84,7 @@ class RecommendationMaterialsTest {
     @Test void passesEveryFileTypeIncludingUnknownMimeAndNoExtensionWithoutClassification() {
         single();
         for (String filename : List.of("result.png", "report.pdf", "data.csv", "recording.wav", "archive.unknown", "无后缀资料")) {
-            var v = new VersionView("file", 1, filename, "application/octet-stream", 30, "sha1", 123, "UNSUPPORTED");
+            var v = new VersionView("file", 1, filename, "application/octet-stream", 30, "sha1", 123);
             when(files.get(FILE_SCOPE, "file")).thenReturn(detail(filename, 1, List.of(v)));
             var rows = subject.observe(ACTOR, "task");
             assertEquals(1, rows.size());

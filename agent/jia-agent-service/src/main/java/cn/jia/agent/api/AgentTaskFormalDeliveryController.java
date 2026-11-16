@@ -10,8 +10,6 @@ import cn.jia.agent.exception.AgentTaskCollaborationException;
 import cn.jia.agent.service.AgentTaskFormalDeliveryDecisionService;
 import cn.jia.agent.service.AgentTaskFormalDeliveryReadService;
 import cn.jia.agent.service.AgentTaskFormalDeliveryService;
-import cn.jia.agent.service.AgentTaskReworkExecutionService;
-import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -69,9 +67,6 @@ public class AgentTaskFormalDeliveryController {
             "artifactId", "artifactVersion", "contentHash", "purpose");
     private static final Set<String> DECISION_FIELDS = Set.of(
             "expectedTaskVersion", "expectedDeliveryVersion", "decision", "reviewReason");
-    private static final Set<String> REWORK_FIELDS = Set.of(
-            "expectedDecisionVersion", "conversationId", "targetAgentId", "sourceOutputId",
-            "sourceFileId", "sourceFileVersion", "instruction", "outputContentMimeType");
     private static final ObjectMapper STRICT_JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -80,16 +75,13 @@ public class AgentTaskFormalDeliveryController {
     private final AgentTaskFormalDeliveryService submissionService;
     private final AgentTaskFormalDeliveryDecisionService decisionService;
     private final AgentTaskFormalDeliveryReadService readService;
-    private final AgentTaskReworkExecutionService reworkService;
 
     public AgentTaskFormalDeliveryController(AgentTaskFormalDeliveryService submissionService,
             AgentTaskFormalDeliveryDecisionService decisionService,
-            AgentTaskFormalDeliveryReadService readService,
-            AgentTaskReworkExecutionService reworkService) {
+            AgentTaskFormalDeliveryReadService readService) {
         this.submissionService = Objects.requireNonNull(submissionService, "submissionService");
         this.decisionService = Objects.requireNonNull(decisionService, "decisionService");
         this.readService = Objects.requireNonNull(readService, "readService");
-        this.reworkService = Objects.requireNonNull(reworkService, "reworkService");
     }
 
     @GetMapping(value = "/{taskId}/formal-deliveries", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -146,25 +138,6 @@ public class AgentTaskFormalDeliveryController {
         return cn.jia.core.config.ApiJsonResponses.success(ok(response(view, taskId, Long.MAX_VALUE)));
     }
 
-    @PostMapping(value = "/{taskId}/formal-deliveries/{deliveryId}/rework-executions",
-            consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<WorkspaceExecutionWire.Execution>> createReworkExecution(
-            @PathVariable String taskId, @PathVariable String deliveryId,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            HttpServletRequest request, Authentication authentication) {
-        Scope scope = requireJwtScope(authentication);
-        requireExact(taskId, 100); requireExact(deliveryId, 100); requireNoQuery(request);
-        String key = requireIdempotencyKey(idempotencyKey);
-        AgentTaskReworkExecutionService.ReworkCommand command = parseRework(
-                readBounded(request), taskId, deliveryId);
-        PersonalWorkspaceExecutionService.ExecutionView view = reworkService.create(
-                new PersonalWorkspaceExecutionService.OwnerScope(
-                        scope.tenantId(), scope.clientId(), scope.ownerJiacn()), command, key);
-        return cn.jia.core.config.ApiJsonResponses.success(ResponseEntity.status(HttpStatus.ACCEPTED)
-                .header(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL)
-                .contentType(MediaType.APPLICATION_JSON).body(view), WorkspaceExecutionWire::from);
-    }
-
     @ExceptionHandler(AuthenticationFailure.class)
     public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> authentication(AuthenticationFailure failure) {
         return error(failure.forbidden ? HttpStatus.FORBIDDEN : HttpStatus.UNAUTHORIZED,
@@ -175,23 +148,6 @@ public class AgentTaskFormalDeliveryController {
     @ExceptionHandler(RequestFailure.class)
     public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> badRequest(RequestFailure ignored) {
         return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Invalid formal delivery request");
-    }
-
-    @ExceptionHandler(PersonalWorkspaceExecutionService.Failure.class)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> reworkFailure(PersonalWorkspaceExecutionService.Failure failure) {
-        return switch (failure.getReason()) {
-            case BAD_REQUEST -> error(HttpStatus.BAD_REQUEST,
-                    "BAD_REQUEST", "Invalid formal delivery rework request");
-            case NOT_FOUND -> error(HttpStatus.NOT_FOUND,
-                    "FORMAL_DELIVERY_NOT_FOUND", "Formal delivery rework source is unavailable");
-            case IDEMPOTENCY_CONFLICT -> error(HttpStatus.CONFLICT,
-                    "IDEMPOTENCY_CONFLICT", "Operation key conflicts with a different rework request");
-            case TASK_CONFLICT, GRANT_CHANGED, GRANT_REVOKED -> error(HttpStatus.CONFLICT,
-                    "FORMAL_DELIVERY_CONFLICT", "Formal delivery changed; refresh before trying again");
-            case CAPABILITY_UNAVAILABLE -> error(HttpStatus.UNPROCESSABLE_ENTITY,
-                    "CAPABILITY_UNAVAILABLE", "Execution capability is not available");
-            case OUTPUT_CONFLICT, OUTPUT_MISSING, STORAGE_UNAVAILABLE -> unavailable();
-        };
     }
 
     @ExceptionHandler(AgentTaskCollaborationException.class)
@@ -306,18 +262,6 @@ public class AgentTaskFormalDeliveryController {
             command.setReviewReason(reason.textValue());
         }
         return command;
-    }
-
-    private static AgentTaskReworkExecutionService.ReworkCommand parseRework(
-            byte[] body, String taskId, String deliveryId) {
-        JsonNode root = parseObject(body, REWORK_FIELDS);
-        long expectedDecisionVersion = version(root, "expectedDecisionVersion");
-        if (expectedDecisionVersion < 1) throw new RequestFailure();
-        return new AgentTaskReworkExecutionService.ReworkCommand(taskId, deliveryId,
-                expectedDecisionVersion, text(root, "conversationId", 100),
-                text(root, "targetAgentId", 100), text(root, "sourceOutputId", 100),
-                text(root, "sourceFileId", 100), positiveInt(root, "sourceFileVersion"),
-                text(root, "instruction", 4_000), text(root, "outputContentMimeType", 127));
     }
 
     private static JsonNode parseDecisionObject(byte[] body) {

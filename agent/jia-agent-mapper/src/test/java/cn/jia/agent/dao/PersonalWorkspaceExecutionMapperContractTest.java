@@ -78,6 +78,35 @@ class PersonalWorkspaceExecutionMapperContractTest {
                 () -> dao.listHistory("0", "client-a", "owner-a", null, null, 102));
     }
 
+    @Test
+    void nativeQueueScopesPrivateAndTaskAuthorityBeforePaging() throws Exception {
+        String sql = sql(PersonalWorkspaceExecutionMapper.class.getDeclaredMethod(
+                "listQueuedConversationsByTarget", String.class, String.class, String.class,
+                String.class, Long.class, String.class, int.class));
+        String admission = sql.substring(0, sql.indexOf(" order by "));
+        assertTrue(admission.contains("execution_protocol_version=6"));
+        assertFalse(admission.contains("execution_protocol_version=5"));
+        assertTrue(admission.contains("execution_mode='conversation'"));
+        assertTrue(admission.contains("conversation_provider_started_at is null"));
+        int privateStart = admission.indexOf("business_scope='private'");
+        int taskStart = admission.indexOf("business_scope='task'");
+        assertTrue(privateStart > 0 && taskStart > privateStart);
+        String privateAdmission = admission.substring(privateStart, taskStart);
+        assertTrue(privateAdmission.contains("binary owner_jiacn=binary #{ownerjiacn}"));
+        for (String field : new String[]{"task_id", "task_grant_id", "task_grant_version", "assignment_revision"}) {
+            assertTrue(privateAdmission.contains(field + " is null"), field);
+        }
+        assertFalse(privateAdmission.contains("exists"));
+        String taskAdmission = admission.substring(taskStart);
+        assertTrue(taskAdmission.contains("exists (select 1 from agent_task_execution_grant g"));
+        assertTrue(taskAdmission.contains("binary g.executor_owner_jiacn=binary #{ownerjiacn}"));
+        assertTrue(taskAdmission.contains("g.grant_version=agent_personal_workspace_execution.task_grant_version"));
+        for (String field : new String[]{"tenant_id", "client_id", "owner_jiacn", "task_id", "target_agent_id"}) {
+            assertTrue(taskAdmission.contains("binary g." + field + "=binary agent_personal_workspace_execution." + field), field);
+        }
+        assertTrue(sql.endsWith("order by created_at asc, cast(execution_id as binary) asc limit #{limit} </script>"));
+    }
+
     private static String sql(Method method) {
         Select select = method.getAnnotation(Select.class);
         return String.join(" ", select.value()).replaceAll("\\s+", " ")

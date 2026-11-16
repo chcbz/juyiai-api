@@ -10,9 +10,8 @@ public final class PersonalWorkspaceViews {
             String state, long metadataRevision, int latestVersion, long createdAt,
             Capabilities capabilities) { }
     public record VersionView(String fileId, int version, String originalFilename,
-            String contentMimeType, long byteLength, String sha256, long createdAt,
-            String previewState) { }
-    public record Capabilities(String upload, String read, String edit, String preview, String download) { }
+            String contentMimeType, long byteLength, String sha256, long createdAt) { }
+    public record Capabilities(String upload, String read, String edit, String download) { }
     public record ListView(List<FileView> items, String nextCursor) { }
     public record VersionPage(List<VersionView> items, String nextCursor, boolean hasMore) { }
     public record FileDetailView(FileView file, VersionView latestVersion,
@@ -24,6 +23,4 @@ public final class PersonalWorkspaceViews {
     public record UsageCounts(long taskReferences, long conversationReferences, long activeInputGrants) { }
     public record TaskReferenceView(String taskId, String relationId, int version, String role,
             long relationRevision, long createdAt) { }
-    public record PreviewView(String state, List<PreviewPart> parts, boolean partial, String reason) { }
-    public record PreviewPart(String partId, String contentMimeType) { }
 }

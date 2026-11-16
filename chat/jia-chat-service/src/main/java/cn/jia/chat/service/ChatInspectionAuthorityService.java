@@ -41,7 +41,7 @@ public class ChatInspectionAuthorityService {
         @Override public void close() throws java.io.IOException {stream.close();}
     }
     private record PreparedContent(ChatTypedDeliberationStore.Scope scope,String taskId,String filename,
-            String mimeType,String hash,long byteLength,String storageUri,String runId,String outputId) {}
+            String mimeType,String hash,long byteLength,String storageUri,String executionId,String runId,String outputId) {}
 
     private final AgentTaskMutationTransaction tasks;
     private final ChatBountyBindingStore bindings;
@@ -87,7 +87,7 @@ public class ChatInspectionAuthorityService {
             } else {
                 var value=executions.openConversationOutput(new PersonalWorkspaceExecutionService.OwnerScope(
                         prepared.scope().tenantId(),prepared.scope().clientId(),prepared.scope().ownerJiacn()),
-                        prepared.taskId(),prepared.runId(),prepared.outputId());
+                        prepared.executionId(),prepared.runId(),prepared.outputId());
                 stream=value.content();
                 if(!prepared.hash().equals(value.sha256())||prepared.byteLength()!=value.byteLength()
                         ||!prepared.mimeType().equals(value.contentMimeType())) {
@@ -354,7 +354,7 @@ public class ChatInspectionAuthorityService {
             throw conflict("Inspection workspace source changed");
         }
         return new PreparedContent(scope,taskId,text(row,"original_filename"),text(row,"content_mime_type"),
-                text(row,"content_hash"),number(row,"byte_length"),text(row,"storage_uri"),null,null);
+                text(row,"content_hash"),number(row,"byte_length"),text(row,"storage_uri"),null,null,null);
     }
 
     private PreparedContent assetContent(ChatTypedDeliberationStore.Scope scope, String taskId,
@@ -370,7 +370,7 @@ public class ChatInspectionAuthorityService {
             throw conflict("Inspection asset changed");
         }
         return new PreparedContent(scope,taskId,actual.outputId(),actual.contentMimeType(),actual.sha256(),
-                actual.byteLength(),null,actual.runId(),actual.outputId());
+                actual.byteLength(),null,actual.executionId(),actual.runId(),actual.outputId());
     }
 
     private Map<String, Object> workspaceRow(ChatTypedDeliberationStore.Scope scope, String taskId,

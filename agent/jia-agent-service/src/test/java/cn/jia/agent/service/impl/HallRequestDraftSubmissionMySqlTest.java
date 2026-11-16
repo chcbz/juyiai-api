@@ -15,6 +15,7 @@ import cn.jia.agent.mapper.HallPrivateCaseMapper;
 import cn.jia.agent.mapper.HallRequestDraftMapper;
 import cn.jia.agent.service.AgentService;
 import cn.jia.agent.service.HallRequestDraftService;
+import cn.jia.agent.service.HallTaskCreationService;
 import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.chat.service.WorkspaceConversationAccessService;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -81,8 +82,8 @@ class HallRequestDraftSubmissionMySqlTest {
     private String namespace;
     private HallRequestDraftService service;
     private HallRequestDraftDao drafts;
-    private AtomicBoolean failExecution;
-    private AtomicInteger executionSequence;
+    private AtomicBoolean failTaskCreation;
+    private AtomicInteger taskSequence;
     private CountDownLatch raceGate;
 
     @BeforeEach
@@ -150,14 +151,14 @@ class HallRequestDraftSubmissionMySqlTest {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
                 """);
         jdbc.execute("""
-                CREATE TABLE fixture_execution (
-                  execution_id VARCHAR(100) NOT NULL,
+                CREATE TABLE fixture_task (
+                  task_id VARCHAR(100) NOT NULL,
                   tenant_id VARCHAR(50) NOT NULL,
                   client_id VARCHAR(50) NOT NULL,
                   owner_jiacn VARCHAR(50) NOT NULL,
                   request_key VARCHAR(100) NOT NULL,
-                  PRIMARY KEY (execution_id),
-                  UNIQUE KEY uk_fixture_execution_key
+                  PRIMARY KEY (task_id),
+                  UNIQUE KEY uk_fixture_task_key
                     (tenant_id,client_id,owner_jiacn,request_key)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin
                 """);
@@ -190,42 +191,34 @@ class HallRequestDraftSubmissionMySqlTest {
             return agent;
         });
         PersonalWorkspaceExecutionService executions = mock(PersonalWorkspaceExecutionService.class);
-        failExecution = new AtomicBoolean(false);
-        executionSequence = new AtomicInteger();
-        when(executions.create(any(), any(), any())).thenAnswer(invocation -> {
-            PersonalWorkspaceExecutionService.OwnerScope scope = invocation.getArgument(0);
-            String key = invocation.getArgument(2);
-            PersonalWorkspaceExecutionService.CreateCommand command = invocation.getArgument(1);
-            if (key.startsWith("legacy-submit")) {
-                assertEquals(List.of(new PersonalWorkspaceExecutionService.InputSelection(
-                        "legacy-file", 1)), command.inputs());
-                assertEquals(null, command.sourceOutputRef(),
-                        "private revision must not forge formal-delivery rework authority");
+        failTaskCreation = new AtomicBoolean(false);
+        taskSequence = new AtomicInteger();
+        // The surviving submit boundary creates an unassigned TASK, not an execution.
+        // Its adapter writes a transactional fixture row; real task-service integration
+        // is covered separately, not claimed by this mapper/CAS test.
+        HallTaskCreationService taskCreation = new HallTaskCreationService() {
+            @Override public HallRequestDraftService.TaskReference create(HallRequestDraftService.OwnerScope scope,
+                    String key, String title, String description, List<HallRequestDraftService.InputSelection> inputs) {
+                String taskId = "task_fixture_" + taskSequence.incrementAndGet();
+                jdbc.update("INSERT INTO fixture_task (task_id,tenant_id,client_id,owner_jiacn,request_key) VALUES (?,?,?,?,?)",
+                        taskId, scope.tenantId(), scope.clientId(), scope.ownerJiacn(), key);
+                if (failTaskCreation.get()) throw new HallRequestDraftService.Failure(HallRequestDraftService.Reason.STORAGE_UNAVAILABLE);
+                return new HallRequestDraftService.TaskReference(taskId, "1");
             }
-            String executionId = "pwe_fixture_" + executionSequence.incrementAndGet();
-            jdbc.update("INSERT INTO fixture_execution "
-                            + "(execution_id,tenant_id,client_id,owner_jiacn,request_key) "
-                            + "VALUES (?,?,?,?,?)",
-                    executionId, scope.tenantId(), scope.clientId(), scope.ownerJiacn(), key);
-            if (failExecution.get()) throw new IllegalStateException("forced execution failure");
-            return execution(executionId);
-        });
+            @Override public HallRequestDraftService.TaskReference get(HallRequestDraftService.OwnerScope scope, String taskId) {
+                Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM fixture_task WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",
+                        Integer.class, scope.tenantId(), scope.clientId(), scope.ownerJiacn(), taskId);
+                if (count == null || count != 1) throw new HallRequestDraftService.Failure(HallRequestDraftService.Reason.NOT_FOUND);
+                return new HallRequestDraftService.TaskReference(taskId, "1");
+            }
+        };
         when(executions.get(any(), any())).thenAnswer(invocation -> {
             PersonalWorkspaceExecutionService.OwnerScope scope = invocation.getArgument(0);
             String executionId = invocation.getArgument(1);
-            Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM fixture_execution "
-                            + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND execution_id=?",
+            Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM agent_personal_workspace_execution "
+                            + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND execution_id=? AND execution_mode='PRIVATE'",
                     Integer.class, scope.tenantId(), scope.clientId(), scope.ownerJiacn(), executionId);
-            if (count == null || count == 0) {
-                count = jdbc.queryForObject("SELECT COUNT(*) FROM agent_personal_workspace_execution "
-                                + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND execution_id=? "
-                                + "AND execution_mode='PRIVATE'",
-                        Integer.class, scope.tenantId(), scope.clientId(), scope.ownerJiacn(), executionId);
-            }
-            if (count == null || count != 1) {
-                throw new PersonalWorkspaceExecutionService.Failure(
-                        PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
-            }
+            if (count == null || count != 1) throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
             return execution(executionId);
         });
 
@@ -233,7 +226,7 @@ class HallRequestDraftSubmissionMySqlTest {
                 mock(PersonalWorkspaceDao.class), mock(AgentTaskMetaDao.class), agents,
                 mock(WorkspaceConversationAccessService.class),
                 new PersonalWorkspaceExecutionProperties(List.of(MIME)),
-                () -> 1_790_000_000_000L + executionSequence.get());
+                () -> 1_790_000_000_000L + taskSequence.get(), taskCreation);
         service = transactionalProxy(raw, new DataSourceTransactionManager(source));
     }
 
@@ -250,8 +243,8 @@ class HallRequestDraftSubmissionMySqlTest {
         assertEquals(List.of(), page.items());
         assertNull(page.nextCursor());
         assertEquals(0, count("hall_request_draft"));
-        assertEquals(0, count("fixture_execution"));
-        assertEquals(0, executionSequence.get());
+        assertEquals(0, count("fixture_task"));
+        assertEquals(0, taskSequence.get());
     }
 
     @Test
@@ -267,7 +260,7 @@ class HallRequestDraftSubmissionMySqlTest {
         assertTrue(page.items().stream().allMatch(row -> row.state().equals("EDITING")));
         assertNull(page.nextCursor());
         assertEquals(3, count("hall_request_draft"), "listing must not rewrite recovery rows");
-        assertEquals(0, executionSequence.get());
+        assertEquals(0, taskSequence.get());
     }
 
     @Test
@@ -297,7 +290,7 @@ class HallRequestDraftSubmissionMySqlTest {
         assertEquals(22L, all.stream().distinct().count());
         assertEquals(expected, all);
         assertEquals(22, count("hall_request_draft"));
-        assertEquals(0, executionSequence.get());
+        assertEquals(0, taskSequence.get());
     }
 
     @Test
@@ -318,7 +311,7 @@ class HallRequestDraftSubmissionMySqlTest {
         assertTrue(service.list(new HallRequestDraftService.OwnerScope(
                 "0", "client-a", "unrelated-owner"), null).items().isEmpty());
         assertEquals(4, count("hall_request_draft"));
-        assertEquals(0, executionSequence.get());
+        assertEquals(0, taskSequence.get());
     }
 
     private static List<String> draftIds(HallRequestDraftService.DraftPage page) {
@@ -343,11 +336,11 @@ class HallRequestDraftSubmissionMySqlTest {
     }
 
     @Test
-    void concurrentDifferentDraftsWithOneSubmitKeyCreateExactlyOneExecution() throws Exception {
+    void concurrentDifferentDraftsWithOneSubmitKeyCreateExactlyOneTask() throws Exception {
         String left = createDraft(OWNER, "create-left");
         String right = createDraft(OWNER, "create-right");
         // Force both transactions past the absent-key lookup, retaining the real mapper SQL.
-        // The loser must fail before invoking execution creation, not merely roll it back later.
+        // The loser must fail before invoking task creation, not merely roll it back later.
         CountDownLatch reserving = new CountDownLatch(2);
         raceGate = reserving;
         doAnswer(invocation -> {
@@ -367,17 +360,17 @@ class HallRequestDraftSubmissionMySqlTest {
                 .filter(failure -> failure.reason()
                         == HallRequestDraftService.Reason.IDEMPOTENCY_CONFLICT).count(),
                 () -> "submit result types/reasons: " + resultKinds(results));
-        assertEquals(1, executionSequence.get(), "loser must not call execution creation");
-        assertEquals(1, count("fixture_execution"));
-        assertEquals(1, count("hall_private_case"));
-        assertEquals(1, count("hall_case_execution"));
+        assertEquals(1, taskSequence.get(), "loser must not call task creation");
+        assertEquals(1, count("fixture_task"));
+        assertEquals(0, count("hall_private_case"));
+        assertEquals(0, count("hall_case_execution"));
         assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM hall_request_draft "
                 + "WHERE state='EDITING' AND revision=1 AND submit_key IS NULL "
                 + "AND submit_hash IS NULL AND submission_ref IS NULL", Integer.class));
     }
 
     @Test
-    void sameDraftConcurrentCasCreatesOneExecutionAndSameKeyReplaysReceipt() throws Exception {
+    void sameDraftConcurrentCasCreatesOneTaskAndSameKeyReplaysReceipt() throws Exception {
         String draft = createDraft(OWNER, "create-same");
         CountDownLatch start = new CountDownLatch(1);
         List<Object> results = concurrently(start,
@@ -390,15 +383,15 @@ class HallRequestDraftSubmissionMySqlTest {
         HallRequestDraftService.SubmissionReceipt second =
                 (HallRequestDraftService.SubmissionReceipt) results.get(1);
         assertEquals(first, second);
-        assertEquals(1, count("fixture_execution"));
-        assertEquals(1, count("hall_private_case"));
-        assertEquals(1, count("hall_case_execution"));
+        assertEquals(1, count("fixture_task"));
+        assertEquals(0, count("hall_private_case"));
+        assertEquals(0, count("hall_case_execution"));
         assertEquals(2L, jdbc.queryForObject("SELECT revision FROM hall_request_draft "
                 + "WHERE draft_id=?", Long.class, draft));
     }
 
     @Test
-    void differentKeyCasLosesWithoutSecondExecution() throws Exception {
+    void differentKeyCasLosesWithoutSecondTask() throws Exception {
         String draft = createDraft(OWNER, "create-cas");
         CountDownLatch start = new CountDownLatch(1);
         List<Object> results = concurrently(start,
@@ -410,77 +403,34 @@ class HallRequestDraftSubmissionMySqlTest {
                 .map(HallRequestDraftService.Failure.class::cast)
                 .filter(failure -> failure.reason()
                         == HallRequestDraftService.Reason.IDEMPOTENCY_CONFLICT).count());
-        assertEquals(1, count("fixture_execution"));
+        assertEquals(1, count("fixture_task"));
     }
 
     @Test
-    void concurrentLegacyRevisionCreatesOneLazyCaseAndOneImmutableParentBinding() throws Exception {
+    void concurrentHistoricalRevisionSubmissionsAreRejectedWithoutLazyCaseOrExecution() throws Exception {
         seedLegacyOutput();
-        String left = createRevisionDraft("legacy-left");
-        String right = createRevisionDraft("legacy-right");
-        // Both sessions must have read an absent binding before either locks the source.
-        // In particular, do not globally change the fixture's default MyBatis SESSION cache.
-        CountDownLatch lockingLegacyOutput = new CountDownLatch(2);
-        raceGate = lockingLegacyOutput;
-        doAnswer(invocation -> {
-            lockingLegacyOutput.countDown();
-            lockingLegacyOutput.await();
-            return invocation.callRealMethod();
-        }).when(drafts).lockPrivateCommittedOutputExists("0", "client-a", "owner-a",
-                "legacy-execution", "legacy-output", "legacy-file", 1);
-        CountDownLatch start = new CountDownLatch(1);
-        List<Object> results = concurrently(start,
-                () -> submitResult(left, "legacy-submit-left"),
-                () -> submitResult(right, "legacy-submit-right"));
-        long receipts = results.stream().filter(
-                HallRequestDraftService.SubmissionReceipt.class::isInstance).count();
-        long conflicts = results.stream().filter(HallRequestDraftService.Failure.class::isInstance)
+        String left = createRevisionDraft("legacy-left"), right = createRevisionDraft("legacy-right");
+        var results = concurrently(new CountDownLatch(1),
+                () -> submitResult(left, "legacy-submit-left"), () -> submitResult(right, "legacy-submit-right"));
+        assertEquals(2, results.stream().filter(HallRequestDraftService.Failure.class::isInstance)
                 .map(HallRequestDraftService.Failure.class::cast)
-                .filter(failure -> failure.reason()
-                        == HallRequestDraftService.Reason.EXECUTION_CONFLICT).count();
-        assertEquals(1, receipts, "both contenders observed the missing legacy binding");
-        assertEquals(1, conflicts, () -> "legacy result types/reasons: " + resultKinds(results));
-        assertEquals(receipts, executionSequence.get(), "loser must not create an execution");
-        assertEquals(1, count("hall_private_case"));
-        assertEquals(1 + receipts, count("hall_case_execution"));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM hall_case_execution "
-                + "WHERE execution_id='legacy-execution' AND revision_no=1 "
-                + "AND parent_execution_id IS NULL", Integer.class));
-        assertEquals(receipts, count("fixture_execution"));
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM hall_request_draft "
-                + "WHERE state='EDITING' AND revision=1 AND submit_key IS NULL "
-                + "AND submit_hash IS NULL", Integer.class));
-
-        // A user retry of the rolled-back contender reuses the committed parent/case, not
-        // the old Provider execution. The failed submit key was not durably consumed.
-        String retryDraft = results.get(0) instanceof HallRequestDraftService.Failure ? left : right;
-        String retryKey = retryDraft.equals(left) ? "legacy-submit-left" : "legacy-submit-right";
-        HallRequestDraftService.SubmissionReceipt retried =
-                service.submit(OWNER, retryDraft, 1, true, retryKey);
-        HallRequestDraftService.SubmissionReceipt winner = results.stream()
-                .filter(HallRequestDraftService.SubmissionReceipt.class::isInstance)
-                .map(HallRequestDraftService.SubmissionReceipt.class::cast).findFirst().orElseThrow();
-        assertEquals(winner.ref(), retried.ref());
-        assertEquals(2, executionSequence.get());
-        assertEquals(2, count("fixture_execution"));
-        assertEquals(1, count("hall_private_case"));
-        assertEquals(3, count("hall_case_execution"));
-        assertEquals(3L, jdbc.queryForObject("SELECT revision FROM hall_private_case", Long.class));
-        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM hall_case_execution "
-                + "WHERE parent_execution_id='legacy-execution' AND revision_no IN (2,3)", Integer.class));
-        assertEquals(retried, service.submit(OWNER, retryDraft, 1, true, retryKey));
-        assertEquals(2, executionSequence.get(), "receipt replay must not create another execution");
+                .filter(failure -> failure.reason() == HallRequestDraftService.Reason.SUBMISSION_UNAVAILABLE).count());
+        assertEquals(0, taskSequence.get());
+        assertEquals(0, count("fixture_task"));
+        assertEquals(0, count("hall_private_case"));
+        assertEquals(0, count("hall_case_execution"));
+        assertEquals(0, jdbc.queryForObject("SELECT COUNT(*) FROM hall_request_draft WHERE submit_key IS NOT NULL", Integer.class));
     }
 
     @Test
-    void executionFailureRollsBackCaseLineageExecutionAndSubmitReservation() {
+    void taskCreationFailureRollsBackTaskAndSubmitReservation() {
         String draft = createDraft(OWNER, "create-rollback");
-        failExecution.set(true);
+        failTaskCreation.set(true);
         HallRequestDraftService.Failure failure = assertThrows(
                 HallRequestDraftService.Failure.class,
                 () -> service.submit(OWNER, draft, 1, true, "rollback-key"));
         assertEquals(HallRequestDraftService.Reason.STORAGE_UNAVAILABLE, failure.reason());
-        assertEquals(0, count("fixture_execution"));
+        assertEquals(0, count("fixture_task"));
         assertEquals(0, count("hall_private_case"));
         assertEquals(0, count("hall_case_execution"));
         assertEquals("EDITING", jdbc.queryForObject("SELECT state FROM hall_request_draft "
@@ -503,7 +453,7 @@ class HallRequestDraftSubmissionMySqlTest {
     }
 
     @Test
-    void legacyCommittedResultIsReadableBeforeCaseAndRemainsPinnedAfterLazyRevision() {
+    void legacyCommittedResultRemainsReadOnlyWithoutLazyCaseOrExecution() {
         seedLegacyOutput();
         seedTaskOutput();
         HallRequestDraftService.ExecutionResultsView before =
@@ -521,15 +471,13 @@ class HallRequestDraftSubmissionMySqlTest {
                 () -> service.getExecutionResults(OWNER, "task-execution"));
 
         String draft = createRevisionDraft("legacy-results-revision");
-        HallRequestDraftService.SubmissionReceipt receipt =
-                service.submit(OWNER, draft, 1, true, "legacy-results-submit");
-        HallRequestDraftService.CaseView privateCase = service.getCase(OWNER, receipt.ref().sourceId());
-        assertEquals(2, privateCase.executions().size());
-        assertEquals("legacy-execution", privateCase.executions().get(1).parentExecutionId());
-        assertEquals("legacy-file",
-                privateCase.executions().get(1).sourceOutputRef().fileId());
-        assertEquals(before, service.getExecutionResults(OWNER, "legacy-execution"),
-                "lazy association and a new run must not rewrite the old fixed result");
+        assertFailure(HallRequestDraftService.Reason.SUBMISSION_UNAVAILABLE,
+                () -> service.submit(OWNER, draft, 1, true, "legacy-results-submit"));
+        assertEquals(List.of("VIEW"), before.allowedActions());
+        assertEquals(before, service.getExecutionResults(OWNER, "legacy-execution"));
+        assertEquals(0, count("hall_private_case"));
+        assertEquals(0, count("hall_case_execution"));
+        assertEquals(0, count("fixture_task"));
     }
 
     private String createRevisionDraft(String key) {
@@ -577,9 +525,9 @@ class HallRequestDraftSubmissionMySqlTest {
 
     private String createDraft(HallRequestDraftService.OwnerScope scope, String key) {
         HallRequestDraftService.EditableFields fields = new HallRequestDraftService.EditableFields(
-                "title", "instruction", "agent-a", MIME, List.of());
+                "title", "instruction", null, null, List.of());
         return service.create(scope, new HallRequestDraftService.CreateCommand(
-                "CREATE", "map", null, null, null, null, fields, null), key).draftId();
+                "TASK_CREATE", "map", null, null, null, null, fields, null), key).draftId();
     }
 
     private Object submitResult(String draft, String key) {
