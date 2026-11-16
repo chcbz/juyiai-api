@@ -68,7 +68,7 @@ class ChatPrivateNativeAdmissionMySqlTest extends SkillManagementMySqlFixture {
         schema.execute(source);
         // The deployed v6 baseline includes the earlier controlled/skill catalog migrations.
         new ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
-        new ResourceDatabasePopulator(new ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(source);
+        new ResourceDatabasePopulator(new ClassPathResource("db/economy-v0-skill-application.sql"), new ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(source);
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
         for(Class<?> mapper:List.of(ChatDeliberationMapper.class,ChatConversationMapper.class,ChatMessageMapper.class,
                 PersonalWorkspaceExecutionMapper.class,PersonalWorkspaceExecutionInputMapper.class,
