@@ -6,6 +6,7 @@ import cn.jia.agent.dao.impl.*;
 import cn.jia.agent.mapper.*;
 import cn.jia.agent.service.*;
 import cn.jia.agent.service.impl.PersonalWorkspaceExecutionServiceImpl;
+import cn.jia.agent.service.impl.PersonalWorkspaceWriteService;
 import cn.jia.agent.skill.SkillManagementMySqlFixture;
 import cn.jia.chat.dao.*;
 import cn.jia.chat.dao.impl.*;
