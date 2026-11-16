@@ -89,7 +89,7 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
     }
     void skill(String id,String phase) {
         skills.insertReady(new SkillExecutionEntity().setTenantId("0").setClientId("client").setOwnerJiacn("owner").setExecutionId(id)
-                .setSnapshotJson(NativeCancellationFixture.snapshot("task")).setSnapshotSha256("a".repeat(64)).setEffectsJson("{\"external\":{\"status\":\"UNKNOWN\"}}")
+                .setSnapshotJson(NativeCancellationFixture.snapshot("task")).setSnapshotSha256(NativeCancellationFixture.snapshotDigest("task")).setEffectsJson("{\"external\":{\"status\":\"UNKNOWN\"}}")
                 .setResultManifestJson("{\"preserved\":true}").setPhase(phase).setVersion(2L).setCreatedAt(100L).setUpdatedAt(100L));
         // Production insertion owns READY defaults; fixtures seed an already accepted phase explicitly.
         jdbc.update("UPDATE agent_skill_execution SET phase=?,version=2,effects_json='{\"external\":{\"status\":\"UNKNOWN\"}}',result_manifest_json='{\"preserved\":true}' WHERE execution_id=?",phase,id);

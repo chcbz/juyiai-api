@@ -53,6 +53,12 @@ final class NativeCancellationFixture {
         service.setProjectionEvents(events);
         return service;
     }
+    static String snapshotDigest(String task) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(snapshot(task).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException unavailable) { throw new IllegalStateException(unavailable); }
+    }
     static String snapshot(String task) {
         return cn.jia.agent.service.SkillCanonicalJson.write(java.util.Map.of("executionProtocolVersion",6,
                 "scope",java.util.Map.of("kind","TASK","conversationId","42","conversationGeneration","1","taskId",task)));

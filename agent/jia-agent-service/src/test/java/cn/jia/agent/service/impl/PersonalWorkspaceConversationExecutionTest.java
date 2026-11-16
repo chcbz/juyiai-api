@@ -295,13 +295,16 @@ class PersonalWorkspaceConversationExecutionTest {
         assertNotNull(select);
         String sql=String.join(" ",select.value());
         assertTrue(sql.contains("execution_mode='CONVERSATION'"));
+        assertTrue(sql.contains("execution_protocol_version=6"));
+        assertTrue(sql.contains("business_scope='PRIVATE'"));
+        assertTrue(sql.contains("business_scope='TASK'"));
         assertTrue(sql.contains("execution_state='QUEUED'"));
         assertTrue(sql.contains("ORDER BY created_at ASC, CAST(execution_id AS BINARY) ASC LIMIT #{limit}"));
         assertTrue(sql.contains("created_at &gt; #{afterCreatedAt}"));
         assertTrue(sql.contains("CAST(execution_id AS BINARY) &gt; CAST(#{afterExecutionId} AS BINARY)"));
         assertTrue(sql.contains("<if test='afterCreatedAt != null and afterExecutionId != null'>"));
-        assertTrue(sql.contains("g.owner_jiacn=agent_personal_workspace_execution.owner_jiacn"));
-        assertTrue(sql.contains("g.grant_id=agent_personal_workspace_execution.task_grant_id"));
+        assertTrue(sql.contains("BINARY g.owner_jiacn=BINARY agent_personal_workspace_execution.owner_jiacn"));
+        assertTrue(sql.contains("BINARY g.grant_id=BINARY agent_personal_workspace_execution.task_grant_id"));
         assertTrue(sql.contains("g.grant_version=agent_personal_workspace_execution.task_grant_version"));
         assertTrue(sql.contains("BINARY g.executor_owner_jiacn=BINARY #{ownerJiacn}"));
         for (String key:List.of("tenant_id","client_id","target_agent_id","execution_mode")) {

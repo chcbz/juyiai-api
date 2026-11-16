@@ -517,8 +517,8 @@ class AgentTaskBillingMySqlTransactionTest {
         jdbc.update("UPDATE agent_personal_workspace_execution SET business_scope='TASK',conversation_id='42',assignment_revision=3 WHERE execution_id='exec'");
         jdbc.update("""
             INSERT INTO agent_skill_execution (tenant_id,client_id,owner_jiacn,execution_id,snapshot_json,snapshot_sha256,
-             phase,version,effects_json,created_at,updated_at) VALUES (?,?,?,'exec',?,REPEAT('a',64),'RUNNING',2,'{}',100,100)
-            """,TENANT,CLIENT,OWNER,NativeCancellationFixture.snapshot(TASK));
+             phase,version,effects_json,created_at,updated_at) VALUES (?,?,?,'exec',?,?,'RUNNING',2,'{}',100,100)
+            """,TENANT,CLIENT,OWNER,NativeCancellationFixture.snapshot(TASK),NativeCancellationFixture.snapshotDigest(TASK));
     }
     private String executionState(){return jdbc.queryForObject("SELECT execution_state FROM agent_personal_workspace_execution WHERE execution_id='exec'",String.class);}
     private String skillPhase(){return jdbc.queryForObject("SELECT phase FROM agent_skill_execution WHERE execution_id='exec'",String.class);}
