@@ -1,6 +1,7 @@
 package cn.jia.chat.service;
 
 import cn.jia.agent.config.PersonalWorkspaceExecutionProperties;
+import cn.jia.agent.config.ControlledImageFollowupV3SchemaInitializer;
 import cn.jia.agent.dao.*;
 import cn.jia.agent.dao.impl.*;
 import cn.jia.agent.mapper.*;
@@ -65,6 +66,9 @@ class ChatPrivateNativeAdmissionMySqlTest extends SkillManagementMySqlFixture {
                 "db/agent-personal-workspace-native-v5.sql","db/agent-personal-workspace-native-v6.sql"))
             schema.addScript(new ClassPathResource(name));
         schema.execute(source);
+        // The deployed v6 baseline includes the earlier controlled/skill catalog migrations.
+        new ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(source);
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
         for(Class<?> mapper:List.of(ChatDeliberationMapper.class,ChatConversationMapper.class,ChatMessageMapper.class,
                 PersonalWorkspaceExecutionMapper.class,PersonalWorkspaceExecutionInputMapper.class,
