@@ -167,7 +167,7 @@ class ChatRetainedOutputSourcesTest {
         c.setId(42L);c.setTenantId("0");c.setJiacn("owner");c.setClientId("client");c.setLifecycleGeneration(3L);
         c.setTaskId("task");c.setConversationType("juyiting");c.setConversationScopeType("bounty");
         c.setConversationScopeKey("task:task");c.setTargetAgentIds("[\"agent\"]");
-        when(conversations.findScopedById("owner","client","42")).thenReturn(c);
+        when(conversations.findScopedById("0","owner","client","42")).thenReturn(c);
         var scopes=mock(JuyitingConversationScopeService.class);
         when(scopes.parsePersistedTargetAgentIds(c.getTargetAgentIds())).thenReturn(List.of("agent"));
         var actual=new ChatSkillSourceAccessService(conversations,scopes,mock(ChatConversationArchiveStore.class),

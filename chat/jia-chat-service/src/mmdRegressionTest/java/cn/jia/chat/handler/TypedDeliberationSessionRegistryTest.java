@@ -30,7 +30,7 @@ class TypedDeliberationSessionRegistryTest {
 
     @Test void emptyFileOutputDeclarationDoesNotBlockAnAnswer() {
         var raw=TypedDeliberationDeclarationTest.declaration("READY");
-        raw.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
+        raw.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",6,
                 "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of()));
         registry.register("s1","0","owner","client","agent",raw);
         assertTrue(registry.ready(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0","client","owner","agent")));
@@ -111,7 +111,7 @@ class TypedDeliberationSessionRegistryTest {
         assertEquals("s1",registry.requireSingleReady(scope,"agent").sessionId());
         assertEquals("s1",registry.observeDiscussion(scope,"agent").sessionId());
         assertFalse(registry.nativeScriptDeclared(scope,"agent","s1"));
-        declaration.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
+        declaration.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",6,
                 "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain"),
                 "supportedToolPolicyRefs",java.util.List.of("NATIVE_SKILL_SCRIPT_V1")));
         registry.register("s1","0","owner","client","agent",declaration);
@@ -124,7 +124,7 @@ class TypedDeliberationSessionRegistryTest {
     @Test void observationNeverInvokesThePotentiallySqlBackedBindingValidator() {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var declaration=TypedDeliberationDeclarationTest.declaration("READY");
-        declaration.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",5,
+        declaration.put("nativeExecution",java.util.Map.of("schemaVersion",1,"executionProtocolVersion",6,
                 "toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",java.util.List.of("text/plain"),
                 "supportedToolPolicyRefs",java.util.List.of("NATIVE_SKILL_SCRIPT_V1")));
         registry.register("s1","0","owner","client","agent",declaration,()->{calls.incrementAndGet();return false;});
