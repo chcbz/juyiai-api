@@ -158,7 +158,7 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),"assignmentRevision",Long.toString(baseline.assignmentRevision())));
         snapshot.put("instruction",action.validated().interactionOutcome().action().instruction());snapshot.put("parameters",action.validated().interactionOutcome().action().parameters());
         snapshot.put("inputs",List.copyOf(inputs));snapshot.put("sourceSnapshotDigest",ChatSkillSnapshotJson.sha(inputs));
-        snapshot.put("outputs",Map.of("mimeTypes",capability.outputMimeTypes(),"multiple",true,"artifactsRequired",true));
+        snapshot.put("outputs",nativeOutputs(action.validated().interactionOutcome().action().parameters(),capability.outputMimeTypes()));
         if(capability.skill()==null)snapshot.put("skills",List.of());
         else {
             String target=(String)action.validated().binding().get("targetAgentId");
@@ -169,12 +169,23 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         return snapshot;
     }
 
+    static Map<String,Object> nativeOutputs(Map<String,Object> parameters,List<String> mimeTypes) {
+        return switch ((String)parameters.get("outputMode")) {
+            case "ANSWER" -> Map.of("mimeTypes",List.of(),"multiple",false,"artifactsRequired",false,
+                    "dataSchema",Map.of("$schema","https://json-schema.org/draft/2020-12/schema","type","object",
+                            "properties",Map.of("answer",Map.of("type","string","minLength",1,"pattern","\\S")),
+                            "required",List.of("answer"),"additionalProperties",false));
+            case "ARTIFACTS" -> Map.of("mimeTypes",mimeTypes,"multiple",true,"artifactsRequired",true);
+            default -> throw conflict();
+        };
+    }
+
     static Map<String,Object> nativeSelection(InstalledSkillDescriptorLookup.Snapshot current,ChatActionOutcomeContract.Capability capability) {
         var selected=capability.skill();
         var matches=current.skills().stream().filter(d->d.verifiedNative()&&d.manifestJson()==null&&d.manifestSha256()==null
                 &&Objects.equals(d.skillKey(),selected.skillKey())&&Objects.equals(d.skillVersion(),selected.skillVersion())
                 &&Objects.equals(d.packageSha256(),selected.packageSha256())&&Objects.equals(d.manifestSha256(),selected.manifestSha256())
-                &&ChatActionCapabilityService.nativeSkillActionId(d,capability.inputMimeTypes(),capability.outputMimeTypes()).equals(capability.actionId())).toList();
+                &&ChatActionCapabilityService.nativeSkillActionId(d,capability.inputMimeTypes(),capability.outputMimeTypes(),capability.parametersSchema()).equals(capability.actionId())).toList();
         if(matches.size()!=1)throw new ChatActionDispatchService.Rejected();var descriptor=matches.getFirst();
         var skill=new LinkedHashMap<String,Object>();skill.put("key",descriptor.skillKey());skill.put("version",descriptor.skillVersion());
         skill.put("installationId",descriptor.installationId());skill.put("packageSha256",descriptor.packageSha256());skill.put("manifestSha256",descriptor.manifestSha256());

@@ -90,6 +90,21 @@ class ChatPrivateNativeProjectionTest {
         order.verify(jdbc).queryForList(contains("FOR UPDATE"),eq("0"),eq("client"),eq("owner"),eq("exec"));
         order.verify(files).get(owner,"exec");
     }
+    @Test void taskAnswerProjectsBodyWithoutFilesOrTaskCompletion() {
+        root.put("business_scope","TASK");root.put("task_id","task");
+        conversation.setTaskId("task").setConversationScopeType("bounty").setConversationScopeKey("task:task");
+        when(step.taskId()).thenReturn("task");when(execution.taskId()).thenReturn("task");
+        when(tasks.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any()))
+                .thenAnswer(call->((AgentTaskMutationTransaction.LockedTaskMutation<Integer>)call.getArgument(4)).apply(null));
+        assertEquals(1,projector.project(candidate));assertEquals("这是处理结果。",reply.getContent());
+        verify(messages,times(1)).insertScoped(eq("0"),eq("client"),any());
+        verify(events,times(1)).insertEvent(any());
+        verify(events,never()).persistFinal(any(),anyString(),anyLong(),anyLong());
+        verify(skills).markProjected(owner,"exec",(String)manifest.get("resultDigest"));
+        verify(files).listConversationOutputs(owner,"exec","run");
+        verify(tasks).executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any());
+        verifyNoMoreInteractions(tasks);
+    }
     @Test void cancellationClosesTurnAndRequestWithoutCreatingResponseFileOrProviderCall() {
         when(execution.state()).thenReturn("CANCELLED");
         assertEquals(1,projector.project(candidate));

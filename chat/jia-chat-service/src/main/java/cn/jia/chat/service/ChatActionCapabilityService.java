@@ -237,9 +237,9 @@ public final class ChatActionCapabilityService {
         var allowed=runtimeMimes.stream().map(String.class::cast).distinct().sorted().toList();
         if(allowed.isEmpty())return List.copyOf(actions);
         var input=catalog.stream().map(x->x.get("contentMimeType")).filter(String.class::isInstance).map(String.class::cast).distinct().sorted().toList();
-        var schema=Map.<String,Object>of("$schema","https://json-schema.org/draft/2020-12/schema","type","object","additionalProperties",false,"properties",Map.of());
+        var schema=nativeParametersSchema();
         var action=new java.util.LinkedHashMap<String,Object>();
-        action.put("actionId","act_"+cn.jia.chat.api.ChatBountyInteractionV3Wire.shaText(CanonicalContextJson.write(Map.of("operation","EXECUTE_NATIVE","inputMimeTypes",input,"outputMimeTypes",allowed))));
+        action.put("actionId","act_"+cn.jia.chat.api.ChatBountyInteractionV3Wire.shaText(CanonicalContextJson.write(Map.of("operation","EXECUTE_NATIVE","inputMimeTypes",input,"outputMimeTypes",allowed,"parametersSchema",schema))));
         action.put("kind","EXECUTE");action.put("operation","EXECUTE_NATIVE");action.put("skill",null);action.put("parametersSchema",schema);
         action.put("inputMimeTypes",input);action.put("minSources",0);action.put("maxSources",catalog.size());action.put("outputMimeTypes",allowed);
         if(!policy.equals(policies.read(key,taskId))||!live.sameExecutionFacts(skillRuntimes.lookup(policy.runtimeScope(),policy.fence())))return List.copyOf(actions);
@@ -256,18 +256,24 @@ public final class ChatActionCapabilityService {
             if(matches.size()!=1)continue;
             var skill=new java.util.LinkedHashMap<String,Object>();skill.put("skillKey",d.skillKey());skill.put("skillVersion",d.skillVersion());
             skill.put("packageSha256",d.packageSha256());skill.put("manifestSha256",null);
-            var selected=new java.util.LinkedHashMap<String,Object>(action);selected.put("actionId",nativeSkillActionId(d,input,allowed));selected.put("skill",skill);
+            var selected=new java.util.LinkedHashMap<String,Object>(action);selected.put("actionId",nativeSkillActionId(d,input,allowed,schema));selected.put("skill",skill);
             actions.add(java.util.Collections.unmodifiableMap(selected));
         }
         if(!current.equals(installedSkills.readCurrent(policy.runtimeScope()))||!policy.equals(policies.read(key,taskId))
                 ||!live.sameExecutionFacts(skillRuntimes.lookup(policy.runtimeScope(),policy.fence())))return List.copyOf(actions.subList(0,legacyCount));
         return List.copyOf(actions);
     }
-    static String nativeSkillActionId(cn.jia.agent.service.InstalledSkillDescriptorLookup.Descriptor d,List<String> input,List<String> output) {
+    static Map<String,Object> nativeParametersSchema() {
+        return Map.of("$schema","https://json-schema.org/draft/2020-12/schema","type","object",
+                "properties",Map.of("outputMode",Map.of("type","string","enum",List.of("ANSWER","ARTIFACTS"),
+                        "description","ANSWER读取分析并回答，不交付新文件；ARTIFACTS创建或修订文件。")),
+                "required",List.of("outputMode"),"additionalProperties",false);
+    }
+    static String nativeSkillActionId(cn.jia.agent.service.InstalledSkillDescriptorLookup.Descriptor d,List<String> input,List<String> output,Map<String,Object> parametersSchema) {
         var identity=new java.util.LinkedHashMap<String,Object>();identity.put("operation","EXECUTE_NATIVE");identity.put("installationId",d.installationId());
         identity.put("skillKey",d.skillKey());identity.put("skillVersion",d.skillVersion());identity.put("packageSha256",d.packageSha256());
         identity.put("manifestSha256",d.manifestSha256());identity.put("toolPolicyRef",cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);
-        identity.put("inputMimeTypes",input);identity.put("outputMimeTypes",output);
+        identity.put("inputMimeTypes",input);identity.put("outputMimeTypes",output);identity.put("parametersSchema",parametersSchema);
         return "act_"+cn.jia.chat.api.ChatBountyInteractionV3Wire.shaText(CanonicalContextJson.write(identity));
     }
     private static Object costInfo(String metadata) {

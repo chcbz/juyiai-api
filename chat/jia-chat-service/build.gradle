@@ -749,6 +749,7 @@ def runtimeCapabilityRegressionSourceSet = sourceSets.create('runtimeCapabilityR
     java.include 'cn/jia/chat/handler/SkillExecutionFixtures.java'
     java.include 'cn/jia/chat/handler/UnifiedRuntimeTestSupport.java'
     java.include 'cn/jia/chat/service/ChatActionCapabilityServiceTest.java'
+    java.include 'cn/jia/chat/service/ChatActionExecutionServiceTest.java'
     java.include 'cn/jia/chat/service/NativeSkillScriptSessionLookupImplTest.java'
     java.include 'cn/jia/chat/handler/AgentWebSocketSkillExecutionRegistrationTest.java'
     java.include 'cn/jia/chat/handler/AgentWebSocketRuntimeAuthenticationTest.java'

@@ -167,6 +167,10 @@ class ChatActionCapabilityServiceTest {
         assertEquals(1,actions.size());var action=actions.getFirst();
         assertEquals("EXECUTE_NATIVE",action.get("operation"));assertNull(action.get("skill"));
         assertEquals(2, action.get("maxSources"));
+        assertEquals(ChatActionCapabilityService.nativeParametersSchema(),action.get("parametersSchema"));
+        String oldId="act_"+cn.jia.chat.api.ChatBountyInteractionV3Wire.shaText(CanonicalContextJson.write(java.util.Map.of(
+                "operation","EXECUTE_NATIVE","inputMimeTypes",action.get("inputMimeTypes"),"outputMimeTypes",action.get("outputMimeTypes"))));
+        assertNotEquals(oldId,action.get("actionId"));
         var manySources = java.util.stream.IntStream.range(0, 33)
                 .mapToObj(i -> java.util.Map.<String,Object>of("sourceRefId", "source-" + i,
                         "contentMimeType", "application/vnd.example.custom")).toList();
@@ -230,13 +234,13 @@ class ChatActionCapabilityServiceTest {
         var decl=java.util.Map.<String,Object>of("nativeExecution",java.util.Map.of("outputMimeTypes",List.of("text/plain"),"supportedToolPolicyRefs",List.of("NATIVE_SKILL_SCRIPT_V1")));
         var actions=service.availableNative(scope,"task",List.of(),decl,"session");assertEquals(2,actions.size());
         var action=actions.get(1);var skill=(java.util.Map<?,?>)action.get("skill");assertEquals("ordinary",skill.get("skillKey"));assertTrue(skill.containsKey("manifestSha256"));assertNull(skill.get("manifestSha256"));
-        assertEquals(ChatActionCapabilityService.nativeSkillActionId(d,List.of(),List.of("text/plain")),action.get("actionId"));
+        assertEquals(ChatActionCapabilityService.nativeSkillActionId(d,List.of(),List.of("text/plain"),ChatActionCapabilityService.nativeParametersSchema()),action.get("actionId"));
         var parsed=ChatActionOutcomeContract.facts(java.util.Map.of("schemaVersion",6,"availableActions",List.of(action),"availableSources",List.of(),"inspectedSourceRefIds",List.of()));
         var frozen=ChatActionExecutionService.nativeSelection(new InstalledSkillDescriptorLookup.Snapshot(List.of(d)),parsed.availableActions().getFirst());
         var frozenSkill=(java.util.Map<?,?>)frozen.get("skill");assertEquals("install-1",frozenSkill.get("installationId"));assertEquals("a".repeat(64),frozenSkill.get("packageSha256"));
         assertTrue(frozenSkill.containsKey("manifestSha256"));assertNull(frozenSkill.get("manifestSha256"));assertNull(frozen.get("providerBinding"));
         var replaced=new InstalledSkillDescriptorLookup.Descriptor("ordinary","1.0","install-2","a".repeat(64),null,null,"installation","host",null);
-        assertNotEquals(action.get("actionId"),ChatActionCapabilityService.nativeSkillActionId(replaced,List.of(),List.of("text/plain")));
+        assertNotEquals(action.get("actionId"),ChatActionCapabilityService.nativeSkillActionId(replaced,List.of(),List.of("text/plain"),ChatActionCapabilityService.nativeParametersSchema()));
         assertThrows(ChatActionDispatchService.Rejected.class,()->ChatActionExecutionService.nativeSelection(new InstalledSkillDescriptorLookup.Snapshot(List.of(replaced)),parsed.availableActions().getFirst()));
         when(installed.read(key)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(replaced)));
         assertEquals(1,service.availableNative(scope,"task",List.of(),decl,"session").size());
