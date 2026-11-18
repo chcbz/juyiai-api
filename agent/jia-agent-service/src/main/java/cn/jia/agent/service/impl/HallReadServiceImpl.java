@@ -186,7 +186,8 @@ public class HallReadServiceImpl implements HallReadService {
                     || !id(row.getDeliveryId(), 100) || !id(row.getWorkItemId(), 100)
                     || row.getDeliveryVersion() == null || row.getDeliveryVersion() < 0
                     || row.getTaskVersion() == null || row.getTaskVersion() < 0)) throw new IllegalStateException();
-            if ("needsAction".equals(view) && !Set.of("failed", "blocked", "reviewing").contains(row.getState())) throw new IllegalStateException();
+            if ("needsAction".equals(view) && !Set.of("PENDING_ASSIGNMENT", "IN_PROGRESS").contains(row.getPhase())
+                    && !Set.of("failed", "blocked", "reviewing").contains(row.getState())) throw new IllegalStateException();
         }
     }
 

@@ -406,6 +406,25 @@ class HallReadTaskCreateMySqlTest {
         assertEquals("FAILED",jdbc.queryForObject("SELECT execution_state FROM agent_personal_workspace_execution WHERE execution_id='mark-race'",String.class));
     }
 
+    @Test void homeNeedsActionIncludesUnassignedAndInProgressTasksWithoutReviewActions() {
+        String id = hall.submit(OWNER,draft("home"),1,true,"home-submit").task().taskId();
+        for (String state : List.of("open", "planning", "assigned", "running", "blocked", "completed", "cancelled", "archived")) {
+            jdbc.update("UPDATE agent_task_meta SET reward_status=? WHERE task_id=?", state, id);
+            var page = reads.overview(OWNER).sections().get("needsAction").partitions().get("task");
+            assertEquals("complete", page.status(), state);
+            if (List.of("completed", "cancelled", "archived").contains(state)) {
+                assertTrue(page.items().isEmpty(), state);
+            } else {
+                assertEquals(1, page.items().size(), state);
+                var item = page.items().getFirst();
+                assertEquals(id, item.ref().sourceId());
+                assertEquals(state.equals("open") ? "PENDING_ASSIGNMENT" : "IN_PROGRESS", item.phase());
+                assertNull(item.review());
+                assertEquals(List.of("OPEN_TASK"), item.allowedActions());
+            }
+        }
+    }
+
     @Test void formalReviewProjectionRequiresOwnerWorkItemManifestAndReleasedLease() {
         String taskId=hall.submit(OWNER,draft("review"),1,true,"review-submit").task().taskId();
         jdbc.update("UPDATE agent_task_meta SET reward_status='reviewing' WHERE task_id=?",taskId);

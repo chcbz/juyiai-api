@@ -29,7 +29,8 @@ public final class HallReadSql {
         } else if ("task".equals(kind)) {
             if ("archive".equals(view)) sql += " AND CAST(state AS BINARY)=CAST('archived' AS BINARY)";
             else sql += " AND CAST(state AS BINARY)<>CAST('archived' AS BINARY)";
-            if ("needsAction".equals(view)) sql += " AND CAST(state AS BINARY) IN (CAST('failed' AS BINARY),CAST('blocked' AS BINARY),CAST('reviewing' AS BINARY))";
+            if ("needsAction".equals(view)) sql += " AND (phase IN ('PENDING_ASSIGNMENT','IN_PROGRESS')"
+                    + " OR CAST(state AS BINARY) IN (CAST('failed' AS BINARY),CAST('blocked' AS BINARY),CAST('reviewing' AS BINARY)))";
         } else if ("archive".equals(view)) {
             throw new IllegalArgumentException("Draft discard is not an archive mark");
         }
