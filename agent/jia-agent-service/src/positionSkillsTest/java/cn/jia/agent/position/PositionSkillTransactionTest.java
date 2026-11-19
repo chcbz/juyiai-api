@@ -42,14 +42,13 @@ class PositionSkillTransactionTest {
         when(identities.lockActiveCanonicalAgentIdsInScope(anyString(),anyString(),anyString(),anyList())).thenAnswer(i->i.getArgument(3));
         packages=mock(SkillCatalogMapper.class);
         when(packages.selectApprovedProductVersion("0","test-client","v1")).thenReturn(new SkillProductVersionEntity().setReviewStatus("APPROVED").setSkillKey("maintain").setProductId("product1"));
-        var product=new cn.jia.agent.entity.skill.SkillProductEntity().setProductId("product1").setVersion(1L);
+        var product=new cn.jia.agent.entity.skill.SkillProductEntity().setProductId("product1").setVersion(1L).setSkillType("POSITION");
         when(packages.selectSkillProductsForUpdate(anyString(),anyString(),anyString())).thenReturn(List.of(product));
-        when(packages.selectPositionSkillKeys(anyString(),anyString())).thenAnswer(i->"POSITION".equals(product.getSkillType())?List.of("maintain"):List.of());
-        when(packages.classifyPositionSkill(anyString(),anyString(),anyString(),anyLong(),anyLong())).thenAnswer(i->{product.setSkillType("POSITION");return 1;});
+        when(packages.selectPositionSkillKeys(anyString(),anyString())).thenReturn(List.of("maintain"));
         var manager=new DataSourceTransactionManager(ds);
         service=new PositionSkillService(new PositionSkillStore(jdbc),identities,packages,manager);
         transaction=new org.springframework.transaction.support.TransactionTemplate(manager);
-        grant("MANAGE_POSITIONS","positions");grant("ARCHIVE_WRITE","archive:public");grant("SKILL_REVIEW","skills:platform");grant("SKILL_PUBLISH","skills:platform");
+        grant("MANAGE_POSITIONS","positions");grant("ARCHIVE_WRITE","archive:public");
         service.defineSkill(scope,"key1",new Skill("maintain",SkillType.POSITION,"v1"));
         service.configure(scope,"key2",new Position("editor","Editor",2,"archive:public",false,List.of("maintain"),0),0);
     }
