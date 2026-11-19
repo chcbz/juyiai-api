@@ -19,9 +19,9 @@ public final class NativePrivateModelCalls {
     private PositionAuthority.Scope authorize(RuntimeScope s,PrivateToolGrant grant,String tool){
         require(grant.tools().contains(tool)&&models.names().contains(tool),404,"PRIVATE_TOOL_UNAVAILABLE");
         var scope=new PositionAuthority.Scope(s.tenantId(),s.clientId(),s.ownerJiacn());
-        models.authorizeFrozen(context(new SkillCapabilityLookup.Scope(s.tenantId(),s.clientId(),s.ownerJiacn(),s.agentId()),grant.installation(),grant.host()),scope,models.priceAuthority(tool),grant.selections());return scope;
+        models.authorizeFrozen(context(new SkillCapabilityLookup.Scope(s.tenantId(),s.clientId(),s.ownerJiacn(),s.agentId()),grant.installation(),grant.host()),scope,ModelConversationToolAdapter.priceAuthority(tool),grant.selections());return scope;
     }
-    private static Key key(RuntimeScope s,String e,String r,String c){require(c!=null&&c.matches("[a-zA-Z0-9_:-]{1,100}"),400,"PRIVATE_TOOL_CALL_INVALID");return new Key(s.tenantId(),s.clientId(),s.ownerJiacn(),e,r,c);}
+    private static Key key(RuntimeScope s,String e,String r,String c){require(c!=null&&c.matches("[a-zA-Z0-9][a-zA-Z0-9._:-]{0,99}"),400,"PRIVATE_TOOL_CALL_INVALID");return new Key(s.tenantId(),s.clientId(),s.ownerJiacn(),e,r,c);}
     Map<String,Object> read(RuntimeScope s,String e,String r,String c){var k=key(s,e,r,c);return executions.withPrivateToolGrant(s,e,r,null,g->{
         var receipt=receipts.find(k);require(receipt!=null,404,"PRIVATE_TOOL_RECEIPT_UNAVAILABLE");authorize(s,g,receipt.tool());return PrivateToolCallReceipts.replay(receipt,receipt.tool(),receipt.inputSha256());});}
     Map<String,Object> call(RuntimeScope s,String e,String r,String c,PrivateToolRequest cmd){

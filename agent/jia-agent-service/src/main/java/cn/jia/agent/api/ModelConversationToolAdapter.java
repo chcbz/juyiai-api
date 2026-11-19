@@ -148,9 +148,14 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         }catch(PositionSkillException denied){if(denied.status()!=403)throw denied;}
         return result;
     }
+    private cn.jia.agent.mapper.skill.SkillManagementMapper managed;
+    @org.springframework.beans.factory.annotation.Autowired public void setManaged(cn.jia.agent.mapper.skill.SkillManagementMapper value){managed=value;}
     void authorizeFrozen(Context ctx,PositionAuthority.Scope scope,boolean price,List<Map<String,Object>> selections) {
         var ids=admit(ctx,scope,price);
-        require(selections.stream().map(s->(Map<?,?>)s.get("skill")).anyMatch(s->REQUIRED.skillKey().equals(s.get("key"))&&ids.contains(s.get("installationId"))),403,"MODEL_SKILL_REQUIRED");
+        var state=managed.lockState(scope.tenantId(),scope.clientId(),ctx.subject().agentId(),REQUIRED.skillKey());
+        require(state!=null && Boolean.TRUE.equals(state.getDesiredEnabled()) && state.getPendingChangeId()==null
+                && ids.contains(state.getActiveInstallationId()) && selections.stream().map(s->(Map<?,?>)s.get("skill"))
+                .anyMatch(s->REQUIRED.skillKey().equals(s.get("key")) && state.getActiveInstallationId().equals(s.get("installationId"))),403,"MODEL_SKILL_REQUIRED");
     }
     private Set<String> admit(Context ctx,PositionAuthority.Scope scope,boolean price) {
         var agent=ctx.subject().agentId();
