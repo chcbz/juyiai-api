@@ -31,9 +31,7 @@ public final class ConversationToolExtensions {
         var snapshot=installed.readCurrent(new cn.jia.agent.service.SkillCapabilityLookup.Scope(
                 subject.tenantId(),subject.clientId(),subject.ownerJiacn(),subject.agentId()));
         var skills=snapshot.skills().stream()
-                .filter(d->d.verifiedNative()&&d.manifestSha256()==null
-                        &&Objects.equals(context.runtimeInstallationId(),d.runtimeInstallationId())
-                        &&Objects.equals(context.runtimeHostId(),d.runtimeHostId()))
+                .filter(d->d.isInstructionOn(context.runtimeInstallationId(),context.runtimeHostId()))
                 .map(d->new ConversationToolProvider.Skill(d.skillKey(),d.skillVersion(),d.installationId(),d.packageSha256())).toList();
         var tools=new ArrayList<Map<String,Object>>();
         for(var provider:providers)tools.addAll(provider.catalog(context,boundary));

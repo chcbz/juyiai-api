@@ -51,16 +51,19 @@ class ModelConversationToolsTest {
     private static final String EXPR="len <= 272000 ? tier(\"0_272k\", p * 2 + cr * 0.1 + cc * 2.5 + cc12h * 5 + c * 10) : tier(\"272k_plus\", p * 4 + cr * 0.2 + cc * 5 + cc12h * 10 + c * 15)";
     private static BaseLlmModelPriceSource.Quote quote(){return new BaseLlmModelPriceSource().parse(fixture(EXPR),MODEL);}
     private void allow() {
-        when(positions.hasModelMaintenancePosition(SCOPE,"agent")).thenReturn(true);
+        when(positions.hasPositionSkill(SCOPE,"agent",ModelConversationToolAdapter.REQUIRED)).thenReturn(true);
         when(identities.requireRegistrationIdentityInScope("fixture","client","owner","agent"))
                 .thenReturn(new AgentIdentityRegistryEntity().setCanonicalAgentId("agent").setBindingId(7L));
-        doReturn(Set.of("si")).when(positions).modelMaintenanceInstallations(eq(SCOPE),eq("agent"),eq(7L),eq("runtime"),eq("host"),anyBoolean());
+        doReturn(Set.of("si")).when(positions).positionSkillInstallations(eq(SCOPE),eq("agent"),eq(7L),eq("runtime"),eq("host"),eq(ModelConversationToolAdapter.REQUIRED),anyBoolean());
         when(installed.withPreparedRead(eq(SKILL),any())).thenAnswer(i->i.<Supplier<?>>getArgument(1).get());
         when(installed.readCurrent(SKILL)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(
                 new InstalledSkillDescriptorLookup.Descriptor("model-maintenance","1.0.0","si","sha",null,null,"runtime","host",null))));
     }
     @Test void exactTierParsingKeepsReadWriteAndLongContextDistinct() {
         var q=quote();
+        assertEquals("basellm-"+PositionSkillService.hash("v1\n"+MODEL+"\n6.6879\n272000\n"
+                +"{CACHED_INPUT=0.1, INPUT=2, OUTPUT=10, cc=2.5, cc12h=5}\n"
+                +"{CACHED_INPUT=0.2, INPUT=4, OUTPUT=15, cc=5, cc12h=10}"),q.version());
         assertEquals(272000L,q.threshold());assertEquals("0.1",q.shortUsd().get("CACHED_INPUT"));
         assertEquals("2.5",q.shortUsd().get("cc"));assertEquals("15",q.longUsd().get("OUTPUT"));
         assertEquals("100.3185",((Map<?,?>)q.priceData().get("longContextYuanPerMillionTokens")).get("OUTPUT"));
@@ -73,7 +76,7 @@ class ModelConversationToolsTest {
         assertTrue(adapter.catalog(CONTEXT,BOUNDARY).isEmpty());
         verifyNoInteractions(installed);
         allow();
-        when(positions.modelMaintenanceInstallations(SCOPE,"agent",7L,"runtime","host",true))
+        when(positions.positionSkillInstallations(SCOPE,"agent",7L,"runtime","host",ModelConversationToolAdapter.REQUIRED,true))
                 .thenThrow(new PositionSkillException(403,"POSITION_PUBLISH_FORBIDDEN"));
         assertEquals(List.of("model_read_hero_binding","model_set_hero_binding"),adapter.catalog(CONTEXT,BOUNDARY).stream().map(t->t.get("name")).toList());
         assertThrows(PositionSkillException.class,()->adapter.call(CONTEXT,BOUNDARY,"model_add_price",Map.of("model",MODEL)));
@@ -81,7 +84,7 @@ class ModelConversationToolsTest {
     }
     @Test void callbacksRecheckInstallationAndRevocationBeforePriceCommit() {
         allow();
-        when(source.read(MODEL)).thenAnswer(i->{when(positions.modelMaintenanceInstallations(SCOPE,"agent",7L,"runtime","host",true))
+        when(source.read(MODEL)).thenAnswer(i->{when(positions.positionSkillInstallations(SCOPE,"agent",7L,"runtime","host",ModelConversationToolAdapter.REQUIRED,true))
                 .thenThrow(new PositionSkillException(403,"MODEL_POSITION_REQUIRED"));return quote();});
         assertThrows(PositionSkillException.class,()->adapter.call(CONTEXT,BOUNDARY,"model_add_price",Map.of("model",MODEL)));
         verifyNoInteractions(prices);

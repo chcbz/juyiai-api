@@ -148,8 +148,7 @@ public final class ArchiveConversationTools implements ConversationToolProvider 
     }
     private List<InstalledSkillDescriptorLookup.Descriptor> descriptors(Context c) {
         var s=c.subject();return installed.readCurrent(new SkillCapabilityLookup.Scope(s.tenantId(),s.clientId(),s.ownerJiacn(),s.agentId())).skills().stream()
-                .filter(d->d.verifiedNative()&&d.manifestSha256()==null
-                    &&Objects.equals(d.runtimeInstallationId(),c.runtimeInstallationId())&&Objects.equals(d.runtimeHostId(),c.runtimeHostId())).toList();
+                .filter(d->d.isInstructionOn(c.runtimeInstallationId(),c.runtimeHostId())).toList();
     }
     private ArchiveMaintenanceStore.Job job(Context c,String id){PositionSkillPolicy.key(id);var job=jobs.find(owner(c),id,false);require(job!=null,404,"ARCHIVE_JOB_NOT_FOUND");requireAgent(c,job);return job;}
     private static void requireAgent(Context c,ArchiveMaintenanceStore.Job job){require(c.subject().agentId().equals(job.agentId()),403,"ARCHIVE_AGENT_FORBIDDEN");}

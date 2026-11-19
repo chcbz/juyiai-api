@@ -82,6 +82,7 @@ class PositionSkillTransactionTest {
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM test_publication",Integer.class));
     }
     @Test void modelPositionRequiresIndependentAuthorityCurrentAppointmentAndVerifiedInstallation() {
+        var required=new PositionSkillService.RequiredPositionSkill("models:platform","model-maintenance","MODEL_POSITION_REQUIRED","MODEL_SKILL_REQUIRED");
         var definition=new Position("model-management","模型管理",1,"models:platform",true,List.of("model-maintenance"),0);
         assertThrows(PositionSkillException.class,()->service.configure(scope,"model-denied",definition,0));
         when(packages.selectApprovedProductVersion("0","test-client","model-v1")).thenReturn(new SkillProductVersionEntity()
@@ -95,18 +96,24 @@ class PositionSkillTransactionTest {
         grant("MODEL_PRICE","models:platform");
         service.configure(scope,"model-position",definition,0);
         var appointment=service.appoint(scope,"model-appointment","model-management","agent1");
+        // An arbitrary skill granted by another appointment must not satisfy the model resource.
+        service.appoint(scope,"editor-agent","editor","agent1");
+        var mismatched=new PositionSkillService.RequiredPositionSkill("models:platform","maintain","MODEL_POSITION_REQUIRED","MODEL_SKILL_REQUIRED");
+        assertFalse(service.hasPositionSkill(scope,"agent1",mismatched));
+        assertEquals("MODEL_POSITION_REQUIRED",assertThrows(PositionSkillException.class,()->transaction.execute(s->
+                service.positionSkillInstallations(scope,"agent1",1,"rt","host",mismatched,false))).getMessage());
         var installation=appointment.state().installations().values().stream().filter(i->i.skillKey().equals("model-maintenance")).findFirst().orElseThrow();
-        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.positionSkillInstallations(scope,"agent1",1,"rt","host",required,true)));
         service.runtimeState(scope,"agent1",policy->{
             policy.bindManagedInstallation(installation.id(),installation.revision(),"physical");
             policy.receipt(installation.id(),installation.revision(),true,"a".repeat(64),"rt","host",null);
             return true;
         });
-        assertEquals(Set.of("physical"),transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
-        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"other","host",true)));
+        assertEquals(Set.of("physical"),transaction.execute(s->service.positionSkillInstallations(scope,"agent1",1,"rt","host",required,true)));
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.positionSkillInstallations(scope,"agent1",1,"other","host",required,true)));
         assertThrows(PositionSkillException.class,()->service.withAuthority(scope,new Grant(appointment.resultId(),1,1,"agent1",1,"book",true),()->true));
         service.resign(scope,"model-resign",appointment.resultId());
-        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.positionSkillInstallations(scope,"agent1",1,"rt","host",required,true)));
     }
 
     private Grant skillManager() {

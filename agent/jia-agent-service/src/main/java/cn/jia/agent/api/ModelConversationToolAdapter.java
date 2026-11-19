@@ -15,7 +15,6 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -25,13 +24,15 @@ import static cn.jia.agent.position.PositionSkillException.require;
 /** Role-gated private conversation tools. The model cannot provide identity, prices, URLs, or FX. */
 @Service
 public final class ModelConversationToolAdapter implements ConversationToolProvider {
+    static final PositionSkillService.RequiredPositionSkill REQUIRED=new PositionSkillService.RequiredPositionSkill(
+            cn.jia.agent.position.PositionSkillPolicy.PLATFORM_MODELS,"model-maintenance","MODEL_POSITION_REQUIRED","MODEL_SKILL_REQUIRED");
     static final String CHANNEL="public-api-reference", TIER="standard";
     private static final String READ_MODEL="model_read_price", ADD_MODEL="model_add_price",
             READ_HERO="model_read_hero_binding", BIND="model_set_hero_binding";
     private static final Pattern MODEL=Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}");
     private static final Pattern PERSONA=Pattern.compile("[a-z0-9][a-z0-9-]{0,99}");
     private static final List<Map<String,Object>> BIND_TOOLS=List.of(
-            tool(READ_HERO,"读取现有好汉目标模型。孙二娘规范标识为 sunerniang；返回配置，不是运行观测。", "personaCode"),
+            tool(READ_HERO,"按已确认的好汉规范标识 personaCode 读取目标模型；返回配置，不是运行观测。", "personaCode"),
             tool(BIND,"用旧目标模型比较并修改指定好汉配置，目标必须已有有效托管套餐。不会切换或重启 Runtime。",
                     "personaCode","expectedModel","model"));
     private static final List<Map<String,Object>> PRICE_TOOLS=List.of(
@@ -55,7 +56,7 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
     @Override public List<Map<String,Object>> catalog(Context ctx,Boundary boundary) {
         // Avoid touching the lock or preparing packages for ordinary conversations.
         var subject=ctx.subject();
-        if(!positions.hasModelMaintenancePosition(new PositionAuthority.Scope(subject.tenantId(),subject.clientId(),subject.ownerJiacn()),subject.agentId()))
+        if(!positions.hasPositionSkill(new PositionAuthority.Scope(subject.tenantId(),subject.clientId(),subject.ownerJiacn()),subject.agentId(),REQUIRED))
             return List.of();
         try {withAuthority(ctx,boundary,false,scope->true);}
         catch(PositionSkillException denied){if(denied.status()==403)return List.of();throw denied;}
@@ -110,9 +111,9 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         boundary.execute(()->admit(ctx,scope,price));
         return installed.withPreparedRead(skillScope,()->boundary.execute(()-> {
             var ids=admit(ctx,scope,price);
-            boolean available=installed.readCurrent(skillScope).skills().stream().anyMatch(d->d.verifiedNative()
-                    && d.manifestSha256()==null && "model-maintenance".equals(d.skillKey()) && ids.contains(d.installationId())
-                    && Objects.equals(ctx.runtimeInstallationId(),d.runtimeInstallationId()) && Objects.equals(ctx.runtimeHostId(),d.runtimeHostId()));
+            boolean available=installed.readCurrent(skillScope).skills().stream().anyMatch(d->
+                    d.isInstructionOn(ctx.runtimeInstallationId(),ctx.runtimeHostId())
+                    && REQUIRED.skillKey().equals(d.skillKey()) && ids.contains(d.installationId()));
             require(available,403,"MODEL_SKILL_REQUIRED");
             return action.apply(scope);
         }));
@@ -121,7 +122,7 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         var agent=ctx.subject().agentId();
         var identity=identities.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
         require(agent.equals(identity.getCanonicalAgentId()) && identity.getBindingId()!=null,403,"MODEL_POSITION_REQUIRED");
-        return positions.modelMaintenanceInstallations(scope,agent,identity.getBindingId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),price);
+        return positions.positionSkillInstallations(scope,agent,identity.getBindingId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),REQUIRED,price);
     }
     private PersonaModelHostingStore.Tariff hero(PositionAuthority.Scope scope,String persona) {
         var row=bindings.find(scope.tenantId(),scope.clientId(),persona);

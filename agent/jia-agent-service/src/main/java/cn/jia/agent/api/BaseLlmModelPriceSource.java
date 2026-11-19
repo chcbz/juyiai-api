@@ -1,7 +1,7 @@
 package cn.jia.agent.api;
 
 import cn.jia.agent.position.PositionSkillException;
-import cn.jia.agent.position.PositionSkillService;
+import java.nio.charset.StandardCharsets;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.StreamReadFeature;
 import tools.jackson.databind.JsonNode;
@@ -94,7 +94,7 @@ public final class BaseLlmModelPriceSource {
             extended.put(CATEGORIES[i],new BigDecimal(match.group(i+7)).stripTrailingZeros().toPlainString());
         }
         long threshold=Long.parseLong(match.group(1));
-        var version="basellm-"+PositionSkillService.hash("v1\n"+model+"\n"+USD_TO_CNY+"\n"+threshold+"\n"+base+"\n"+extended);
+        var version="basellm-"+sha256(("v1\n"+model+"\n"+USD_TO_CNY+"\n"+threshold+"\n"+base+"\n"+extended).getBytes(StandardCharsets.UTF_8));
         return new Quote(model,version,sha256(bytes),threshold,Map.copyOf(base),Map.copyOf(extended));
     }
     private static final class BoundedPriceResponse implements HttpResponse.BodySubscriber<byte[]> {

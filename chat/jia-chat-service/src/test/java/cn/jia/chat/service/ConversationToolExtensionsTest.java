@@ -34,7 +34,10 @@ class ConversationToolExtensionsTest {
     @Test void discoversArbitraryNewSkillsWithoutBusinessProviderOrTool() {
         when(installed.readCurrent(any())).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(
                 descriptor("writing-guide","installation",null),descriptor("new-skill-never-coded","installation",null),
-                descriptor("wrong-runtime","another",null),descriptor("revoked","installation","DISABLED"))));
+                descriptor("wrong-runtime","another",null),descriptor("revoked","installation","DISABLED"),
+                new InstalledSkillDescriptorLookup.Descriptor("wrong-host","1","i","pkg",null,null,"installation","other",null),
+                new InstalledSkillDescriptorLookup.Descriptor("executable","1","i","pkg","manifest","{}","installation","host",null),
+                new InstalledSkillDescriptorLookup.Descriptor("missing-package","1","i",null,null,null,"installation","host",null))));
         var catalog=registry(List.of()).catalog(principal,"request","turn");
         assertTrue(catalog.tools().isEmpty());
         assertEquals(List.of("writing-guide","new-skill-never-coded"),catalog.skills().stream().map(ConversationToolProvider.Skill::skillKey).toList());

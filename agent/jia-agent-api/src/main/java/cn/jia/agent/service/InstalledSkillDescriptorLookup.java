@@ -13,6 +13,11 @@ public interface InstalledSkillDescriptorLookup {
         /** Native execution also accepts a verified instruction package without a manifest. */
         public boolean verifiedNative() { return reasonCode == null && packageSha256 != null
                 && ((manifestJson == null && manifestSha256 == null) || verified() && manifestSha256 != null); }
+        /** Installation evidence only; the caller still checks the current turn and business authority. */
+        public boolean isInstructionOn(String runtimeId, String hostId) {
+            return runtimeId != null && hostId != null && runtimeId.equals(runtimeInstallationId)
+                    && hostId.equals(runtimeHostId) && verifiedNative() && manifestSha256 == null;
+        }
     }
     record Snapshot(List<Descriptor> skills) {
         public Snapshot { skills = List.copyOf(Objects.requireNonNull(skills)); }
