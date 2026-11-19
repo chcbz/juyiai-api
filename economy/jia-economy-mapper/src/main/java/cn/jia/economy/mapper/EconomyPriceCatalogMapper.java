@@ -4,10 +4,23 @@ import cn.jia.economy.entity.EconomyModelPriceRow;
 import cn.jia.economy.entity.EconomyToolPriceRow;
 import cn.jia.economy.entity.EconomyTaskModelTariffRow;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Select;
 
 /** Exact scoped reads. Version rows are immutable; current pointers are maintained explicitly. */
 public interface EconomyPriceCatalogMapper {
+    @Insert("""
+            INSERT INTO economy_model_price (tenant_id,client_id,channel,model,tier,price_version,price_data_json,created_at)
+            VALUES (#{tenantId},#{clientId},#{channel},#{model},#{tier},#{priceVersion},#{priceDataJson},#{createdAt})
+            """)
+    int insertModelVersion(EconomyModelPriceRow row);
+
+    @Insert("""
+            INSERT INTO economy_model_price_current (tenant_id,client_id,channel,model,tier,price_version,updated_at)
+            VALUES (#{tenantId},#{clientId},#{channel},#{model},#{tier},#{priceVersion},#{createdAt})
+            """)
+    int insertCurrentModel(EconomyModelPriceRow row);
+
     @Select("""
             SELECT p.* FROM economy_task_model_tariff p WHERE p.tenant_id=#{tenantId} AND p.client_id=#{clientId} AND p.model=#{model}
             """)

@@ -23,6 +23,8 @@ class PositionSkillTransactionTest {
     private JdbcTemplate admin,jdbc;
     private String database;
     private PositionSkillService service;
+    private SkillCatalogMapper packages;
+    private org.springframework.transaction.support.TransactionTemplate transaction;
     private Scope scope=new Scope("0","test-client","owner-a");
     @BeforeEach void setup()throws Exception {
         String base=System.getenv("CYF_POSITION_TEST_JDBC");
@@ -38,13 +40,15 @@ class PositionSkillTransactionTest {
         var identity=new AgentIdentityRegistryEntity().setCanonicalAgentId("agent1").setBindingId(1L);
         when(identities.requireRegistrationIdentityInScope("0","test-client","owner-a","agent1")).thenReturn(identity);
         when(identities.lockActiveCanonicalAgentIdsInScope(anyString(),anyString(),anyString(),anyList())).thenAnswer(i->i.getArgument(3));
-        var packages=mock(SkillCatalogMapper.class);
+        packages=mock(SkillCatalogMapper.class);
         when(packages.selectApprovedProductVersion("0","test-client","v1")).thenReturn(new SkillProductVersionEntity().setReviewStatus("APPROVED").setSkillKey("maintain").setProductId("product1"));
         var product=new cn.jia.agent.entity.skill.SkillProductEntity().setProductId("product1").setVersion(1L);
         when(packages.selectSkillProductsForUpdate(anyString(),anyString(),anyString())).thenReturn(List.of(product));
         when(packages.selectPositionSkillKeys(anyString(),anyString())).thenAnswer(i->"POSITION".equals(product.getSkillType())?List.of("maintain"):List.of());
         when(packages.classifyPositionSkill(anyString(),anyString(),anyString(),anyLong(),anyLong())).thenAnswer(i->{product.setSkillType("POSITION");return 1;});
-        service=new PositionSkillService(new PositionSkillStore(jdbc),identities,packages,new DataSourceTransactionManager(ds));
+        var manager=new DataSourceTransactionManager(ds);
+        service=new PositionSkillService(new PositionSkillStore(jdbc),identities,packages,manager);
+        transaction=new org.springframework.transaction.support.TransactionTemplate(manager);
         grant("MANAGE_POSITIONS","positions");grant("ARCHIVE_WRITE","archive:public");grant("SKILL_REVIEW","skills:platform");grant("SKILL_PUBLISH","skills:platform");
         service.defineSkill(scope,"key1",new Skill("maintain",SkillType.POSITION,"v1"));
         service.configure(scope,"key2",new Position("editor","Editor",2,"archive:public",false,List.of("maintain"),0),0);
@@ -78,6 +82,34 @@ class PositionSkillTransactionTest {
         assertThrows(PositionSkillException.class,()->service.withAuthority(scope,g,()->jdbc.update("INSERT INTO test_publication VALUES(2)")));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM test_publication",Integer.class));
     }
+    @Test void modelPositionRequiresIndependentAuthorityCurrentAppointmentAndVerifiedInstallation() {
+        var definition=new Position("model-management","模型管理",1,"models:platform",true,List.of("model-maintenance"),0);
+        assertThrows(PositionSkillException.class,()->service.configure(scope,"model-denied",definition,0));
+        when(packages.selectApprovedProductVersion("0","test-client","model-v1")).thenReturn(new SkillProductVersionEntity()
+                .setReviewStatus("APPROVED").setSkillKey("model-maintenance").setProductId("model-product"));
+        var product=new cn.jia.agent.entity.skill.SkillProductEntity().setProductId("model-product").setVersion(1L).setSkillType("POSITION");
+        when(packages.selectSkillProductsForUpdate("0","test-client","model-maintenance")).thenReturn(List.of(product));
+        when(packages.selectPositionSkillKeys("0","test-client")).thenReturn(List.of("maintain","model-maintenance"));
+        service.defineSkill(scope,"model-skill",new Skill("model-maintenance",SkillType.POSITION,"model-v1"));
+        grant("MODEL_BIND","models:platform");
+        assertThrows(PositionSkillException.class,()->service.configure(scope,"model-price-denied",definition,0));
+        grant("MODEL_PRICE","models:platform");
+        service.configure(scope,"model-position",definition,0);
+        var appointment=service.appoint(scope,"model-appointment","model-management","agent1");
+        var installation=appointment.state().installations().values().stream().filter(i->i.skillKey().equals("model-maintenance")).findFirst().orElseThrow();
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
+        service.runtimeState(scope,"agent1",policy->{
+            policy.bindManagedInstallation(installation.id(),installation.revision(),"physical");
+            policy.receipt(installation.id(),installation.revision(),true,"a".repeat(64),"rt","host",null);
+            return true;
+        });
+        assertEquals(Set.of("physical"),transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"other","host",true)));
+        assertThrows(PositionSkillException.class,()->service.withAuthority(scope,new Grant(appointment.resultId(),1,1,"agent1",1,"book",true),()->true));
+        service.resign(scope,"model-resign",appointment.resultId());
+        assertThrows(PositionSkillException.class,()->transaction.execute(s->service.modelMaintenanceInstallations(scope,"agent1",1,"rt","host",true)));
+    }
+
     private Grant skillManager() {
         grant("SKILL_REVIEW","skills:platform");grant("SKILL_PUBLISH","skills:platform");
         service.configure(scope,"skills-configure",new Position("skill-management","技能管理",1,"skills:platform",true,List.of(),0),0);

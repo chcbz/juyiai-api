@@ -28,6 +28,19 @@ public final class PersonaModelHostingStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
+    /** CAS only an existing configured persona, with an eligible model/plan in the same scope. */
+    public boolean changeModel(String tenantId,String clientId,String personaCode,String expected,String requested) {
+        return jdbc.update("""
+                UPDATE agent_persona_model a
+                  JOIN economy_hosting_model_plan m ON m.tenant_id=a.tenant_id AND m.client_id=a.client_id AND m.model_id=?
+                  JOIN economy_hosting_rent_plan p ON p.tenant_id=m.tenant_id AND p.client_id=m.client_id
+                    AND p.plan_id=m.plan_id AND p.plan_version=m.plan_version
+                   SET a.model_id=?
+                 WHERE a.tenant_id=? AND a.client_id=? AND a.persona_code=? AND a.model_id=?
+                   AND p.status='ACTIVE' AND p.currency='WEN'
+                """,requested,requested,tenantId,clientId,personaCode,expected)==1;
+    }
+
     public Map<String, Tariff> list(String tenantId, String clientId) {
         var result = new LinkedHashMap<String, Tariff>();
         for (var row : jdbc.query(QUERY, ROW, tenantId, clientId)) result.put(row.personaCode(), row);
