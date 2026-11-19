@@ -1625,6 +1625,25 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 ||!same(access.scopeKey(),"task:"+execution.getTaskId()))throw failure(Reason.NOT_FOUND);
         return access;
     }
+    @Override public <T> T withPrivateToolGrant(RuntimeScope authenticatedScope,String executionId,String runId,
+            PrivateToolRequest command,java.util.function.Function<PrivateToolGrant,T> operation) {
+        var scope=executionScope(authenticatedScope,executionId,runId);
+        if(!same(scope.ownerJiacn(),scope.executorOwnerJiacn()))throw failure(Reason.NOT_FOUND);
+        var proof=AgentRuntimeAuthenticationService.requireProof(nativeAuthentication(scope));
+        return nativeMutation(scope,()->withConversationRoot(scope,executionId,runId,true,command==null,command==null,execution->{
+            if(!Objects.equals(6,execution.getExecutionProtocolVersion())||!"PRIVATE".equals(execution.getBusinessScope()))throw failure(Reason.NOT_FOUND);
+            var skill=skillRow(skillOwner(scope),executionId,true);var snapshot=skillMap(skill.getSnapshotJson());
+            if(!snapshot.containsKey("privateTools"))throw failure(Reason.NOT_FOUND);
+            var catalog=skillObject(snapshot.get("privateTools"));
+            var names=((List<?>)catalog.get("tools")).stream().map(t->skillString(skillObject(t),"name")).toList();
+            if(command!=null){
+                requireConversationFence(scope,execution,command.fence(),false);requireSkillSnapshot(skill,executionId,command.snapshotDigest());
+                if(!"RUNNING".equals(skill.getPhase()) || !same(command.catalogSha256(),skillString(catalog,"catalogSha256")) || !names.contains(command.tool()))throw failure(Reason.TASK_CONFLICT);
+                requireCommandCapabilities(scope,execution,skill);
+            }
+            return operation.apply(new PrivateToolGrant(proof.installationId(),proof.hostId(),nativeSelections(snapshot),names));
+        }));
+    }
     private void requireCommandCapabilities(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution,cn.jia.agent.entity.SkillExecutionEntity skill) {
         var snapshot=skillMap(skill.getSnapshotJson());
         boolean script=cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef"));

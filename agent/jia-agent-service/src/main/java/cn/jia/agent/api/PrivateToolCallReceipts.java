@@ -21,6 +21,8 @@ public class PrivateToolCallReceipts {
     private final PrivateToolCallReceiptMapper mapper;
     public PrivateToolCallReceipts(PrivateToolCallReceiptMapper mapper) {this.mapper=mapper;}
 
+    Receipt find(Key key) { return mapper.find(key); }
+
     @Transactional(propagation=Propagation.MANDATORY)
     public Map<String,Object> apply(Key key,String tool,String digest,Supplier<Map<String,Object>> mutation) {
         Receipt old=mapper.lock(key);

@@ -4,6 +4,8 @@ import org.apache.ibatis.annotations.*;
 import java.util.List;
 /** Scoped persistent SM-C1 state; orchestration and lock ordering stay in the skill service. */
 public interface SkillManagementMapper {
+    @Select("SELECT * FROM agent_skill_managed_state WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND agent_id=#{agentId}")
+    List<SkillManagedStateEntity> statesForPrivateAdmission(@Param("tenantId") String tenant,@Param("clientId") String client,@Param("agentId") String agent);
     String S = "tenant_id=#{tenantId} AND client_id=#{clientId}";
     @Insert("INSERT INTO agent_skill_managed_state(tenant_id,client_id,agent_id,skill_key,skill_revision,active_installation_id,active_policy_revision,desired_enabled,admission_enabled,pending_change_id) VALUES(#{tenantId},#{clientId},#{agentId},#{skillKey},#{skillRevision},#{activeInstallationId},#{activePolicyRevision},#{desiredEnabled},#{admissionEnabled},#{pendingChangeId})")
     int insertState(SkillManagedStateEntity row);

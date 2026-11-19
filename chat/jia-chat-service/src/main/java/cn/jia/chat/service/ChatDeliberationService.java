@@ -156,6 +156,8 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
     private org.springframework.transaction.support.TransactionTemplate privateAdmissionTransaction;
     private cn.jia.agent.service.SkillExecutionService nativeExecutions;
     private ChatSkillSourceAccessService nativeSources;
+    private cn.jia.agent.service.PrivateNativeCapabilities privateCapabilities;
+    @Autowired public void setPrivateCapabilities(cn.jia.agent.service.PrivateNativeCapabilities value){privateCapabilities=value;}
     private cn.jia.chat.handler.TypedDeliberationSessionRegistry nativeSessions;
     @Autowired public void setPrivateNativeAdmission(org.springframework.transaction.PlatformTransactionManager manager,
             @org.springframework.context.annotation.Lazy cn.jia.agent.service.SkillExecutionService executions,
@@ -182,8 +184,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         // This lane selects no package by name: plain native local-file tools use the same engine.
         // No package I/O, provider call or conversation write occurs during readiness observation.
         var observed=privateRuntime(tenantId,trusted,intent.target());
-        try {
-            return privateAdmissionTransaction.execute(status->{
+        java.util.function.Function<java.util.function.Supplier<cn.jia.agent.service.PrivateNativeCapabilities.Selection>,PrivateAccepted> admit=freeze -> privateAdmissionTransaction.execute(status->{
                 var prior=dao.findRequest(tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId());
                 if(prior!=null)return replayPrivate(tenantId,trusted,intent);
                 ChatConversationEntity conversation;
@@ -233,7 +234,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
                 var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);
                 snapshot.put("actionEventId",actionId);snapshot.put("scope",new cn.jia.agent.service.SkillExecutionService.ScopeView("PRIVATE",id,Long.toString(generation),null).asMap());
                 snapshot.put("targetAgentId",intent.target());snapshot.put("toolPolicyRef",cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
-                snapshot.put("skills",List.of());snapshot.put("parameters",Map.of("authorizedContext",context));
+                var selected=freeze.get();snapshot.put("skills",selected.skills());if(!selected.catalog().isEmpty())snapshot.put("privateTools",selected.catalog());snapshot.put("parameters",Map.of("authorizedContext",context));
                 // The complete user text is frozen in authorizedContext.currentUserMessage. Do not
                 // duplicate it into the bounded tool instruction or truncate long chat messages.
                 snapshot.put("instruction","请按 parameters.authorizedContext.currentUserMessage 中的用户请求，结合已授权会话上下文和明确选择的资料回复。意图不明确时先询问；不得声称已读取未提供的文件。");
@@ -271,6 +272,10 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
                 return new PrivateAccepted(new Admission(intent.requestId(),1,Long.toString(message.getId()),id,generation,
                         InteractionRoute.EXECUTE,List.of(toDispatch(turn,contextSnapshot)),false),conversation);
             });
+        try {
+            if(privateCapabilities==null)return admit.apply(cn.jia.agent.service.PrivateNativeCapabilities.Selection::empty);
+            var nativeDeclaration=ChatSkillSourceAccessService.object(observed.frozenDeclaration().get("nativeExecution"));
+            return privateCapabilities.prepared(new cn.jia.agent.service.SkillCapabilityLookup.Scope(tenantId,trusted.clientId(),trusted.jiacn(),intent.target()),observed.sessionId(),Integer.valueOf(1).equals(nativeDeclaration.get("privateBusinessToolsVersion")),admit);
         } catch(org.springframework.dao.DuplicateKeyException raced) {
             // The failed template has already rolled back. Never swallow a duplicate in its rollback-only transaction.
             return privateAdmissionTransaction.execute(status->{

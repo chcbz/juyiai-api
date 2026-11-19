@@ -140,6 +140,18 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
             return action.apply(scope);
         }));
     }
+    List<Map<String,Object>> nativeCatalog(Context ctx,PositionAuthority.Scope scope,List<Map<String,Object>> selections) {
+        if(!positions.hasPositionSkill(scope,ctx.subject().agentId(),REQUIRED))return List.of();
+        var result=new ArrayList<Map<String,Object>>();
+        for(boolean price:List.of(false,true))try {
+            authorizeFrozen(ctx,scope,price,selections);result.addAll(price?PRICE_TOOLS:BIND_TOOLS);
+        }catch(PositionSkillException denied){if(denied.status()!=403)throw denied;}
+        return result;
+    }
+    void authorizeFrozen(Context ctx,PositionAuthority.Scope scope,boolean price,List<Map<String,Object>> selections) {
+        var ids=admit(ctx,scope,price);
+        require(selections.stream().map(s->(Map<?,?>)s.get("skill")).anyMatch(s->REQUIRED.skillKey().equals(s.get("key"))&&ids.contains(s.get("installationId"))),403,"MODEL_SKILL_REQUIRED");
+    }
     private Set<String> admit(Context ctx,PositionAuthority.Scope scope,boolean price) {
         var agent=ctx.subject().agentId();
         var identity=identities.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
