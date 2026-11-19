@@ -1,6 +1,5 @@
 package cn.jia.agent.api;
 
-import cn.jia.agent.mapper.hosting.PersonaModelHostingStore;
 import cn.jia.agent.position.PositionSkillException;
 import cn.jia.agent.position.PositionSkillService;
 import cn.jia.agent.service.AgentIdentityService;
@@ -8,8 +7,6 @@ import cn.jia.agent.service.InstalledSkillDescriptorLookup;
 import cn.jia.agent.service.PositionAuthority;
 import cn.jia.agent.service.SkillCapabilityLookup;
 import cn.jia.chat.service.ConversationToolProvider;
-import cn.jia.economy.pricing.ModelPriceCatalogMaintenance;
-import cn.jia.economy.service.EconomyScope;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -26,7 +23,6 @@ import static cn.jia.agent.position.PositionSkillException.require;
 public final class ModelConversationToolAdapter implements ConversationToolProvider {
     static final PositionSkillService.RequiredPositionSkill REQUIRED=new PositionSkillService.RequiredPositionSkill(
             cn.jia.agent.position.PositionSkillPolicy.PLATFORM_MODELS,"model-maintenance","MODEL_POSITION_REQUIRED","MODEL_SKILL_REQUIRED");
-    static final String CHANNEL="public-api-reference", TIER="standard";
     private static final String READ_MODEL="model_read_price", ADD_MODEL="model_add_price",
             READ_HERO="model_read_hero_binding", BIND="model_set_hero_binding";
     private static final Pattern MODEL=Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}");
@@ -42,15 +38,11 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
     private final PositionSkillService positions;
     private final AgentIdentityService identities;
     private final InstalledSkillDescriptorLookup installed;
-    private final PersonaModelHostingStore bindings;
-    private final ModelPriceCatalogMaintenance prices;
-    private final BaseLlmModelPriceSource source;
+    private final ModelMaintenanceOperations operations;
 
     public ModelConversationToolAdapter(PositionSkillService positions,AgentIdentityService identities,
-            InstalledSkillDescriptorLookup installed,PersonaModelHostingStore bindings,
-            ModelPriceCatalogMaintenance prices,BaseLlmModelPriceSource source) {
-        this.positions=positions;this.identities=identities;this.installed=installed;this.bindings=bindings;
-        this.prices=prices;this.source=source;
+            InstalledSkillDescriptorLookup installed,ModelMaintenanceOperations operations) {
+        this.positions=positions;this.identities=identities;this.installed=installed;this.operations=operations;
     }
     @Override public Set<String> names(){return Set.of(READ_MODEL,ADD_MODEL,READ_HERO,BIND);}
     @Override public List<Map<String,Object>> catalog(Context ctx,Boundary boundary) {
@@ -93,33 +85,19 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         return switch(tool) {
             case READ_MODEL -> {
                 exact(args,"model");var model=arg(args,"model",MODEL);
-                yield scope->prices.find(economyScope(scope),CHANNEL,model,TIER).map(ModelConversationToolAdapter::priceReceipt)
-                            .orElseGet(()->Map.of("model",model,"configured",false));
+                yield scope->operations.readPrice(scope,model);
             }
             case ADD_MODEL -> {
-                exact(args,"model");var model=arg(args,"model",MODEL);
-                var quote=source.read(model); // External I/O is outside identity, conversation and DB locks.
-                var price=new ModelPriceCatalogMaintenance.Price(CHANNEL,quote.model(),TIER,quote.version(),quote.priceData(),null);
-                yield scope->{
-                    try {return priceReceipt(prices.create(economyScope(scope),price));}
-                    catch(ModelPriceCatalogMaintenance.Conflict conflict){throw new PositionSkillException(409,"MODEL_PRICE_CONFLICT");}
-                };
+                exact(args,"model");yield operations.prepareAddPrice(arg(args,"model",MODEL));
             }
             case READ_HERO -> {
                 exact(args,"personaCode");var persona=arg(args,"personaCode",PERSONA);
-                yield scope->Map.of("personaCode",persona,"configuredModel",hero(scope,persona).modelId());
+                yield scope->operations.readBinding(scope,persona);
             }
             case BIND -> {
                 exact(args,"personaCode","expectedModel","model");var persona=arg(args,"personaCode",PERSONA);
                 var expected=arg(args,"expectedModel",MODEL);var model=arg(args,"model",MODEL);
-                yield scope-> {
-                    if(expected.equals(model)) {
-                        require(model.equals(hero(scope,persona).modelId()),409,"MODEL_BINDING_CONFLICT");
-                        return Map.of("personaCode",persona,"configuredModel",model,"disposition","UNCHANGED");
-                    }
-                    require(bindings.changeModel(scope.tenantId(),scope.clientId(),persona,expected,model),409,"MODEL_BINDING_CONFLICT_OR_PLAN_MISSING");
-                    return Map.of("personaCode",persona,"previousConfiguredModel",expected,"configuredModel",model,"disposition","CHANGED");
-                };
+                yield scope->operations.changeBinding(scope,persona,expected,model);
             }
             default -> throw new IllegalArgumentException("Unknown model tool");
         };
@@ -162,17 +140,6 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         var identity=identities.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
         require(agent.equals(identity.getCanonicalAgentId()) && identity.getBindingId()!=null,403,"MODEL_POSITION_REQUIRED");
         return positions.positionSkillInstallations(scope,agent,identity.getBindingId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),REQUIRED,price);
-    }
-    private PersonaModelHostingStore.Tariff hero(PositionAuthority.Scope scope,String persona) {
-        var row=bindings.find(scope.tenantId(),scope.clientId(),persona);
-        require(row!=null,404,"MODEL_HERO_NOT_FOUND");return row;
-    }
-    private static EconomyScope economyScope(PositionAuthority.Scope scope) {
-        return new EconomyScope(scope.tenantId(),scope.clientId());
-    }
-    private static Map<String,Object> priceReceipt(ModelPriceCatalogMaintenance.Price price) {
-        return Map.of("model",price.model(),"configured",true,"channel",price.channel(),"tier",price.tier(),
-                "priceVersion",price.version(),"price",price.data(),"disposition",price.disposition());
     }
     private static Map<String,Object> tool(String name,String description,String... fields) {
         var props=new java.util.LinkedHashMap<String,Object>();for(var field:fields)props.put(field,Map.of("type","string"));
