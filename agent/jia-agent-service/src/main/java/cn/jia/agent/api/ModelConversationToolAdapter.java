@@ -8,11 +8,9 @@ import cn.jia.agent.service.InstalledSkillDescriptorLookup;
 import cn.jia.agent.service.PositionAuthority;
 import cn.jia.agent.service.SkillCapabilityLookup;
 import cn.jia.chat.service.ConversationToolProvider;
-import cn.jia.economy.entity.EconomyModelPriceRow;
-import cn.jia.economy.mapper.EconomyPriceCatalogMapper;
-import org.springframework.dao.DuplicateKeyException;
+import cn.jia.economy.pricing.ModelPriceCatalogMaintenance;
+import cn.jia.economy.service.EconomyScope;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -44,15 +42,14 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
     private final AgentIdentityService identities;
     private final InstalledSkillDescriptorLookup installed;
     private final PersonaModelHostingStore bindings;
-    private final EconomyPriceCatalogMapper prices;
+    private final ModelPriceCatalogMaintenance prices;
     private final BaseLlmModelPriceSource source;
-    private final ObjectMapper json;
 
     public ModelConversationToolAdapter(PositionSkillService positions,AgentIdentityService identities,
             InstalledSkillDescriptorLookup installed,PersonaModelHostingStore bindings,
-            EconomyPriceCatalogMapper prices,BaseLlmModelPriceSource source,ObjectMapper json) {
+            ModelPriceCatalogMaintenance prices,BaseLlmModelPriceSource source) {
         this.positions=positions;this.identities=identities;this.installed=installed;this.bindings=bindings;
-        this.prices=prices;this.source=source;this.json=json;
+        this.prices=prices;this.source=source;
     }
     @Override public Set<String> names(){return Set.of(READ_MODEL,ADD_MODEL,READ_HERO,BIND);}
     @Override public List<Map<String,Object>> catalog(Context ctx,Boundary boundary) {
@@ -73,15 +70,17 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
             case READ_MODEL -> {
                 exact(args,"model");var model=arg(args,"model",MODEL);
                 yield withAuthority(ctx,boundary,true,scope-> {
-                    var row=current(scope,model);return row==null?Map.of("model",model,"configured",false):priceReceipt(row,"CURRENT");
+                    return prices.find(economyScope(scope),CHANNEL,model,TIER).map(ModelConversationToolAdapter::priceReceipt)
+                            .orElseGet(()->Map.of("model",model,"configured",false));
                 });
             }
             case ADD_MODEL -> {
                 exact(args,"model");var model=arg(args,"model",MODEL);
                 withAuthority(ctx,boundary,true,scope->true);
                 var quote=source.read(model); // External I/O is outside identity, conversation and DB locks.
-                try {yield withAuthority(ctx,boundary,true,scope->add(scope,quote));}
-                catch(DuplicateKeyException conflict){throw new PositionSkillException(409,"MODEL_PRICE_CONFLICT");}
+                var price=new ModelPriceCatalogMaintenance.Price(CHANNEL,quote.model(),TIER,quote.version(),quote.priceData(),null);
+                try {yield withAuthority(ctx,boundary,true,scope->priceReceipt(prices.create(economyScope(scope),price)));}
+                catch(ModelPriceCatalogMaintenance.Conflict conflict){throw new PositionSkillException(409,"MODEL_PRICE_CONFLICT");}
             }
             case READ_HERO -> {
                 exact(args,"personaCode");var persona=arg(args,"personaCode",PERSONA);
@@ -128,25 +127,12 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         var row=bindings.find(scope.tenantId(),scope.clientId(),persona);
         require(row!=null,404,"MODEL_HERO_NOT_FOUND");return row;
     }
-    private EconomyModelPriceRow current(PositionAuthority.Scope scope,String model) {
-        return prices.findCurrentModel(scope.tenantId(),scope.clientId(),CHANNEL,model,TIER);
+    private static EconomyScope economyScope(PositionAuthority.Scope scope) {
+        return new EconomyScope(scope.tenantId(),scope.clientId());
     }
-    private Map<String,Object> add(PositionAuthority.Scope scope,BaseLlmModelPriceSource.Quote quote) {
-        var old=current(scope,quote.model());
-        if(old!=null) {
-            require(quote.version().equals(old.getPriceVersion()),409,"MODEL_PRICE_ALREADY_EXISTS");
-            return priceReceipt(old,"UNCHANGED");
-        }
-        var row=new EconomyModelPriceRow();row.setTenantId(scope.tenantId());row.setClientId(scope.clientId());
-        row.setChannel(CHANNEL);row.setTier(TIER);row.setModel(quote.model());row.setPriceVersion(quote.version());
-        row.setCreatedAt(System.currentTimeMillis());row.setPriceDataJson(json.writeValueAsString(quote.priceData()));
-        require(prices.insertModelVersion(row)==1 && prices.insertCurrentModel(row)==1,409,"MODEL_PRICE_CONFLICT");
-        return priceReceipt(row,"CREATED");
-    }
-    private Map<String,Object> priceReceipt(EconomyModelPriceRow row,String disposition) {
-        var data=json.readTree(row.getPriceDataJson());
-        return Map.of("model",row.getModel(),"configured",true,"channel",row.getChannel(),"tier",row.getTier(),
-                "priceVersion",row.getPriceVersion(),"price",data,"disposition",disposition);
+    private static Map<String,Object> priceReceipt(ModelPriceCatalogMaintenance.Price price) {
+        return Map.of("model",price.model(),"configured",true,"channel",price.channel(),"tier",price.tier(),
+                "priceVersion",price.version(),"price",price.data(),"disposition",price.disposition());
     }
     private static Map<String,Object> tool(String name,String description,String... fields) {
         var props=new java.util.LinkedHashMap<String,Object>();for(var field:fields)props.put(field,Map.of("type","string"));

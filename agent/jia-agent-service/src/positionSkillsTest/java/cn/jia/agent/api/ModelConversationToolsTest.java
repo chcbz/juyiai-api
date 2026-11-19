@@ -12,6 +12,7 @@ import cn.jia.chat.service.ConversationToolProvider;
 import cn.jia.chat.service.PrivateConversationToolAccess;
 import cn.jia.economy.entity.EconomyModelPriceRow;
 import cn.jia.economy.mapper.EconomyPriceCatalogMapper;
+import cn.jia.economy.service.impl.DatabaseModelPriceMaintenance;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -41,7 +42,7 @@ class ModelConversationToolsTest {
     private final PersonaModelHostingStore bindings=mock(PersonaModelHostingStore.class);
     private final EconomyPriceCatalogMapper prices=mock(EconomyPriceCatalogMapper.class);
     private final BaseLlmModelPriceSource source=mock(BaseLlmModelPriceSource.class);
-    private final ModelConversationToolAdapter adapter=new ModelConversationToolAdapter(positions,identities,installed,bindings,prices,source,JSON);
+    private final ModelConversationToolAdapter adapter=new ModelConversationToolAdapter(positions,identities,installed,bindings,new DatabaseModelPriceMaintenance(prices,JSON),source);
 
     private static byte[] fixture(String expression) {
         return JSON.writeValueAsString(Map.of("success",true,"data",Map.of("billing_mode",Map.of(MODEL,"tiered_expr"),
