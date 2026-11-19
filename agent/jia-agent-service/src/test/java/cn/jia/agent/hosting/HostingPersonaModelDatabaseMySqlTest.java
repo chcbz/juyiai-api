@@ -70,6 +70,20 @@ class HostingPersonaModelDatabaseMySqlTest {
                 () -> db.jdbc().update("UPDATE economy_hosting_rent_plan SET amount_wen=1"));
     }
 
+    @Test void modelMaintenanceUsesScopedCompareAndSwapAndExistingTargetPlan() {
+        seed();
+        var from=store.find("fixture-tenant","fixture-client","sunerniang").modelId();
+        var target="gpt-6.1-terra";
+        assertNotEquals(from,target);
+        assertFalse(store.changeModel("other","fixture-client","sunerniang",from,target));
+        assertFalse(store.changeModel("fixture-tenant","fixture-client","sunerniang",target,from));
+        assertFalse(store.changeModel("fixture-tenant","fixture-client","sunerniang",from,"no-plan"));
+        assertTrue(store.changeModel("fixture-tenant","fixture-client","sunerniang",from,target));
+        assertEquals(target,store.find("fixture-tenant","fixture-client","sunerniang").modelId());
+        assertFalse(store.changeModel("fixture-tenant","fixture-client","sunerniang",from,target));
+        assertEquals(108,store.list("fixture-tenant","fixture-client").size());
+    }
+
     @Test void danglingAndCrossScopePointersAreRejectedWithoutCheckConstraints() {
         seed();
         assertThrows(org.springframework.dao.DataAccessException.class, () -> db.jdbc().update(

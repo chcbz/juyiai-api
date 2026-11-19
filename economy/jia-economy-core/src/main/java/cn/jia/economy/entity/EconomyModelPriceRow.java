@@ -12,4 +12,5 @@ public class EconomyModelPriceRow {
     private String tier;
     private String priceVersion;
     private String priceDataJson;
+    private Long createdAt;
 }

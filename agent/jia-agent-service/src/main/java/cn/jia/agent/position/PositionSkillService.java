@@ -125,6 +125,42 @@ public class PositionSkillService implements PositionAuthority {
             return commit.get();
         });
     }
+    /** Cheap catalog prefilter only; never sufficient to admit a callback. */
+    public boolean hasModelMaintenancePosition(Scope scope,String agentId) {
+        scope(scope);
+        var row=store.read(scope);
+        if(row==null)return false;
+        var state=decode(row.json());
+        return state.appointments().values().stream().anyMatch(a->a.active() && agentId.equals(a.agentId())
+                && modelMaintenancePosition(state.positions().get(a.positionId()),false));
+    }
+    private static boolean modelMaintenancePosition(Position p,boolean price) {
+        return p!=null && PositionSkillPolicy.PLATFORM_MODELS.equals(p.resource())
+                && (!price || p.allowPublish()) && p.skillKeys().contains("model-maintenance");
+    }
+
+    /** Called inside the native identity/turn fence; this same root serializes resignation. */
+    public Set<String> modelMaintenanceInstallations(Scope scope, String agentId, long bindingId,
+            String runtimeInstallationId, String runtimeHostId, boolean price) {
+        var state=currentState(scope);
+        authority(scope,PositionSkillPolicy.PLATFORM_MODELS,price);
+        boolean appointed=state.appointments().values().stream().anyMatch(a->{
+            if(!a.active() || !agentId.equals(a.agentId()) || a.bindingId()!=bindingId)return false;
+            return modelMaintenancePosition(state.positions().get(a.positionId()),price);
+        });
+        require(appointed,403,"MODEL_POSITION_REQUIRED");
+        var skill=state.skills().get("model-maintenance");
+        require(skill!=null && skill.type()==SkillType.POSITION,403,"MODEL_SKILL_REQUIRED");
+        var ids=new HashSet<String>();
+        for(var i:state.installations().values())if("model-maintenance".equals(i.skillKey()) && agentId.equals(i.agentId())
+                && bindingId==i.bindingId() && i.usable() && i.managedInstallationId()!=null
+                && Objects.equals(runtimeInstallationId,i.runtimeInstallationId()) && Objects.equals(runtimeHostId,i.runtimeHostId())) {
+            ids.add(i.managedInstallationId());
+        }
+        require(!ids.isEmpty(),403,"MODEL_SKILL_REQUIRED");
+        return Set.copyOf(ids);
+    }
+
     /** Read-only omission check inside the caller's transaction. A denied pending job must not mark
      * the native poll transaction rollback-only; callback mutations still use withAuthority. */
     public boolean authorityAvailable(Scope scope,Grant grant){
@@ -178,6 +214,11 @@ public class PositionSkillService implements PositionAuthority {
         if(PositionSkillPolicy.PLATFORM_SKILLS.equals(resource)) {
             require(store.authorized(scope,"SKILL_REVIEW",resource),403,"POSITION_RESOURCE_FORBIDDEN");
             if(publish)require(store.authorized(scope,"SKILL_PUBLISH",resource),403,"POSITION_PUBLISH_FORBIDDEN");
+            return;
+        }
+        if(PositionSkillPolicy.PLATFORM_MODELS.equals(resource)) {
+            require(store.authorized(scope,"MODEL_BIND",resource),403,"POSITION_RESOURCE_FORBIDDEN");
+            if(publish)require(store.authorized(scope,"MODEL_PRICE",resource),403,"POSITION_PUBLISH_FORBIDDEN");
             return;
         }
         require(store.authorized(scope,"ARCHIVE_WRITE",resource),403,"POSITION_RESOURCE_FORBIDDEN");
