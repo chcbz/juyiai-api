@@ -152,7 +152,7 @@ Money=`{amountMinor:D0,currency:"SILVER"}`；这里的SILVER最小单位就是mi
 | IM05 | `GET /chat/requests/{requestId}/steps/{stepId}/outputs` | 无body → 200 R<Output[]> | JWT+原持久链及资料ACL，不能从任意新manifest投影；目录不代表字节已验证可下载 |
 | IM06 | `GET /chat/requests/{requestId}/steps/{stepId}/outputs/{outputId}` | query download:boolean默认false；Range/If-Range可选 | 200/206字节；非法/不可满足单Range按现实现416（明确无body，保留Content-Range）；实际MIME、ETag、Disposition、Content-Length、Content-Range一致；404/503开始传输前统一错误 |
 | IM07 | `HEAD /chat/requests/{requestId}/steps/{stepId}/outputs/{outputId}` | 同IM06资源/权限 | 同请求语义状态与响应头，无响应body，包括失败时；不能为统一JSON给HEAD追加错误body |
-| IM08 | `GET /internal/agent/chat/requests/{requestId}/turns/{turnId}/materials/inputs/{sourceRefId}/content` | 唯一X-Materials-Manifest-Digest；无query/body | Native当前proof→固定manifest资料授权→读取→发送前再次fence检查；200字节；401/403/404/409/422/503沿用MATERIAL_INPUT_* |
+| IM08 | `GET /internal/agent/chat/requests/{requestId}/turns/{turnId}/materials/inputs/{sourceRefId}/content` | 唯一X-Materials-Manifest-Digest；无query/body | Native当前proof→固定manifest资料授权→返回前再次fence检查。200返回原字节和强ETag（带双引号的来源SHA-256）；唯一If-None-Match与该ETag精确相等时不打开正文，返回304、相同ETag、无body。两者均no-store，不缓存授权；401/403/404/409/422/503沿用MATERIAL_INPUT_* |
 
 目标DTO：
 - TaskCatalog=`{catalogRevision:D0?,items:SkillCapability[]}`；SkillCapability=`{skillKey,skillVersion,title:String,state:CALLABLE|UNAVAILABLE,reasonCode:String?,costInfo:CostInfo}`；CALLABLE必须reasonCode=null。revision当前Runtime确为十进制String，浏览器原typedId校验需改数值串校验。

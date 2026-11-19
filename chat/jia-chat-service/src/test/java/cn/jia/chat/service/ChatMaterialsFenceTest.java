@@ -158,11 +158,34 @@ class ChatMaterialsFenceTest {
         assertThrows(SecurityException.class,this::read);
         verifyNoInteractions(dispatch,tasks,sources);
     }
-    byte[] read() throws java.io.IOException {
+    final String etag = "\"" + "a".repeat(64) + "\"";
+    @Test void unchangedSourceRequiresBothFencesButNotStorage() throws Exception {
+        var response = request(etag);
+        assertEquals(304,response.getStatus());
+        assertEquals(etag,response.getHeader("ETag"));
+        assertEquals("no-store",response.getHeader("Cache-Control"));
+        assertEquals(0,response.getContentAsByteArray().length);
+        assertEquals(List.of("fence","incoming","task","release","fence","task","release"),events);
+    }
+    @Test void tagDoesNotBypassCurrentSourceAccess() {
+        doThrow(new ChatDeliberationException(ChatDeliberationException.Reason.NOT_FOUND_OR_FORBIDDEN,"revoked"))
+            .when(sources).requireAuthorized(any(),anyString(),anyString(),anyLong(),any());
+        assertThrows(ChatDeliberationException.class,()->request(etag));
+        verify(sources,never()).open(any(),anyString(),anyString(),anyLong(),any());
+    }
+    @Test void differentTagReturnsFullBytesAndSourceTag() throws Exception {
+        var response = request("\"different\"");
+        assertEquals(200,response.getStatus());
+        assertEquals(etag,response.getHeader("ETag"));
+        assertArrayEquals(bytes,response.getContentAsByteArray());
+    }
+    byte[] read() throws java.io.IOException { return request(null).getContentAsByteArray(); }
+    org.springframework.mock.web.MockHttpServletResponse request(String tag) throws java.io.IOException {
         var request=new MockHttpServletRequest();
+        if(tag!=null)request.addHeader("If-None-Match",tag);
         request.addHeader("X-Materials-Manifest-Digest",digest);
         var response=new org.springframework.mock.web.MockHttpServletResponse();
         controller.content("request","turn","source",runtime,request,response);
-        return response.getContentAsByteArray();
+        return response;
     }
 }
