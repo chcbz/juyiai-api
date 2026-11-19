@@ -67,37 +67,59 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
     }
 
     @Override public Object call(Context ctx,Boundary boundary,String tool,Map<String,Object> args) {
+        boolean price=priceAuthority(tool);
+        if (ADD_MODEL.equals(tool)) withAuthority(ctx,boundary,true,scope->true);
+        var operation=prepare(tool,args);
+        return withAuthority(ctx,boundary,price,operation);
+    }
+
+    static boolean transactionalWrite(String tool) {
+        return switch(tool) {
+            case ADD_MODEL,BIND -> true;
+            case READ_MODEL,READ_HERO -> false;
+            default -> throw new IllegalArgumentException("Unknown model tool");
+        };
+    }
+    static boolean priceAuthority(String tool) {
+        return switch(tool) {
+            case READ_MODEL,ADD_MODEL -> true;
+            case READ_HERO,BIND -> false;
+            default -> throw new IllegalArgumentException("Unknown model tool");
+        };
+    }
+    /** Performs external preparation only. Caller checks price access before fetching, then
+     * re-admits inside the execution transaction before invoking the returned operation. */
+    Function<PositionAuthority.Scope,Map<String,Object>> prepare(String tool,Map<String,Object> args) {
         return switch(tool) {
             case READ_MODEL -> {
                 exact(args,"model");var model=arg(args,"model",MODEL);
-                yield withAuthority(ctx,boundary,true,scope-> {
-                    return prices.find(economyScope(scope),CHANNEL,model,TIER).map(ModelConversationToolAdapter::priceReceipt)
+                yield scope->prices.find(economyScope(scope),CHANNEL,model,TIER).map(ModelConversationToolAdapter::priceReceipt)
                             .orElseGet(()->Map.of("model",model,"configured",false));
-                });
             }
             case ADD_MODEL -> {
                 exact(args,"model");var model=arg(args,"model",MODEL);
-                withAuthority(ctx,boundary,true,scope->true);
                 var quote=source.read(model); // External I/O is outside identity, conversation and DB locks.
                 var price=new ModelPriceCatalogMaintenance.Price(CHANNEL,quote.model(),TIER,quote.version(),quote.priceData(),null);
-                try {yield withAuthority(ctx,boundary,true,scope->priceReceipt(prices.create(economyScope(scope),price)));}
-                catch(ModelPriceCatalogMaintenance.Conflict conflict){throw new PositionSkillException(409,"MODEL_PRICE_CONFLICT");}
+                yield scope->{
+                    try {return priceReceipt(prices.create(economyScope(scope),price));}
+                    catch(ModelPriceCatalogMaintenance.Conflict conflict){throw new PositionSkillException(409,"MODEL_PRICE_CONFLICT");}
+                };
             }
             case READ_HERO -> {
                 exact(args,"personaCode");var persona=arg(args,"personaCode",PERSONA);
-                yield withAuthority(ctx,boundary,false,scope->Map.of("personaCode",persona,"configuredModel",hero(scope,persona).modelId()));
+                yield scope->Map.of("personaCode",persona,"configuredModel",hero(scope,persona).modelId());
             }
             case BIND -> {
                 exact(args,"personaCode","expectedModel","model");var persona=arg(args,"personaCode",PERSONA);
                 var expected=arg(args,"expectedModel",MODEL);var model=arg(args,"model",MODEL);
-                yield withAuthority(ctx,boundary,false,scope-> {
+                yield scope-> {
                     if(expected.equals(model)) {
                         require(model.equals(hero(scope,persona).modelId()),409,"MODEL_BINDING_CONFLICT");
                         return Map.of("personaCode",persona,"configuredModel",model,"disposition","UNCHANGED");
                     }
                     require(bindings.changeModel(scope.tenantId(),scope.clientId(),persona,expected,model),409,"MODEL_BINDING_CONFLICT_OR_PLAN_MISSING");
                     return Map.of("personaCode",persona,"previousConfiguredModel",expected,"configuredModel",model,"disposition","CHANGED");
-                });
+                };
             }
             default -> throw new IllegalArgumentException("Unknown model tool");
         };

@@ -1442,11 +1442,17 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         }
         var catalog=runtimeRequired?skillCapabilities.lookup(runtimeScope,liveFence):null;
         if(runtimeRequired&&(catalog==null||catalog.state()!=cn.jia.agent.service.SkillCapabilityLookup.State.AVAILABLE))throw failure(Reason.CAPABILITY_UNAVAILABLE);
+        // Keep duplicate rejection while avoiding an entire catalog scan per selected installation.
+        record Installed(String key,String version,String installation) {}
+        var descriptions=descriptors.skills().stream().collect(java.util.stream.Collectors.groupingBy(d->
+                new Installed(d.skillKey(),d.skillVersion(),d.installationId())));
+        var runtimeFacts=runtimeRequired ? catalog.catalog().skills().stream().collect(java.util.stream.Collectors.groupingBy(d->
+                new Installed(d.skillKey(),d.skillVersion(),d.skillInstallationId()))) : null;
         for(var item:selections) {
             var selected=skillObject(item.get("skill"));String key=skillString(selected,"key"), version=skillString(selected,"version");
-            var matches=descriptors.skills().stream().filter(d->key.equals(d.skillKey())&&version.equals(d.skillVersion())
-                    &&same(d.installationId(),skillString(selected,"installationId"))).toList();
-            if(matches.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var descriptor=matches.getFirst();
+            var id=new Installed(key,version,skillString(selected,"installationId"));
+            var matches=descriptions.get(id);
+            if(matches==null||matches.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var descriptor=matches.getFirst();
             if(!descriptor.verifiedNative()||!same(descriptor.packageSha256(),skillString(selected,"packageSha256"))
                     ||!selected.containsKey("manifestSha256")||!Objects.equals(descriptor.manifestSha256(),selected.get("manifestSha256")))throw failure(Reason.CAPABILITY_UNAVAILABLE);
             boolean instructionPackage=descriptor.manifestJson()==null;
@@ -1462,9 +1468,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             }
             if(runtimeRequired) {
                 if(!same(descriptor.runtimeInstallationId(),liveFence.runtimeInstallationId())||!same(descriptor.runtimeHostId(),liveFence.hostId()))throw failure(Reason.CAPABILITY_UNAVAILABLE);
-                var facts=catalog.catalog().skills().stream().filter(d->key.equals(d.skillKey())&&version.equals(d.skillVersion())
-                        &&same(d.skillInstallationId(),descriptor.installationId())).toList();
-                if(facts.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var fact=facts.getFirst();
+                var facts=runtimeFacts.get(id);
+                if(facts==null||facts.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var fact=facts.getFirst();
                 if(!same(fact.packageSha256(),descriptor.packageSha256())||!Objects.equals(fact.manifestSha256(),descriptor.manifestSha256())
                         ||!fact.enabled()||!Objects.equals(fact.kind(),instructionPackage?"INSTRUCTION":"EXECUTABLE")
                         ||!instructionPackage&&(fact.readiness()!=cn.jia.agent.service.SkillCapabilityLookup.Readiness.READY||fact.toolchainDigest()==null))throw failure(Reason.CAPABILITY_UNAVAILABLE);
