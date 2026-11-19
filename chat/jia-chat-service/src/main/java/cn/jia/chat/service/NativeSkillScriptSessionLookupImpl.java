@@ -17,14 +17,22 @@ public final class NativeSkillScriptSessionLookupImpl implements NativeSkillScri
         this.runtimes=runtimes;this.sessions=sessions;
     }
     @Override public boolean supports(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence) {
+        return declared(scope,fence,false);
+    }
+    @Override public boolean supportsPrivateTools(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence) {
+        return declared(scope,fence,true);
+    }
+    private boolean declared(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence,boolean privateTools) {
         try {
             SkillCapabilityLookup.validateFence(fence);
             if(!Objects.equals(scope.runtimeInstanceId(),fence.runtimeInstanceId()))return false;
             var key=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId());
             var live=runtimes.lookup(key,fence);
             if(live==null||live.state()!=SkillCapabilityLookup.State.AVAILABLE)return false;
-            if(!sessions.nativeScriptDeclared(new TypedDeliberationSessionRegistry.Scope(scope.tenantId(),scope.executorOwnerJiacn(),scope.clientId()),
-                    scope.agentId(),live.sessionId()))return false;
+            var socketScope=new TypedDeliberationSessionRegistry.Scope(scope.tenantId(),scope.executorOwnerJiacn(),scope.clientId());
+            boolean supported=privateTools ? sessions.privateBusinessToolsDeclared(socketScope,scope.agentId(),live.sessionId())
+                    : sessions.nativeScriptDeclared(socketScope,scope.agentId(),live.sessionId());
+            if (!supported) return false;
             return live.sameExecutionFacts(runtimes.lookup(key,fence));
         }catch(IllegalStateException|IllegalArgumentException unavailable){return false;}
     }

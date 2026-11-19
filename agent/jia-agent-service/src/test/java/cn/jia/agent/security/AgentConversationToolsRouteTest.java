@@ -16,6 +16,18 @@ class AgentConversationToolsRouteTest {
         assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",ROOT)));
         assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",ROOT+"/skill_read")));
     }
+    @Test void nativeToolCallAndReceiptUseOnlyTheExactAuthenticatedRoute() {
+        String path="/internal/agent/executions/e/runs/r/tool-calls/call_1";
+        for (String method:new String[]{"GET","POST"}) {
+            var req=new MockHttpServletRequest(method,path);
+            assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(req));
+            assertTrue(AgentRuntimeAuthenticationFilter.allowed(req));
+            req.setQueryString("other=1"); assertFalse(AgentRuntimeAuthenticationFilter.allowed(req));
+            for(String invalid:new String[]{path+"/extra",path+"%2fmore",path+";v=1"})
+                assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest(method,invalid)));
+        }
+        assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("DELETE",path)));
+    }
     @Test void routesNeverFallBackToOwnerJwtEvenWithoutRuntimeHeaders() {
         assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(new MockHttpServletRequest("GET",ROOT)));
         assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(new MockHttpServletRequest("POST",ROOT+"/skill_read")));

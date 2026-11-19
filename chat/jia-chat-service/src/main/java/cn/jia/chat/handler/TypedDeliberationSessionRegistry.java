@@ -101,6 +101,12 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
 
     /** Declaration on a socket already validated by the caller's live skill catalogue. */
     public boolean nativeScriptDeclared(Scope scope, String agentId, String sessionId) {
+        return nativeDeclared(scope,agentId,sessionId,false);
+    }
+    public boolean privateBusinessToolsDeclared(Scope scope,String agentId,String sessionId) {
+        return nativeDeclared(scope,agentId,sessionId,true);
+    }
+    private boolean nativeDeclared(Scope scope,String agentId,String sessionId,boolean privateTools) {
         try {
             Session session = sessions.get(key(sessionId, agentId));
             if (session == null || !scope.equals(session.scope())
@@ -109,8 +115,8 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
                     session.declaration().supportedOperations(), session.declaration().frozenReceipt()));
             var nativeExecution = (Map<?,?>) ready.frozenDeclaration().get("nativeExecution");
             return Objects.equals(sessionId, ready.sessionId())
-                    && nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs
-                    && refs.contains("NATIVE_SKILL_SCRIPT_V1");
+                    && (privateTools ? Integer.valueOf(1).equals(nativeExecution.get("privateBusinessToolsVersion"))
+                    : nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains("NATIVE_SKILL_SCRIPT_V1"));
         } catch (IllegalStateException unavailable) { return false; }
     }
 

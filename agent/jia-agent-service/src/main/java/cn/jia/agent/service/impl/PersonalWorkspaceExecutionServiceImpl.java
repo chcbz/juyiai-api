@@ -747,7 +747,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         requireStartCommand(candidate,commandId,messageId);
         return withConversationRoot(scope,executionId,runId,true,execution -> {
             requireStartCommand(execution,commandId,messageId);
-            if(Objects.equals(6,execution.getExecutionProtocolVersion()))requireNativeScriptSession(scope,execution,skillRow(skillOwner(scope),execution.getExecutionId(),false));
+            if(Objects.equals(6,execution.getExecutionProtocolVersion()))requireCommandCapabilities(scope,execution,skillRow(skillOwner(scope),execution.getExecutionId(),false));
             // A previously admitted Provider call may be complete, in flight or outcome-unknown.
             // Do not reissue it merely because the client or lease changed.
             if (execution.getConversationProviderStartedAt()!=null) throw failure(Reason.TASK_CONFLICT);
@@ -1620,9 +1620,12 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 ||!same(access.scopeKey(),"task:"+execution.getTaskId()))throw failure(Reason.NOT_FOUND);
         return access;
     }
-    private void requireNativeScriptSession(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution,cn.jia.agent.entity.SkillExecutionEntity skill) {
+    private void requireCommandCapabilities(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution,cn.jia.agent.entity.SkillExecutionEntity skill) {
         var snapshot=skillMap(skill.getSnapshotJson());
-        if(!cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")))return;
+        boolean script=cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef"));
+        boolean privateTools=snapshot.containsKey("privateTools");
+        if (!script && !privateTools) return;
+        if (privateTools && (!"PRIVATE".equals(execution.getBusinessScope()) || !"NATIVE_LOCAL_FILES_V1".equals(snapshot.get("toolPolicyRef")))) throw failure(Reason.NOT_FOUND);
         if(nativeSkillScriptSessions==null||runtimeAuthentication==null)throw failure(Reason.NOT_FOUND);
         // Authentication stays in its owning agent boundary. Chat consumes the trusted fence
         // and checks its live registry/declaration; it must not import the authentication service.
@@ -1631,14 +1634,14 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             var expected=new AgentRuntimeAuthentication.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId(),scope.runtimeInstanceId());
             if(proof==null||!expected.equals(proof.scope()))throw failure(Reason.NOT_FOUND);
             var fence=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration());
-            if(!nativeSkillScriptSessions.supports(scope,fence)
+            if((script && !nativeSkillScriptSessions.supports(scope,fence)) || (privateTools && !nativeSkillScriptSessions.supportsPrivateTools(scope,fence))
                     ||!proof.equals(runtimeAuthentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId())))throw failure(Reason.NOT_FOUND);
         }catch(IllegalStateException|IllegalArgumentException unavailable){throw failure(Reason.NOT_FOUND);}
     }
     private cn.jia.agent.service.SkillExecutionService.Command skillCommand(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution) {
         var skill=skillRow(skillOwner(scope),execution.getExecutionId(),false);if(!"READY".equals(skill.getPhase()))throw failure(Reason.NOT_FOUND);
         var snapshot=skillMap(skill.getSnapshotJson());
-        requireNativeScriptSession(scope,execution,skill);
+        requireCommandCapabilities(scope,execution,skill);
         verifiedNativeSkills(skillOwner(scope),scope.agentId(),snapshot,false);
         var bindings=new ArrayList<cn.jia.agent.service.SkillExecutionService.AuthorizedSkill>();
         if(skill.getTaskSkillBindingJson()==null)throw failure(Reason.TASK_CONFLICT);
@@ -1663,7 +1666,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         return new cn.jia.agent.service.SkillExecutionService.Command(6,execution.getExecutionId(),execution.getRunId(),nativeScope(snapshot),
             "pwe_cmd_"+plainSha("command\n"+execution.getExecutionId()),"pwe_msg_"+plainSha("message\n"+execution.getExecutionId()),
             List.copyOf(bindings),skill.getSnapshotSha256(),skillObject(snapshot.get("parameters")),execution.getInstruction(),
-            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"));
+            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"),
+            snapshot.containsKey("privateTools") ? skillObject(snapshot.get("privateTools")) : null);
     }
     @Override
     public cn.jia.agent.service.SkillExecutionService.Inputs inputs(RuntimeScope authenticatedScope,String executionId,String runId,ConversationFence fence) {
@@ -1808,7 +1812,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 if(!"FAILED".equals(skill.getPhase())||skill.getResultManifestJson()!=null)throw failure(Reason.TASK_CONFLICT);
                 return new cn.jia.agent.service.SkillExecutionService.ResumeReceipt(null,"FAILED",List.of(),null,visible,turnFailure);
             }
-            if(skill.getResultManifestJson()==null&&turnFailure==null)requireNativeScriptSession(scope,execution,skill);
+            if(skill.getResultManifestJson()==null&&turnFailure==null)requireCommandCapabilities(scope,execution,skill);
             long now=System.currentTimeMillis();boolean live=execution.getConversationLeaseExpiresAt()!=null&&execution.getConversationLeaseExpiresAt()>now;
             if(live&&!same(execution.getConversationLeaseRuntimeId(),scope.runtimeInstanceId()))throw failure(Reason.TASK_CONFLICT);
             if(!live) {

@@ -79,6 +79,10 @@ public final class TypedDeliberationDeclaration {
                 ||new java.util.HashSet<>(types).size()!=types.size())throw invalid();
         var result=new java.util.LinkedHashMap<String,Object>();
         result.put("schemaVersion",1);result.put("executionProtocolVersion",6);result.put("toolPolicyRef","NATIVE_LOCAL_FILES_V1");result.put("outputMimeTypes",List.copyOf(types));
+        // Unknown optional versions do not invalidate the rest of the declaration.
+        Object version=m.get("privateBusinessToolsVersion");
+        if ((version instanceof Integer || version instanceof Long || version instanceof Short || version instanceof Byte)
+                && ((Number)version).longValue()==1) result.put("privateBusinessToolsVersion",1);
         if(m.containsKey("supportedToolPolicyRefs")) {
             if(!(m.get("supportedToolPolicyRefs") instanceof List<?> refs)||refs.stream().anyMatch(x->!"NATIVE_SKILL_SCRIPT_V1".equals(x))||new java.util.HashSet<>(refs).size()!=refs.size())throw invalid();
             result.put("supportedToolPolicyRefs",List.copyOf(refs));

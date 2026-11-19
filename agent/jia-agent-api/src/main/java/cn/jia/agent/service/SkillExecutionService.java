@@ -42,7 +42,12 @@ public interface SkillExecutionService {
     record Command(int executionProtocolVersion,String executionId,String runId,ScopeView scope,
             String commandId,String messageId,List<AuthorizedSkill> skills,
             String snapshotDigest,Map<String,Object> parameters,String instruction,List<String> inputRefs,
-            Map<String,Object> outputs,String toolPolicyRef) implements ConversationCommandView { }
+            Map<String,Object> outputs,String toolPolicyRef,Map<String,Object> privateTools) implements ConversationCommandView {
+        public Command(int executionProtocolVersion,String executionId,String runId,ScopeView scope,String commandId,String messageId,List<AuthorizedSkill> skills,
+                String snapshotDigest,Map<String,Object> parameters,String instruction,List<String> inputRefs,Map<String,Object> outputs,String toolPolicyRef) {
+            this(executionProtocolVersion,executionId,runId,scope,commandId,messageId,skills,snapshotDigest,parameters,instruction,inputRefs,outputs,toolPolicyRef,null);
+        }
+    }
     record EffectStart(String executionId,String snapshotDigest,ConversationFence fence,
             String effectDigest,String providerBindingRevision) { }
     record EffectResult(String executionId,String snapshotDigest,ConversationFence fence,
