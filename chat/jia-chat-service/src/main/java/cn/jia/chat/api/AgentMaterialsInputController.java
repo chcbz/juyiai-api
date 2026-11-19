@@ -50,11 +50,20 @@ public final class AgentMaterialsInputController {
         // Identity before task, matching native WS mutations. incomingTurn also locks the task.
         var prepared = runtimeAuthentication.withNativeFence(runtime, () -> authority.prepare(
                 runtime.getPrincipal(), requestId, turnId, sourceRefId, headers.getFirst()));
+        String etag = "\"" + prepared.sourceSha256() + "\"";
+        if (Collections.list(request.getHeaders(HttpHeaders.IF_NONE_MATCH)).equals(List.of(etag))) {
+            runtimeAuthentication.withNativeFence(runtime, () -> { authority.revalidate(prepared); return true; });
+            response.setHeader(HttpHeaders.ETAG, etag);
+            response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
+            response.setStatus(HttpStatus.NOT_MODIFIED.value());
+            return;
+        }
         // No enclosing transaction: file I/O must not retain identity/runtime/task locks.
         try(var value=authority.read(prepared)) {
             runtimeAuthentication.withNativeFence(runtime,()-> {authority.revalidate(prepared);return true;});
             response.setHeader(HttpHeaders.CACHE_CONTROL,"no-store");
             response.setHeader("X-Content-Type-Options","nosniff");
+            response.setHeader(HttpHeaders.ETAG, etag);
             response.setContentType(value.contentMimeType());
             response.setContentLengthLong(value.byteLength());
             value.content().transferTo(response.getOutputStream());

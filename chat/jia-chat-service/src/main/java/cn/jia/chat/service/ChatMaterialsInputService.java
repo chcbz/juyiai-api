@@ -48,6 +48,7 @@ public class ChatMaterialsInputService {
         private final Input input;
         private final String sourceId;
         private final String digest;
+        public String sourceSha256() { return (String) input.input().get("sha256"); }
         private Prepared(ChatTurnEntity turn,Input input,String sourceId,String digest) {
             this.turn=turn;this.input=input;this.sourceId=sourceId;this.digest=digest;
         }
