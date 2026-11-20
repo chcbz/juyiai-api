@@ -138,6 +138,23 @@ public class PositionSkillService implements PositionAuthority {
     }
     /** Server-owned provider requirement; never deserialized from a tool request.
      * Error codes belong to the provider's existing public contract. */
+    public Grant currentManagementGrant(Scope scope,String agent){
+            var identity=identities.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
+            var state=currentState(scope);
+            var appointment=state.appointments().values().stream()
+                    .filter(value->value.active()&&agent.equals(value.agentId())
+                            &&Objects.equals(identity.getBindingId(),value.bindingId()))
+                    .filter(value->{var position=state.positions().get(value.positionId());
+                        return position!=null&&position.allowPublish()&&PositionSkillPolicy.PLATFORM_SKILLS.equals(position.resource());})
+                    .sorted(Comparator.comparing(cn.jia.agent.position.PositionSkillState.Appointment::id))
+                    .findFirst().orElse(null);
+            require(appointment!=null,403,"SKILL_PUBLICATION_FORBIDDEN");
+            var position=state.positions().get(appointment.positionId());
+            // This projection is not an authorization decision. The existing service validates
+            // current appointment revisions and resource rights inside the mutation transaction.
+            return new PositionAuthority.Grant(appointment.id(),appointment.revision(),position.revision(),
+                    agent,appointment.bindingId(),null,true);
+    }
     public record RequiredPositionSkill(String resource,String skillKey,String positionRequired,String skillRequired) {
         private boolean matches(Position p,boolean publish) {
             return p!=null && resource.equals(p.resource()) && (!publish || p.allowPublish()) && p.skillKeys().contains(skillKey);

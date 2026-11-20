@@ -38,7 +38,7 @@ abstract class ExecutionDomainController extends RunningExecutionEndpoint {
     // One business intention per canonical operation/input in this run. The receipt is independent of
     // socket lifetime, model tool IDs, lease renewal and retried HTTP request IDs. A receipt-only request
     // never prepares or invokes a mutation. The second authorization covers out-of-transaction quote I/O.
-    ResponseEntity<?> change(Call<?> c,String resource,boolean publish,Map<String,String> input,boolean receiptOnly,Supplier<Function<Scope,Map<String,Object>>> prepare){
+    ResponseEntity<?> change(Call<?> c,String resource,boolean publish,Map<String,?> input,boolean receiptOnly,Supplier<Function<Scope,Map<String,Object>>> prepare){
         var digest=PositionSkillService.hash(SkillCanonicalJson.write(Map.of("resource",resource,"input",input,"snapshot",c.snapshot())));
         var a=c.actor();var key=new Key(a.tenantId(),a.clientId(),a.ownerJiacn(),c.execution(),c.run(),"domain-"+digest);
         var prior=authorized(c,publish,true,s->receipts.find(key));

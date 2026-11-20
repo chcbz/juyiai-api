@@ -15,12 +15,24 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ExecutionModelPriceHttpTest {
+    @Test void productReadsReusePublicationGrantAndDoNotExposeAnotherExecutorsCatalog() throws Exception {
+        var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);var positions=mock(cn.jia.agent.position.PositionSkillService.class);var products=mock(cn.jia.agent.skill.SkillPackagePublicationService.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionSkillProductsController(executions,authority,mock(PrivateToolCallReceipts.class),positions,products)).build();
+        var identity=new AgentRuntimeAuthentication.Scope("tenant","client","owner","agent","instance");var principal=mock(AgentRuntimeAuthentication.class);when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(identity,"install","host",1,"digest",1,1));
+        var actor=new RuntimeScope("tenant","client","owner","agent","instance");var subject=new java.util.concurrent.atomic.AtomicReference<>(actor);
+        doAnswer(i->i.<Function<SkillExecutionService.RunningSkills,Object>>getArgument(5).apply(new SkillExecutionService.RunningSkills(subject.get(),"install","host",List.of()))).when(executions).withRunningSkills(eq(actor),eq("e"),eq("r"),any(),anyString(),any());
+        var scope=new PositionAuthority.Scope("tenant","client","owner");var grant=new PositionAuthority.Grant("appointment",1,2,"agent",1,null,true);when(positions.currentManagementGrant(scope,"agent")).thenReturn(grant);
+        var req=post("/internal/agent/executions/e/runs/r/business/skill-products/lookup").principal(principal).contentType("application/json").content("{\"protocolVersion\":1,\"requestId\":\"req\",\"data\":{\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"},\"payload\":{\"offset\":\"0\",\"limit\":\"10\"}}}");
+        mvc.perform(req).andExpect(status().isOk());verify(products).listProducts(scope,grant,0,10);
+        subject.set(new RuntimeScope("tenant","client","other","agent","instance","owner"));mvc.perform(req).andExpect(status().isForbidden());verifyNoMoreInteractions(products);
+    }
     @Test void selectionIsIrrevocablyBoundToOneOfferedInstallationUnderTheExecutionLock() throws Exception {
         var executions=mock(SkillExecutionService.class);var mapper=mock(cn.jia.agent.mapper.PrivateToolCallReceiptMapper.class);
         var saved=new HashMap<cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Key,cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt>();
         doAnswer(i->saved.get(i.getArgument(0,Object.class))).when(mapper).lock(any());
         doAnswer(i->{saved.put(i.getArgument(0),i.getArgument(1));return 1;}).when(mapper).insert(any(),any(),anyLong());
-        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionSkillSelection(executions,new PrivateToolCallReceipts(mapper))).build();
+        var authority=mock(InstalledDomainAuthority.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionSkillSelection(executions,new PrivateToolCallReceipts(mapper),authority)).build();
         var identity=new AgentRuntimeAuthentication.Scope("tenant","client","owner","agent","instance");var principal=mock(AgentRuntimeAuthentication.class);
         when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);
         when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(identity,"install","host",1,"digest",1,1));
@@ -30,6 +42,8 @@ class ExecutionModelPriceHttpTest {
         java.util.function.Function<String,org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder> req=id->post("/internal/agent/executions/e/runs/r/skill-selection").principal(principal).contentType("application/json").content("{\"protocolVersion\":1,\"requestId\":\"req\",\"data\":{\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"test\"},\"installationId\":\""+id+"\"}}");
         mvc.perform(req.apply("unknown")).andExpect(status().isForbidden());mvc.perform(req.apply("b")).andExpect(status().isOk());
         mvc.perform(req.apply("b")).andExpect(status().isOk());mvc.perform(req.apply("a")).andExpect(status().isConflict());verify(mapper,times(1)).insert(any(),any(),anyLong());
+        doThrow(new PositionSkillException(403,"SKILL_SELECTION_REVOKED")).when(authority).requireCurrentChoice(any(),anyString(),anyString(),anyString(),anyMap());
+        mvc.perform(req.apply("b")).andExpect(status().isForbidden());
     }
     @Test void multipleCandidatesRequireTheDurableBindingAndTheTrustedIsolationHeader() {
         var receipts=mock(PrivateToolCallReceipts.class);

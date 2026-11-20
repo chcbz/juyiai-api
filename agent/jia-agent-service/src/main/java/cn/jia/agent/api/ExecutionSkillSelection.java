@@ -14,7 +14,8 @@ import static cn.jia.agent.position.PositionSkillException.require;
 public final class ExecutionSkillSelection extends RunningExecutionEndpoint {
     private static final String BINDING="native-skill-selection";
     private final PrivateToolCallReceipts receipts;
-    ExecutionSkillSelection(SkillExecutionService executions,PrivateToolCallReceipts receipts){super(executions);this.receipts=receipts;}
+    private final InstalledDomainAuthority authority;
+    ExecutionSkillSelection(SkillExecutionService executions,PrivateToolCallReceipts receipts,InstalledDomainAuthority authority){super(executions);this.receipts=receipts;this.authority=authority;}
     public record Input(String installationId,String snapshotSha256,Fence fence) implements BoundInput {}
     private static List<Map<String,Object>> match(List<Map<String,Object>> frozen,Object id){
         require(id instanceof String s && !s.isBlank(),400,"BAD_SKILL_SELECTION");
@@ -26,7 +27,10 @@ public final class ExecutionSkillSelection extends RunningExecutionEndpoint {
         var c=call(auth,execution,run,request);var id=c.input().installationId();
         return ok(executions.withRunningSkills(c.actor(),execution,run,c.fence(),c.snapshot(),grant->{
             require(grant.selections().size()>1,409,"SKILL_SELECTION_NOT_REQUIRED");
-            if(id!=null)match(grant.selections(),id);
+            if(id!=null){
+                var choice=match(grant.selections(),id).getFirst();var a=grant.subject();
+                authority.requireCurrentChoice(new cn.jia.agent.service.PositionAuthority.Scope(a.tenantId(),a.clientId(),a.executorOwnerJiacn()),a.agentId(),grant.installation(),grant.host(),choice);
+            }
             var value=id==null?Map.<String,Object>of():Map.<String,Object>of("installationId",id);
             var saved=receipts.apply(receiptKey(c,BINDING),BINDING,c.snapshot(),()->value);
             require(value.equals(saved),409,"SKILL_SELECTION_ALREADY_BOUND");return saved;
