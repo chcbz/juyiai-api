@@ -152,14 +152,16 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
             input.put("contentMimeType",source.get("contentMimeType"));input.put("byteLength",source.get("byteLength"));input.put("sha256",source.get("contentHash"));inputs.add(input);
         }
         var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);
-        snapshot.put("toolPolicyRef",capability.skill()==null?SkillExecutionService.NATIVE_LOCAL_FILES_POLICY:SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);snapshot.put("actionEventId",actionId);
+        snapshot.put("actionEventId",actionId);
         snapshot.put("scope",new SkillExecutionService.ScopeView("TASK",scope.conversationId(),Long.toString(scope.conversationGeneration()),parent.taskId()).asMap());
         snapshot.put("targetAgentId",action.validated().binding().get("targetAgentId"));
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),"assignmentRevision",Long.toString(baseline.assignmentRevision())));
         snapshot.put("instruction",action.validated().interactionOutcome().action().instruction());snapshot.put("parameters",action.validated().interactionOutcome().action().parameters());
         snapshot.put("inputs",List.copyOf(inputs));snapshot.put("sourceSnapshotDigest",ChatSkillSnapshotJson.sha(inputs));
         snapshot.put("outputs",nativeOutputs(action.validated().interactionOutcome().action().parameters(),capability.outputMimeTypes()));
-        if(capability.skill()==null)snapshot.put("skills",List.of());
+        if(capability.skill()==null) {
+            snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());
+        }
         else {
             String target=(String)action.validated().binding().get("targetAgentId");
             var key=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),target);

@@ -244,7 +244,7 @@ public final class ChatActionCapabilityService {
         action.put("inputMimeTypes",input);action.put("minSources",0);action.put("maxSources",catalog.size());action.put("outputMimeTypes",allowed);
         if(!policy.equals(policies.read(key,taskId))||!live.sameExecutionFacts(skillRuntimes.lookup(policy.runtimeScope(),policy.fence())))return List.copyOf(actions);
         actions.add(java.util.Collections.unmodifiableMap(action));
-        if(!(nativeDeclaration.get("supportedToolPolicyRefs") instanceof List<?> refs)||!refs.contains(cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY))return List.copyOf(actions);
+        if(!(nativeDeclaration.get("supportedToolPolicyRefs") instanceof List<?> refs)||refs.isEmpty())return List.copyOf(actions);
         var current=installedSkills.readCurrent(policy.runtimeScope());
         for(var d:current.skills()) {
             if(current.skills().stream().filter(x->Objects.equals(x.installationId(),d.installationId())).count()!=1)continue;

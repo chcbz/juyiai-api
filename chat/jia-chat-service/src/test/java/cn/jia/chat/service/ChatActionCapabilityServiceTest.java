@@ -239,6 +239,13 @@ class ChatActionCapabilityServiceTest {
         var frozen=ChatActionExecutionService.nativeSelection(new InstalledSkillDescriptorLookup.Snapshot(List.of(d)),parsed.availableActions().getFirst());
         var frozenSkill=(java.util.Map<?,?>)frozen.get("skill");assertEquals("install-1",frozenSkill.get("installationId"));assertEquals("a".repeat(64),frozenSkill.get("packageSha256"));
         assertTrue(frozenSkill.containsKey("manifestSha256"));assertNull(frozenSkill.get("manifestSha256"));assertNull(frozen.get("providerBinding"));
+        var domainDecl=java.util.Map.<String,Object>of("nativeExecution",java.util.Map.of("outputMimeTypes",List.of("text/plain"),"supportedToolPolicyRefs",List.of("NATIVE_DOMAIN_API_V1")));
+        assertEquals(1,service.availableNative(scope,"task",List.of(),domainDecl,"session").size());
+        var domain=new InstalledSkillDescriptorLookup.Descriptor("ordinary","1.0","install-1","a".repeat(64),null,null,"installation","host",null,true);
+        when(installed.read(key)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(domain)));
+        var domainActions=service.availableNative(scope,"task",List.of(),domainDecl,"session");
+        assertEquals(2,domainActions.size());assertNotEquals(action.get("actionId"),domainActions.get(1).get("actionId"));
+        assertEquals(1,service.availableNative(scope,"task",List.of(),decl,"session").size());
         var replaced=new InstalledSkillDescriptorLookup.Descriptor("ordinary","1.0","install-2","a".repeat(64),null,null,"installation","host",null);
         assertNotEquals(action.get("actionId"),ChatActionCapabilityService.nativeSkillActionId(replaced,List.of(),List.of("text/plain"),ChatActionCapabilityService.nativeParametersSchema()));
         assertThrows(ChatActionDispatchService.Rejected.class,()->ChatActionExecutionService.nativeSelection(new InstalledSkillDescriptorLookup.Snapshot(List.of(replaced)),parsed.availableActions().getFirst()));
