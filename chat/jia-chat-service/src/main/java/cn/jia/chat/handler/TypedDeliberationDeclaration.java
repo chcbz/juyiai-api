@@ -84,7 +84,7 @@ public final class TypedDeliberationDeclaration {
         if ((version instanceof Integer || version instanceof Long || version instanceof Short || version instanceof Byte)
                 && ((Number)version).longValue()==1) result.put("privateBusinessToolsVersion",1);
         if(m.containsKey("supportedToolPolicyRefs")) {
-            if(!(m.get("supportedToolPolicyRefs") instanceof List<?> refs)||refs.stream().anyMatch(x->!"NATIVE_SKILL_SCRIPT_V1".equals(x))||new java.util.HashSet<>(refs).size()!=refs.size())throw invalid();
+            if(!(m.get("supportedToolPolicyRefs") instanceof List<?> refs)||refs.stream().anyMatch(x->!"NATIVE_SKILL_SCRIPT_V1".equals(x)&&!"NATIVE_DOMAIN_API_V1".equals(x))||new java.util.HashSet<>(refs).size()!=refs.size())throw invalid();
             result.put("supportedToolPolicyRefs",List.copyOf(refs));
         }
         return java.util.Collections.unmodifiableMap(result);

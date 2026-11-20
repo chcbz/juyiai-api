@@ -164,7 +164,8 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
             String target=(String)action.validated().binding().get("targetAgentId");
             var key=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),target);
             var policy=policies.read(key,parent.taskId());requireAvailablePolicy(policy);requireRuntimeTarget(key,policy.runtimeScope());
-            snapshot.put("skills",List.of(nativeSelection(installed.readCurrent(policy.runtimeScope()),capability)));
+            var descriptor=nativeDescriptor(installed.readCurrent(policy.runtimeScope()),capability);
+            snapshot.put("toolPolicyRef",descriptor.instructionPolicy());snapshot.put("skills",List.of(nativeSelection(descriptor)));
         }
         return snapshot;
     }
@@ -181,12 +182,17 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
     }
 
     static Map<String,Object> nativeSelection(InstalledSkillDescriptorLookup.Snapshot current,ChatActionOutcomeContract.Capability capability) {
+        return nativeSelection(nativeDescriptor(current,capability));
+    }
+    private static InstalledSkillDescriptorLookup.Descriptor nativeDescriptor(InstalledSkillDescriptorLookup.Snapshot current,ChatActionOutcomeContract.Capability capability){
         var selected=capability.skill();
         var matches=current.skills().stream().filter(d->d.verifiedNative()&&d.manifestJson()==null&&d.manifestSha256()==null
                 &&Objects.equals(d.skillKey(),selected.skillKey())&&Objects.equals(d.skillVersion(),selected.skillVersion())
                 &&Objects.equals(d.packageSha256(),selected.packageSha256())&&Objects.equals(d.manifestSha256(),selected.manifestSha256())
                 &&ChatActionCapabilityService.nativeSkillActionId(d,capability.inputMimeTypes(),capability.outputMimeTypes(),capability.parametersSchema()).equals(capability.actionId())).toList();
-        if(matches.size()!=1)throw new ChatActionDispatchService.Rejected();var descriptor=matches.getFirst();
+        if(matches.size()!=1)throw new ChatActionDispatchService.Rejected();return matches.getFirst();
+    }
+    private static Map<String,Object> nativeSelection(InstalledSkillDescriptorLookup.Descriptor descriptor){
         var skill=new LinkedHashMap<String,Object>();skill.put("key",descriptor.skillKey());skill.put("version",descriptor.skillVersion());
         skill.put("installationId",descriptor.installationId());skill.put("packageSha256",descriptor.packageSha256());skill.put("manifestSha256",descriptor.manifestSha256());
         var selection=new LinkedHashMap<String,Object>();selection.put("skill",skill);selection.put("providerBinding",null);return selection;

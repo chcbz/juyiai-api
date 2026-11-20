@@ -225,16 +225,17 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
                 // dispatch, so its current user message must be carried in full in the frozen parameters.
                 context.put("currentUserMessage",messageView(message,"USER"));
                 var vector=sourceVector(generation,message.getId(),null,context);
+                var selected=freeze.get();
                 var facts=factsManifest(conversation,scope,intent.target(),null,null,context,
-                        cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
+                        selected.policy());
                 String contextHash=contextDigest(vector,facts);
                 String turnId=stableId("turn",tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId(),intent.target());
                 String dispatchId=stableId("dispatch",tenantId,trusted.jiacn(),trusted.clientId(),intent.requestId(),intent.target());
                 String snapshotId=stableId("ctx",turnId,contextHash),stepId=stableId("step",turnId),actionId=stableId("native",turnId);
                 var snapshot=new LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);
                 snapshot.put("actionEventId",actionId);snapshot.put("scope",new cn.jia.agent.service.SkillExecutionService.ScopeView("PRIVATE",id,Long.toString(generation),null).asMap());
-                snapshot.put("targetAgentId",intent.target());snapshot.put("toolPolicyRef",cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
-                var selected=freeze.get();snapshot.put("skills",selected.skills());if(!selected.catalog().isEmpty())snapshot.put("privateTools",selected.catalog());snapshot.put("parameters",Map.of("authorizedContext",context));
+                snapshot.put("targetAgentId",intent.target());snapshot.put("toolPolicyRef",selected.policy());
+                snapshot.put("skills",selected.skills());snapshot.put("parameters",Map.of("authorizedContext",context));
                 // The complete user text is frozen in authorizedContext.currentUserMessage. Do not
                 // duplicate it into the bounded tool instruction or truncate long chat messages.
                 snapshot.put("instruction","请按 parameters.authorizedContext.currentUserMessage 中的用户请求，结合已授权会话上下文和明确选择的资料回复。意图不明确时先询问；不得声称已读取未提供的文件。");
@@ -275,7 +276,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         try {
             if(privateCapabilities==null)return admit.apply(cn.jia.agent.service.PrivateNativeCapabilities.Selection::empty);
             var nativeDeclaration=ChatSkillSourceAccessService.object(observed.frozenDeclaration().get("nativeExecution"));
-            return privateCapabilities.prepared(new cn.jia.agent.service.SkillCapabilityLookup.Scope(tenantId,trusted.clientId(),trusted.jiacn(),intent.target()),observed.sessionId(),Integer.valueOf(1).equals(nativeDeclaration.get("privateBusinessToolsVersion")),admit);
+            return privateCapabilities.prepared(new cn.jia.agent.service.SkillCapabilityLookup.Scope(tenantId,trusted.clientId(),trusted.jiacn(),intent.target()),observed.sessionId(),nativeDeclaration.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains(cn.jia.agent.service.SkillExecutionService.NATIVE_DOMAIN_API_POLICY),admit);
         } catch(org.springframework.dao.DuplicateKeyException raced) {
             // The failed template has already rolled back. Never swallow a duplicate in its rollback-only transaction.
             return privateAdmissionTransaction.execute(status->{

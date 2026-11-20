@@ -16,8 +16,8 @@ class PrivateNativeCapabilitiesTest {
     @Test void genuineInstructionUsesDesiredPointerAndPrefixedPositionReceiptNotLegacyRunnerFlag(){
         var auth=mock(AgentRuntimeAuthenticationService.class); var live=mock(SkillCapabilityLookup.class);
         var installed=mock(InstalledSkillDescriptorLookup.class); var positions=mock(PositionSkillService.class);var identities=mock(AgentIdentityService.class);
-        var managed=mock(SkillManagementMapper.class); var models=mock(ModelConversationToolAdapter.class);
-        var service=new PrivateNativeCapabilitiesImpl(auth,live,installed,positions,identities,managed,models);
+        var managed=mock(SkillManagementMapper.class);
+        var service=new PrivateNativeCapabilitiesImpl(auth,live,installed,positions,identities,managed);
         String pkg="a".repeat(64);var scope=new SkillCapabilityLookup.Scope("t","c","o","a");var role=new PositionAuthority.Scope("t","c","o");
         var fence=new AgentManagedSessionLookup.SessionFence("install","host","instance",1);
         when(auth.currentRegisteredProof("t","c","a")).thenReturn(new AgentRuntimeAuthenticationService.Proof(new AgentRuntimeAuthentication.Scope("t","c","o","a","instance"),"install","host",1,"token-sha",1,1));
@@ -28,8 +28,11 @@ class PrivateNativeCapabilitiesTest {
         when(positions.currentState(role)).thenReturn(state);
         var pointer=new SkillManagedStateEntity().setActiveInstallationId("si").setDesiredEnabled(true).setAdmissionEnabled(false);
         when(managed.statesForPrivateAdmission("t","c","a")).thenReturn(List.of(pointer));
-        var selection=service.prepared(scope,"socket",false,Supplier::get);assertEquals(1,selection.skills().size());assertTrue(selection.catalog().isEmpty());
+        var selection=service.prepared(scope,"socket",false,Supplier::get);assertEquals(1,selection.skills().size());assertEquals(SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,selection.policy());
+        var descriptor=new InstalledSkillDescriptorLookup.Descriptor("skill","1.0.0","si",pkg,null,null,"install","host",null,true);
+        when(installed.readCurrent(scope)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(descriptor)));
+        assertEquals(SkillExecutionService.NATIVE_DOMAIN_API_POLICY,service.prepared(scope,"socket",true,Supplier::get).policy());
         pointer.setDesiredEnabled(false);assertTrue(service.prepared(scope,"socket",false,Supplier::get).skills().isEmpty());
-        assertThrows(IllegalStateException.class,()->service.prepared(scope,"wrong",true,Supplier::get));verifyNoInteractions(models);
+        assertThrows(IllegalStateException.class,()->service.prepared(scope,"wrong",true,Supplier::get));
     }
 }

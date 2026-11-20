@@ -9,6 +9,7 @@ public interface SkillExecutionService {
     /** Isolated local workspace/file and artifact/result tools only. Never network, credentials or paid providers. */
     String NATIVE_LOCAL_FILES_POLICY = "NATIVE_LOCAL_FILES_V1";
     String NATIVE_SKILL_SCRIPT_POLICY = "NATIVE_SKILL_SCRIPT_V1";
+    String NATIVE_DOMAIN_API_POLICY = "NATIVE_DOMAIN_API_V1";
     sealed interface ExecutionScope permits PrivateScope,TaskScope {
         String conversationId();
         long conversationGeneration();

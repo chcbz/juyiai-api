@@ -1187,7 +1187,7 @@ public final class SkillManagementService {
                 if(!"INSTRUCTION".equals(target.get("kind"))||target.get("manifestSha256")!=null)continue;
             } else if(!"EXECUTABLE".equals(target.get("kind"))||!manifest.manifestSha256().equals(target.get("manifestSha256")))continue;
             rows.add(new InstalledSkillDescriptorLookup.Descriptor(context.skillKey(),text(target,"skillVersion"),auth.getInstallationId(),
-                    text(target,"packageSha256"),manifest==null?null:manifest.manifestSha256(),manifest==null?null:manifest.document().toString(),runtimeInstallation(auth,relationship),runtimeHost(auth,relationship),null));
+                    text(target,"packageSha256"),manifest==null?null:manifest.manifestSha256(),manifest==null?null:manifest.document().toString(),runtimeInstallation(auth,relationship),runtimeHost(auth,relationship),null,manifest==null && decodePermissions(auth.getPermissionsJson()).contains("execution:domain-api")));
         }
         return rows;
     }

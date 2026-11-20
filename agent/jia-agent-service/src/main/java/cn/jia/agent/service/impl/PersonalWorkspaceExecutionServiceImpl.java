@@ -1406,7 +1406,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 || snapshot.containsKey("taskSkillBinding")) throw failure(Reason.BAD_REQUEST);
         var policy=snapshot.get("toolPolicyRef");
         if(!cn.jia.agent.service.SkillExecutionService.NATIVE_LOCAL_FILES_POLICY.equals(policy)
-                && !( !values.isEmpty() && cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(policy)))throw failure(Reason.BAD_REQUEST);
+                && !( !values.isEmpty() && (cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(policy) || NATIVE_DOMAIN_API_POLICY.equals(policy))))throw failure(Reason.BAD_REQUEST);
         var selected=new ArrayList<Map<String,Object>>();var ids=new LinkedHashSet<String>();
         for(var value:values) {
             var item=skillObject(value);var skill=skillObject(item.get("skill"));
@@ -1455,6 +1455,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             if(matches==null||matches.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var descriptor=matches.getFirst();
             if(!descriptor.verifiedNative()||!same(descriptor.packageSha256(),skillString(selected,"packageSha256"))
                     ||!selected.containsKey("manifestSha256")||!Objects.equals(descriptor.manifestSha256(),selected.get("manifestSha256")))throw failure(Reason.CAPABILITY_UNAVAILABLE);
+            if(NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef")) && !descriptor.domainApi())throw failure(Reason.CAPABILITY_UNAVAILABLE);
             boolean instructionPackage=descriptor.manifestJson()==null;
             var manifest=instructionPackage?null:skillMap(descriptor.manifestJson());
             if(!instructionPackage) {
@@ -1637,7 +1638,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             requireSkillSnapshot(skill,executionId,snapshotDigest);
             if(!"RUNNING".equals(skill.getPhase()))throw failure(Reason.TASK_CONFLICT);
             var snapshot=skillMap(skill.getSnapshotJson());
-            if(!NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")))throw failure(Reason.NOT_FOUND);
+            if(!NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef")))throw failure(Reason.NOT_FOUND);
             requireCommandCapabilities(scope,execution,skill);
             return operation.apply(new RunningSkills(scope,proof.installationId(),proof.hostId(),nativeSelections(snapshot)));
         }));
@@ -1665,7 +1666,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         var snapshot=skillMap(skill.getSnapshotJson());
         boolean script=cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef"));
         boolean privateTools=snapshot.containsKey("privateTools");
-        if (!script && !privateTools) return;
+        boolean domain=NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef"));
+        if (!script && !domain && !privateTools) return;
         if (privateTools && (!"PRIVATE".equals(execution.getBusinessScope()) || !"NATIVE_LOCAL_FILES_V1".equals(snapshot.get("toolPolicyRef")))) throw failure(Reason.NOT_FOUND);
         if(nativeSkillScriptSessions==null||runtimeAuthentication==null)throw failure(Reason.NOT_FOUND);
         // Authentication stays in its owning agent boundary. Chat consumes the trusted fence
@@ -1675,7 +1677,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             var expected=new AgentRuntimeAuthentication.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId(),scope.runtimeInstanceId());
             if(proof==null||!expected.equals(proof.scope()))throw failure(Reason.NOT_FOUND);
             var fence=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration());
-            if((script && !nativeSkillScriptSessions.supports(scope,fence)) || (privateTools && !nativeSkillScriptSessions.supportsPrivateTools(scope,fence))
+            if((domain && !nativeSkillScriptSessions.supportsDomain(scope,fence)) || (script && !nativeSkillScriptSessions.supports(scope,fence)) || (privateTools && !nativeSkillScriptSessions.supportsPrivateTools(scope,fence))
                     ||!proof.equals(runtimeAuthentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId())))throw failure(Reason.NOT_FOUND);
         }catch(IllegalStateException|IllegalArgumentException unavailable){throw failure(Reason.NOT_FOUND);}
     }

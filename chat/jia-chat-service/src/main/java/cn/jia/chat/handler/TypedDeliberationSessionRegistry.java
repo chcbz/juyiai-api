@@ -101,12 +101,12 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
 
     /** Declaration on a socket already validated by the caller's live skill catalogue. */
     public boolean nativeScriptDeclared(Scope scope, String agentId, String sessionId) {
-        return nativeDeclared(scope,agentId,sessionId,false);
+        return nativePolicyDeclared(scope,agentId,sessionId,"NATIVE_SKILL_SCRIPT_V1");
     }
     public boolean privateBusinessToolsDeclared(Scope scope,String agentId,String sessionId) {
-        return nativeDeclared(scope,agentId,sessionId,true);
+        return nativePolicyDeclared(scope,agentId,sessionId,null);
     }
-    private boolean nativeDeclared(Scope scope,String agentId,String sessionId,boolean privateTools) {
+    public boolean nativePolicyDeclared(Scope scope,String agentId,String sessionId,String policy) {
         try {
             Session session = sessions.get(key(sessionId, agentId));
             if (session == null || !scope.equals(session.scope())
@@ -115,8 +115,8 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
                     session.declaration().supportedOperations(), session.declaration().frozenReceipt()));
             var nativeExecution = (Map<?,?>) ready.frozenDeclaration().get("nativeExecution");
             return Objects.equals(sessionId, ready.sessionId())
-                    && (privateTools ? Integer.valueOf(1).equals(nativeExecution.get("privateBusinessToolsVersion"))
-                    : nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains("NATIVE_SKILL_SCRIPT_V1"));
+                    && (policy==null ? Integer.valueOf(1).equals(nativeExecution.get("privateBusinessToolsVersion"))
+                    : nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains(policy));
         } catch (IllegalStateException unavailable) { return false; }
     }
 

@@ -12,9 +12,9 @@ import java.util.function.*;
 public final class PrivateNativeCapabilitiesImpl implements PrivateNativeCapabilities {
     private final AgentRuntimeAuthenticationService authentication; private final SkillCapabilityLookup live;
     private final InstalledSkillDescriptorLookup installed; private final PositionSkillService positions; private final AgentIdentityService identities;
-    private final SkillManagementMapper managed; private final ModelConversationToolAdapter models;
-    public PrivateNativeCapabilitiesImpl(AgentRuntimeAuthenticationService authentication,SkillCapabilityLookup live,InstalledSkillDescriptorLookup installed,PositionSkillService positions,AgentIdentityService identities,SkillManagementMapper managed,ModelConversationToolAdapter models){
-        this.authentication=authentication;this.live=live;this.installed=installed;this.positions=positions;this.identities=identities;this.managed=managed;this.models=models;}
+    private final SkillManagementMapper managed;
+    public PrivateNativeCapabilitiesImpl(AgentRuntimeAuthenticationService authentication,SkillCapabilityLookup live,InstalledSkillDescriptorLookup installed,PositionSkillService positions,AgentIdentityService identities,SkillManagementMapper managed){
+        this.authentication=authentication;this.live=live;this.installed=installed;this.positions=positions;this.identities=identities;this.managed=managed;}
     private SkillCapabilityLookup.View current(SkillCapabilityLookup.Scope s,String socket){
         var p=authentication.currentRegisteredProof(s.tenantId(),s.clientId(),s.agentId());
         if(p==null||!s.ownerJiacn().equals(p.scope().ownerJiacn()))throw new IllegalStateException("Private runtime changed");
@@ -22,11 +22,11 @@ public final class PrivateNativeCapabilitiesImpl implements PrivateNativeCapabil
         var view=live.lookup(s,fence); if(view==null||view.state()!=SkillCapabilityLookup.State.AVAILABLE)return null;
         if(!socket.equals(view.sessionId())||!fence.equals(view.fence()))throw new IllegalStateException("Private runtime changed");return view;
     }
-    @Override public <T>T prepared(SkillCapabilityLookup.Scope s,String socket,boolean tools,Function<Supplier<Selection>,T> action){
+    @Override public <T>T prepared(SkillCapabilityLookup.Scope s,String socket,boolean domainSupported,Function<Supplier<Selection>,T> action){
         var v=current(s,socket);if(v==null||v.catalog().skills().stream().noneMatch(f->f.enabled()&&"INSTRUCTION".equals(f.kind())))return action.apply(Selection::empty);
-        return installed.withPreparedRead(s,()->action.apply(()->freeze(s,socket,v,tools)));
+        return installed.withPreparedRead(s,()->action.apply(()->freeze(s,socket,v,domainSupported)));
     }
-    private Selection freeze(SkillCapabilityLookup.Scope s,String socket,SkillCapabilityLookup.View v,boolean tools){
+    private Selection freeze(SkillCapabilityLookup.Scope s,String socket,SkillCapabilityLookup.View v,boolean domainSupported){
         if(!v.sameExecutionFacts(current(s,socket)))throw new IllegalStateException("Private runtime changed");
         var scope=new PositionAuthority.Scope(s.tenantId(),s.clientId(),s.ownerJiacn());var state=positions.currentState(scope);
         var identity=identities.requireRegistrationIdentityInScope(s.tenantId(),s.clientId(),s.ownerJiacn(),s.agentId());
@@ -40,9 +40,14 @@ public final class PrivateNativeCapabilitiesImpl implements PrivateNativeCapabil
             byKey.computeIfAbsent(f.skillKey(),unused->new ArrayList<>()).add(Map.of("skill",skill));
         }
         var selected=byKey.values().stream().filter(l->l.size()==1).map(List::getFirst).toList();
-        if(!tools||selected.isEmpty())return new Selection(selected,Map.of());
-        var catalog=models.nativeCatalog(NativePrivateModelCalls.context(s,v.fence().runtimeInstallationId(),v.fence().hostId()),scope,selected).stream().sorted(Comparator.comparing(t->(String)t.get("name"))).toList();
-        if(catalog.isEmpty())return new Selection(selected,Map.of());
-        var result=new LinkedHashMap<String,Object>();result.put("version",1);result.put("tools",catalog);result.put("catalogSha256",PositionSkillService.hash(SkillCanonicalJson.write(result)));return new Selection(selected,Map.copyOf(result));
+        if(domainSupported && !selected.isEmpty()) {
+            // Match verified install/bytes, not the package name. Do not put non-granted packages
+            // in a shared process namespace which can use an execution-level business socket.
+            var allowed=new HashMap<String,String>();
+            for(var d:installed.readCurrent(s).skills()) if(d.domainApi() && d.isInstructionOn(v.fence().runtimeInstallationId(),v.fence().hostId()))allowed.put(d.installationId(),d.packageSha256());
+            var domain=selected.stream().filter(row->{var sk=(Map<?,?>)row.get("skill");return sk.get("packageSha256").equals(allowed.get(sk.get("installationId")));}).toList();
+            if(!domain.isEmpty())return new Selection(domain,SkillExecutionService.NATIVE_DOMAIN_API_POLICY);
+        }
+        return new Selection(selected,SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
     }
 }

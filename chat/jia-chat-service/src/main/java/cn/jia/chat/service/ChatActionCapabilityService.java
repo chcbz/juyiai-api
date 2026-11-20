@@ -248,7 +248,7 @@ public final class ChatActionCapabilityService {
         var current=installedSkills.readCurrent(policy.runtimeScope());
         for(var d:current.skills()) {
             if(current.skills().stream().filter(x->Objects.equals(x.installationId(),d.installationId())).count()!=1)continue;
-            if(!d.verifiedNative()||d.manifestJson()!=null||d.manifestSha256()!=null
+            if(!refs.contains(d.instructionPolicy())||!d.verifiedNative()||d.manifestJson()!=null||d.manifestSha256()!=null
                     ||!Objects.equals(d.runtimeInstallationId(),policy.fence().runtimeInstallationId())||!Objects.equals(d.runtimeHostId(),policy.fence().hostId()))continue;
             var matches=live.catalog().skills().stream().filter(r->Objects.equals(r.skillInstallationId(),d.installationId())
                     &&Objects.equals(r.skillKey(),d.skillKey())&&Objects.equals(r.skillVersion(),d.skillVersion())
@@ -272,7 +272,7 @@ public final class ChatActionCapabilityService {
     static String nativeSkillActionId(cn.jia.agent.service.InstalledSkillDescriptorLookup.Descriptor d,List<String> input,List<String> output,Map<String,Object> parametersSchema) {
         var identity=new java.util.LinkedHashMap<String,Object>();identity.put("operation","EXECUTE_NATIVE");identity.put("installationId",d.installationId());
         identity.put("skillKey",d.skillKey());identity.put("skillVersion",d.skillVersion());identity.put("packageSha256",d.packageSha256());
-        identity.put("manifestSha256",d.manifestSha256());identity.put("toolPolicyRef",cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY);
+        identity.put("manifestSha256",d.manifestSha256());identity.put("toolPolicyRef",d.instructionPolicy());
         identity.put("inputMimeTypes",input);identity.put("outputMimeTypes",output);identity.put("parametersSchema",parametersSchema);
         return "act_"+cn.jia.chat.api.ChatBountyInteractionV3Wire.shaText(CanonicalContextJson.write(identity));
     }

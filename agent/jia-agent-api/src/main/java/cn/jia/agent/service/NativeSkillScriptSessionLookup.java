@@ -4,5 +4,6 @@ package cn.jia.agent.service;
 public interface NativeSkillScriptSessionLookup {
     /** The caller supplies the current authenticated transport fence, never request-provided authority. */
     boolean supports(PersonalWorkspaceExecutionService.RuntimeScope scope, AgentManagedSessionLookup.SessionFence fence);
+    default boolean supportsDomain(PersonalWorkspaceExecutionService.RuntimeScope scope, AgentManagedSessionLookup.SessionFence fence) { return false; }
     default boolean supportsPrivateTools(PersonalWorkspaceExecutionService.RuntimeScope scope, AgentManagedSessionLookup.SessionFence fence) { return false; }
 }
