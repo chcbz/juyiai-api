@@ -60,13 +60,17 @@ class ModelMaintenanceOperationsTest {
         assertEquals(404,assertThrows(PositionSkillException.class,()->source.resolve(MODEL,models,models,fixture(EXPR))).status());
     }
     @Test void domainRequiresLiveInstallationAndSeparatePriceAuthority() {
+        var selected=Map.<String,Object>of("skill",Map.of("key","model-maintenance","installationId","si"));
+        var other=Map.<String,Object>of("skill",Map.of("key","skill-management","installationId","other"));
+        assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",true,List.of(selected,other),ExecutionModelPriceController.REQUIRED));
+        verifyNoInteractions(positions,identities,managed);
         when(identities.requireRegistrationIdentityInScope("fixture","client","owner","agent"))
             .thenReturn(new AgentIdentityRegistryEntity().setCanonicalAgentId("agent").setBindingId(7L));
         when(positions.positionSkillInstallations(SCOPE,"agent",7L,"runtime","host",ExecutionModelPriceController.REQUIRED,true))
             .thenThrow(new PositionSkillException(403,"POSITION_PUBLISH_FORBIDDEN"));
-        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",true,List.of(),ExecutionModelPriceController.REQUIRED)).status());
+        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",true,List.of(selected),ExecutionModelPriceController.REQUIRED)).status());
         verifyNoInteractions(managed);
-        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",false,List.of(),ExecutionModelPriceController.REQUIRED)).status());
+        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",false,List.of(selected),ExecutionModelPriceController.REQUIRED)).status());
         verify(managed).lockState("fixture","client","agent","model-maintenance");
     }
     @Test void addIsScopedAndExistingDifferentVersionIsNotOverwritten() {
