@@ -72,6 +72,17 @@ public class PositionSkillService implements PositionAuthority {
             return skill.key();
         });
     }
+    public View upgrade(Scope scope,String requestId,String skill,String expected,String target) {
+        PositionSkillPolicy.key(skill);PositionSkillPolicy.key(expected);PositionSkillPolicy.key(target);
+        return mutate(scope,requestId,"UPGRADE_POSITION_SKILL",List.of(skill,expected,target),policy->{
+            authority(scope,PositionSkillPolicy.PLATFORM_SKILLS,true);
+            var old=packages.selectApprovedProductVersion(scope.tenantId(),scope.clientId(),expected);
+            var next=packages.selectApprovedProductVersion(scope.tenantId(),scope.clientId(),target);
+            require(old!=null && next!=null && skill.equals(old.getSkillKey()) && skill.equals(next.getSkillKey())
+                    && old.getProductId().equals(next.getProductId()) && next.getVersionSequence()>old.getVersionSequence(),409,"POSITION_VERSION_CONFLICT");
+            policy.upgrade(skill,expected,target);return skill;
+        });
+    }
     public View configure(Scope scope,String key,Position definition,long expectedRevision) {
         require(definition!=null,400,"POSITION_INVALID");
         return mutate(scope,key,"CONFIGURE_POSITION",List.of(definition,expectedRevision),p->{

@@ -28,6 +28,11 @@ public class PositionSkillController {
             @RequestBody JsonRequest<DefineSkill> request){
         var d=data(request);return ok(service.defineSkill(scope(auth),key,new Skill(d.skillKey(),d.type(),d.productVersionId())));
     }
+    public record UpgradeSkill(String expectedProductVersionId,String targetProductVersionId) {}
+    @PostMapping("/skills/{skill}/upgrade") public ResponseEntity<?> upgrade(Authentication auth,@RequestHeader("Idempotency-Key") String key,
+            @PathVariable String skill,@RequestBody JsonRequest<UpgradeSkill> request){
+        var d=data(request);return ok(service.upgrade(scope(auth),key,skill,d.expectedProductVersionId(),d.targetProductVersionId()));
+    }
     @PostMapping("/definitions") public ResponseEntity<?> configure(Authentication auth,@RequestHeader("Idempotency-Key")String key,
             @RequestBody JsonRequest<Configure> request){
         var d=data(request);require(d.skillKeys()!=null,400,"POSITION_INVALID");

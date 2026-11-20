@@ -51,6 +51,17 @@ class PositionSkillPolicyTest {
         p.authorizeSkillManagement(review.id(),1,1,"agent1",1,false);
         assertThrows(PositionSkillException.class,()->p.authorizeSkillManagement(review.id(),1,1,"agent1",1,true));
     }
+    @Test void versionUpgradeFencesOldReceiptsAndDoesNotInterruptPendingChanges() {
+        var p=policy();p.appoint("editor","agent1",1);var installed=installation(p,"maintain");
+        assertThrows(PositionSkillException.class,()->p.upgrade("maintain","v1","v3"));
+        p.receipt(installed.id(),installed.revision(),true,"a".repeat(64),"rt","host",null);
+        assertThrows(PositionSkillException.class,()->p.upgrade("maintain","stale","v3"));
+        p.upgrade("maintain","v1","v3");var next=installation(p,"maintain");
+        assertEquals("v3",p.state().skills().get("maintain").productVersionId());assertFalse(next.usable());assertNull(next.receiptDigest());
+        assertEquals(installed.revision()+1,next.revision());assertEquals(InstallState.INSTALL_PENDING,next.state());
+        assertThrows(PositionSkillException.class,()->p.receipt(installed.id(),installed.revision(),true,"a".repeat(64),"rt","host",null));
+        assertEquals(1,installation(p,"read").revision());
+    }
     @Test void exactlyTwoTypes() { assertEquals(List.of("POSITION", "GENERAL"), Arrays.stream(SkillType.values()).map(Enum::name).toList()); }
     @Test void appointmentSchedulesButNeverInventsInstallationSuccess() {
         var p = policy(); p.appoint("editor", "agent1", 1);

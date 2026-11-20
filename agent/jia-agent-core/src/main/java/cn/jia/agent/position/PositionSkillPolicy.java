@@ -28,6 +28,17 @@ public final class PositionSkillPolicy {
         require(old == null || old.equals(skill), 409, "POSITION_SKILL_IMMUTABLE");
         skills.put(skill.key(), skill);
     }
+    /** Replace only the version pin. Do not transfer receipt evidence or interrupt pending installers. */
+    public void upgrade(String skillKey,String expected,String target) {
+        key(skillKey);key(expected);key(target);
+        var before=skills.get(skillKey);
+        require(before!=null && before.type()==SkillType.POSITION,409,"POSITION_SKILL_REQUIRED");
+        require(expected.equals(before.productVersionId()) && !expected.equals(target),409,"POSITION_VERSION_CONFLICT");
+        var affected=installations.values().stream().filter(i->skillKey.equals(i.skillKey())).toList();
+        require(affected.stream().noneMatch(i->i.state()==InstallState.INSTALL_PENDING || i.state()==InstallState.REMOVE_PENDING),409,"POSITION_CHANGE_PENDING");
+        skills.put(skillKey,new Skill(skillKey,before.type(),target));
+        for (var i:affected) if(i.desired()) retry(i.id());
+    }
     public void configure(Position definition, long expectedRevision) {
         require(definition != null, 400, "POSITION_INVALID"); key(definition.id());
         require(definition.title() != null && !definition.title().isBlank() && definition.title().length() <= 200
