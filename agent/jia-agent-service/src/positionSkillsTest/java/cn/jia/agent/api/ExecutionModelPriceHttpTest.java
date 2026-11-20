@@ -69,6 +69,8 @@ class ExecutionModelPriceHttpTest {
         assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(call,candidates,receipts));
         when(receipts.find(RunningExecutionEndpoint.receiptKey(call,"native-skill-selection"))).thenReturn(new cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt("native-skill-selection",digest,"{\"installationId\":\"b\"}"));
         assertEquals(List.of(b),ExecutionSkillSelection.bound(call,candidates,receipts));
+        var local=Map.<String,Object>of("skill",b.get("skill"),"domainApi",false);
+        assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(call,List.of(a,local),receipts));
         for(String wrong:new String[]{null,"a"})assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(new RunningExecutionEndpoint.Call<>(actor,"exec","run",fence,digest,wrong,null),candidates,receipts));
         assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(call,List.of(b,b),receipts));
     }

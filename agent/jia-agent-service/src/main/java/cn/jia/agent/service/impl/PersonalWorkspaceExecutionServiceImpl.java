@@ -1455,7 +1455,10 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             if(matches==null||matches.size()!=1)throw failure(Reason.CAPABILITY_UNAVAILABLE);var descriptor=matches.getFirst();
             if(!descriptor.verifiedNative()||!same(descriptor.packageSha256(),skillString(selected,"packageSha256"))
                     ||!selected.containsKey("manifestSha256")||!Objects.equals(descriptor.manifestSha256(),selected.get("manifestSha256")))throw failure(Reason.CAPABILITY_UNAVAILABLE);
-            if(NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef")) && !descriptor.domainApi())throw failure(Reason.CAPABILITY_UNAVAILABLE);
+            if(NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef"))){
+                boolean localOnly=Boolean.FALSE.equals(item.get("domainApi"));
+                if(localOnly && (selections.size()<2 || !"PRIVATE".equals(nativeScope(snapshot).kind()) || descriptor.manifestJson()!=null) || !localOnly && !descriptor.domainApi())throw failure(Reason.CAPABILITY_UNAVAILABLE);
+            }
             boolean instructionPackage=descriptor.manifestJson()==null;
             var manifest=instructionPackage?null:skillMap(descriptor.manifestJson());
             if(!instructionPackage) {

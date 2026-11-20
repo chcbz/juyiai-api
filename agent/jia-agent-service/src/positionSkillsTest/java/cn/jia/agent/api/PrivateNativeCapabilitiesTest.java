@@ -32,6 +32,14 @@ class PrivateNativeCapabilitiesTest {
         var descriptor=new InstalledSkillDescriptorLookup.Descriptor("skill","1.0.0","si",pkg,null,null,"install","host",null,true);
         when(installed.readCurrent(scope)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(descriptor)));
         assertEquals(SkillExecutionService.NATIVE_DOMAIN_API_POLICY,service.prepared(scope,"socket",true,Supplier::get).policy());
+        var available=live.lookup(scope,fence).catalog().skills().getFirst();
+        var localFact=new SkillCapabilityLookup.RuntimeSkill("local","1.0.0",pkg,null,null,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE,null,null,null,"si-local",null,"INSTRUCTION",null,true,1L);
+        when(live.lookup(scope,fence)).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"socket",fence,new SkillCapabilityLookup.Catalog("2",List.of(available,localFact))));
+        var localInstall=new PositionSkillState.Installation("j","a",1,"local",false,true,1,PositionSkillState.InstallState.INSTALLED,"digest","sha256:"+pkg,null,"install","host",null,"si-local");
+        when(positions.currentState(role)).thenReturn(new PositionSkillState(1,Map.of(),Map.of("p",new PositionSkillState.Position("p","P",1,"models:platform",true,List.of("skill","local"),1)),state.appointments(),Map.of("i",state.installations().get("i"),"j",localInstall)));
+        var localPointer=new SkillManagedStateEntity().setActiveInstallationId("si-local").setDesiredEnabled(true);when(managed.statesForPrivateAdmission("t","c","a")).thenReturn(List.of(pointer,localPointer));
+        var mixed=service.prepared(scope,"socket",true,Supplier::get);assertEquals(2,mixed.skills().size());assertEquals(false,mixed.skills().getFirst().get("domainApi"));assertFalse(mixed.skills().getLast().containsKey("domainApi"));
+        localPointer.setDesiredEnabled(false);
         pointer.setDesiredEnabled(false);assertTrue(service.prepared(scope,"socket",false,Supplier::get).skills().isEmpty());
         assertThrows(IllegalStateException.class,()->service.prepared(scope,"wrong",true,Supplier::get));
     }

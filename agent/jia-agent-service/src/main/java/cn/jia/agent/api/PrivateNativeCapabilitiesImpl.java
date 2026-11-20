@@ -46,7 +46,11 @@ public final class PrivateNativeCapabilitiesImpl implements PrivateNativeCapabil
             var allowed=new HashMap<String,String>();
             for(var d:installed.readCurrent(s).skills()) if(d.domainApi() && d.isInstructionOn(v.fence().runtimeInstallationId(),v.fence().hostId()))allowed.put(d.installationId(),d.packageSha256());
             var domain=selected.stream().filter(row->{var sk=(Map<?,?>)row.get("skill");return sk.get("packageSha256").equals(allowed.get(sk.get("installationId")));}).toList();
-            if(!domain.isEmpty())return new Selection(domain,SkillExecutionService.NATIVE_DOMAIN_API_POLICY);
+            if(!domain.isEmpty()){
+                var rows=new ArrayList<Map<String,Object>>();for(var row:selected){var skill=(Map<?,?>)row.get("skill");
+                    rows.add(skill.get("packageSha256").equals(allowed.get(skill.get("installationId")))?row:Map.of("skill",skill,"domainApi",false));}
+                return new Selection(List.copyOf(rows),SkillExecutionService.NATIVE_DOMAIN_API_POLICY);
+            }
         }
         return new Selection(selected,SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
     }

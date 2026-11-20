@@ -27,11 +27,12 @@ public final class ExecutionSkillSelection extends RunningExecutionEndpoint {
         var c=call(auth,execution,run,request);var id=c.input().installationId();
         return ok(executions.withRunningSkills(c.actor(),execution,run,c.fence(),c.snapshot(),grant->{
             require(grant.selections().size()>1,409,"SKILL_SELECTION_NOT_REQUIRED");
-            if(id!=null){
-                var choice=match(grant.selections(),id).getFirst();var a=grant.subject();
+            var choice=id==null?null:match(grant.selections(),id).getFirst();
+            if(choice!=null){
+                var a=grant.subject();
                 authority.requireCurrentChoice(new cn.jia.agent.service.PositionAuthority.Scope(a.tenantId(),a.clientId(),a.executorOwnerJiacn()),a.agentId(),grant.installation(),grant.host(),choice);
             }
-            var value=id==null?Map.<String,Object>of():Map.<String,Object>of("installationId",id);
+            var value=id==null?Map.<String,Object>of("domainApi",false):Map.<String,Object>of("installationId",id,"domainApi",!Boolean.FALSE.equals(choice.get("domainApi")));
             var saved=receipts.apply(receiptKey(c,BINDING),BINDING,c.snapshot(),()->value);
             require(value.equals(saved),409,"SKILL_SELECTION_ALREADY_BOUND");return saved;
         }));
@@ -41,6 +42,6 @@ public final class ExecutionSkillSelection extends RunningExecutionEndpoint {
         require(c.selectedInstallation()!=null,403,"SKILL_SELECTION_REQUIRED");
         var binding=receipts.find(receiptKey(c,BINDING));require(binding!=null,403,"SKILL_SELECTION_REQUIRED");
         var id=PrivateToolCallReceipts.replay(binding,BINDING,c.snapshot()).get("installationId");
-        require(c.selectedInstallation().equals(id),403,"SKILL_SELECTION_MISMATCH");return match(frozen,id);
+        require(c.selectedInstallation().equals(id),403,"SKILL_SELECTION_MISMATCH");var selected=match(frozen,id);require(!Boolean.FALSE.equals(selected.getFirst().get("domainApi")),403,"DOMAIN_PERMISSION_REQUIRED");return selected;
     }
 }
