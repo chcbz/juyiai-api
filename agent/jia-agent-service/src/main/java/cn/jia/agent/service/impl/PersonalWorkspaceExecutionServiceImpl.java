@@ -1625,6 +1625,23 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 ||!same(access.scopeKey(),"task:"+execution.getTaskId()))throw failure(Reason.NOT_FOUND);
         return access;
     }
+    @Override public <T> T withRunningSkills(RuntimeScope authenticated,String executionId,String runId,ConversationFence fence,
+            String snapshotDigest,java.util.function.Function<RunningSkills,T> operation) {
+        var scope=executionScope(authenticated,executionId,runId);
+        requireSkillEnabled();
+        var proof=AgentRuntimeAuthenticationService.requireProof(nativeAuthentication(scope));
+        return nativeMutation(scope,()->withConversationRoot(scope,executionId,runId,true,execution->{
+            if(!Objects.equals(6,execution.getExecutionProtocolVersion()))throw failure(Reason.NOT_FOUND);
+            requireConversationFence(scope,execution,fence,false);
+            var skill=skillRow(skillOwner(scope),executionId,true);
+            requireSkillSnapshot(skill,executionId,snapshotDigest);
+            if(!"RUNNING".equals(skill.getPhase()))throw failure(Reason.TASK_CONFLICT);
+            var snapshot=skillMap(skill.getSnapshotJson());
+            if(!NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")))throw failure(Reason.NOT_FOUND);
+            requireCommandCapabilities(scope,execution,skill);
+            return operation.apply(new RunningSkills(scope,proof.installationId(),proof.hostId(),nativeSelections(snapshot)));
+        }));
+    }
     @Override public <T> T withPrivateToolGrant(RuntimeScope authenticatedScope,String executionId,String runId,
             PrivateToolRequest command,java.util.function.Function<PrivateToolGrant,T> operation) {
         var scope=executionScope(authenticatedScope,executionId,runId);

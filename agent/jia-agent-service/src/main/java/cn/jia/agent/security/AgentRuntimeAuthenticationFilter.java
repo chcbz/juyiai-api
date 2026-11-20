@@ -63,6 +63,8 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || "GET".equals(request.getMethod()) && path.equals("/internal/agent/executions/commands")
                 || request.getQueryString() == null && ("GET".equals(request.getMethod()) || "POST".equals(request.getMethod()))
                 && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/tool-calls/" + id)
+                || request.getQueryString() == null && "POST".equals(request.getMethod())
+                && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/business/model-prices/lookup")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/executions/" + id
                 + "/runs/" + id + "/(?:inputs(?:/" + id + "/content)?|lease(?:/renew)?|failure|resume|usage|provider-usage|effects/" + id + "/(?:start|result)|result-commits/" + id
                 + "|outputs/" + id + "/content)")

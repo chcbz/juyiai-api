@@ -42,7 +42,7 @@ class ModelConversationToolsTest {
     private final PersonaModelHostingStore bindings=mock(PersonaModelHostingStore.class);
     private final EconomyPriceCatalogMapper prices=mock(EconomyPriceCatalogMapper.class);
     private final BaseLlmModelPriceSource source=mock(BaseLlmModelPriceSource.class);
-    private final ModelConversationToolAdapter adapter=new ModelConversationToolAdapter(positions,identities,installed,new ModelMaintenanceOperations(bindings,new DatabaseModelPriceMaintenance(prices,JSON),source));
+    private final ModelConversationToolAdapter adapter=new ModelConversationToolAdapter(positions,new ModelMaintenanceAuthority(positions,identities,mock(cn.jia.agent.mapper.skill.SkillManagementMapper.class)),installed,new ModelMaintenanceOperations(bindings,new DatabaseModelPriceMaintenance(prices,JSON),source));
 
     private static byte[] fixture(String expression) {
         return JSON.writeValueAsString(Map.of("success",true,"data",Map.of("billing_mode",Map.of(MODEL,"tiered_expr"),

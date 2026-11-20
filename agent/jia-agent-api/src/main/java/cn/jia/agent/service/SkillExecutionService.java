@@ -48,6 +48,10 @@ public interface SkillExecutionService {
             this(executionProtocolVersion,executionId,runId,scope,commandId,messageId,skills,snapshotDigest,parameters,instruction,inputRefs,outputs,toolPolicyRef,null);
         }
     }
+    /** Server-owned execution context, not a caller-supplied skill identity. */
+    record RunningSkills(RuntimeScope subject,String installation,String host,List<Map<String,Object>> selections) {}
+    <T> T withRunningSkills(RuntimeScope subject,String execution,String run,ConversationFence fence,String snapshotDigest,
+            java.util.function.Function<RunningSkills,T> operation);
     record PrivateToolRequest(ConversationFence fence,String snapshotDigest,String catalogSha256,String threadId,String turnId,String tool,Map<String,Object> arguments) {}
     record PrivateToolGrant(String installation,String host,List<Map<String,Object>> selections,List<String> tools) {}
     <T> T withPrivateToolGrant(RuntimeScope scope,String execution,String run,PrivateToolRequest request,

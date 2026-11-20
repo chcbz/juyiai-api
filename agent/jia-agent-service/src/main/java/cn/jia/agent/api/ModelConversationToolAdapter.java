@@ -2,7 +2,6 @@ package cn.jia.agent.api;
 
 import cn.jia.agent.position.PositionSkillException;
 import cn.jia.agent.position.PositionSkillService;
-import cn.jia.agent.service.AgentIdentityService;
 import cn.jia.agent.service.InstalledSkillDescriptorLookup;
 import cn.jia.agent.service.PositionAuthority;
 import cn.jia.agent.service.SkillCapabilityLookup;
@@ -21,8 +20,7 @@ import static cn.jia.agent.position.PositionSkillException.require;
 /** Role-gated private conversation tools. The model cannot provide identity, prices, URLs, or FX. */
 @Service
 public final class ModelConversationToolAdapter implements ConversationToolProvider {
-    static final PositionSkillService.RequiredPositionSkill REQUIRED=new PositionSkillService.RequiredPositionSkill(
-            cn.jia.agent.position.PositionSkillPolicy.PLATFORM_MODELS,"model-maintenance","MODEL_POSITION_REQUIRED","MODEL_SKILL_REQUIRED");
+    static final PositionSkillService.RequiredPositionSkill REQUIRED=ModelMaintenanceAuthority.REQUIRED;
     private static final String READ_MODEL="model_read_price", ADD_MODEL="model_add_price",
             READ_HERO="model_read_hero_binding", BIND="model_set_hero_binding";
     private static final Pattern MODEL=Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}");
@@ -36,13 +34,13 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
             tool(ADD_MODEL,"从默认 BaseLLM 来源录入精确型号的输入、输出和缓存命中单价；保留两个档位，不覆盖现有版本。", "model"));
 
     private final PositionSkillService positions;
-    private final AgentIdentityService identities;
+    private final ModelMaintenanceAuthority authority;
     private final InstalledSkillDescriptorLookup installed;
     private final ModelMaintenanceOperations operations;
 
-    public ModelConversationToolAdapter(PositionSkillService positions,AgentIdentityService identities,
+    public ModelConversationToolAdapter(PositionSkillService positions,ModelMaintenanceAuthority authority,
             InstalledSkillDescriptorLookup installed,ModelMaintenanceOperations operations) {
-        this.positions=positions;this.identities=identities;this.installed=installed;this.operations=operations;
+        this.positions=positions;this.authority=authority;this.installed=installed;this.operations=operations;
     }
     @Override public Set<String> names(){return Set.of(READ_MODEL,ADD_MODEL,READ_HERO,BIND);}
     @Override public List<Map<String,Object>> catalog(Context ctx,Boundary boundary) {
@@ -126,20 +124,11 @@ public final class ModelConversationToolAdapter implements ConversationToolProvi
         }catch(PositionSkillException denied){if(denied.status()!=403)throw denied;}
         return result;
     }
-    private cn.jia.agent.mapper.skill.SkillManagementMapper managed;
-    @org.springframework.beans.factory.annotation.Autowired public void setManaged(cn.jia.agent.mapper.skill.SkillManagementMapper value){managed=value;}
     void authorizeFrozen(Context ctx,PositionAuthority.Scope scope,boolean price,List<Map<String,Object>> selections) {
-        var ids=admit(ctx,scope,price);
-        var state=managed.lockState(scope.tenantId(),scope.clientId(),ctx.subject().agentId(),REQUIRED.skillKey());
-        require(state!=null && Boolean.TRUE.equals(state.getDesiredEnabled()) && state.getPendingChangeId()==null
-                && ids.contains(state.getActiveInstallationId()) && selections.stream().map(s->(Map<?,?>)s.get("skill"))
-                .anyMatch(s->REQUIRED.skillKey().equals(s.get("key")) && state.getActiveInstallationId().equals(s.get("installationId"))),403,"MODEL_SKILL_REQUIRED");
+        authority.requireInstalled(scope,ctx.subject().agentId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),price,selections);
     }
     private Set<String> admit(Context ctx,PositionAuthority.Scope scope,boolean price) {
-        var agent=ctx.subject().agentId();
-        var identity=identities.requireRegistrationIdentityInScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
-        require(agent.equals(identity.getCanonicalAgentId()) && identity.getBindingId()!=null,403,"MODEL_POSITION_REQUIRED");
-        return positions.positionSkillInstallations(scope,agent,identity.getBindingId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),REQUIRED,price);
+        return authority.admit(scope,ctx.subject().agentId(),ctx.runtimeInstallationId(),ctx.runtimeHostId(),price);
     }
     private static Map<String,Object> tool(String name,String description,String... fields) {
         var props=new java.util.LinkedHashMap<String,Object>();for(var field:fields)props.put(field,Map.of("type","string"));
