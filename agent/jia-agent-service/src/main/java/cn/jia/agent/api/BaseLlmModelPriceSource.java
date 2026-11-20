@@ -30,6 +30,8 @@ import java.util.concurrent.Flow;
 @Component
 public final class BaseLlmModelPriceSource {
     public static final String URL="https://basellm.github.io/llm-metadata/api/newapi/ratio_config-v1-base.json";
+    static final String MODELS="https://basellm.github.io/llm-metadata/api/i18n/zh/newapi/models.json";
+    static final String VENDORS="https://basellm.github.io/llm-metadata/api/i18n/zh/newapi/vendors.json";
     private static final BigDecimal USD_TO_CNY=new BigDecimal("6.6879"); // Existing CYF public-reference conversion, not live FX.
     private static final String RATE="((?:0|[1-9][0-9]{0,8})(?:\\.[0-9]{1,10})?)";
     private static final String TERMS="p\\s*\\*\\s*"+RATE+"\\s*\\+\\s*cr\\s*\\*\\s*"+RATE
@@ -42,11 +44,11 @@ public final class BaseLlmModelPriceSource {
             .followRedirects(HttpClient.Redirect.NEVER).build();
     private final JsonMapper json=JsonMapper.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
 
-    record Quote(String model,String version,String sourceSha256,long threshold,Map<String,String> shortUsd,Map<String,String> longUsd) {
+    record Quote(String model,String version,String sourceSha256,long threshold,Map<String,String> shortUsd,Map<String,String> longUsd,Map<String,String> catalog) {
         Map<String,Object> priceData() {
             return Map.of("basis","BASELLM_NEWAPI_ZH_REFERENCE_USD_TO_CNY_6.6879", "shortContextMaxInputTokens",threshold,
                     "yuanPerMillionTokens",yuan(shortUsd),"longContextYuanPerMillionTokens",yuan(longUsd),
-                    "reference",Map.of("source",URL,"sha256",sourceSha256,"currency","USD",
+                    "catalog",catalog,"reference",Map.of("source",URL,"sha256",sourceSha256,"currency","USD",
                             "unit","perMillionTokens","base",shortUsd,"longContext",longUsd));
         }
         private static Map<String,String> yuan(Map<String,String> rates) {
@@ -58,23 +60,42 @@ public final class BaseLlmModelPriceSource {
     }
 
     Quote read(String model) {
-        var request=HttpRequest.newBuilder(URI.create(URL)).timeout(Duration.ofSeconds(12)).GET().build();
+        var models=fetch(MODELS);var vendors=fetch(VENDORS);var prices=fetch(URL);
         try {
-            // Bounded subscriber; ofInputStream would allow an unbounded response body read after headers.
-            var pending=http.sendAsync(request, ignored->new BoundedPriceResponse(MAX_BYTES));
-            HttpResponse<byte[]> response;
-            try {response=pending.get(12,java.util.concurrent.TimeUnit.SECONDS);}
-            finally {if(!pending.isDone())pending.cancel(true);}
-            if(response.statusCode()!=200)throw new PositionSkillException(503,"MODEL_PRICE_SOURCE_UNAVAILABLE");
-            return parse(response.body(),model);
+            CompletableFuture.allOf(models,vendors,prices).get(12,java.util.concurrent.TimeUnit.SECONDS);
+            return resolve(model,body(models),body(vendors),body(prices));
         } catch(InterruptedException failure) {
             Thread.currentThread().interrupt();
             throw new PositionSkillException(503,"MODEL_PRICE_SOURCE_UNAVAILABLE");
         } catch(java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException failure) {
             throw new PositionSkillException(503,"MODEL_PRICE_SOURCE_UNAVAILABLE");
-        }
+        } finally {for(var pending:List.of(models,vendors,prices))if(!pending.isDone())pending.cancel(true);}
     }
-
+    private CompletableFuture<HttpResponse<byte[]>> fetch(String source){
+        var request=HttpRequest.newBuilder(URI.create(source)).timeout(Duration.ofSeconds(12)).GET().build();
+        return http.sendAsync(request,ignored->new BoundedPriceResponse(MAX_BYTES));
+    }
+    private static byte[] body(CompletableFuture<HttpResponse<byte[]>> pending){
+        var response=pending.join();if(response.statusCode()!=200)throw new PositionSkillException(503,"MODEL_PRICE_SOURCE_UNAVAILABLE");return response.body();
+    }
+    private JsonNode catalogRow(byte[] bytes,String key,String expected) {
+        JsonNode doc;
+        try {doc=json.readTree(bytes);}catch(tools.jackson.core.JacksonException invalid){throw new PositionSkillException(503,"MODEL_CATALOG_INVALID");}
+        if(doc==null||!doc.path("success").asBoolean(false)||!doc.path("data").isArray())throw new PositionSkillException(503,"MODEL_CATALOG_INVALID");
+        JsonNode found=null;
+        for(var row:doc.path("data"))if(expected.equals(row.path(key).asText())&&row.path("status").asInt()==1){
+            if(found!=null)throw new PositionSkillException(503,"MODEL_CATALOG_AMBIGUOUS");found=row;
+        }
+        if(found==null)throw new PositionSkillException(404,"MODEL_CATALOG_ENTRY_MISSING");return found;
+    }
+    Quote resolve(String model,byte[] models,byte[] vendors,byte[] prices){
+        var entry=catalogRow(models,"model_name",model);var vendor=entry.path("vendor_name");
+        if(!vendor.isTextual()||vendor.asText().isBlank())throw new PositionSkillException(503,"MODEL_CATALOG_INVALID");
+        catalogRow(vendors,"name",vendor.asText());var q=parse(prices,model);
+        return new Quote(q.model(),q.version(),q.sourceSha256(),q.threshold(),q.shortUsd(),q.longUsd(),Map.of(
+                "language","zh","modelSource",MODELS,"vendorSource",VENDORS,"vendor",vendor.asText(),"description",entry.path("description").asText(""),
+                "modelsSha256",sha256(models),"vendorsSha256",sha256(vendors)));
+    }
     Quote parse(byte[] bytes,String model) {
         JsonNode root;
         try {root=json.readTree(bytes);}
@@ -95,7 +116,7 @@ public final class BaseLlmModelPriceSource {
         }
         long threshold=Long.parseLong(match.group(1));
         var version="basellm-"+sha256(("v1\n"+model+"\n"+USD_TO_CNY+"\n"+threshold+"\n"+base+"\n"+extended).getBytes(StandardCharsets.UTF_8));
-        return new Quote(model,version,sha256(bytes),threshold,Map.copyOf(base),Map.copyOf(extended));
+        return new Quote(model,version,sha256(bytes),threshold,Map.copyOf(base),Map.copyOf(extended),Map.of());
     }
     private static final class BoundedPriceResponse implements HttpResponse.BodySubscriber<byte[]> {
         private final CompletableFuture<byte[]> body=new CompletableFuture<>();

@@ -103,9 +103,6 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
     public boolean nativeScriptDeclared(Scope scope, String agentId, String sessionId) {
         return nativePolicyDeclared(scope,agentId,sessionId,"NATIVE_SKILL_SCRIPT_V1");
     }
-    public boolean privateBusinessToolsDeclared(Scope scope,String agentId,String sessionId) {
-        return nativePolicyDeclared(scope,agentId,sessionId,null);
-    }
     public boolean nativePolicyDeclared(Scope scope,String agentId,String sessionId,String policy) {
         try {
             Session session = sessions.get(key(sessionId, agentId));
@@ -115,8 +112,7 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
                     session.declaration().supportedOperations(), session.declaration().frozenReceipt()));
             var nativeExecution = (Map<?,?>) ready.frozenDeclaration().get("nativeExecution");
             return Objects.equals(sessionId, ready.sessionId())
-                    && (policy==null ? Integer.valueOf(1).equals(nativeExecution.get("privateBusinessToolsVersion"))
-                    : nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains(policy));
+                    && nativeExecution.get("supportedToolPolicyRefs") instanceof List<?> refs && refs.contains(policy);
         } catch (IllegalStateException unavailable) { return false; }
     }
 

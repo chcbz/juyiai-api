@@ -19,9 +19,6 @@ public final class NativeSkillScriptSessionLookupImpl implements NativeSkillScri
     @Override public boolean supports(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence) {
         return declared(scope,fence,"NATIVE_SKILL_SCRIPT_V1");
     }
-    @Override public boolean supportsPrivateTools(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence) {
-        return declared(scope,fence,null);
-    }
     @Override public boolean supportsDomain(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence){return declared(scope,fence,"NATIVE_DOMAIN_API_V1");}
     private boolean declared(PersonalWorkspaceExecutionService.RuntimeScope scope,AgentManagedSessionLookup.SessionFence fence,String policy) {
         try {
@@ -31,9 +28,7 @@ public final class NativeSkillScriptSessionLookupImpl implements NativeSkillScri
             var live=runtimes.lookup(key,fence);
             if(live==null||live.state()!=SkillCapabilityLookup.State.AVAILABLE)return false;
             var socketScope=new TypedDeliberationSessionRegistry.Scope(scope.tenantId(),scope.executorOwnerJiacn(),scope.clientId());
-            boolean supported=policy==null ? sessions.privateBusinessToolsDeclared(socketScope,scope.agentId(),live.sessionId())
-                    : "NATIVE_SKILL_SCRIPT_V1".equals(policy)?sessions.nativeScriptDeclared(socketScope,scope.agentId(),live.sessionId()):sessions.nativePolicyDeclared(socketScope,scope.agentId(),live.sessionId(),policy);
-            if (!supported) return false;
+            if (!sessions.nativePolicyDeclared(socketScope,scope.agentId(),live.sessionId(),policy)) return false;
             return live.sameExecutionFacts(runtimes.lookup(key,fence));
         }catch(IllegalStateException|IllegalArgumentException unavailable){return false;}
     }

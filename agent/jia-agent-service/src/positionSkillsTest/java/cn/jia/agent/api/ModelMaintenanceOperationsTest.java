@@ -52,6 +52,13 @@ class ModelMaintenanceOperationsTest {
         assertEquals(404,assertThrows(PositionSkillException.class,()->reader.parse(fixture(EXPR),"missing")).status());
         assertEquals(422,assertThrows(PositionSkillException.class,()->reader.parse(fixture(EXPR.replace("cr * 0.1 + ","")),MODEL)).status());
     }
+    @Test void importJoinsExactActiveModelAndVendorWithoutChangingPriceIdentity(){
+        var models=JSON.writeValueAsBytes(Map.of("success",true,"data",List.of(Map.of("model_name",MODEL,"description","测试","status",1,"vendor_name","Fixture"))));
+        var vendors=JSON.writeValueAsBytes(Map.of("success",true,"data",List.of(Map.of("name","Fixture","status",1))));
+        var source=new BaseLlmModelPriceSource();var q=source.resolve(MODEL,models,vendors,fixture(EXPR));
+        assertEquals(quote().version(),q.version());assertEquals("Fixture",q.catalog().get("vendor"));assertEquals("测试",q.catalog().get("description"));
+        assertEquals(404,assertThrows(PositionSkillException.class,()->source.resolve(MODEL,models,models,fixture(EXPR))).status());
+    }
     @Test void domainRequiresLiveInstallationAndSeparatePriceAuthority() {
         when(identities.requireRegistrationIdentityInScope("fixture","client","owner","agent"))
             .thenReturn(new AgentIdentityRegistryEntity().setCanonicalAgentId("agent").setBindingId(7L));

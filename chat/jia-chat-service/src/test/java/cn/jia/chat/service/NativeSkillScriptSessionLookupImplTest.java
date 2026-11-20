@@ -22,12 +22,9 @@ class NativeSkillScriptSessionLookupImplTest {
         assertFalse(adapter.supports(scope,fence));
         nativeExecution.put("supportedToolPolicyRefs",List.of("NATIVE_SKILL_SCRIPT_V1"));sessions.register("session","0","owner","client","agent",declaration);
         assertTrue(adapter.supports(scope,fence));
-        assertFalse(adapter.supportsPrivateTools(scope,fence));
-        for (var version : List.of(2,"1",1)) {
-            nativeExecution.put("privateBusinessToolsVersion",version);
-            sessions.register("session","0","owner","client","agent",declaration);
-            assertEquals(Integer.valueOf(1).equals(version),adapter.supportsPrivateTools(scope,fence));
-        }
+        assertFalse(adapter.supportsDomain(scope,fence));
+        nativeExecution.put("supportedToolPolicyRefs",List.of("NATIVE_DOMAIN_API_V1","NATIVE_SKILL_SCRIPT_V1"));sessions.register("session","0","owner","client","agent",declaration);
+        assertTrue(adapter.supportsDomain(scope,fence));
         var tick=new java.util.concurrent.atomic.AtomicLong(100);
         when(runtimes.lookup(key,fence)).thenAnswer(ignored->new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session",fence,
                 new SkillCapabilityLookup.Catalog("1",List.of(new SkillCapabilityLookup.RuntimeSkill("skill","1.0","a".repeat(64),null,null,
