@@ -15,7 +15,9 @@ import tools.jackson.databind.JsonNode;
 @RestController
 @RequestMapping("/internal/agent/executions")
 public final class NativeExecutionUsageCostController {
-    public record Request(String executionId, NativeExecutionUsageCostRecorder.Phase phase, String requestedModel, JsonNode usageEvidence) { }
+    public record Request(String executionId, NativeExecutionUsageCostRecorder.Phase phase, String requestedModel, JsonNode usageEvidence, NativeExecutionUsageCostRecorder.Invocation invocation) {
+        public Request(String executionId,NativeExecutionUsageCostRecorder.Phase phase,String requestedModel,JsonNode usageEvidence){this(executionId,phase,requestedModel,usageEvidence,null);}
+    }
     public record Receipt(String executionId, String attemptId, String revision, String status, String costYuan) { }
     private final NativeExecutionUsageCostRecorder recorder;
     private final AgentRuntimeAuthenticationService authentication;
@@ -37,7 +39,7 @@ public final class NativeExecutionUsageCostController {
             var scope = new PersonalWorkspaceExecutionService.RuntimeScope(trusted.tenantId(), trusted.clientId(),
                     trusted.ownerJiacn(), trusted.agentId(), trusted.runtimeInstanceId());
             return recorder.record(scope, executionId, runId, new NativeExecutionUsageCostRecorder.Evidence(
-                    body.executionId(), body.phase(), body.requestedModel(), body.usageEvidence() == null ? "null" : body.usageEvidence().toString()));
+                    body.executionId(), body.phase(), body.requestedModel(), body.usageEvidence() == null ? "null" : body.usageEvidence().toString(),body.invocation()));
         });
         return ResponseEntity.ok().header("Cache-Control", "private, no-store").body(JsonResult.success(
                 new Receipt(body.executionId(), receipt.attemptId(), Long.toString(receipt.revision()),

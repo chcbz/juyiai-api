@@ -37,6 +37,12 @@ class NativeExecutionUsageCostRecorderTest {
         verifyNoMoreInteractions(executions, costs);
     }
 
+    @Test void plannerObservationsDoNotOverwriteTheBusinessTurn() {
+        when(executions.findForNativeUsageCost("0","client","executor","agent","exec","run")).thenReturn(new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setOwnerJiacn("owner"));
+        recorder.record(scope,"exec","run",new NativeExecutionUsageCostRecorder.Evidence("exec",evidence.phase(),evidence.requestedModel(),evidence.usageEvidenceJson(),NativeExecutionUsageCostRecorder.Invocation.SKILL_SELECTION));
+        var saved=ArgumentCaptor.forClass(UsageCostService.Observation.class);verify(costs).record(saved.capture());
+        assertEquals("NATIVE_SELECTION_EVIDENCE",saved.getValue().binding().source());assertEquals("exec",saved.getValue().binding().sourceAttemptId());
+    }
     @Test void startedObservationCreatesSamePendingAttemptBeforeAnyKnownUsage() {
         when(executions.findForNativeUsageCost("0", "client", "executor", "agent", "exec", "run"))
                 .thenReturn(new PersonalWorkspaceExecutionEntity().setExecutionId("exec").setTaskId("task")

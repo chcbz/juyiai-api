@@ -15,7 +15,10 @@ import java.util.LinkedHashMap;
 @Service
 public final class NativeExecutionUsageCostRecorder {
     public enum Phase { STARTED, TERMINAL }
-    public record Evidence(String executionId, Phase phase, String requestedModel, String usageEvidenceJson) { }
+    public enum Invocation { SKILL_SELECTION }
+    public record Evidence(String executionId, Phase phase, String requestedModel, String usageEvidenceJson, Invocation invocation) {
+        public Evidence(String executionId, Phase phase, String requestedModel, String usageEvidenceJson){this(executionId,phase,requestedModel,usageEvidenceJson,null);}
+    }
     private static final ObjectMapper JSON = new ObjectMapper();
     private final PersonalWorkspaceExecutionDao executions;
     private final UsageCostService costs;
@@ -38,7 +41,7 @@ public final class NativeExecutionUsageCostRecorder {
         if (execution == null) throw new PersonalWorkspaceExecutionService.Failure(
                 PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
         var binding = new UsageCostService.Binding(new EconomyScope(scope.tenantId(), scope.clientId()),
-                execution.getOwnerJiacn(), execution.getTaskId(), "NATIVE_EXECUTION_EVIDENCE", execution.getExecutionId());
+                execution.getOwnerJiacn(), execution.getTaskId(), evidence.invocation()==Invocation.SKILL_SELECTION?"NATIVE_SELECTION_EVIDENCE":"NATIVE_EXECUTION_EVIDENCE", execution.getExecutionId());
         var raw = new LinkedHashMap<String, Object>();
         raw.put("executionId", execution.getExecutionId()); raw.put("runId", execution.getRunId());
         raw.put("phase", evidence.phase().name());

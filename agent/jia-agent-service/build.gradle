@@ -1050,6 +1050,9 @@ tasks.register('positionSkillsTest', Test) {
 
 // Exact native security lane and persistent generation regressions for position/archive integration.
 def positionSecuritySourceSet = sourceSets.create('positionSecurityTest') {
+    java.include 'cn/jia/agent/security/AgentConversationToolsRouteTest.java'
+    java.include 'cn/jia/agent/security/NativeExecutionUsageCostControllerTest.java'
+    java.include 'cn/jia/agent/service/usage/NativeExecutionUsageCostRecorderTest.java'
     java.srcDir 'src/test/java'
     java.include 'cn/jia/agent/security/AgentRuntimeSecurityIntegrationTest.java'
     java.include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
