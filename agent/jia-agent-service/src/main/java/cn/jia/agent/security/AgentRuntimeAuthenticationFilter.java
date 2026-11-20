@@ -61,10 +61,8 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || "POST".equals(request.getMethod()) && path.matches("/agent/runtime/v1/commands/" + id + "/acks")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/chat/dispatches/" + id + "/usage")
                 || "GET".equals(request.getMethod()) && path.equals("/internal/agent/executions/commands")
-                || request.getQueryString() == null && ("GET".equals(request.getMethod()) || "POST".equals(request.getMethod()))
-                && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/tool-calls/" + id)
                 || request.getQueryString() == null && "POST".equals(request.getMethod())
-                && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/business/model-prices/lookup")
+                && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/(?:skill-selection|business/[a-z][a-z0-9-]{0,63}/(?:lookup|commit|receipt))")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/executions/" + id
                 + "/runs/" + id + "/(?:inputs(?:/" + id + "/content)?|lease(?:/renew)?|failure|resume|usage|provider-usage|effects/" + id + "/(?:start|result)|result-commits/" + id
                 + "|outputs/" + id + "/content)")

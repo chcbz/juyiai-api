@@ -15,6 +15,18 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ExecutionModelPriceHttpTest {
+    @Test void multipleCandidatesRequireTheDurableBindingAndTheTrustedIsolationHeader() {
+        var receipts=mock(PrivateToolCallReceipts.class);
+        var actor=new RuntimeScope("tenant","client","owner","agent","instance");
+        var fence=new ConversationFence(1,"test");var digest="a".repeat(64);
+        var a=Map.<String,Object>of("skill",Map.of("installationId","a"));var b=Map.<String,Object>of("skill",Map.of("installationId","b"));
+        var candidates=List.of(a,b);var call=new RunningExecutionEndpoint.Call<>(actor,"exec","run",fence,digest,"b",null);
+        assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(call,candidates,receipts));
+        when(receipts.find(RunningExecutionEndpoint.receiptKey(call,"native-skill-selection"))).thenReturn(new cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt("native-skill-selection",digest,"{\"installationId\":\"b\"}"));
+        assertEquals(List.of(b),ExecutionSkillSelection.bound(call,candidates,receipts));
+        for(String wrong:new String[]{null,"a"})assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(new RunningExecutionEndpoint.Call<>(actor,"exec","run",fence,digest,wrong,null),candidates,receipts));
+        assertThrows(PositionSkillException.class,()->ExecutionSkillSelection.bound(call,List.of(b,b),receipts));
+    }
     @Test void lookupUsesFrozenGrantAndCannotReadAfterRevocationOrExpiredLease() throws Exception {
         var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);
         var prices=mock(ModelMaintenanceOperations.class);

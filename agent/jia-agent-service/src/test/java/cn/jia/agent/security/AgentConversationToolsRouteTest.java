@@ -16,17 +16,16 @@ class AgentConversationToolsRouteTest {
         assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",ROOT)));
         assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",ROOT+"/skill_read")));
     }
-    @Test void nativeToolCallAndReceiptUseOnlyTheExactAuthenticatedRoute() {
-        String path="/internal/agent/executions/e/runs/r/tool-calls/call_1";
-        for (String method:new String[]{"GET","POST"}) {
-            var req=new MockHttpServletRequest(method,path);
+    @Test void nativeSkillSelectionAndDomainOperationsHaveOnlyTheExactPostRoutes() {
+        String root="/internal/agent/executions/e/runs/r/";
+        for(String route:new String[]{"skill-selection","business/new-domain/lookup","business/new-domain/commit","business/new-domain/receipt"}){
+            var req=new MockHttpServletRequest("POST",root+route);
             assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(req));
-            assertTrue(AgentRuntimeAuthenticationFilter.allowed(req));
-            req.setQueryString("other=1"); assertFalse(AgentRuntimeAuthenticationFilter.allowed(req));
-            for(String invalid:new String[]{path+"/extra",path+"%2fmore",path+";v=1"})
-                assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest(method,invalid)));
+            assertTrue(AgentRuntimeAuthenticationFilter.allowed(req));req.setQueryString("other=1");assertFalse(AgentRuntimeAuthenticationFilter.allowed(req));
+            assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",root+route)));
         }
-        assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("DELETE",path)));
+        for(String invalid:new String[]{"tool-calls/call_1","skill-selection/commit","business/domain/delete","business/domain/../skill-selection","business/a%2fb/lookup"})
+            assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",root+invalid)));
     }
     @Test void routesNeverFallBackToOwnerJwtEvenWithoutRuntimeHeaders() {
         assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(new MockHttpServletRequest("GET",ROOT)));
