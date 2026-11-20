@@ -52,22 +52,6 @@ public final class PersonalWorkspaceConversationRuntimeController {
         this.runtimeAuthentication=Objects.requireNonNull(runtimeAuthentication,"runtimeAuthentication");
     }
 
-    private NativePrivateModelCalls privateCalls;
-    @org.springframework.beans.factory.annotation.Autowired public void setPrivateCalls(NativePrivateModelCalls calls){this.privateCalls=calls;}
-    @PostMapping(value="/{executionId}/runs/{runId}/tool-calls/{callId}",consumes=MediaType.APPLICATION_JSON_VALUE,produces=MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<java.util.Map<String,Object>>> privateTool(@PathVariable String executionId,@PathVariable String runId,@PathVariable String callId,
-            @cn.jia.core.annotation.ApiJsonData @RequestBody String raw,HttpServletRequest request,Authentication authentication){
-        noQuery(request); if(!callId.equals(request.getHeader("Idempotency-Key")))throw new BadRequest();
-        var cmd=skillBody(raw,Set.of("fence","snapshotSha256","catalogSha256","threadId","turnId","tool","arguments"),cn.jia.agent.service.SkillExecutionService.PrivateToolRequest.class);
-        return cn.jia.core.config.ApiJsonResponses.success(ok(skillCall(()->privateCalls.call(scope(authentication),executionId,runId,callId,cmd))));
-    }
-    @GetMapping(value="/{executionId}/runs/{runId}/tool-calls/{callId}",produces=MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<java.util.Map<String,Object>>> privateReceipt(@PathVariable String executionId,@PathVariable String runId,@PathVariable String callId,HttpServletRequest request,Authentication authentication){
-        noQuery(request);return cn.jia.core.config.ApiJsonResponses.success(ok(skillCall(()->privateCalls.read(scope(authentication),executionId,runId,callId))));
-    }
-    @ExceptionHandler(cn.jia.agent.position.PositionSkillException.class)
-    public ResponseEntity<cn.jia.core.entity.JsonResult<Void>> privateToolFailure(cn.jia.agent.position.PositionSkillException failure){return error(HttpStatus.valueOf(failure.status()),failure.getMessage());}
-
     @GetMapping(value="/commands",produces=MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<cn.jia.core.entity.JsonResult<ConversationQueue>> commands(HttpServletRequest request,Authentication authentication) {
         noQuery(request);
@@ -312,12 +296,11 @@ public final class PersonalWorkspaceConversationRuntimeController {
     }
     public record SkillCommandResponse(int executionProtocolVersion,String executionId,String runId,
             cn.jia.agent.service.SkillExecutionService.ScopeView scope,String commandId,String messageId,List<cn.jia.agent.service.SkillExecutionService.AuthorizedSkill> skills,
-            String snapshotSha256,java.util.Map<String,Object> parameters,String instruction,List<String> inputRefs,java.util.Map<String,Object> outputs,String toolPolicyRef,
-            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) java.util.Map<String,Object> privateTools) {
+            String snapshotSha256,java.util.Map<String,Object> parameters,String instruction,List<String> inputRefs,java.util.Map<String,Object> outputs,String toolPolicyRef) {
         static SkillCommandResponse from(cn.jia.agent.service.SkillExecutionService.Command value) {
             return new SkillCommandResponse(value.executionProtocolVersion(),value.executionId(),value.runId(),
                     value.scope(),value.commandId(),value.messageId(),value.skills(),
-                    value.snapshotDigest(),value.parameters(),value.instruction(),value.inputRefs(),value.outputs(),value.toolPolicyRef(),value.privateTools());
+                    value.snapshotDigest(),value.parameters(),value.instruction(),value.inputRefs(),value.outputs(),value.toolPolicyRef());
         }
     }
     public record ClaimRequest(String commandId,String messageId) { }

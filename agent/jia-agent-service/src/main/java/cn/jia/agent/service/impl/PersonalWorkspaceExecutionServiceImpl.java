@@ -1643,32 +1643,13 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             return operation.apply(new RunningSkills(scope,proof.installationId(),proof.hostId(),nativeSelections(snapshot)));
         }));
     }
-    @Override public <T> T withPrivateToolGrant(RuntimeScope authenticatedScope,String executionId,String runId,
-            PrivateToolRequest command,java.util.function.Function<PrivateToolGrant,T> operation) {
-        var scope=executionScope(authenticatedScope,executionId,runId);
-        if(!same(scope.ownerJiacn(),scope.executorOwnerJiacn()))throw failure(Reason.NOT_FOUND);
-        var proof=AgentRuntimeAuthenticationService.requireProof(nativeAuthentication(scope));
-        return nativeMutation(scope,()->withConversationRoot(scope,executionId,runId,true,command==null,command==null,execution->{
-            if(!Objects.equals(6,execution.getExecutionProtocolVersion())||!"PRIVATE".equals(execution.getBusinessScope()))throw failure(Reason.NOT_FOUND);
-            var skill=skillRow(skillOwner(scope),executionId,true);var snapshot=skillMap(skill.getSnapshotJson());
-            if(!snapshot.containsKey("privateTools"))throw failure(Reason.NOT_FOUND);
-            var catalog=skillObject(snapshot.get("privateTools"));
-            var names=((List<?>)catalog.get("tools")).stream().map(t->skillString(skillObject(t),"name")).toList();
-            if(command!=null){
-                requireConversationFence(scope,execution,command.fence(),false);requireSkillSnapshot(skill,executionId,command.snapshotDigest());
-                if(!"RUNNING".equals(skill.getPhase()) || !same(command.catalogSha256(),skillString(catalog,"catalogSha256")) || !names.contains(command.tool()))throw failure(Reason.TASK_CONFLICT);
-                requireCommandCapabilities(scope,execution,skill);
-            }
-            return operation.apply(new PrivateToolGrant(proof.installationId(),proof.hostId(),nativeSelections(snapshot),names));
-        }));
-    }
     private void requireCommandCapabilities(RuntimeScope scope,PersonalWorkspaceExecutionEntity execution,cn.jia.agent.entity.SkillExecutionEntity skill) {
         var snapshot=skillMap(skill.getSnapshotJson());
         boolean script=cn.jia.agent.service.SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef"));
-        boolean privateTools=snapshot.containsKey("privateTools");
+        // Retired command shapes are historical evidence, never instructions to replay.
+        if(snapshot.containsKey("privateTools"))throw failure(Reason.NOT_FOUND);
         boolean domain=NATIVE_DOMAIN_API_POLICY.equals(snapshot.get("toolPolicyRef"));
-        if (!script && !domain && !privateTools) return;
-        if (privateTools && (!"PRIVATE".equals(execution.getBusinessScope()) || !"NATIVE_LOCAL_FILES_V1".equals(snapshot.get("toolPolicyRef")))) throw failure(Reason.NOT_FOUND);
+        if (!script && !domain) return;
         if(nativeSkillScriptSessions==null||runtimeAuthentication==null)throw failure(Reason.NOT_FOUND);
         // Authentication stays in its owning agent boundary. Chat consumes the trusted fence
         // and checks its live registry/declaration; it must not import the authentication service.
@@ -1677,7 +1658,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             var expected=new AgentRuntimeAuthentication.Scope(scope.tenantId(),scope.clientId(),scope.executorOwnerJiacn(),scope.agentId(),scope.runtimeInstanceId());
             if(proof==null||!expected.equals(proof.scope()))throw failure(Reason.NOT_FOUND);
             var fence=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration());
-            if((domain && !nativeSkillScriptSessions.supportsDomain(scope,fence)) || (script && !nativeSkillScriptSessions.supports(scope,fence)) || (privateTools && !nativeSkillScriptSessions.supportsPrivateTools(scope,fence))
+            if((domain && !nativeSkillScriptSessions.supportsDomain(scope,fence)) || (script && !nativeSkillScriptSessions.supports(scope,fence))
                     ||!proof.equals(runtimeAuthentication.currentRegisteredProof(scope.tenantId(),scope.clientId(),scope.agentId())))throw failure(Reason.NOT_FOUND);
         }catch(IllegalStateException|IllegalArgumentException unavailable){throw failure(Reason.NOT_FOUND);}
     }
@@ -1709,8 +1690,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         return new cn.jia.agent.service.SkillExecutionService.Command(6,execution.getExecutionId(),execution.getRunId(),nativeScope(snapshot),
             "pwe_cmd_"+plainSha("command\n"+execution.getExecutionId()),"pwe_msg_"+plainSha("message\n"+execution.getExecutionId()),
             List.copyOf(bindings),skill.getSnapshotSha256(),skillObject(snapshot.get("parameters")),execution.getInstruction(),
-            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"),
-            snapshot.containsKey("privateTools") ? skillObject(snapshot.get("privateTools")) : null);
+            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"));
     }
     @Override
     public cn.jia.agent.service.SkillExecutionService.Inputs inputs(RuntimeScope authenticatedScope,String executionId,String runId,ConversationFence fence) {

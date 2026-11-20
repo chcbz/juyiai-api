@@ -43,20 +43,11 @@ public interface SkillExecutionService {
     record Command(int executionProtocolVersion,String executionId,String runId,ScopeView scope,
             String commandId,String messageId,List<AuthorizedSkill> skills,
             String snapshotDigest,Map<String,Object> parameters,String instruction,List<String> inputRefs,
-            Map<String,Object> outputs,String toolPolicyRef,Map<String,Object> privateTools) implements ConversationCommandView {
-        public Command(int executionProtocolVersion,String executionId,String runId,ScopeView scope,String commandId,String messageId,List<AuthorizedSkill> skills,
-                String snapshotDigest,Map<String,Object> parameters,String instruction,List<String> inputRefs,Map<String,Object> outputs,String toolPolicyRef) {
-            this(executionProtocolVersion,executionId,runId,scope,commandId,messageId,skills,snapshotDigest,parameters,instruction,inputRefs,outputs,toolPolicyRef,null);
-        }
-    }
+            Map<String,Object> outputs,String toolPolicyRef) implements ConversationCommandView {}
     /** Server-owned execution context, not a caller-supplied skill identity. */
     record RunningSkills(RuntimeScope subject,String installation,String host,List<Map<String,Object>> selections) {}
     <T> T withRunningSkills(RuntimeScope subject,String execution,String run,ConversationFence fence,String snapshotDigest,
             java.util.function.Function<RunningSkills,T> operation);
-    record PrivateToolRequest(ConversationFence fence,String snapshotDigest,String catalogSha256,String threadId,String turnId,String tool,Map<String,Object> arguments) {}
-    record PrivateToolGrant(String installation,String host,List<Map<String,Object>> selections,List<String> tools) {}
-    <T> T withPrivateToolGrant(RuntimeScope scope,String execution,String run,PrivateToolRequest request,
-            java.util.function.Function<PrivateToolGrant,T> operation);
     record EffectStart(String executionId,String snapshotDigest,ConversationFence fence,
             String effectDigest,String providerBindingRevision) { }
     record EffectResult(String executionId,String snapshotDigest,ConversationFence fence,
