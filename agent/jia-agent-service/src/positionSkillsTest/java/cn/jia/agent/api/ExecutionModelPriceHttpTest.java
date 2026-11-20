@@ -18,7 +18,7 @@ class ExecutionModelPriceHttpTest {
     @Test void lookupUsesFrozenGrantAndCannotReadAfterRevocationOrExpiredLease() throws Exception {
         var executions=mock(SkillExecutionService.class);var authority=mock(ModelMaintenanceAuthority.class);
         var prices=mock(ModelMaintenanceOperations.class);
-        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionModelPriceController(executions,authority,prices)).build();
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionModelPriceController(executions,authority,prices,mock(PrivateToolCallReceipts.class))).build();
         var identity=new AgentRuntimeAuthentication.Scope("tenant","client","executor","agent","instance");
         var principal=mock(AgentRuntimeAuthentication.class);
         when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);
@@ -38,5 +38,30 @@ class ExecutionModelPriceHttpTest {
         mvc.perform(request).andExpect(status().isForbidden());
         doThrow(new Failure(Reason.TASK_CONFLICT)).when(executions).withRunningSkills(eq(caller),eq("e"),eq("r"),eq(fence),eq(digest),any());
         mvc.perform(request).andExpect(status().isConflict());verify(prices,times(1)).readPrice(scope,"fixture");
+    }
+    @Test void commitAndReceiptUseTheSameIntentAndNeverReapplyUnknownWrites() throws Exception {
+        var executions=mock(SkillExecutionService.class);var authority=mock(ModelMaintenanceAuthority.class);
+        var operations=mock(ModelMaintenanceOperations.class);var receipts=mock(PrivateToolCallReceipts.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionModelPriceController(executions,authority,operations,receipts)).build();
+        var identity=new AgentRuntimeAuthentication.Scope("tenant","client","executor","agent","instance");
+        var principal=mock(AgentRuntimeAuthentication.class);when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);
+        when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(identity,"install","host",1,"digest",1,1));
+        var actor=new RuntimeScope("tenant","client","executor","agent","instance");var cross=new RuntimeScope("tenant","client","other","agent","instance","executor");
+        var subject=new java.util.concurrent.atomic.AtomicReference<>(actor);
+        doAnswer(i->i.<Function<SkillExecutionService.RunningSkills,Object>>getArgument(5).apply(new SkillExecutionService.RunningSkills(subject.get(),"install","host",List.of())))
+            .when(executions).withRunningSkills(eq(actor),eq("e"),eq("r"),any(),anyString(),any());
+        var saved=new HashMap<cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Key,cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt>();
+        doAnswer(i->saved.get(i.getArgument(0,Object.class))).when(receipts).find(any());
+        doAnswer(i->{var result=i.<java.util.function.Supplier<Map<String,Object>>>getArgument(3).get();
+            saved.put(i.getArgument(0),new cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt(i.getArgument(1),i.getArgument(2),SkillCanonicalJson.write(result)));return result;})
+            .when(receipts).apply(any(),anyString(),anyString(),any());
+        when(operations.prepareAddPrice("fixture")).thenReturn(scope->Map.of("model","fixture","configured",true));
+        var payload="{\"protocolVersion\":1,\"requestId\":\"test\",\"data\":{\"model\":\"fixture\",\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"}}}";
+        java.util.function.Function<String,org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder> request=suffix->post("/internal/agent/executions/e/runs/r/business/model-prices/"+suffix).principal(principal).contentType("application/json").content(payload);
+        mvc.perform(request.apply("receipt")).andExpect(status().isNotFound());verifyNoInteractions(operations);
+        subject.set(cross);mvc.perform(request.apply("commit")).andExpect(status().isForbidden());verifyNoInteractions(operations);subject.set(actor);
+        mvc.perform(request.apply("commit")).andExpect(status().isOk());
+        assertTrue(mvc.perform(request.apply("receipt")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString().contains("configured"));
+        mvc.perform(request.apply("commit")).andExpect(status().isOk());verify(operations,times(1)).prepareAddPrice("fixture");verify(receipts,times(1)).apply(any(),anyString(),anyString(),any());
     }
 }
