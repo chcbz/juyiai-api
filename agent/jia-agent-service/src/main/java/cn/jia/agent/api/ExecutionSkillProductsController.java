@@ -9,6 +9,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import java.util.*;
+import java.io.IOException;
+import org.springframework.web.multipart.MultipartFile;
 import static cn.jia.agent.position.PositionSkillException.require;
 
 /** Platform marketplace resources. Transport and execution selection do not know product operations. */
@@ -42,16 +44,34 @@ public final class ExecutionSkillProductsController extends ExecutionDomainContr
     private ResponseEntity<?> retire(Call<Input> c,boolean receipt){var p=intent(c.input(),"productId","expectedProductVersion");return change(c,"skill-product-retirements",true,p,receipt,()->s->{
         var v=products.retireProduct(s,subject(c,s).grant(),new SkillPackagePublicationService.RetireProduct(text(p,"productId"),number(p,"expectedProductVersion")));
         return Map.of("productId",v.productId(),"status",v.status(),"productVersion",Long.toString(v.productVersion()),"disposition",v.disposition());});}
-    private ResponseEntity<?> publish(Call<Input> c,boolean receipt){var p=intent(c.input(),"productId","productVersionId","name","description","skillKey","skillVersion","priceWen","approvedPermissionsManifest","expectedProductVersion","files");return change(c,"skill-product-versions",true,p,receipt,()->{
-        var a=authorized(c,true,true,s->subject(c,s));require(p.get("files") instanceof List<?>,400,"BAD_REQUEST");var files=new ArrayList<SkillPublicationToolArchive.File>();
-        for(var row:(List<?>)p.get("files")){require(row instanceof Map<?,?>,400,"BAD_REQUEST");var f=(Map<?,?>)row;files.add(new SkillPublicationToolArchive.File(text(f,"path"),text(f,"content"),text(f,"encoding")));}
-        var bytes=SkillPublicationToolArchive.encode(files);String digest;try{digest=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));}catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
-        var command=new SkillPackagePublicationService.Publish(text(p,"productId"),text(p,"productVersionId"),text(p,"name"),text(p,"description"),text(p,"skillKey"),text(p,"skillVersion"),number(p,"priceWen"),"NONE",text(p,"approvedPermissionsManifest"),digest,null,number(p,"expectedProductVersion"),null);
-        var prepared=products.prepare(a.scope(),a.grant(),command,bytes);return s->{require(prepared.matches(s,subject(c,s).grant()),403,"POSITION_AUTHORITY_CHANGED");var v=products.commitPrepared(prepared);
-        return Map.of("productId",v.productId(),"productVersionId",v.productVersionId(),"productVersion",Long.toString(v.productVersion()),"packageSha256",v.packageSha256(),"disposition",v.disposition());};});}
+    private ResponseEntity<?> publish(Call<Input> c, boolean receipt, MultipartFile archive) {
+        boolean binary = c.input().payload()!=null && c.input().payload().containsKey("packageSha256");
+        require(!binary || !c.input().payload().containsKey("files"),400,"AMBIGUOUS_PACKAGE");
+        require(receipt || binary==(archive!=null),400,"PACKAGE_REQUIRED");
+        var p=intent(c.input(),"productId","productVersionId","name","description","skillKey","skillVersion","priceWen","approvedPermissionsManifest","expectedProductVersion",binary?"packageSha256":"files");
+        if(binary)require(text(p,"packageSha256").matches("[a-f0-9]{64}"),400,"BAD_PACKAGE_DIGEST");
+        return change(c,"skill-product-versions",true,p,receipt,()->{
+            var a=authorized(c,true,true,s->subject(c,s));
+            byte[] bytes;String digest;
+            if(binary){
+                require(archive!=null && archive.getSize()>0 && archive.getSize()<=SkillPackageStore.MAX_PACKAGE_BYTES,413,"SKILL_PACKAGE_SIZE");
+                try{bytes=archive.getBytes();}catch(IOException ex){throw new cn.jia.agent.position.PositionSkillException(503,"PACKAGE_READ_FAILED");}
+                // prepare() checks the digest and validates the complete archive outside the transaction.
+                digest=text(p,"packageSha256");
+            }else{
+                require(p.get("files") instanceof List<?>,400,"BAD_REQUEST");var files=new ArrayList<SkillPublicationToolArchive.File>();
+                for(var row:(List<?>)p.get("files")){require(row instanceof Map<?,?>,400,"BAD_REQUEST");var f=(Map<?,?>)row;files.add(new SkillPublicationToolArchive.File(text(f,"path"),text(f,"content"),text(f,"encoding")));}
+                bytes=SkillPublicationToolArchive.encode(files);try{digest=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));}catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+            }
+            var command=new SkillPackagePublicationService.Publish(text(p,"productId"),text(p,"productVersionId"),text(p,"name"),text(p,"description"),text(p,"skillKey"),text(p,"skillVersion"),number(p,"priceWen"),"NONE",text(p,"approvedPermissionsManifest"),digest,null,number(p,"expectedProductVersion"),null);
+            var prepared=products.prepare(a.scope(),a.grant(),command,bytes);return s->{require(prepared.matches(s,subject(c,s).grant()),403,"POSITION_AUTHORITY_CHANGED");var v=products.commitPrepared(prepared);
+            return Map.of("productId",v.productId(),"productVersionId",v.productVersionId(),"productVersion",Long.toString(v.productVersion()),"packageSha256",v.packageSha256(),"disposition",v.disposition());};});
+    }
     @ExceptionHandler(SkillMarketplaceException.class) public ResponseEntity<?> marketplaceFailure(SkillMarketplaceException f){return ResponseEntity.status(f.status()).header("Cache-Control","private, no-store").body(cn.jia.core.entity.JsonResult.failure(f.code(),"Marketplace operation unavailable"));}
-    @PostMapping("/skill-product-versions/commit") public ResponseEntity<?> publishCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return publish(call(auth,e,r,req),false);}
-    @PostMapping("/skill-product-versions/receipt") public ResponseEntity<?> publishReceipt(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return publish(call(auth,e,r,req),true);}
+    @PostMapping(path="/skill-product-versions/commit",consumes="application/json") public ResponseEntity<?> publishCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return publish(call(auth,e,r,req),false,null);}
+    @PostMapping(path="/skill-product-versions/commit",consumes="multipart/form-data")
+    public ResponseEntity<?> publishArchive(@PathVariable String e,@PathVariable String r,@RequestPart("metadata") JsonRequest<Input> req,@RequestPart("file") MultipartFile archive,Authentication auth){return publish(call(auth,e,r,req),false,archive);}
+    @PostMapping("/skill-product-versions/receipt") public ResponseEntity<?> publishReceipt(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return publish(call(auth,e,r,req),true,null);}
     @PostMapping("/skill-product-metadata/commit") public ResponseEntity<?> metadataCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return metadata(call(auth,e,r,req),false);}
     @PostMapping("/skill-product-metadata/receipt") public ResponseEntity<?> metadataReceipt(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return metadata(call(auth,e,r,req),true);}
     @PostMapping("/skill-product-retirements/commit") public ResponseEntity<?> retireCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return retire(call(auth,e,r,req),false);}

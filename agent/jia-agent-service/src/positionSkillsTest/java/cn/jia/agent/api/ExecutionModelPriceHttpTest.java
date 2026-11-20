@@ -29,6 +29,18 @@ class ExecutionModelPriceHttpTest {
         mvc.perform(req.apply("skill-product-versions/commit","""
             {"productId":"p","productVersionId":"v","name":"name","description":"description","skillKey":"x","skillVersion":"1.0.0","priceWen":"0","approvedPermissionsManifest":"[]","expectedProductVersion":"0","files":[{"path":"SKILL.md","content":"example","encoding":"utf8"}]}
             """)).andExpect(status().isConflict());verify(products,never()).commitPrepared(any());
+        // ZIP bytes are an attachment, not a large JSON string. Revocation after prepare still wins.
+        active.set(true);byte[] zip=new byte[96*1024];new Random(7).nextBytes(zip);
+        String hash=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(zip));
+        String payload="""
+            {"productId":"p","productVersionId":"v","name":"name","description":"description","skillKey":"x","skillVersion":"1.0.0","priceWen":"0","approvedPermissionsManifest":"[]","expectedProductVersion":"0","packageSha256":"%s"}
+            """.formatted(hash);
+        var meta=new org.springframework.mock.web.MockMultipartFile("metadata","metadata.json","application/json",("{\"protocolVersion\":1,\"requestId\":\"req\",\"data\":{\"fence\":{\"version\":\"1\",\"token\":\"fixture\"},\"snapshotSha256\":\""+"a".repeat(64)+"\",\"payload\":"+payload+"}}").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var file=new org.springframework.mock.web.MockMultipartFile("file","package.zip","application/octet-stream",zip);
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart("/internal/agent/executions/e/runs/r/business/skill-product-versions/commit").file(meta).file(file).principal(principal)).andExpect(status().isConflict());
+        verify(products).prepare(eq(scope),eq(grant),argThat(cmd->hash.equals(cmd.packageSha256())),org.mockito.AdditionalMatchers.aryEq(zip));
+        verify(products,never()).commitPrepared(any());
+
     }
     @Test void productReadsReusePublicationGrantAndDoNotExposeAnotherExecutorsCatalog() throws Exception {
         var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);var positions=mock(cn.jia.agent.position.PositionSkillService.class);var products=mock(cn.jia.agent.skill.SkillPackagePublicationService.class);
