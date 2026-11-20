@@ -15,6 +15,21 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class ExecutionModelPriceHttpTest {
+    @Test void cancellationDuringPackageReviewSuppressesReadbackAndCommit() throws Exception {
+        var executions=mock(SkillExecutionService.class);var positions=mock(cn.jia.agent.position.PositionSkillService.class);var products=mock(cn.jia.agent.skill.SkillPackagePublicationService.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionSkillProductsController(executions,mock(InstalledDomainAuthority.class),mock(PrivateToolCallReceipts.class),positions,products)).build();
+        var identity=new AgentRuntimeAuthentication.Scope("tenant","client","owner","agent","instance");var principal=mock(AgentRuntimeAuthentication.class);when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(identity,"install","host",1,"digest",1,1));
+        var actor=new RuntimeScope("tenant","client","owner","agent","instance");var active=new java.util.concurrent.atomic.AtomicBoolean(true);
+        doAnswer(i->{if(!active.get())throw new Failure(Reason.TASK_CONFLICT);return i.<Function<SkillExecutionService.RunningSkills,Object>>getArgument(5).apply(new SkillExecutionService.RunningSkills(actor,"install","host",List.of()));}).when(executions).withRunningSkills(eq(actor),eq("e"),eq("r"),any(),anyString(),any());
+        var scope=new PositionAuthority.Scope("tenant","client","owner");var grant=new PositionAuthority.Grant("appointment",1,2,"agent",1,null,true);when(positions.currentManagementGrant(scope,"agent")).thenReturn(grant);
+        java.util.function.BiFunction<String,String,org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder> req=(route,data)->post("/internal/agent/executions/e/runs/r/business/"+route).principal(principal).contentType("application/json").content("{\"protocolVersion\":1,\"requestId\":\"req\",\"data\":{\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"},\"payload\":"+data+"}}");
+        when(products.readPackage(scope,grant,"ver","SKILL.md")).thenAnswer(i->{active.set(false);return Map.of("data","private-candidate-body");});
+        var denied=mvc.perform(req.apply("skill-package-files/lookup","{\"productVersionId\":\"ver\",\"path\":\"SKILL.md\"}")).andExpect(status().isConflict()).andReturn();assertFalse(denied.getResponse().getContentAsString().contains("private-candidate-body"));
+        active.set(true);when(products.prepare(eq(scope),eq(grant),any(),any())).thenAnswer(i->{active.set(false);return mock(cn.jia.agent.skill.SkillPackagePublicationService.Prepared.class);});
+        mvc.perform(req.apply("skill-product-versions/commit","""
+            {"productId":"p","productVersionId":"v","name":"name","description":"description","skillKey":"x","skillVersion":"1.0.0","priceWen":"0","approvedPermissionsManifest":"[]","expectedProductVersion":"0","files":[{"path":"SKILL.md","content":"example","encoding":"utf8"}]}
+            """)).andExpect(status().isConflict());verify(products,never()).commitPrepared(any());
+    }
     @Test void productReadsReusePublicationGrantAndDoNotExposeAnotherExecutorsCatalog() throws Exception {
         var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);var positions=mock(cn.jia.agent.position.PositionSkillService.class);var products=mock(cn.jia.agent.skill.SkillPackagePublicationService.class);
         var mvc=MockMvcBuilders.standaloneSetup(new ExecutionSkillProductsController(executions,authority,mock(PrivateToolCallReceipts.class),positions,products)).build();
