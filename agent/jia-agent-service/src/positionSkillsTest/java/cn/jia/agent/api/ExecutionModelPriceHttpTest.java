@@ -16,7 +16,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class ExecutionModelPriceHttpTest {
     @Test void lookupUsesFrozenGrantAndCannotReadAfterRevocationOrExpiredLease() throws Exception {
-        var executions=mock(SkillExecutionService.class);var authority=mock(ModelMaintenanceAuthority.class);
+        var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);
         var prices=mock(ModelMaintenanceOperations.class);
         var mvc=MockMvcBuilders.standaloneSetup(new ExecutionModelPriceController(executions,authority,prices,mock(PrivateToolCallReceipts.class))).build();
         var identity=new AgentRuntimeAuthentication.Scope("tenant","client","executor","agent","instance");
@@ -34,13 +34,13 @@ class ExecutionModelPriceHttpTest {
                 .content("{\"protocolVersion\":1,\"requestId\":\"test\",\"data\":{\"model\":\"fixture\",\"snapshotSha256\":\""+digest+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"}}}");
         var response=mvc.perform(request).andExpect(status().isOk()).andReturn().getResponse();
         assertTrue(response.getContentAsString().contains("\"configured\":true"));
-        doThrow(new PositionSkillException(403,"MODEL_SKILL_REQUIRED")).when(authority).requireInstalled(scope,"agent","install","host",true,grant.selections());
+        doThrow(new PositionSkillException(403,"MODEL_SKILL_REQUIRED")).when(authority).requireInstalled(scope,"agent","install","host",true,grant.selections(),ExecutionModelPriceController.REQUIRED);
         mvc.perform(request).andExpect(status().isForbidden());
         doThrow(new Failure(Reason.TASK_CONFLICT)).when(executions).withRunningSkills(eq(caller),eq("e"),eq("r"),eq(fence),eq(digest),any());
         mvc.perform(request).andExpect(status().isConflict());verify(prices,times(1)).readPrice(scope,"fixture");
     }
     @Test void commitAndReceiptUseTheSameIntentAndNeverReapplyUnknownWrites() throws Exception {
-        var executions=mock(SkillExecutionService.class);var authority=mock(ModelMaintenanceAuthority.class);
+        var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);
         var operations=mock(ModelMaintenanceOperations.class);var receipts=mock(PrivateToolCallReceipts.class);
         var mvc=MockMvcBuilders.standaloneSetup(new ExecutionModelPriceController(executions,authority,operations,receipts)).build();
         var identity=new AgentRuntimeAuthentication.Scope("tenant","client","executor","agent","instance");
@@ -63,5 +63,27 @@ class ExecutionModelPriceHttpTest {
         mvc.perform(request.apply("commit")).andExpect(status().isOk());
         assertTrue(mvc.perform(request.apply("receipt")).andExpect(status().isOk()).andReturn().getResponse().getContentAsString().contains("configured"));
         mvc.perform(request.apply("commit")).andExpect(status().isOk());verify(operations,times(1)).prepareAddPrice("fixture");verify(receipts,times(1)).apply(any(),anyString(),anyString(),any());
+    }
+    @Test void positionUpgradeRejectsBorrowedScopeAndRequiresCurrentManagementInstallationEvenForReceipt() throws Exception {
+        var executions=mock(SkillExecutionService.class);var authority=mock(InstalledDomainAuthority.class);
+        var positions=mock(cn.jia.agent.position.PositionSkillService.class);var receipts=mock(PrivateToolCallReceipts.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionPositionUpgradeController(executions,authority,receipts,positions)).build();
+        var identity=new AgentRuntimeAuthentication.Scope("tenant","client","executor","agent","instance");
+        var principal=mock(AgentRuntimeAuthentication.class);when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(identity);
+        when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(identity,"install","host",1,"digest",1,1));
+        var actor=new RuntimeScope("tenant","client","executor","agent","instance");var cross=new RuntimeScope("tenant","client","other","agent","instance","executor");
+        var subject=new java.util.concurrent.atomic.AtomicReference<>(cross);
+        doAnswer(i->i.<Function<SkillExecutionService.RunningSkills,Object>>getArgument(5).apply(new SkillExecutionService.RunningSkills(subject.get(),"install","host",List.of())))
+                .when(executions).withRunningSkills(eq(actor),eq("e"),eq("r"),any(),anyString(),any());
+        String payload="{\"protocolVersion\":1,\"requestId\":\"test\",\"data\":{\"skillKey\":\"fixture\",\"expectedProductVersionId\":\"old\",\"targetProductVersionId\":\"new\",\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"}}}";
+        java.util.function.Function<String,org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder> req=verb->post("/internal/agent/executions/e/runs/r/business/position-skill-versions/"+verb).principal(principal).contentType("application/json").content(payload);
+        mvc.perform(req.apply("commit")).andExpect(status().isForbidden());verifyNoInteractions(positions,receipts);
+        subject.set(actor);mvc.perform(req.apply("receipt")).andExpect(status().isNotFound());verifyNoInteractions(positions);
+        var scope=new PositionAuthority.Scope("tenant","client","executor");
+        doAnswer(i->i.<java.util.function.Supplier<?>>getArgument(3).get()).when(receipts).apply(any(),eq("position-skill-versions"),anyString(),any());
+        when(positions.upgrade(eq(scope),anyString(),eq("fixture"),eq("old"),eq("new"))).thenReturn(new cn.jia.agent.position.PositionSkillService.View("op","fixture",2,null));
+        var response=mvc.perform(req.apply("commit")).andExpect(status().isOk()).andReturn().getResponse();assertTrue(response.getContentAsString().contains("DEFINITION_UPDATED"));
+        doThrow(new PositionSkillException(403,"MANAGEMENT_REVOKED")).when(authority).requireInstalled(eq(scope),eq("agent"),eq("install"),eq("host"),eq(true),anyList(),eq(ExecutionPositionUpgradeController.REQUIRED));
+        mvc.perform(req.apply("receipt")).andExpect(status().isForbidden());verify(positions,times(1)).upgrade(eq(scope),anyString(),eq("fixture"),eq("old"),eq("new"));
     }
 }

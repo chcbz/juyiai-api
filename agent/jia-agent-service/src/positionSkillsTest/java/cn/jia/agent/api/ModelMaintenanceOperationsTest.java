@@ -31,7 +31,7 @@ class ModelMaintenanceOperationsTest {
     private final EconomyPriceCatalogMapper prices=mock(EconomyPriceCatalogMapper.class);
     private final BaseLlmModelPriceSource source=mock(BaseLlmModelPriceSource.class);
     private final ModelMaintenanceOperations operations=new ModelMaintenanceOperations(bindings,new DatabaseModelPriceMaintenance(prices,JSON),source);
-    private final ModelMaintenanceAuthority authority=new ModelMaintenanceAuthority(positions,identities,managed);
+    private final InstalledDomainAuthority authority=new InstalledDomainAuthority(positions,identities,managed);
 
     private static byte[] fixture(String expression) {
         return JSON.writeValueAsString(Map.of("success",true,"data",Map.of("billing_mode",Map.of(MODEL,"tiered_expr"),
@@ -62,11 +62,11 @@ class ModelMaintenanceOperationsTest {
     @Test void domainRequiresLiveInstallationAndSeparatePriceAuthority() {
         when(identities.requireRegistrationIdentityInScope("fixture","client","owner","agent"))
             .thenReturn(new AgentIdentityRegistryEntity().setCanonicalAgentId("agent").setBindingId(7L));
-        when(positions.positionSkillInstallations(SCOPE,"agent",7L,"runtime","host",ModelMaintenanceAuthority.REQUIRED,true))
+        when(positions.positionSkillInstallations(SCOPE,"agent",7L,"runtime","host",ExecutionModelPriceController.REQUIRED,true))
             .thenThrow(new PositionSkillException(403,"POSITION_PUBLISH_FORBIDDEN"));
-        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",true,List.of())).status());
+        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",true,List.of(),ExecutionModelPriceController.REQUIRED)).status());
         verifyNoInteractions(managed);
-        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",false,List.of())).status());
+        assertEquals(403,assertThrows(PositionSkillException.class,()->authority.requireInstalled(SCOPE,"agent","runtime","host",false,List.of(),ExecutionModelPriceController.REQUIRED)).status());
         verify(managed).lockState("fixture","client","agent","model-maintenance");
     }
     @Test void addIsScopedAndExistingDifferentVersionIsNotOverwritten() {
