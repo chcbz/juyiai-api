@@ -23,26 +23,30 @@ public final class SkillPackageStore {
         this.root = root;
     }
     public byte[] read(byte[] digest, long size) {
-        try (FileChannel channel = open(digest, size)) {
+        try (FileChannel channel = FileChannel.open(checkedObject(digest,size),StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)) {
+            require(channel.size()==size,503,"SKILL_PACKAGE_UNAVAILABLE");
             byte[] bytes = new byte[(int)size];
             for (int offset = 0; offset < size;) {
                 int n = channel.read(chunk(bytes, offset));
                 require(n > 0,503,"SKILL_PACKAGE_UNAVAILABLE");
                 offset += n;
             }
+            require(channel.read(ByteBuffer.allocate(1))==-1 && Arrays.equals(sha256(bytes),digest),503,"SKILL_PACKAGE_UNAVAILABLE");
             return bytes;
         } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
     }
-    FileChannel open(byte[] digest, long size) throws IOException {
-        String hex = objectKey(digest, size);
-        try {
-            checkRoot();
-            Path object = root.resolve(hex + ".zip");
-            require(Files.isRegularFile(object, LinkOption.NOFOLLOW_LINKS),503,"SKILL_PACKAGE_UNAVAILABLE");
-            checkPermissions(object);
-            require(!Files.getPosixFilePermissions(object,LinkOption.NOFOLLOW_LINKS).contains(PosixFilePermission.OWNER_WRITE),503,"SKILL_PACKAGE_STORE_INVALID");
-            return openVerified(object, digest, size);
-        } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
+    FileChannel open(byte[] digest, long size) {
+        try { return openVerified(checkedObject(digest,size),digest,size); }
+        catch(IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
+    }
+    private Path checkedObject(byte[] digest,long size) throws IOException {
+        String hex=objectKey(digest,size);
+        checkRoot();
+        Path object=root.resolve(hex+".zip");
+        require(Files.isRegularFile(object,LinkOption.NOFOLLOW_LINKS),503,"SKILL_PACKAGE_UNAVAILABLE");
+        checkPermissions(object);
+        require(!Files.getPosixFilePermissions(object,LinkOption.NOFOLLOW_LINKS).contains(PosixFilePermission.OWNER_WRITE),503,"SKILL_PACKAGE_STORE_INVALID");
+        return object;
     }
     private static FileChannel openVerified(Path file, byte[] digest, long size) throws IOException {
         var channel = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
