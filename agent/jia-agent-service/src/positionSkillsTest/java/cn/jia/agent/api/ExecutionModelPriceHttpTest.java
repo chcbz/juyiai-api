@@ -53,6 +53,23 @@ class ExecutionModelPriceHttpTest {
         mvc.perform(req).andExpect(status().isOk());verify(products).listProducts(scope,grant,0,10);
         subject.set(new RuntimeScope("tenant","client","other","agent","instance","owner"));mvc.perform(req).andExpect(status().isForbidden());verifyNoMoreInteractions(products);
     }
+    @Test void archiveLookupRequiresCurrentSelectedArchiveInstallationAndSameOwner() throws Exception {
+        var runs=mock(SkillExecutionService.class); var authority=mock(InstalledDomainAuthority.class);
+        var jobs=mock(ArchiveExecutionJobLookup.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new ExecutionArchiveJobController(runs,authority,mock(PrivateToolCallReceipts.class),jobs)).build();
+        var id=new AgentRuntimeAuthentication.Scope("tenant","client","owner","agent","instance");var principal=mock(AgentRuntimeAuthentication.class);
+        when(principal.isAuthenticated()).thenReturn(true);when(principal.getPrincipal()).thenReturn(id);
+        when(principal.getDetails()).thenReturn(new AgentRuntimeAuthenticationService.Proof(id,"install","host",1,"digest",1,1));
+        var actor=new RuntimeScope("tenant","client","owner","agent","instance");var subject=new java.util.concurrent.atomic.AtomicReference<>(actor);
+        doAnswer(i->i.<Function<SkillExecutionService.RunningSkills,Object>>getArgument(5).apply(new SkillExecutionService.RunningSkills(subject.get(),"install","host",List.of())))
+            .when(runs).withRunningSkills(eq(actor),eq("e"),eq("r"),any(),anyString(),any());
+        var request=post("/internal/agent/executions/e/runs/r/business/archive-jobs/lookup").principal(principal).contentType("application/json").content(
+            "{\"protocolVersion\":1,\"requestId\":\"req\",\"data\":{\"snapshotSha256\":\""+"a".repeat(64)+"\",\"fence\":{\"version\":\"1\",\"token\":\"fixture\"},\"jobId\":\"fixed-job\"}}");
+        var scope=new PositionAuthority.Scope("tenant","client","owner");mvc.perform(request).andExpect(status().isOk());verify(jobs).readJob(scope,"agent","fixed-job");
+        doThrow(new PositionSkillException(403,"ARCHIVE_SKILL_NOT_READY")).when(authority).requireInstalled(eq(scope),eq("agent"),eq("install"),eq("host"),eq(false),any(),argThat(req->req.resource().equals("archive:public") && req.skillKey().equals("archive-maintenance")));
+        mvc.perform(request).andExpect(status().isForbidden());
+        subject.set(new RuntimeScope("tenant","client","other","agent","instance","owner"));mvc.perform(request).andExpect(status().isForbidden());verifyNoMoreInteractions(jobs);
+    }
     @Test void selectionIsIrrevocablyBoundToOneOfferedInstallationUnderTheExecutionLock() throws Exception {
         var executions=mock(SkillExecutionService.class);var mapper=mock(cn.jia.agent.mapper.PrivateToolCallReceiptMapper.class);
         var saved=new HashMap<cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Key,cn.jia.agent.mapper.PrivateToolCallReceiptMapper.Receipt>();
