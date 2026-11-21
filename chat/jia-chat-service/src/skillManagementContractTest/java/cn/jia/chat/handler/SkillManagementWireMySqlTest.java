@@ -106,7 +106,7 @@ public class SkillManagementWireMySqlTest extends SkillManagementTransactionTest
         when(capabilities.lookup(any(),any())).thenAnswer(call->registry.lookup(call.getArgument(0),call.getArgument(1)));
         var frames=new ArrayList<String>();var socket=socket(frames);register(handler,socket,null,frames);
         assertTrue(frames.stream().anyMatch(f->f.contains("agent.registered")),frames.toString());
-        var c=installOverHttp();recovery.recover();verify(sessions,atLeastOnce()).dispatch(anyString(),anyString(),anyString(),any(),any());
+        var c=installOverHttp();runSkillSchedules();verify(sessions,atLeastOnce()).dispatch(anyString(),anyString(),anyString(),any(),any());
         handler.accept(socket,result(c,evidence(c,"PREPARED",null)));c=current(c);assertEquals("ACTIVATING",c.get("status"));
         assertTrue(frames.stream().anyMatch(f->f.contains("work.result.receipt")&&f.contains("ACCEPTED")),frames.toString());
         var applied=result(c,evidence(c,"APPLIED",null));handler.accept(socket,applied);c=current(c);assertEquals("VERIFYING",c.get("status"));

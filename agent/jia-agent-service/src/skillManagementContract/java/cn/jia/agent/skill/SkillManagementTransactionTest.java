@@ -1105,7 +1105,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         for(String table:List.of("agent_skill_agent_version","agent_skill_managed_state","agent_outbox_event"))assertEquals(0,count(table));
         assertThrows(RuntimeException.class,()->service.skills(new HostingRentHttp.Actor("other","0",ACTOR.clientId(),"other-owner"),AGENT,false));
     }
-    private void runSkillSchedules() {
+    protected final void runSkillSchedules() {
         for(var work:schedules.claimDue("node-1",100,60000)) {
             recovery.executeScheduled(new ScheduledInvocation("0",work.key(),work.claim().revision()));
             assertTrue(schedules.succeed(work));

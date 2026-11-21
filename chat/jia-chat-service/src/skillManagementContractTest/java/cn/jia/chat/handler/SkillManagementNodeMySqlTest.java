@@ -135,7 +135,7 @@ public class SkillManagementNodeMySqlTest extends SkillManagementWireMySqlTest {
         Map<String,Object> complete(Map<String,Object> change,boolean packageRequired) throws Exception {
             if(packageRequired)supply(change);
             // Bounded phase count, not a wait/retry loop. PREPARE creates ACTIVATE transactionally.
-            recovery.recover();if(Set.of("INSTALL","UPGRADE").contains(change.get("action")))recovery.recover();
+            runSkillSchedules();if(Set.of("INSTALL","UPGRADE").contains(change.get("action")))runSkillSchedules();
             var completed=current(change);assertEquals("SUCCEEDED",completed.get("status"),()->json(completed));assertEquals(true,completed.get("runtimeSynced"));return completed;
         }
         @Override public void close() throws Exception {try{handler.afterConnectionClosed(socket,CloseStatus.NORMAL);}finally{peer.close();}}
@@ -159,9 +159,9 @@ public class SkillManagementNodeMySqlTest extends SkillManagementWireMySqlTest {
             jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","COVERED");
             var upgrade=packageChange("UPGRADE",old,text(first,"skillRevision"),"spv_pdf_2");node.supply(upgrade);
             assertThrows(cn.jia.agent.skill.SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",old,()->"never"));
-            recovery.recover();assertEquals("ACTIVATING",current(upgrade).get("status"));
+            runSkillSchedules();assertEquals("ACTIVATING",current(upgrade).get("status"));
             assertThrows(cn.jia.agent.skill.SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",old,()->"never"));
-            recovery.recover();upgrade=current(upgrade);assertEquals("SUCCEEDED",upgrade.get("status"));
+            runSkillSchedules();upgrade=current(upgrade);assertEquals("SUCCEEDED",upgrade.get("status"));
             assertNotEquals(old,object(upgrade.get("target")).get("skillInstallationId"));
             assertEquals(binding,service.executionBinding("0",ACTOR.clientId(),"old-execution","a".repeat(64),1,AGENT,old));
             var disabled=policyChange("DISABLE",upgrade);String active=text(object(upgrade.get("target")),"skillInstallationId");
