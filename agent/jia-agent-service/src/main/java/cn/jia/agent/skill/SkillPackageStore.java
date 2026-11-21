@@ -23,6 +23,17 @@ public final class SkillPackageStore {
         this.root = root;
     }
     public byte[] read(byte[] digest, long size) {
+        try (FileChannel channel = open(digest, size)) {
+            byte[] bytes = new byte[(int)size];
+            for (int offset = 0; offset < size;) {
+                int n = channel.read(chunk(bytes, offset));
+                require(n > 0,503,"SKILL_PACKAGE_UNAVAILABLE");
+                offset += n;
+            }
+            return bytes;
+        } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
+    }
+    FileChannel open(byte[] digest, long size) throws IOException {
         String hex = objectKey(digest, size);
         try {
             checkRoot();
@@ -30,21 +41,32 @@ public final class SkillPackageStore {
             require(Files.isRegularFile(object, LinkOption.NOFOLLOW_LINKS),503,"SKILL_PACKAGE_UNAVAILABLE");
             checkPermissions(object);
             require(!Files.getPosixFilePermissions(object,LinkOption.NOFOLLOW_LINKS).contains(PosixFilePermission.OWNER_WRITE),503,"SKILL_PACKAGE_STORE_INVALID");
-            return readVerified(object, digest, (int)size);
+            return openVerified(object, digest, size);
         } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
     }
-    private static byte[] readVerified(Path file, byte[] digest, int size) throws IOException {
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-            require(channel.size() == size,503,"SKILL_PACKAGE_UNAVAILABLE");
-            byte[] bytes = new byte[size];
-            for (int offset = 0; offset < size;) {
-                int n = channel.read(chunk(bytes, offset));
-                require(n > 0,503,"SKILL_PACKAGE_UNAVAILABLE");
-                offset += n;
-            }
-            require(channel.read(ByteBuffer.allocate(1)) == -1 && Arrays.equals(sha256(bytes),digest),503,"SKILL_PACKAGE_UNAVAILABLE");
-            return bytes;
+    private static FileChannel openVerified(Path file, byte[] digest, long size) throws IOException {
+        var channel = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        try {
+            verify(channel, digest, size);
+            return channel;
+        } catch (IOException | RuntimeException | Error failure) {
+            try { channel.close(); } catch (IOException close) { failure.addSuppressed(close); }
+            throw failure;
         }
+    }
+    static void verify(FileChannel channel, byte[] digest, long size) throws IOException {
+        require(channel.size() == size,503,"SKILL_PACKAGE_UNAVAILABLE");
+        var hash = newDigest();
+        var block = ByteBuffer.allocate(IO_CHUNK);
+        channel.position(0);
+        long total = 0;
+        for (int n; (n = channel.read(block)) != -1; block.clear()) {
+            total += n;
+            require(n > 0 && total <= size,503,"SKILL_PACKAGE_UNAVAILABLE");
+            block.flip(); hash.update(block);
+        }
+        require(total == size && Arrays.equals(hash.digest(),digest),503,"SKILL_PACKAGE_UNAVAILABLE");
+        channel.position(0);
     }
     private static ByteBuffer chunk(byte[] bytes, int offset) {
         return ByteBuffer.wrap(bytes, offset, Math.min(IO_CHUNK, bytes.length - offset));
@@ -62,12 +84,12 @@ public final class SkillPackageStore {
                 for (int offset = 0; offset < bytes.length;) offset += channel.write(chunk(bytes, offset));
                 channel.force(true);
             }
-            readVerified(temporary, digest, bytes.length);
+            try (var verified = openVerified(temporary, digest, bytes.length)) { /* checked before promotion */ }
             Files.setPosixFilePermissions(temporary,Set.of(PosixFilePermission.OWNER_READ,
                     PosixFilePermission.GROUP_READ,PosixFilePermission.OTHERS_READ));
             try { Files.createLink(root.resolve(hex+".zip"),temporary); }
             catch (FileAlreadyExistsException alreadyPublished) { /* Verify identical existing bytes below. */ }
-            read(digest,bytes.length);
+            try (var verified = open(digest,bytes.length)) { /* also checks an existing object */ }
             try (FileChannel directory=FileChannel.open(root,StandardOpenOption.READ)) { directory.force(true); }
             return hex;
         } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
@@ -89,7 +111,10 @@ public final class SkillPackageStore {
         return HexFormat.of().formatHex(digest);
     }
     static byte[] sha256(byte[] bytes) {
-        try { return MessageDigest.getInstance("SHA-256").digest(bytes); }
+        return newDigest().digest(bytes);
+    }
+    private static MessageDigest newDigest() {
+        try { return MessageDigest.getInstance("SHA-256"); }
         catch(NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
 }

@@ -5,7 +5,11 @@ import cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog.PlatformS
 import cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog.PlatformSkillProduct;
 import cn.jia.agent.entity.skill.SkillProductVersionEntity;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import java.nio.file.Path;
+import java.io.*;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.file.*;
+import org.springframework.core.io.ClassPathResource;
 import java.util.*;
 import java.util.function.Supplier;
 import static cn.jia.agent.skill.SkillMarketplaceException.require;
@@ -46,8 +50,9 @@ public final class SkillPackages {
             // Never turn cache eviction into archive IO while holding business locks. Callers that
             // span a transaction pin their cold/warm preparation for that operation explicitly.
             requireOutsideTransaction();
-            var pkg=load(product);
-            var manifest=SkillPackageDescriptor.read(pkg,manifestCodec);
+            SkillManifestCodec.Manifest manifest;
+            try { manifest=withArchive(product,(description,input)->description.manifest()); }
+            catch(IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
             cached=new CachedDescription(product.packageSize(),manifest,
                     1024L+(manifest==null?0L:8L*manifest.document().toString().length()));
             remember(digest,cached);
@@ -69,7 +74,45 @@ public final class SkillPackages {
             }
         }
     }
-    /** Actual downloads only: bytes live with this operation, not with the application singleton. */
+    @FunctionalInterface
+    interface ArchiveReader<T> { T read(Description description, InputStream input) throws IOException; }
+
+    <T> T withArchive(SkillProductVersionEntity approved, ArchiveReader<T> reader) throws IOException {
+        return withArchive(product(approved),reader);
+    }
+
+    /** Digest, ZIP projection and delivery operate on the same open file, never a reopened path. */
+    private <T> T withArchive(PlatformSkillProduct product, ArchiveReader<T> reader) throws IOException {
+        requireOutsideTransaction();
+        var bundled=seed.products().stream().filter(p->Arrays.equals(p.packageSha256(),product.packageSha256())).findFirst();
+        if(bundled.isPresent()) {
+            var resource=bundled.get();
+            require(product.packageSize()==resource.packageSize(),503,"SKILL_PACKAGE_UNAVAILABLE");
+            // A classpath stream is not seekable. Only bundled resources need this private spool.
+            Path tmp=Files.createTempFile("cyf-skill-seed-",".zip");
+            try (var channel=FileChannel.open(tmp,StandardOpenOption.READ,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS);
+                 var in=new ClassPathResource(resource.resourcePath()).getInputStream()) {
+                var out=Channels.newOutputStream(channel); byte[] block=new byte[8192]; long total=0;
+                for(int n;(n=in.read(block))!=-1;) {
+                    total+=n; require(total<=product.packageSize(),503,"SKILL_PACKAGE_UNAVAILABLE");
+                    out.write(block,0,n);
+                }
+                SkillPackageStore.verify(channel,product.packageSha256(),product.packageSize());
+                return readArchive(product,channel,reader);
+            } finally { Files.deleteIfExists(tmp); }
+        }
+        try(var channel=store.open(product.packageSha256(),product.packageSize())) {
+            return readArchive(product,channel,reader);
+        }
+    }
+    private <T> T readArchive(PlatformSkillProduct product, FileChannel channel, ArchiveReader<T> reader) throws IOException {
+        try(var zip=SkillPackageDescriptor.open(channel)) {
+            var manifest=SkillPackageDescriptor.read(zip,product,manifestCodec);
+            channel.position(0);
+            return reader.read(new Description(product,manifest),Channels.newInputStream(channel));
+        }
+    }
+    /** Byte-array interface retained for callers that explicitly require an in-memory package. */
     public PlatformSkillPackage prepare(SkillProductVersionEntity approved) {
         requireOutsideTransaction();
         var pkg=load(product(approved));

@@ -976,11 +976,16 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         var after=taskAttachments.find("0",ACTOR.clientId(),ACTOR.ownerJiacn(),"historical");assertEquals(before.getSnapshotJson(),after.getSnapshotJson());assertEquals(before.getSnapshotSha256(),after.getSnapshotSha256());
     }
 
-    @Test void offlineFirstInstallFlowsThroughRealOutboxPrepareActivateAppliedAndCurrentCatalog() {
+    @Test void offlineFirstInstallFlowsThroughRealOutboxPrepareActivateAppliedAndCurrentCatalog() throws Exception {
         when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(false);
         var c=install();assertEquals("WAITING_AGENT",c.get("status"));assertEquals(99_999_950L,wallet());
         assertEquals(1,count("economy_skill_order"));assertEquals(1,count("agent_outbox_event"));
-        var pkg=service.packageBytes(proof(),text(object(c.get("target")),"skillInstallationId"));assertTrue(pkg.length>0);
+        var body=new java.io.ByteArrayOutputStream();
+        service.writePackage(proof(),text(object(c.get("target")),"skillInstallationId"),length->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            assertEquals(text(object(c.get("target")),"byteLength"),Long.toString(length)); return body;
+        });
+        assertEquals(text(object(c.get("target")),"packageSha256"),java.util.HexFormat.of().formatHex(SkillPackageStore.sha256(body.toByteArray())));
         when(sessions.isReady(anyString(),anyString(),anyString(),any())).thenReturn(true);runSkillSchedules();
         verify(sessions).dispatch(eq("0"),eq(ACTOR.clientId()),eq(AGENT),any(),any());
         report(c,"PREPARED",null);c=current(c);assertEquals("ACTIVATING",c.get("status"));assertEquals("ACTIVATE",command(c).get("phase"));
@@ -1343,7 +1348,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertTrue(service.descriptors(scope()).stream().anyMatch(d->installedId.equals(d.installationId())));
         assertTrue(packages.prepare(version).bytes().length>0);
         // The installation-only download remains closed after PREPARE; retirement must not reopen it.
-        assertEquals("SKILL_DOWNLOAD_FORBIDDEN",assertThrows(SkillMarketplaceException.class,()->service.packageBytes(proof(),installedId)).code());
+        assertEquals("SKILL_DOWNLOAD_FORBIDDEN",assertThrows(SkillMarketplaceException.class,()->service.writePackage(proof(),installedId,length->{throw new AssertionError("unauthorized body");})).code());
     }
 
 }

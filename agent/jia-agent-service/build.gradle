@@ -1,6 +1,7 @@
 def poiOoxmlRuntimeVersion = libs.versions.poi.ooxml.full.get()
 
 dependencies {
+    implementation libs.commons.compress
     // Strict metadata/request codecs intentionally use Jackson2, independently of networknt3/Jackson3.
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
     api project(':agent:jia-agent-api')

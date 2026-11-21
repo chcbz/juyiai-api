@@ -1106,23 +1106,30 @@ public final class SkillManagementService {
         }));
         return sessions.getObject().dispatch(tenant,client,agent,SkillMarketplaceService.sessionFence(proof),wire);
     }
-    public byte[] packageBytes(AgentRuntimeAuthenticationService.Proof proof,String installationId) {
+    @FunctionalInterface
+    public interface PackageOutput { java.io.OutputStream open(long length) throws java.io.IOException; }
+
+    public void writePackage(AgentRuntimeAuthenticationService.Proof proof,String installationId, PackageOutput output) throws java.io.IOException {
         path(installationId);String t=proof.scope().tenantId(),client=proof.scope().clientId();
         var auth=db.findAuthorization(t,client,installationId);
         require(auth!=null&&proof.installationId().equals(auth.getRuntimeInstallationId())&&proof.hostId().equals(auth.getRuntimeHostId()),403,"SKILL_DOWNLOAD_FORBIDDEN");
         var hint=db.findChange(t,client,auth.getChangeId());
         require(hint!=null&&hint.getAgentId().equals(proof.scope().agentId())&&hint.getOwnerJiacn().equals(proof.scope().ownerJiacn()),403,"SKILL_DOWNLOAD_FORBIDDEN");
-        var target=ref(auth);var version=market.selectApprovedProductVersion(t,client,text(target,"productVersionId"));var prepared=packages.getObject().prepare(version);
-        var a=new HostingRentHttp.Actor(hint.getActorId(),t,client,hint.getOwnerJiacn());
-        return ownedChange(hint,()->authentication.withFence(proof,false,()->{
-            var state=state(a,hint.getAgentId(),hint.getSkillKey());var c=db.lockChange(t,client,hint.getChangeId());var value=dto(c);
-            require(installationId.equals(object(value.get("target")).get("skillInstallationId"))&&state.getSkillRevision().toString().equals(value.get("skillRevision")),403,"SKILL_DOWNLOAD_FORBIDDEN");
-            var command=db.lockCommand(t,client,c.getCommandId());var data=decode(command.getDataJson(),"CommandData");
-            require("PREPARE".equals(data.get("phase"))&&Set.of("PENDING","RECEIVED").contains(command.getState()),403,"SKILL_DOWNLOAD_FORBIDDEN");
-            SkillPackages.revalidate(market.selectApprovedProductVersionForUpdate(t,client,text(target,"productVersionId")),prepared);
-            require(HexFormat.of().formatHex(prepared.product().packageSha256()).equals(target.get("packageSha256"))
-                    &&Long.toString(prepared.product().packageSize()).equals(target.get("byteLength")),403,"SKILL_DOWNLOAD_FORBIDDEN");return prepared.bytes();
-        }));
+        var target=ref(auth);var version=market.selectApprovedProductVersion(t,client,text(target,"productVersionId"));
+        packages.getObject().withArchive(version,(prepared,input)->{
+            var a=new HostingRentHttp.Actor(hint.getActorId(),t,client,hint.getOwnerJiacn());
+            ownedChange(hint,()->authentication.withFence(proof,false,()->{
+                var state=state(a,hint.getAgentId(),hint.getSkillKey());var c=db.lockChange(t,client,hint.getChangeId());var value=dto(c);
+                require(installationId.equals(object(value.get("target")).get("skillInstallationId"))&&state.getSkillRevision().toString().equals(value.get("skillRevision")),403,"SKILL_DOWNLOAD_FORBIDDEN");
+                var command=db.lockCommand(t,client,c.getCommandId());var data=decode(command.getDataJson(),"CommandData");
+                require("PREPARE".equals(data.get("phase"))&&Set.of("PENDING","RECEIVED").contains(command.getState()),403,"SKILL_DOWNLOAD_FORBIDDEN");
+                SkillPackages.revalidate(market.selectApprovedProductVersionForUpdate(t,client,text(target,"productVersionId")),prepared);
+                require(HexFormat.of().formatHex(prepared.product().packageSha256()).equals(target.get("packageSha256"))
+                        &&Long.toString(prepared.product().packageSize()).equals(target.get("byteLength")),403,"SKILL_DOWNLOAD_FORBIDDEN");return null;
+            }));
+            input.transferTo(output.open(prepared.product().packageSize()));
+            return null;
+        });
     }
     /** Keep all authorized exact installs available to in-flight tasks; only admission selects active.
      * No current product/order pointer is borrowed to authorize covered upgrades or old executions. */

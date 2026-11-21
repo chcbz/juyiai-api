@@ -46,6 +46,7 @@ public class SharedDependencyManagementPlugin implements Plugin<Settings> {
                             catalog.version("guava", "33.4.0-jre");
                             catalog.version("commons-lang3", "3.17.0");
                             catalog.version("commons-io", "2.18.0");
+                            catalog.version("commons-compress", "1.27.1");
                             catalog.version("commons-codec", "1.18.0");
                             catalog.version("commons-collections", "3.2.2");
                             catalog.version("commons-fileupload", "1.5");
@@ -212,6 +213,7 @@ public class SharedDependencyManagementPlugin implements Plugin<Settings> {
                             catalog.library("commons-logging", "commons-logging", "commons-logging").versionRef("commons-logging");
                             catalog.library("commons-collections", "commons-collections", "commons-collections").versionRef("commons-collections");
                             catalog.library("commons-io", "commons-io", "commons-io").versionRef("commons-io");
+                            catalog.library("commons-compress", "org.apache.commons", "commons-compress").versionRef("commons-compress");
                             catalog.library("commons-lang3", "org.apache.commons", "commons-lang3").versionRef("commons-lang3");
                             catalog.library("guava", "com.google.guava", "guava").versionRef("guava");
                             catalog.library("httpclient", "org.apache.httpcomponents", "httpclient").versionRef("httpclient");

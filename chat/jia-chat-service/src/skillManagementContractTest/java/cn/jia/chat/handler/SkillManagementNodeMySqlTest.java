@@ -129,8 +129,8 @@ public class SkillManagementNodeMySqlTest extends SkillManagementWireMySqlTest {
         }
         void supply(Map<String,Object> change) throws Exception {
             String installation=text(object(change.get("target")),"skillInstallationId");
-            byte[] archive=service.packageBytes(proof(),installation); // real authenticated package service
-            peer.call(map("op","putPackage","skillInstallationId",installation,"base64",Base64.getEncoder().encodeToString(archive)));
+            var body=new java.io.ByteArrayOutputStream(); service.writePackage(proof(),installation,length->body); // real authenticated package service
+            peer.call(map("op","putPackage","skillInstallationId",installation,"base64",Base64.getEncoder().encodeToString(body.toByteArray())));
         }
         Map<String,Object> complete(Map<String,Object> change,boolean packageRequired) throws Exception {
             if(packageRequired)supply(change);

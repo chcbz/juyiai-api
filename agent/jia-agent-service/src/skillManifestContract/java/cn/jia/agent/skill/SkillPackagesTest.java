@@ -30,6 +30,41 @@ class SkillPackagesTest {
                 .setApprovedPermissionsSha256(SkillPackageStore.sha256(permissions.getBytes(StandardCharsets.UTF_8)))
                 .setTenantId("tenant").setClientId("client");
     }
+    @Test void verifiedDownloadUsesOneOpenObjectAndDoesNotAllocateItsLength() throws Exception {
+        var buffer=new java.io.ByteArrayOutputStream();
+        try(var zip=new java.util.zip.ZipOutputStream(buffer)) {
+            zip.setLevel(0); zip.putNextEntry(new java.util.zip.ZipEntry("SKILL.md"));
+            byte[] block=new byte[8192]; for(int i=0;i<640;i++) zip.write(block);
+        }
+        byte[] archive=buffer.toByteArray(); var v=approved(archive);
+        Path object=root.resolve(new SkillPackageStore(root).publish(archive)+".zip");
+        var packages=new SkillPackages(root); packages.describe(v); // warm classes, not a download
+        var hash=java.security.MessageDigest.getInstance("SHA-256");
+        var sink=new java.security.DigestOutputStream(java.io.OutputStream.nullOutputStream(),hash);
+        var allocations=java.lang.management.ManagementFactory.getPlatformMXBean(com.sun.management.ThreadMXBean.class);
+        long before=allocations.getCurrentThreadAllocatedBytes();
+        long sent=packages.withArchive(v,(description,in)->{
+            Files.move(object,root.resolve("original.zip")); Files.writeString(object,"replacement");
+            return in.transferTo(sink);
+        });
+        long allocated=allocations.getCurrentThreadAllocatedBytes()-before;
+        assertTrue(before>=0 && allocated<archive.length,"download heap allocated: "+allocated);
+        assertEquals(archive.length,sent); assertArrayEquals(v.getPackageSha256(),hash.digest());
+        System.out.printf("verified download bytes=%d threadAllocatedBytes=%d%n",sent,allocated);
+    }
+    @Test void failedVerificationNeverOpensBodyAndDisconnectClosesSource() throws Exception {
+        byte[] bytes=archive("stream"); var v=approved(bytes); var packages=new SkillPackages(root);
+        Path object=root.resolve(new SkillPackageStore(root).publish(bytes)+".zip");
+        java.io.InputStream[] borrowed={null};
+        assertThrows(java.io.IOException.class,()->packages.withArchive(v,(d,in)->{
+            borrowed[0]=in; in.read(); throw new java.io.IOException("peer disconnected");
+        }));
+        assertThrows(java.io.IOException.class,()->borrowed[0].read());
+        Files.delete(object); bytes[0]^=1; Files.write(object,bytes);
+        Files.setPosixFilePermissions(object,java.nio.file.attribute.PosixFilePermissions.fromString("r--r--r--"));
+        assertThrows(SkillMarketplaceException.class,()->packages.withArchive(v,(d,in)->{throw new AssertionError("bad digest sent");}));
+        assertThrows(SkillMarketplaceException.class,()->packages.withArchive(v.setPackageSize((long)bytes.length+1),(d,in)->{throw new AssertionError("short object sent");}));
+    }
     @Test void newApprovedPackageDoesNotNeedClasspathOrApplicationRestart() {
         byte[] bytes=archive("new pdf skill");var packages=new SkillPackages(root);
         new SkillPackageStore(root).publish(bytes);var v=approved(bytes);

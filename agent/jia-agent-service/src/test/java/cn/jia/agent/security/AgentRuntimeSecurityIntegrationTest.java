@@ -396,11 +396,15 @@ class AgentRuntimeSecurityIntegrationTest {
         var controller=new cn.jia.agent.api.SkillPackageController(installs);
         var packageMvc=MockMvcBuilders.standaloneSetup(controller).addFilters(context.getBean(FilterChainProxy.class)).build();
         String path="/internal/agent/skill-installations/si_original/package";
-        when(installs.packageBytes(any(),eq("si_original"))).thenReturn(new byte[]{1,2,3});
+        org.mockito.Mockito.doAnswer(call->{
+            call.<cn.jia.agent.skill.SkillManagementService.PackageOutput>getArgument(2).open(3).write(new byte[]{1,2,3});
+            return null;
+        }).when(installs).writePackage(any(),eq("si_original"),any());
         packageMvc.perform(headers(get(path),A,"runtime-a",TOKEN_A))
-                .andExpect(status().isOk()).andExpect(header().string("Cache-Control","private, no-store"));
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control","private, no-store"))
+                .andExpect(header().string("Content-Length","3")).andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().bytes(new byte[]{1,2,3}));
         var proof=org.mockito.ArgumentCaptor.forClass(AgentRuntimeAuthenticationService.Proof.class);
-        verify(installs).packageBytes(proof.capture(),eq("si_original"));
+        verify(installs).writePackage(proof.capture(),eq("si_original"),any());
         assertEquals(A,proof.getValue().scope().agentId());assertNotEquals("si_original",proof.getValue().installationId());
         packageMvc.perform(get(path).header("X-API-Key","old-secret")).andExpect(status().isUnauthorized());
         packageMvc.perform(get(path)).andExpect(status().isUnauthorized());
