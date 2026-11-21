@@ -15,6 +15,8 @@ import static cn.jia.agent.skill.SkillMarketplaceException.require;
 public final class SkillPackageStore {
     // Same existing archive boundary as the Runtime installer, not a new performance deadline.
     public static final int MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
+    // Heap-backed FileChannel operations can stage the entire requested span off heap.
+    private static final int IO_CHUNK = 8192;
     private final Path root;
     public SkillPackageStore(Path root) {
         require(root != null && root.isAbsolute() && root.normalize().equals(root),503,"SKILL_PACKAGE_STORE_INVALID");
@@ -28,16 +30,24 @@ public final class SkillPackageStore {
             require(Files.isRegularFile(object, LinkOption.NOFOLLOW_LINKS),503,"SKILL_PACKAGE_UNAVAILABLE");
             checkPermissions(object);
             require(!Files.getPosixFilePermissions(object,LinkOption.NOFOLLOW_LINKS).contains(PosixFilePermission.OWNER_WRITE),503,"SKILL_PACKAGE_STORE_INVALID");
-            try (FileChannel channel = FileChannel.open(object, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-                require(channel.size() == size,503,"SKILL_PACKAGE_UNAVAILABLE");
-                ByteBuffer data = ByteBuffer.allocate((int)size);
-                while (data.hasRemaining()) require(channel.read(data) >= 0,503,"SKILL_PACKAGE_UNAVAILABLE");
-                require(channel.read(ByteBuffer.allocate(1)) == -1,503,"SKILL_PACKAGE_UNAVAILABLE");
-                byte[] bytes = data.array();
-                require(Arrays.equals(sha256(bytes), digest),503,"SKILL_PACKAGE_UNAVAILABLE");
-                return bytes;
-            }
+            return readVerified(object, digest, (int)size);
         } catch (IOException e) { throw new SkillMarketplaceException(503,"SKILL_PACKAGE_UNAVAILABLE"); }
+    }
+    private static byte[] readVerified(Path file, byte[] digest, int size) throws IOException {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            require(channel.size() == size,503,"SKILL_PACKAGE_UNAVAILABLE");
+            byte[] bytes = new byte[size];
+            for (int offset = 0; offset < size;) {
+                int n = channel.read(chunk(bytes, offset));
+                require(n > 0,503,"SKILL_PACKAGE_UNAVAILABLE");
+                offset += n;
+            }
+            require(channel.read(ByteBuffer.allocate(1)) == -1 && Arrays.equals(sha256(bytes),digest),503,"SKILL_PACKAGE_UNAVAILABLE");
+            return bytes;
+        }
+    }
+    private static ByteBuffer chunk(byte[] bytes, int offset) {
+        return ByteBuffer.wrap(bytes, offset, Math.min(IO_CHUNK, bytes.length - offset));
     }
     /** Trusted maintenance primitive only; no public HTTP endpoint or DB publication implied.
      * Atomic hard-link promotion never replaces an existing hash object, even under concurrency. */
@@ -49,11 +59,10 @@ public final class SkillPackageStore {
             checkRoot();
             temporary = Files.createTempFile(root,".package-",".tmp");
             try (FileChannel channel = FileChannel.open(temporary,StandardOpenOption.WRITE)) {
-                ByteBuffer data = ByteBuffer.wrap(bytes);
-                while (data.hasRemaining()) channel.write(data);
+                for (int offset = 0; offset < bytes.length;) offset += channel.write(chunk(bytes, offset));
                 channel.force(true);
             }
-            require(Arrays.equals(sha256(Files.readAllBytes(temporary)),digest),503,"SKILL_PACKAGE_UNAVAILABLE");
+            readVerified(temporary, digest, bytes.length);
             Files.setPosixFilePermissions(temporary,Set.of(PosixFilePermission.OWNER_READ,
                     PosixFilePermission.GROUP_READ,PosixFilePermission.OTHERS_READ));
             try { Files.createLink(root.resolve(hex+".zip"),temporary); }

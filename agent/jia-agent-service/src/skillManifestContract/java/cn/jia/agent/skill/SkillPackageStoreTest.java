@@ -19,6 +19,14 @@ class SkillPackageStoreTest {
         try(var files=Files.list(root)) { assertEquals(1,files.count()); }
         assertFalse(Files.getPosixFilePermissions(root.resolve(key+".zip")).contains(PosixFilePermission.OWNER_WRITE));
     }
+    @Test void multiMiBPackageRoundTripsIncludingShortFinalChunk() {
+        var store = new SkillPackageStore(root);
+        byte[] content = new byte[5 * 1024 * 1024 + 17];
+        new Random(42).nextBytes(content);
+        byte[] digest = SkillPackageStore.sha256(content);
+        assertEquals(HexFormat.of().formatHex(digest), store.publish(content));
+        assertArrayEquals(content, store.read(digest, content.length));
+    }
     @Test void concurrentPublicationDoesNotReplaceObject() throws Exception {
         var store=new SkillPackageStore(root);
         try(var workers=Executors.newFixedThreadPool(3)) {
