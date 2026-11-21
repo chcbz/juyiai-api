@@ -22,7 +22,7 @@ import static cn.jia.agent.position.PositionSkillException.require;
 
 /** Archive-owned native conversation tools. No polling, shell, model-produced full text or legacy task replay. */
 @Service
-public final class ArchiveConversationTools implements ConversationToolProvider {
+public final class ArchiveConversationTools implements ConversationToolProvider, cn.jia.agent.service.ArchiveExecutionJobLookup {
     private static final Map<String,Object> TEXT=Map.of("type","string");
     private static final Map<String,Object> VERSION=Map.of("type","string","pattern","^[1-9][0-9]*$");
     private static final ObjectMapper JSON=new ObjectMapper();
@@ -153,7 +153,16 @@ public final class ArchiveConversationTools implements ConversationToolProvider 
     private ArchiveMaintenanceStore.Job job(Context c,String id){PositionSkillPolicy.key(id);var job=jobs.find(owner(c),id,false);require(job!=null,404,"ARCHIVE_JOB_NOT_FOUND");requireAgent(c,job);return job;}
     private static void requireAgent(Context c,ArchiveMaintenanceStore.Job job){require(c.subject().agentId().equals(job.agentId()),403,"ARCHIVE_AGENT_FORBIDDEN");}
     private Map<String,Object> view(Context c,ArchiveMaintenanceStore.Job job) {
-        requireAgent(c,job);var s=spec(job);var row=new LinkedHashMap<String,Object>();
+        requireAgent(c,job);return jobView(job);
+    }
+    @Override public Map<String,Object> readJob(PositionAuthority.Scope scope,String agentId,String jobId) {
+        var owner=new ArchiveOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn());
+        var job=jobs.find(owner,jobId,false);
+        require(job!=null && agentId.equals(job.agentId()),404,"ARCHIVE_JOB_NOT_FOUND");
+        return jobView(job);
+    }
+    private Map<String,Object> jobView(ArchiveMaintenanceStore.Job job) {
+        var s=spec(job);var row=new LinkedHashMap<String,Object>();
         row.put("jobId",job.id());row.put("operationKey",job.operationKey());row.put("state",job.state());row.put("workId",s.request().workId());row.put("editionId",s.editionId());row.put("title",s.request().title());
         row.put("sourceName",s.request().sourceName());row.put("sourceRights",s.request().sourceRights());row.put("sourceSha256",s.sourceSha256());row.put("sourceFileId",s.sourceFileId());row.put("sourceFileVersion",s.sourceFileVersion()==null?null:s.sourceFileVersion().toString());row.put("manifestFileSha256",job.resultDigest());
         var work=content.findWork(s.request().workId());row.put("activeEditionId",work==null?null:work.activeEditionId());row.put("active",work!=null&&s.editionId().equals(work.activeEditionId()));

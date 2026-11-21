@@ -91,6 +91,10 @@ class ArchiveConversationMySqlTest {
         var published=publish("publish",draft.get("jobId"));assertEquals("PUBLISHED",published.get("state"));assertEquals(true,published.get("active"));
         var stored=content.listAllParagraphs((String)draft.get("editionId"));assertEquals(List.of("甲。","乙。"),stored.stream().map(x->x.text()).toList());
         assertEquals(published,call("archive_read",Map.of("jobId",draft.get("jobId"))));
+        String id=(String)draft.get("jobId");
+        assertEquals(published,tools.readJob(scope,"agent1",id));
+        assertEquals(404,assertThrows(PositionSkillException.class,()->tools.readJob(scope,"other-agent",id)).status());
+        assertEquals(404,assertThrows(PositionSkillException.class,()->tools.readJob(new Scope("0","test-client","other-owner"),"agent1",id)).status());
         verify(files).readContent(new PersonalWorkspaceService.Scope("0","test-client","owner-a"),"file1",1);
     }
     @Test void sameKeyRecoversExactResultDifferentInputConflictsWithoutOverwrite() {
