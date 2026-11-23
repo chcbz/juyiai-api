@@ -2875,16 +2875,7 @@ public class AgentServiceImpl implements AgentService, cn.jia.agent.service.reco
         }
     }
 
-    private List<String> parseList(String json) {
-        if (StringUtil.isBlank(json) || "[]".equals(json.trim())) {
-            return Collections.emptyList();
-        }
-        List<String> parsed = JsonUtil.jsonToList(json, String.class);
-        if (!parsed.isEmpty()) {
-            return parsed;
-        }
-        return Arrays.stream(json.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
-    }
+    private List<String> parseList(String json) {return cn.jia.agent.common.AgentTaskStoredLists.read(json);}
 
     private List<String> parseAssignedAgentIds(String value) {
         return parseList(value);
