@@ -13,6 +13,19 @@ class NativeCaptureEvidenceTest {
         assertEquals(first,NativeCaptureEvidence.bindingDigest("REQUEST",o,identity));o.put("attemptId","b");
         assertNotEquals(first,NativeCaptureEvidence.bindingDigest("REQUEST",o,identity));
     }
+    @Test void responseOriginNeedsOriginalPlanAndChannelAndRejectsRehashedForeignProviderId() throws Exception {
+        var records=new HashMap<String,String>();String response=null,id=null;
+        try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
+            for(var message:JSON.readTree(in).get("cases").get(0).get("messages")){
+                var d=message.get("request").get("body").get("data");String kind=d.get("kind").asText();
+                if(kind.equals("RESPONSE")){response=d.toString();id=d.get("observation").get("sourceAttemptId").asText();break;}
+                records.put(d.get("recordId").asText(),d.toString());
+            }
+        }
+        assertNull(NativeResponseOrigin.resolve(response,k->null).attemptId());
+        assertEquals(id,NativeResponseOrigin.resolve(response,records::get).attemptId());
+        assertTrue(NativeResponseOrigin.resolve(response.replace("response_1\"","different\""),records::get).conflict());
+    }
     @Test void fixedRuntimeMessagesHavePortableJavaDigestsAndClosedScope() throws Exception {
         try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var fixture=JSON.readTree(Objects.requireNonNull(in));int count=0;

@@ -26,10 +26,10 @@ public interface EconomyUsageCaptureMapper {
     int invalidateSample(@Param("id") String id);
     @Update("UPDATE economy_usage_capture SET input_revision=input_revision+1,coverage_state=CASE WHEN #{reason} IS NULL THEN 'WAITING_EVIDENCE' ELSE 'INCOMPLETE' END,conflict_reason=#{reason} WHERE id=#{pk}")
     int invalidateCapture(@Param("pk") long pk,@Param("reason") String reason);
-    @Select("SELECT capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,previous_evidence_sha256,evidence_json,binding_sha256,association_state FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} AND revision_key=#{key}")
+    @Select("SELECT capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,previous_evidence_sha256,evidence_json,binding_sha256,association_state FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} AND revision_key=#{key} FOR UPDATE")
     Evidence evidence(@Param("pk") long pk,@Param("recordId") String recordId,@Param("key") String key);
     // Caller holds the capture lock. Every admitted revision has the same binding, even across gaps.
-    @Select("SELECT binding_sha256 FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} LIMIT 1")
+    @Select("SELECT binding_sha256 FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} LIMIT 1 FOR UPDATE")
     String recordBinding(@Param("pk") long pk,@Param("recordId") String recordId);
     @Insert("""
         INSERT INTO economy_usage_capture(tenant_id,client_id,execution_id,run_id,capture_id,owner_jiacn,agent_id,task_id)
@@ -53,8 +53,17 @@ public interface EconomyUsageCaptureMapper {
         """) int appendSubmission(Receipt submission);
     @Select("""
         SELECT capture_pk,receipt_id,record_id,revision_key,request_id,request_sha256,expected_revision,processing_state,ack_json
-        FROM economy_usage_capture_receipt WHERE capture_pk=#{pk} AND receipt_id=#{receiptId}
+        FROM economy_usage_capture_receipt WHERE capture_pk=#{pk} AND receipt_id=#{receiptId} FOR UPDATE
         """) Receipt receipt(@Param("pk") long pk,@Param("receiptId") String receiptId);
+    record Origin(String tenantId,String clientId,String sourceAttemptId,long capturePk,String recordId) {}
+    @Insert("""
+        INSERT INTO economy_usage_response_origin (tenant_id,client_id,source_attempt_id,capture_pk,record_id)
+        VALUES(#{tenantId},#{clientId},#{sourceAttemptId},#{capturePk},#{recordId}) ON DUPLICATE KEY UPDATE capture_pk=capture_pk
+        """) int ensureOrigin(Origin origin);
+    @Select("""
+        SELECT tenant_id,client_id,source_attempt_id,capture_pk,record_id FROM economy_usage_response_origin
+        WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND source_attempt_id=#{sourceAttemptId} FOR UPDATE
+        """) Origin lockOrigin(Origin origin);
     @Update("""
         UPDATE economy_usage_capture_receipt SET ack_json=#{ack},processing_state='ACKED'
         WHERE capture_pk=#{pk} AND receipt_id=#{receiptId} AND request_sha256=#{requestSha256}

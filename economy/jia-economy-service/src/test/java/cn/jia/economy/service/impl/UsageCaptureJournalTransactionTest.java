@@ -44,6 +44,19 @@ class UsageCaptureJournalTransactionTest {
         assertEquals("READY",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE sample_id=?",String.class,h));
         var response=sub("response","RESPONSE",sample,"1",null,"c".repeat(64));assertEquals(State.PENDING,tx.execute(st->journal.register(b,response)).state());
         assertEquals(State.PENDING,tx.execute(st->journal.readReceipt(b,"response")).state());
+        ResponseOrigin adapter=(raw,first)->new Origin(sample,false);
+        assertEquals(State.PENDING,tx.execute(st->journal.bindResponse(b,"response",adapter)).state());
+        assertEquals(State.PENDING,tx.execute(st->journal.bindResponse(b,"response",adapter)).state());
+        var copied=new Binding("t","c","own","agent","task","copy","r",sample);
+        var foreign=new Binding("other","c","own","agent","task","copy","r",sample);
+        for(var other:new Binding[]{copied,foreign}){
+            tx.execute(st->journal.register(other,response));
+            var bound=tx.execute(st->journal.bindResponse(other,"response",adapter));
+            assertEquals(other==copied?State.CONFLICT:State.PENDING,bound.state());
+        }
+        assertEquals(State.CONFLICT,tx.execute(st->journal.readReceipt(copied,"response")).state());
+        assertEquals(State.PENDING,tx.execute(st->journal.readReceipt(b,"response")).state());
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_response_origin",Integer.class));
         var broken=sub("first","REQUEST",h,"1",null,"d".repeat(64));assertEquals(State.CONFLICT,tx.execute(st->journal.register(b,broken)).state());
         assertEquals(State.CONFLICT,tx.execute(st->journal.readReceipt(b,"second")).state());
         assertEquals(3L,jdbc.queryForObject("SELECT input_revision FROM economy_usage_capture WHERE execution_id='exec'",Long.class));

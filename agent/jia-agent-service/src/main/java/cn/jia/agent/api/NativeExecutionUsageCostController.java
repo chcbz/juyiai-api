@@ -48,7 +48,12 @@ public final class NativeExecutionUsageCostController {
         var submission=new UsageCaptureJournal.Submission(request.requestId(),NativeCaptureEvidence.digest(List.of(request.requestId(),data)),
                 e.receiptId(),e.kind(),e.recordId(),e.sourceRevision(),e.previousEvidenceSha256(),e.evidenceSha256(),e.expectedRevision(),e.canonicalEvidence(),e.bindingSha256());
         try {
-            var result=authentication.withNativeFence(principal,()->journal.register(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),submission));
+            var result=authentication.withNativeFence(principal,()->{
+                var binding=authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId);
+                var registered=journal.register(binding,submission);
+                return registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
+                        ?journal.bindResponse(binding,e.receiptId(),cn.jia.agent.service.usage.NativeResponseOrigin::resolve):registered;
+            });
             return response(result); // fence transaction has committed, including any conflict quarantine
         } catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
     }

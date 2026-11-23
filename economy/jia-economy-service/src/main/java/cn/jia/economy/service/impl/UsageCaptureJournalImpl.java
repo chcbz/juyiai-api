@@ -27,6 +27,25 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
     private void change(long pk,List<String> members,String reason){if(db.invalidateCapture(pk,reason)!=1)throw new IllegalStateException("Capture disappeared");for(String id:members)if(db.invalidateSample(id)!=1)throw new IllegalStateException("Membership disappeared");}
     private Result conflict(long pk,List<String> members,String reason){change(pk,members,reason);return status(State.CONFLICT);}
     public Result readReceipt(Binding b,String receiptId){var c=db.lockCapture(key(b));if(!matches(b,c))return status(State.NOT_FOUND);return c.conflictReason()!=null?status(State.CONFLICT):stored(db.receipt(c.id(),receiptId));}
+    /** Source ownership is decided before the separate ledger transaction, never by ledger owner/task alone. */
+    public Result bindResponse(Binding b,String receiptId,ResponseOrigin adapter){
+        var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
+        var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);
+        long pk=c.id();if(c.conflictReason()!=null)return status(State.CONFLICT);
+        var receipt=db.receipt(pk,receiptId);var result=stored(receipt);if(result.state()!=State.PENDING)return result;
+        var response=db.evidence(pk,receipt.recordId(),receipt.revisionKey());
+        if(response==null||!"RESPONSE".equals(response.kind()))throw new IllegalStateException("Missing pending response");
+        // A future revision may arrive first; do not let a gap reserve a provider identity.
+        if(!"1".equals(response.sourceRevision()))return result;
+        var origin=adapter.resolve(response.evidenceJson(),id->{var row=db.evidence(pk,id,key(BigInteger.ONE));return row==null?null:row.evidenceJson();});
+        if(origin.conflict())return conflict(pk,members,"RESPONSE_ORIGIN");
+        if(origin.attemptId()==null)return result;
+        var claim=new EconomyUsageCaptureMapper.Origin(b.tenantId(),b.clientId(),origin.attemptId(),pk,response.recordId());
+        db.ensureOrigin(claim);
+        if(!claim.equals(db.lockOrigin(claim)))return conflict(pk,members,"RESPONSE_OWNER");
+        // Origin is durable, not proof of predecessor/ledger/coverage. No ACK without ledger result.
+        return result;
+    }
     public Result register(Binding b,Submission s){
         var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
         db.ensureCapture(binding);var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);

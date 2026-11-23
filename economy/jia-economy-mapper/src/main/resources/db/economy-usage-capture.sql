@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS economy_usage_capture_record (
     CONSTRAINT fk_usage_capture_record FOREIGN KEY (capture_pk) REFERENCES economy_usage_capture(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 
+-- A source identity has one original capture per ledger scope. Not a second cost ledger.
+CREATE TABLE IF NOT EXISTS economy_usage_response_origin (
+    tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL, source_attempt_id CHAR(64) NOT NULL,
+    capture_pk BIGINT NOT NULL, record_id CHAR(64) NOT NULL,
+    PRIMARY KEY (tenant_id,client_id,source_attempt_id),
+    CONSTRAINT fk_usage_response_origin FOREIGN KEY (capture_pk) REFERENCES economy_usage_capture(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
 CREATE TABLE IF NOT EXISTS economy_usage_capture_receipt (
     capture_pk BIGINT NOT NULL,
     receipt_id VARCHAR(100) NOT NULL,

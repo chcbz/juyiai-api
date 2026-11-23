@@ -7,6 +7,10 @@ public interface UsageCaptureJournal {
                       String previousEvidenceSha256,String evidenceSha256,String expectedRevision,String canonicalEvidence,String bindingSha256) {}
     enum State { DURABLE, PENDING, CONFLICT, NOT_FOUND }
     record Result(State state,String ackJson) {}
+    /** Adapter receives only previously registered bytes for this capture. Null attempt = missing/unsupported source. */
+    record Origin(String attemptId,boolean conflict) {}
+    interface ResponseOrigin { Origin resolve(String response,java.util.function.Function<String,String> firstRevision); }
+    Result bindResponse(Binding trusted,String receiptId,ResponseOrigin adapter);
     Result register(Binding trusted,Submission source);
     Result readReceipt(Binding trusted,String receiptId);
 }
