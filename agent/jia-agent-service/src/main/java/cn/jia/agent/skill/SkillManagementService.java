@@ -713,7 +713,19 @@ public final class SkillManagementService {
         if(agents.isEmpty())return Map.of();
         enabled(a);
         return tx.execute(transaction->{
-            // One observation only: never reuse these reads across the model call or requests.
+            // Read installations only for candidates admitted by discovery, in bounded IN batches.
+            var ids=agents.stream().map(c->c.target().agentId()).distinct().toList();
+            var active=new HashMap<String,List<SkillManagedStateEntity>>();
+            var authorizations=new HashMap<String,SkillInstallationAuthorizationEntity>();
+            final int batchSize=128;
+            for(int from=0;from<ids.size();from+=batchSize){
+                var batch=ids.subList(from,Math.min(from+batchSize,ids.size()));
+                var states=db.activeRecommendationStates(a.tenantId(),a.clientId(),batch);
+                if(states.isEmpty())continue;
+                for(var state:states)active.computeIfAbsent(state.getAgentId(),ignored->new ArrayList<>()).add(state);
+                for(var auth:db.activeRecommendationAuthorizations(a.tenantId(),a.clientId(),batch))
+                    authorizations.put(auth.getInstallationId(),auth);
+            }
             var products=new HashMap<String,SkillProductEntity>();
             var approved=new HashMap<String,Optional<SkillProductVersionEntity>>();
             var result=new LinkedHashMap<String,List<RecommendationSkill>>();
@@ -723,15 +735,12 @@ public final class SkillManagementService {
                 // never impersonates the provider Actor or opens skill-management operations.
                 String agent=candidate.target().agentId();
                 String providerOwner=candidate.skillProviderOwnerJiacn();
-                var states=db.states(a.tenantId(),a.clientId(),agent).stream()
-                        .filter(state->state.getActiveInstallationId()!=null).toList();
+                var states=active.getOrDefault(agent,List.of());
                 if(states.isEmpty()){result.put(agent,List.of());continue;}
                 if(!productsLoaded){
                     for(var product:db.products(a.tenantId(),a.clientId()))products.put(product.getProductId(),product);
                     productsLoaded=true;
                 }
-                var authorizations=new HashMap<String,SkillInstallationAuthorizationEntity>();
-                for(var auth:db.activeAuthorizationsForAgent(a.tenantId(),a.clientId(),agent))authorizations.put(auth.getInstallationId(),auth);
                 // The registry owns live session/fence isolation. Capture one coherent catalog,
                 // not two full catalogs whose timestamps/unrelated skills may differ.
                 SkillCapabilityLookup.View observed=null;

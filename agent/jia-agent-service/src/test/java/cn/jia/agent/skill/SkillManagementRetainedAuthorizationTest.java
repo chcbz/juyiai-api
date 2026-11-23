@@ -45,7 +45,7 @@ class SkillManagementRetainedAuthorizationTest {
     }
     @Test void recommendationsUseNewPaidRuntimeFenceAndReadInventoryOnlyOncePerAgent() {
         var f=new SkillManagementRecommendationTest.Fixture();f.installed("a");
-        var auth=f.db.activeAuthorizationsForAgent("0","client","a").getFirst();auth.setRuntimeInstallationId("retired-runtime");
+        var auth=f.authorizations.get("a");auth.setRuntimeInstallationId("retired-runtime");
         f.service.setRelationshipAuthorizations(new SkillRelationshipAuthorizations(f.db,true));
         assertFalse(f.service.recommendationSkills(SkillManagementRecommendationTest.ACTOR,SkillManagementRecommendationTest.candidates("a")).get("a").getFirst().available());
         when(f.db.paidInventory("0","client","a","owner")).thenReturn(paid(inventory("si_a","a".repeat(64))));

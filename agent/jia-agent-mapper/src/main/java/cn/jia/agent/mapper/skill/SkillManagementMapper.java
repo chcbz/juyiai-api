@@ -120,9 +120,12 @@ public interface SkillManagementMapper {
     SkillEntitlementEntity entitlement(@Param("tenantId") String t,@Param("clientId") String c,@Param("entitlementId") String id);
     @Select("SELECT p.* FROM agent_skill_product p WHERE "+S+" AND status='PUBLISHED' ORDER BY product_id")
     List<SkillProductEntity> products(@Param("tenantId") String t,@Param("clientId") String c);
-    /** Active managed installations include native position skills without marketplace purchase rows. */
-    @Select("SELECT a.* FROM agent_skill_managed_state s JOIN agent_skill_installation_authorization a ON a.tenant_id=s.tenant_id AND a.client_id=s.client_id AND a.installation_id=s.active_installation_id WHERE s.tenant_id=#{tenantId} AND s.client_id=#{clientId} AND s.agent_id=#{agentId} ORDER BY a.installation_id")
-    List<SkillInstallationAuthorizationEntity> activeAuthorizationsForAgent(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentId") String a);
+    String RECOMMENDATION_AGENT_IDS = "<foreach collection='agentIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>";
+    @Select("<script>SELECT * FROM agent_skill_managed_state WHERE "+S+" AND active_installation_id IS NOT NULL AND agent_id IN "+RECOMMENDATION_AGENT_IDS+" ORDER BY agent_id,skill_key</script>")
+    List<SkillManagedStateEntity> activeRecommendationStates(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentIds") List<String> agents);
+    /** Includes native/adopted skills without marketplace purchase rows; queried only for a non-empty authorized batch. */
+    @Select("<script>SELECT a.* FROM agent_skill_managed_state s JOIN agent_skill_installation_authorization a ON a.tenant_id=s.tenant_id AND a.client_id=s.client_id AND a.installation_id=s.active_installation_id WHERE s.tenant_id=#{tenantId} AND s.client_id=#{clientId} AND s.agent_id IN "+RECOMMENDATION_AGENT_IDS+" ORDER BY a.installation_id</script>")
+    List<SkillInstallationAuthorizationEntity> activeRecommendationAuthorizations(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentIds") List<String> agents);
     @Select("SELECT a.* FROM agent_skill_installation_authorization a JOIN agent_skill_installation i ON i.tenant_id=a.tenant_id AND i.client_id=a.client_id AND i.installation_id=a.installation_id WHERE a.tenant_id=#{tenantId} AND a.client_id=#{clientId} AND i.target_agent_id=#{agentId} ORDER BY a.installation_id")
     List<SkillInstallationAuthorizationEntity> authorizationsForAgent(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentId") String a);
     @Select("SELECT * FROM agent_skill_installation_authorization WHERE "+S+" AND change_id=#{changeId} ORDER BY installation_id")

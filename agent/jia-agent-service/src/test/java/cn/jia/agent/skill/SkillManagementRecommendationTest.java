@@ -41,7 +41,13 @@ class SkillManagementRecommendationTest {
         final SkillInstallCommandWriter writer=mock(SkillInstallCommandWriter.class);
         final AgentManagedSessionLookup sessions=mock(AgentManagedSessionLookup.class);
         final SkillManagementService service;
+        final Map<String,SkillManagedStateEntity> states=new HashMap<>();
+        final Map<String,SkillInstallationAuthorizationEntity> authorizations=new HashMap<>();
         Fixture() {
+            when(db.activeRecommendationStates(eq("0"),eq("client"),anyList())).thenAnswer(call ->
+                    call.<List<String>>getArgument(2).stream().map(states::get).filter(Objects::nonNull).toList());
+            when(db.activeRecommendationAuthorizations(eq("0"),eq("client"),anyList())).thenAnswer(call ->
+                    call.<List<String>>getArgument(2).stream().map(authorizations::get).filter(Objects::nonNull).toList());
             var tx=mock(PlatformTransactionManager.class);when(tx.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
             when(marketplace.available(ACTOR)).thenReturn(true);
             service=new SkillManagementService(db,market,mock(SkillInstallationMapper.class),marketplace,trade,versions,
@@ -51,11 +57,11 @@ class SkillManagementRecommendationTest {
         void installed(String agent) {
             var state=new SkillManagedStateEntity().setActiveInstallationId("si_"+agent).setSkillKey("vision")
                     .setDesiredEnabled(true).setAdmissionEnabled(false).setSkillRevision(1L).setActivePolicyRevision(1L);
-            when(db.states("0","client",agent)).thenReturn(List.of(state));
+            states.put(agent,state.setAgentId(agent));
             var authorization=new SkillInstallationAuthorizationEntity().setInstallationId("si_"+agent)
                     .setRuntimeInstallationId("rt_"+agent).setRuntimeHostId("host")
                     .setPackageJson("{\"skillInstallationId\":\"si_"+agent+"\",\"productVersionId\":\"spv_vision\",\"skillVersion\":\"1.0.0\",\"packageSha256\":\""+HASH+"\",\"manifestSha256\":null,\"byteLength\":\"1\",\"kind\":\"INSTRUCTION\"}");
-            when(db.activeAuthorizationsForAgent("0","client",agent)).thenReturn(List.of(authorization));
+            authorizations.put(agent,authorization);
             var proof=new AgentRuntimeAuthenticationService.Proof(new AgentRuntimeAuthentication.Scope("0","client","owner",agent,"instance"),"rt_"+agent,"host",1L,HASH,1L,1L);
             when(auth.currentRegisteredProof("0","client",agent)).thenReturn(proof);
             when(catalog.lookup(eq(new SkillCapabilityLookup.Scope("0","client","owner",agent)),any()))
@@ -75,11 +81,23 @@ class SkillManagementRecommendationTest {
         verifyNoInteractions(f.versions);verify(f.db,never()).products(anyString(),anyString());
         verifyNoInteractions(f.auth,f.catalog,f.packages,f.writer,f.market,f.sessions);
     }
+    @Test void emptyInstallationsRequireOnlyOneStateReadPerBoundedCandidateBatch() {
+        var f=new Fixture();
+        var ids=java.util.stream.IntStream.range(0,129).mapToObj(i->"agent"+i).toList();
+        var result=f.service.recommendationSkills(ACTOR,candidates(ids.toArray(String[]::new)));
+        assertEquals(129,result.size());
+        verify(f.db).activeRecommendationStates("0","client",ids.subList(0,128));
+        verify(f.db).activeRecommendationStates("0","client",ids.subList(128,129));
+        verify(f.db,never()).activeRecommendationAuthorizations(anyString(),anyString(),anyList());
+        verify(f.db,never()).states(anyString(),anyString(),anyString());
+    }
     @Test void oneBatchSharesProductsVersionsAndReadsOnlyOneCatalogPerAgent() {
         var f=new Fixture();f.installed("a");f.installed("b");
         var rows=f.service.recommendationSkills(ACTOR,candidates("a","b"));
         assertTrue(rows.get("a").getFirst().available());assertTrue(rows.get("b").getFirst().available());
         assertEquals("识图",rows.get("a").getFirst().title());
+        verify(f.db).activeRecommendationStates("0","client",List.of("a","b"));
+        verify(f.db).activeRecommendationAuthorizations("0","client",List.of("a","b"));
         verify(f.db).products("0","client");verify(f.market).selectApprovedProductVersion("0","client","spv_vision");
         verify(f.auth).currentRegisteredProof("0","client","a");verify(f.auth).currentRegisteredProof("0","client","b");
         verify(f.catalog,times(2)).lookup(any(),any());verify(f.db,never()).findAuthorization(anyString(),anyString(),anyString());
@@ -133,7 +151,7 @@ class SkillManagementRecommendationTest {
         verify(f.catalog).lookup(eq(new SkillCapabilityLookup.Scope("0","client","provider","external")),any());
         verify(f.catalog,never()).lookup(eq(new SkillCapabilityLookup.Scope("0","client","owner","external")),any());
         verifyNoInteractions(f.versions,f.packages,f.writer,f.sessions);
-        var state=f.db.states("0","client","external").getFirst();state.setDesiredEnabled(false);
+        var state=f.states.get("external");state.setDesiredEnabled(false);
         assertTrue(f.service.recommendationSkills(ACTOR,List.of(candidate)).get("external").isEmpty());
     }
     @Test void externalProviderMismatchNeverBorrowsAnotherOwnersCatalog() {
