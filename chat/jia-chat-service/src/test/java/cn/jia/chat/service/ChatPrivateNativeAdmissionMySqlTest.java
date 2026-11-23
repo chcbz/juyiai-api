@@ -64,7 +64,7 @@ class ChatPrivateNativeAdmissionMySqlTest extends SkillManagementMySqlFixture {
                 "db/agent-personal-workspace-v1_13-task-publication.sql","db/agent-personal-workspace-v1_14-conversation-execution.sql",
                 "db/agent-personal-workspace-v1_14-conversation-output.sql","db/agent-personal-workspace-v1_15-conversation-lease.sql",
                 "db/agent-personal-workspace-v1_16-conversation-provider-start.sql","db/agent-skill-execution-v1.sql",
-                "db/agent-personal-workspace-native-v5.sql","db/agent-personal-workspace-native-v6.sql"))
+                "db/agent-personal-workspace-native-v5.sql","db/agent-personal-workspace-native-v6.sql","db/agent-personal-workspace-metered-capture-v2.sql"))
             schema.addScript(new ClassPathResource(name));
         schema.execute(source);
         // The deployed v6 baseline includes the earlier controlled/skill catalog migrations.

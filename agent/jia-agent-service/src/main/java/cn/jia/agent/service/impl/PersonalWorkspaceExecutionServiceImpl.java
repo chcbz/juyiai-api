@@ -89,6 +89,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
     @Value("${jia.agent.conversation-execution.enabled:false}")
     private boolean conversationExecutionEnabled;
+    // A rollout decision only at INSERT: polling/replay must use the persisted pair, not this flag.
+    @Value("${jia.agent.conversation-execution.metered-capture-enabled:false}")
+    private boolean meteredCaptureEnabled;
     /** Source materials are a fixed bridge contract and never inherit the output allow-list. */
     private static final Set<String> SUPPORTED_INPUT_MIME_TYPES = Set.of(
             "image/png", "image/jpeg", "text/plain", "text/markdown", "text/html", "application/json", "application/pdf",
@@ -1570,6 +1573,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             var skill=new cn.jia.agent.entity.SkillExecutionEntity().setTenantId(scope.tenantId()).setClientId(scope.clientId()).setOwnerJiacn(scope.ownerJiacn())
                 .setExecutionId(executionId).setSnapshotJson(skillJson(snapshot)).setSnapshotSha256(digest).setCreatedAt(now).setUpdatedAt(now)
                 .setTaskSkillBindingJson(skillJson(bindings.stream().map(b->Map.of("skill",cn.jia.agent.skill.SkillManagementCodec.map("key",b.skill().key(),"version",b.skill().version(),"packageSha256",b.skill().packageSha256(),"manifestSha256",b.skill().manifestSha256()),"executionBinding",b.executionBinding())).toList()));
+            if (meteredCaptureEnabled) row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2");
             executions.insert(row);skillExecutions.insertReady(skill);
             if (workDiscovery!=null) workDiscovery.afterCommit(new cn.jia.agent.entity.NativeConversationWorkAvailable(
                     scope.tenantId(),scope.clientId(),command.targetAgentId()));
@@ -1663,7 +1667,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         return new cn.jia.agent.service.SkillExecutionService.Command(6,execution.getExecutionId(),execution.getRunId(),nativeScope(snapshot),
             "pwe_cmd_"+plainSha("command\n"+execution.getExecutionId()),"pwe_msg_"+plainSha("message\n"+execution.getExecutionId()),
             List.copyOf(bindings),skill.getSnapshotSha256(),skillObject(snapshot.get("parameters")),execution.getInstruction(),
-            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"));
+            skillInputs(snapshot).stream().map(i->skillString(i,"inputRef")).toList(),skillObject(snapshot.get("outputs")),skillString(snapshot,"toolPolicyRef"),
+            execution.getUsageMode(),execution.getCaptureProtocol());
     }
     @Override
     public cn.jia.agent.service.SkillExecutionService.Inputs inputs(RuntimeScope authenticatedScope,String executionId,String runId,ConversationFence fence) {

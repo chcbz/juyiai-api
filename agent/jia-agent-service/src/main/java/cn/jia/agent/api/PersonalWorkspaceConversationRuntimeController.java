@@ -296,11 +296,13 @@ public final class PersonalWorkspaceConversationRuntimeController {
     }
     public record SkillCommandResponse(int executionProtocolVersion,String executionId,String runId,
             cn.jia.agent.service.SkillExecutionService.ScopeView scope,String commandId,String messageId,List<cn.jia.agent.service.SkillExecutionService.AuthorizedSkill> skills,
-            String snapshotSha256,java.util.Map<String,Object> parameters,String instruction,List<String> inputRefs,java.util.Map<String,Object> outputs,String toolPolicyRef) {
+            String snapshotSha256,java.util.Map<String,Object> parameters,String instruction,List<String> inputRefs,java.util.Map<String,Object> outputs,String toolPolicyRef,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) String usageMode,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) String captureProtocol) {
         static SkillCommandResponse from(cn.jia.agent.service.SkillExecutionService.Command value) {
             return new SkillCommandResponse(value.executionProtocolVersion(),value.executionId(),value.runId(),
                     value.scope(),value.commandId(),value.messageId(),value.skills(),
-                    value.snapshotDigest(),value.parameters(),value.instruction(),value.inputRefs(),value.outputs(),value.toolPolicyRef());
+                    value.snapshotDigest(),value.parameters(),value.instruction(),value.inputRefs(),value.outputs(),value.toolPolicyRef(),value.usageMode(),value.captureProtocol());
         }
     }
     public record ClaimRequest(String commandId,String messageId) { }

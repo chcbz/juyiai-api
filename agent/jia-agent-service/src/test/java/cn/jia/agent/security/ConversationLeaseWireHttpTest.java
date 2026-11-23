@@ -163,7 +163,7 @@ class ConversationLeaseWireHttpTest {
         var command=fixture.path("commandResponse").path("data").path("items").get(0);
         var outputs=mapper.convertValue(command.path("outputs"),java.util.Map.class);
         var view=new SkillExecutionService.Command(6,"execution","run",new SkillExecutionService.ScopeView("TASK","42","1","task"),"cmd","msg",List.of(),
-                "a".repeat(64),java.util.Map.of(),command.path("instruction").asText(),List.of(),outputs,SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);
+                "a".repeat(64),java.util.Map.of(),command.path("instruction").asText(),List.of(),outputs,SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,null,null);
         when(executions.runtimeConversationCommandViews(any(),eq(16))).thenAnswer(i->List.of(view));
         String actual=mvc.perform(get("/internal/agent/executions/commands").principal(auth).header("X-Request-Id","lease-test"))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.items[0].skills").isEmpty())

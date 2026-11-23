@@ -93,3 +93,7 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 - 迁移前必须按NF设计收尾已接收的5执行、投影及用量；MySQL DDL可能部分提交，逐项读取实际catalog并保留恢复依据，不能把Java事务当DDL回滚保证。
 
 以上是未编译的源码候选和操作边界，尚未执行DDL、正式测试或生产部署；现有新库/升级测试的显式DDL准备仍待完整同步。
+
+### 逐响应计量（开发候选，未启用）
+
+在部署含新执行实体的 API **之前**，通过原维护窗口应用 `agent/jia-agent-service/src/main/resources/db/agent-personal-workspace-metered-capture-v2.sql`。本迁移只新增两列；不要把存量执行补写成已采集。Economy 的 `db/economy-usage-capture.sql` 沿已有 usage-cost 显式维护入口。`jia.agent.conversation-execution.metered-capture-enabled` 默认关闭；建表/加列不等于启用。Runtime 真实命令接线、原执行鉴权、账本重放与 ACK 未联验前不要开启。

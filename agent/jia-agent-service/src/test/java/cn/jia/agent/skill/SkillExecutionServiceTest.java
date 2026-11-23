@@ -390,11 +390,21 @@ public class SkillExecutionServiceTest {
         assertEquals(6,execution.getExecutionProtocolVersion());assertEquals("[]",skill.getTaskSkillBindingJson());assertNull(skill.getSkillKey());
         assertEquals(sha(json(snapshot)),created.snapshotDigest());verifyNoInteractions(installed,management,capabilities,policy);
     }
+    @Test void admissionFreezesMeteringButPollingDoesNotConsultCurrentRollout() {
+        ReflectionTestUtils.setField(service,"meteredCaptureEnabled",true);
+        var snap=snapshot();snap.put("skills",List.of());insertFixtures();
+        service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap));
+        assertEquals("RESPONSE_V2",execution.getUsageMode());assertEquals("METERED_CAPTURE_V2",execution.getCaptureProtocol());
+        ReflectionTestUtils.setField(service,"meteredCaptureEnabled",false);
+        when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
+        var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();
+        assertEquals("RESPONSE_V2",command.usageMode());assertEquals("METERED_CAPTURE_V2",command.captureProtocol());
+    }
     @Test void emptySkillsCommandRetainsExplicitLocalPolicyInstructionParametersAndInputs() {
         emptySkills();skill.setPhase("READY");execution.setInstruction("write a real file");
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();
-        assertEquals(6,command.executionProtocolVersion());assertEquals(List.of(),command.skills());
+        assertEquals(6,command.executionProtocolVersion());assertEquals(List.of(),command.skills());assertNull(command.usageMode());assertNull(command.captureProtocol());
         assertEquals(SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,command.toolPolicyRef());assertEquals("write a real file",command.instruction());
         assertEquals(Map.of(),command.parameters());assertEquals(List.of(),command.inputRefs());assertEquals(outputs,command.outputs());
         verifyNoInteractions(installed,management,capabilities,policy);

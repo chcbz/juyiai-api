@@ -67,6 +67,13 @@ class NativeExecutionUsageCostRecorderTest {
         verifyNoInteractions(executions,costs);
     }
 
+    @Test void meteredAndPartialBindingsRejectLegacyTotalsBeforeAnyLedgerCall() {
+        var row=new PersonalWorkspaceExecutionEntity().setUsageMode("RESPONSE_V2");
+        when(executions.findForNativeUsageCost("0","client","executor","agent","exec","run")).thenReturn(row);
+        assertThrows(IllegalArgumentException.class,()->recorder.record(scope,"exec","run",evidence));
+        row.setCaptureProtocol("METERED_CAPTURE_V2");
+        assertThrows(IllegalArgumentException.class,()->recorder.record(scope,"exec","run",evidence));verifyNoInteractions(costs);
+    }
     @Test void missingHistoricalAuthorityNeverWritesCosts() {
         assertThrows(PersonalWorkspaceExecutionService.Failure.class, () -> recorder.record(scope, "exec", "run", evidence));
         verifyNoInteractions(costs);

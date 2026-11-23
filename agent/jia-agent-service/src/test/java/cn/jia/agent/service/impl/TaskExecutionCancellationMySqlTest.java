@@ -46,7 +46,7 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         for(String name:List.of("agent-personal-workspace-v1_11-executions.sql", "agent-personal-workspace-v1_13-task-execution.sql",
                 "agent-personal-workspace-v1_13-task-publication.sql", "agent-personal-workspace-v1_14-conversation-execution.sql",
                 "agent-personal-workspace-v1_14-conversation-output.sql", "agent-personal-workspace-v1_15-conversation-lease.sql",
-                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql"))
+                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql"))
             schema.addScript(new ClassPathResource("db/"+name));
         schema.execute(source);
         new ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
