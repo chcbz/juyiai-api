@@ -7,6 +7,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class NativeCaptureEvidenceTest {
     private static final ObjectMapper JSON=new ObjectMapper();
+    @Test void dispatchGroupIsOptionalImmutablePrivateAndDoesNotGrantCoverage(){
+        var plan=new HashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","executionConfigSha256","a".repeat(64),"engineVersion","fixture","coveragePolicyVersion","unverified","rootSourceId","root"));
+        NativeCaptureEvidence.planKeys(plan);var old=NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of());
+        var group=new HashMap<String,Object>(Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256","b".repeat(64),"routeSha256","c".repeat(64),"toolConfigSha256","d".repeat(64)));
+        plan.put("dispatchGroup",group);NativeCaptureEvidence.planKeys(plan);assertNotEquals(old,NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of()));
+        group.put("providerUrl","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));group.remove("providerUrl");
+        group.put("routeSha256","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));
+    }
     @Test void requestOutcomeCanChangeButAttemptCannot(){
         var identity=List.of("source","0","1");var o=new HashMap<String,Object>();o.put("attemptId","a");o.put("resolution","PENDING");
         String first=NativeCaptureEvidence.bindingDigest("REQUEST",o,identity);o.put("resolution","RESPONSE");

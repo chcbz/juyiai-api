@@ -32,7 +32,7 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         check(revision.equals("1")== (d.get("previousEvidenceSha256")==null));if(kind.equals("RESPONSE"))field(d,"expectedRevision",DEC);else check(d.get("expectedRevision")==null);
         var o=obj(d.get("observation"));List<String> identity;
         switch(kind){
-          case "PLAN" -> {keys(o,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId");check("METERED_CAPTURE_V2".equals(o.get("captureProtocol")));field(o,"executionConfigSha256",SHA);field(o,"rootSourceId",ID);text(o,"engineVersion");text(o,"coveragePolicyVersion");identity=List.of();}
+          case "PLAN" -> {planKeys(o);check("METERED_CAPTURE_V2".equals(o.get("captureProtocol")));field(o,"executionConfigSha256",SHA);field(o,"rootSourceId",ID);text(o,"engineVersion");text(o,"coveragePolicyVersion");identity=List.of();}
           case "SOURCE" -> {keys(o,"sourceId","epoch","sourceKind","adapterVersion","channelNamespace","parentSourceRecordId","previousEpochSourceRecordId");identity=source(o);text(o,"sourceKind");text(o,"adapterVersion");text(o,"channelNamespace");nullableSha(o,"parentSourceRecordId");nullableSha(o,"previousEpochSourceRecordId");}
           case "REQUEST" -> {keys(o,"sourceId","epoch","sequence","attemptId","resolution","sourceAttemptId","reasonCodes");identity=List.of(field(o,"sourceId",ID),field(o,"epoch",DEC),field(o,"sequence",POS));field(o,"attemptId",ID);String res=text(o,"resolution");check(Set.of("PENDING","RESPONSE","UNRESOLVED").contains(res));check(!revision.equals("1")||res.equals("PENDING"));nullableSha(o,"sourceAttemptId");check(res.equals("RESPONSE")== (o.get("sourceAttemptId")!=null));reasons(o);check(!res.equals("UNRESOLVED")||!((List<?>)o.get("reasonCodes")).isEmpty());}
           case "RESPONSE" -> {keys(o,"sourceId","epoch","sourceAttemptId","providerResponseId","reportedUsage","measuredQuantities","actualBillingIdentity","reasonCodes");source(o);text(o,"providerResponseId");identity=List.of(field(o,"sourceAttemptId",SHA));reasons(o);checkQuantities(o);}
@@ -44,6 +44,17 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         for(String key:List.of("receiptId","expectedRevision","evidenceSha256"))evidence.remove(key);
         String sha=field(d,"evidenceSha256",SHA);check(sha.equals(digest(evidence)));
         return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence),bindingDigest(kind,o,identity));
+    }
+    // The old PLAN config hash fences an individual run. Optional dispatch facts are configuration-only;
+    // they never prove complete coverage, an actual billing route, or entitlement to a tariff.
+    static void planKeys(Map<?,?> plan){
+        if(!plan.containsKey("dispatchGroup")){
+            keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId");return;
+        }
+        keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId","dispatchGroup");
+        var g=obj(plan.get("dispatchGroup"));keys(g,"version","executionConfigSha256","routeSha256","toolConfigSha256");
+        check("NATIVE_DISPATCH_GROUP_V1".equals(g.get("version")));
+        for(String k:List.of("executionConfigSha256","routeSha256","toolConfigSha256"))field(g,k,SHA);
     }
     // Select immutable wire facts here; Economy enforces equality without interpreting Runtime JSON.
     static String bindingDigest(String kind,Map<?,?> o,List<String> identity){
