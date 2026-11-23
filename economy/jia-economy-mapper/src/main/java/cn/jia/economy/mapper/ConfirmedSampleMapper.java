@@ -32,6 +32,11 @@ public interface ConfirmedSampleMapper {
         AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
     List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
+    @Select("""
+        SELECT r.operation_refs FROM economy_task_cost_sample s JOIN economy_task_cost_sample_revision r
+        ON r.sample_id=s.sample_id AND r.sample_revision=s.projection_revision AND r.sample_state='READY' WHERE
+        """+HISTORY+" AND s.sample_id=#{id} AND s.projection_revision=#{revision}")
+    String historyQuantities(@Param("t") Task query,@Param("group") String group,@Param("id") String id,@Param("revision") long revision);
     @Select("SELECT s.projection_revision FROM economy_task_cost_sample s WHERE "+HISTORY+" AND s.sample_id=#{id} AND s.projection_revision=#{revision} FOR SHARE")
     Long lockHistory(@Param("t") Task query,@Param("group") String group,@Param("id") String id,@Param("revision") long revision);
     record Header(String lifecycle,long evidenceRevision,String fact,String outcome,Boolean verified,Long memberCount,

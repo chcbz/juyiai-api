@@ -22,7 +22,6 @@ public class ConfirmedSampleProjectionService implements ConfirmedSampleProjecti
         var row=db.target(tenant,client,id);if(row==null)return false;
         return refresh(new Task(new cn.jia.economy.service.EconomyScope(tenant,client),row.owner(),row.taskId()),id,decoder);
     }
-    private record Ref(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,String evidenceSha256){}
     @Transactional(propagation=Propagation.NEVER)
     public boolean refresh(Task task,String id,ConfirmedSampleEvidence.Decoder decoder){
         var measured=evidence.measure(task,id,decoder);if(measured==null)return false;
@@ -33,7 +32,7 @@ public class ConfirmedSampleProjectionService implements ConfirmedSampleProjecti
         };
         if("READY".equals(state) && (a.members()==0 || measured.operations().isEmpty()))throw new IllegalStateException("Missing whole-task measurements");
         // No copied response bodies, vector, mutable current price or wallet observation in the revision.
-        var refs=json.writeValueAsString(measured.operations().stream().map(o->new Ref(o.memberRevision(),o.captureId(),o.captureRevision(),o.recordId(),o.sourceRevision(),o.fact().evidenceSha())).toList());
+        var refs=json.writeValueAsString(measured.operations().stream().map(o->ProjectedTaskOperation.from(o,json)).toList());
         return Boolean.TRUE.equals(tx.execute(st->{if(db.project(task,id,a.evidenceRevision(),state)!=1)return false;
             db.append(id,a.evidenceRevision(),a.terminalFactId(),state,a.verdict().name(),a.members(),refs);return true;}));
     }

@@ -24,6 +24,13 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog {
             return new Entry(new Revision(r.id(),r.revision()),r.taskId(),features);
         }).toList();
     }
+    @Transactional(propagation=Propagation.NEVER)
+    public List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> quantities(Task query,Group group,Revision selected){
+        var payload=db.historyQuantities(query,group.digest(),selected.sampleId(),selected.revision());if(payload==null)return null;
+        var rows=json.readValue(payload,ProjectedTaskOperation[].class);
+        if(rows.length==0)throw new IllegalStateException("Empty READY operation projection");
+        return java.util.Arrays.stream(rows).map(r->r.fact(json)).toList();
+    }
     @Transactional(propagation=Propagation.MANDATORY)
     public boolean lockCurrent(Task query,Group group,Revision selected){
         return db.lockHistory(query,group.digest(),selected.sampleId(),selected.revision())!=null;

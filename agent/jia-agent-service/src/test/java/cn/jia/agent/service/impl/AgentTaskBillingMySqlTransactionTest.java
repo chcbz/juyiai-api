@@ -555,10 +555,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var entries=historyCatalog.page(query,group,"");assertEquals(1,entries.size());var selected=entries.getFirst().source();assertEquals(sid,selected.sampleId());
         assertTrue(historyCatalog.page(BILLING_TASK,group,"").isEmpty());assertTrue(historyCatalog.page(new TaskBillingService.Task(query.scope(),"other","new-task"),group,"").isEmpty());
         assertTrue(historyCatalog.page(query,group,sid).isEmpty());assertTrue(historyCatalog.page(query,new cn.jia.economy.task.TaskHistoryCatalog.Group(group.execution(),group.featureVersion(),"different-template",group.embedding()),"").isEmpty());
+        var recovered=historyCatalog.quantities(query,group,selected);assertEquals(measured.operations().stream().map(o->o.fact()).toList(),recovered);
+        assertNull(historyCatalog.quantities(new TaskBillingService.Task(query.scope(),"other","new-task"),group,selected));
         assertTrue(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertEquals(1024,entries.getFirst().features().vector().size());
         assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operation_refs) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'"); // synthetic source invalidation, journal/CAS tested independently
-        assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));
+        assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertNull(historyCatalog.quantities(query,group,selected));
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
         assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='EXCLUDED' AND reason_code='MIXED_EXECUTION_CONFIG'",Integer.class));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));

@@ -1,5 +1,6 @@
 package cn.jia.economy.service.impl;
 
+import cn.jia.economy.pricing.MeasuredTaskRepricing;
 import cn.jia.economy.mapper.EconomyUsageCaptureMapper;
 import cn.jia.economy.usage.UsageCaptureJournal.*;
 import org.apache.ibatis.mapping.Environment;
@@ -21,6 +22,17 @@ class UsageCaptureJournalTransactionTest {
     final String h="e".repeat(64),sample="f".repeat(64);
     final Binding b=new Binding("t","c","own","agent","task","exec","r",h);
     Submission sub(String receipt,String kind,String id,String rev,String prev,String sha){return new Submission("request-"+receipt,sha,receipt,kind,id,rev,prev,sha,kind.equals("RESPONSE")?"0":null,"{\"test\":1}",h);}
+    @Test void revisionOperationPayloadPreservesPreciseQuantitiesWithoutInventingMissingUnits(){
+        var json=new tools.jackson.databind.ObjectMapper();
+        var key=new cn.jia.economy.pricing.TaskQuoteCalculator.ToolKey("test","render","frame");
+        for(var quantity:java.util.List.of(new MeasuredTaskRepricing.Units(key,new java.math.BigDecimal("1.00000000000000000000000001")),
+                new MeasuredTaskRepricing.Tokens("basis",java.util.Map.of(cn.jia.economy.pricing.ModelTokenPrice.Category.INPUT,9007199254740993L)),MeasuredTaskRepricing.Zero.EXPLICIT_ZERO,MeasuredTaskRepricing.Missing.MISSING)){
+            var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"kind","component",h,quantity);
+            var row=new cn.jia.economy.usage.ConfirmedSampleEvidence.Operation(1,h,2,sample,"3",fact);
+            if(quantity==MeasuredTaskRepricing.Missing.MISSING)assertThrows(IllegalStateException.class,()->ProjectedTaskOperation.from(row,json));
+            else assertEquals(fact,json.readValue(json.writeValueAsString(ProjectedTaskOperation.from(row,json)),ProjectedTaskOperation.class).fact(json));
+        }
+    }
     @Test void crashAfterIndependentLedgerCommitReplaysOriginalWithoutDuplicateOrFalseZero() throws Exception {
         var ds=new JdbcDataSource();ds.setURL("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
         for(String script:new String[]{"economy-usage-cost","economy-usage-capture"})try(var in=getClass().getResourceAsStream("/db/"+script+".sql");var c=ds.getConnection()){

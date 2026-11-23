@@ -28,6 +28,8 @@ public interface TaskHistoryCatalog {
     record Revision(String sampleId,long revision){}
     record Entry(Revision source,String sourceTaskId,TaskEstimateFeatures features){}
     List<Entry> page(TaskBillingService.Task query,Group group,String afterSampleId);
+    /** Read only the selected immutable projection while still current. Null = revision became unavailable, not zero cost. */
+    List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> quantities(TaskBillingService.Task query,Group group,Revision selected);
     /** Under caller's existing task transaction. Holds a read lock until quote commit; acquire selected ids in sorted order. */
     boolean lockCurrent(TaskBillingService.Task query,Group group,Revision selected);
 }
