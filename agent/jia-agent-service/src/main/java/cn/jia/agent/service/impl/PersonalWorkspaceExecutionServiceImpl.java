@@ -92,6 +92,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
     // A rollout decision only at INSERT: polling/replay must use the persisted pair, not this flag.
     @Value("${jia.agent.conversation-execution.metered-capture-enabled:false}")
     private boolean meteredCaptureEnabled;
+    @Value("${jia.agent.conversation-execution.local-artifact-metering-profile-sha256:}")
+    private String localArtifactMeteringProfile;
+
     /** Source materials are a fixed bridge contract and never inherit the output allow-list. */
     private static final Set<String> SUPPORTED_INPUT_MIME_TYPES = Set.of(
             "image/png", "image/jpeg", "text/plain", "text/markdown", "text/html", "application/json", "application/pdf",
@@ -1576,6 +1579,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 .setExecutionId(executionId).setSnapshotJson(skillJson(snapshot)).setSnapshotSha256(digest).setCreatedAt(now).setUpdatedAt(now)
                 .setTaskSkillBindingJson(skillJson(bindings.stream().map(b->Map.of("skill",cn.jia.agent.skill.SkillManagementCodec.map("key",b.skill().key(),"version",b.skill().version(),"packageSha256",b.skill().packageSha256(),"manifestSha256",b.skill().manifestSha256()),"executionBinding",b.executionBinding())).toList()));
             if (meteredCaptureEnabled) row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2");
+            // Rollout controls observation only, never the permitted tools or the dispatch itself.
+            if(meteredCaptureEnabled && task!=null && selections.isEmpty() && localArtifactMeteringProfile!=null
+                    && localArtifactMeteringProfile.matches("[a-f0-9]{64}"))row.setCaptureProfileSha256(localArtifactMeteringProfile);
             executions.insert(row);skillExecutions.insertReady(skill);
             if(task!=null) executions.registerTaskMember(row,row.getCaptureProtocol()==null?null:
                     cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(executionId,runId));

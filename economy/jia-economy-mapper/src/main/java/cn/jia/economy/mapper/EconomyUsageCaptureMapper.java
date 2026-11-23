@@ -10,7 +10,7 @@ import org.apache.ibatis.annotations.Update;
  * never from HTTP input. No mapper operation updates evidence bytes or ledger amounts. */
 public interface EconomyUsageCaptureMapper {
     @Select("""
-        SELECT input_revision,capture_id FROM economy_usage_capture WHERE id=#{pk} AND tenant_id=#{tenant}
+        SELECT input_revision,capture_id,owner_jiacn AS owner,task_id AS task,agent_id AS agent,execution_id AS execution,run_id AS run FROM economy_usage_capture WHERE id=#{pk} AND tenant_id=#{tenant}
         AND client_id=#{client} AND conflict_reason IS NULL AND (projection_revision IS NULL OR projection_revision<>input_revision)
         """) UsageCaptureProjection.Snapshot pendingProjection(UsageCaptureProjection.Key key);
     @Select("""

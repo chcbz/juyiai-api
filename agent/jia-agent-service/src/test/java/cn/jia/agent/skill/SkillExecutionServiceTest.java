@@ -404,11 +404,14 @@ public class SkillExecutionServiceTest {
         verify(pwe,times(1)).registerTaskMember(any(),isNull());verify(pwe,times(1)).insert(any());
     }
     @Test void admissionFreezesMeteringButPollingDoesNotConsultCurrentRollout() {
+        ReflectionTestUtils.setField(service,"localArtifactMeteringProfile","a".repeat(64));
         ReflectionTestUtils.setField(service,"meteredCaptureEnabled",true);
         var snap=snapshot();snap.put("skills",List.of());insertFixtures();
         service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap));
         verify(pwe).registerTaskMember(same(execution),eq(cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(execution.getExecutionId(),execution.getRunId())));
         assertEquals("RESPONSE_V2",execution.getUsageMode());assertEquals("METERED_CAPTURE_V2",execution.getCaptureProtocol());
+        assertEquals("a".repeat(64),execution.getCaptureProfileSha256());
+        ReflectionTestUtils.setField(service,"localArtifactMeteringProfile","b".repeat(64));
         ReflectionTestUtils.setField(service,"meteredCaptureEnabled",false);
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));
         var command=(SkillExecutionService.Command)service.runtimeConversationCommandViews(runtime,16).getFirst();

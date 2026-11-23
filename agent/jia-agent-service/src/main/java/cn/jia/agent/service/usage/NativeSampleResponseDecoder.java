@@ -14,7 +14,7 @@ public final class NativeSampleResponseDecoder implements ConfirmedSampleEvidenc
     private static final ObjectMapper JSON=new ObjectMapper();
     // Never infer zero tools merely because every MODEL response had measured tokens.
     @Override public boolean coversAllOperations(String groupVersion,String policy){
-        return "NATIVE_DISPATCH_GROUP_V1".equals(groupVersion)&&"TEXT_MODEL_ONLY_V1".equals(policy);
+        return "NATIVE_DISPATCH_GROUP_V1".equals(groupVersion)&&("TEXT_MODEL_ONLY_V1".equals(policy)||NativeCaptureCoverage.LOCAL_POLICY.equals(policy));
     }
     @Override public MeasuredTaskRepricing.Fact decode(ConfirmedSampleEvidence.Response row){
         var e=JSON.readTree(row.evidenceJson());var o=e.path("observation");String attempt=o.path("sourceAttemptId").asText();

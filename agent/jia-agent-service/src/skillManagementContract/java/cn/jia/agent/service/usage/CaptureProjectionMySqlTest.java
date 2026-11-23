@@ -40,7 +40,7 @@ class CaptureProjectionMySqlTest extends SkillManagementMySqlFixture {
             var store=proxy(new UsageCaptureProjectionStore(db),manager,cn.jia.economy.usage.UsageCaptureProjection.class);
             var scope=new FixedTenantAdmissionPolicy("t","c");var schedules=new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager);
             var beans=new DefaultListableBeanFactory();beans.registerSingleton("schedules",schedules);
-            var handler=new NativeCaptureProjection(store,beans.getBeanProvider(ScheduleService.class),scope);
+            var handler=new NativeCaptureProjection(store,beans.getBeanProvider(ScheduleService.class),scope,org.mockito.Mockito.mock(cn.jia.agent.dao.PersonalWorkspaceExecutionDao.class));
             var journal=proxy(new UsageCaptureJournalImpl(db,event->handler.changed((cn.jia.economy.usage.UsageCaptureProjection.Key)event)),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
             tx.execute(st->{journal.register(b,sub("rollback","PLAN",h,"1",null,h));st.setRollbackOnly();return null;});
             assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM task_scheduled_work",Integer.class));

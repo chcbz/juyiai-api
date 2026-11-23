@@ -137,6 +137,16 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
         @Param("runId") String runId);
 
     @Select("""
+        SELECT capture_profile_sha256 FROM agent_personal_workspace_execution
+        WHERE tenant_id=#{tenant} AND client_id=#{client} AND execution_id=#{execution}
+          AND BINARY tenant_id=BINARY #{tenant} AND BINARY client_id=BINARY #{client} AND BINARY execution_id=BINARY #{execution}
+          AND BINARY run_id=BINARY #{run} AND BINARY owner_jiacn=BINARY #{owner} AND BINARY task_id=BINARY #{task}
+          AND BINARY target_agent_id=BINARY #{agent} AND business_scope='TASK' AND execution_protocol_version=6
+          AND usage_mode='RESPONSE_V2' AND capture_protocol='METERED_CAPTURE_V2'
+        """) String admittedCaptureProfile(@Param("tenant")String tenant,@Param("client")String client,@Param("owner")String owner,
+                @Param("task")String task,@Param("agent")String agent,@Param("execution")String execution,@Param("run")String run);
+
+    @Select("""
             SELECT COUNT(*)
               FROM information_schema.columns
              WHERE table_schema=DATABASE()

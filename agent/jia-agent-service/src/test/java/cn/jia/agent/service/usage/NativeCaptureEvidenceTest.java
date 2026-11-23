@@ -110,11 +110,31 @@ class NativeCaptureEvidenceTest {
             }
         }
     }
+    @Test void closedTwoRequestProjectionUsesFrozenAdmissionNotReportedProfileOrCurrentRollout(){
+        // Associated-head boundary: HTTP codec/journal/recovery are verified independently with MySQL.
+        String cap="a".repeat(64),cfg="b".repeat(64),route="c".repeat(64),tool="d".repeat(64),channel="e".repeat(64);
+        var heads=new TreeMap<String,cn.jia.economy.usage.UsageCaptureProjection.Row>();
+        class Fixture { String add(String kind,Map<String,Object> o){String id=String.format("%064x",heads.size()+1);
+            var data=Map.of("kind",kind,"captureId",cap,"recordId",id,"observation",o);String sha=NativeCaptureEvidence.digest(data);
+            heads.put(id,new cn.jia.economy.usage.UsageCaptureProjection.Row(id,1,"1",sha,JSON.writeValueAsString(data)));return sha;}
+            String hash(int from,int to){return NativeCaptureEvidence.digest(heads.values().stream().skip(from).limit(to-from).map(r->List.of(r.recordId(),r.sourceRevision(),r.evidenceSha256())).toList());}}
+        var f=new Fixture();var group=Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256",cfg,"routeSha256",route,"toolConfigSha256",tool);
+        String p=f.add("PLAN",Map.of("rootSourceId","root","snapshotSha256",cap,"executionConfigSha256","f".repeat(64),"engineVersion","codex-cli-0.167.0","coveragePolicyVersion","NATIVE_LOCAL_ARTIFACT_TEXT_V1","dispatchGroup",group));
+        f.add("SOURCE",Map.of("sourceId","root","epoch","0","adapterVersion","RESPONSES_TEXT_TOKENS_V1","sourceKind","METERED_HTTP_RESPONSES_V1","channelNamespace",channel));
+        for(int i=1;i<=2;i++){f.add("REQUEST",Map.of("sourceId","root","epoch","0","sequence",""+i,"resolution","RESPONSE","sourceAttemptId","r"+i));
+            f.add("RESPONSE",Map.of("sourceId","root","epoch","0","measuredQuantities",Map.of("normalizationBasis","RESPONSES_TEXT_TOKENS_V1","tokens",Map.of("INPUT","5"))));}
+        f.add("SOURCE_FINAL",Map.of("sourceId","root","epoch","0","requestCount","2","responseCount","2","reservedSequenceHighWatermark","2","recordsSha256",f.hash(1,6),"closeState","DRAINED","reasonCodes",List.of()));
+        f.add("CAPTURE_FINAL",Map.of("planEvidenceSha256",p,"sourceCount","1","sourcesSha256",f.hash(6,7),"closeState","DRAINED","reasonCodes",List.of()));
+        String approved=NativeCaptureEvidence.digest(List.of("NATIVE_LOCAL_ARTIFACT_TEXT_V1","codex-cli-0.167.0","RESPONSES_TEXT_TOKENS_V1",cfg,route,tool,channel));
+        for(String pin:Arrays.asList(null,approved,NativeCaptureCoverage.profileSha(cfg,route,tool,"other"),NativeCaptureCoverage.profileSha(cfg,route,"other",channel))){
+            var fold=NativeCaptureCoverage.forAdmission(cap,pin);heads.values().forEach(fold::accept);var result=fold.finish();boolean match=approved.equals(pin);
+            assertEquals(match?"COMPLETE":"INCOMPLETE",result.state().name());assertEquals(match?10:0,result.observedTokens().intValueExact());}
+    }
     @Test void openCaptureHandlerUsesOnlyScopedFinalLookupAndRevisionCas(){
         var store=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCaptureProjection.class);
-        var worker=new NativeCaptureProjection(store,null,new cn.jia.core.security.FixedTenantAdmissionPolicy("t","c"));
+        var worker=new NativeCaptureProjection(store,null,new cn.jia.core.security.FixedTenantAdmissionPolicy("t","c"),null);
         var key=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","c",7);var cap="a".repeat(64);
-        org.mockito.Mockito.when(store.pending(key)).thenReturn(new cn.jia.economy.usage.UsageCaptureProjection.Snapshot(19,cap));
+        org.mockito.Mockito.when(store.pending(key)).thenReturn(new cn.jia.economy.usage.UsageCaptureProjection.Snapshot(19,cap,"o","task","a","e","r"));
         var schedule=new cn.jia.task.scheduling.ScheduleKey("c",worker.getName(),"7","");
         worker.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("t",schedule,1));
         org.mockito.Mockito.verify(store).pending(key);org.mockito.Mockito.verify(store).hasAssociated(key,NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"CAPTURE_FINAL",List.of())));

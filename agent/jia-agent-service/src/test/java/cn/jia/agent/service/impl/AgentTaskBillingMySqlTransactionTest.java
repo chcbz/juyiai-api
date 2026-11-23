@@ -901,7 +901,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 "agent-personal-workspace-v1_14-conversation-output.sql",
                 "agent-personal-workspace-v1_15-conversation-lease.sql",
                 "agent-personal-workspace-v1_16-conversation-provider-start.sql",
-                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql")) {
+                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql","agent-native-capture-profile-v1.sql")) {
             new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/" + file))
                     .execute(jdbc.getDataSource());
         }

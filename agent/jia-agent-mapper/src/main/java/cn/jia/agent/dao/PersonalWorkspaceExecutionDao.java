@@ -16,6 +16,8 @@ public interface PersonalWorkspaceExecutionDao extends TaskExecutionClosureDao {
     PersonalWorkspaceExecutionEntity findForRuntime(String tenantId,String clientId,String executorOwner,
             String agentId,String executionId,String runId);
 
+    String admittedCaptureProfile(String tenant,String client,String owner,String task,String agent,String execution,String run);
+
     /** Historical native cost authority, not active execution admission. */
     PersonalWorkspaceExecutionEntity findForNativeUsageCost(String tenantId, String clientId, String executorOwner,
             String agentId, String executionId, String runId);

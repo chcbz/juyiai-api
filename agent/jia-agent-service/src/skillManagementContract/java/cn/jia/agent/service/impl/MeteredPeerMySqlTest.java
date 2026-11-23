@@ -69,6 +69,10 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         row("exec1","owner","task","CONVERSATION","RESULT_COMMITTED",6);
         jdbc.update("UPDATE agent_personal_workspace_execution SET target_agent_id=?,task_grant_id='g',task_grant_version=1,usage_mode='RESPONSE_V2',capture_protocol='METERED_CAPTURE_V2' WHERE execution_id='exec1'",AGENT);
         skill("exec1","COMPLETE");
+        jdbc.update("UPDATE agent_personal_workspace_execution SET capture_profile_sha256=? WHERE execution_id='exec1'","e".repeat(64));
+        assertEquals("e".repeat(64),executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","run-exec1"));
+        assertNull(executions.admittedCaptureProfile("0","client","executor","task",AGENT,"exec1","run-exec1"));
+        assertNull(executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","foreign"));
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
         for(var cl:List.of(AgentRuntimeMapper.class,AgentRuntimeV1InstallationMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentPersonaBindingMapper.class,EconomyUsageCostMapper.class,EconomyUsageCaptureMapper.class,ScheduledWorkMapper.class)) config.addMapper(cl);
         var factory=new MybatisSqlSessionFactoryBean();factory.setConfiguration(config);factory.setDataSource(ds);
@@ -83,7 +87,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var beans=new DefaultListableBeanFactory();beans.registerSingleton("s",new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager));
         var schedules=beans.getBeanProvider(ScheduleService.class);
         var store=transactional(new UsageCaptureProjectionStore(sql.getMapper(EconomyUsageCaptureMapper.class)),UsageCaptureProjection.class,manager);
-        var projection=new NativeCaptureProjection(store,schedules,scope);
+        var projection=new NativeCaptureProjection(store,schedules,scope,executions);
         var journal=transactional(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class),event->projection.changed((UsageCaptureProjection.Key)event)),UsageCaptureJournal.class,manager);
         var cost=transactional(new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class),json),UsageCostService.class,manager);
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);

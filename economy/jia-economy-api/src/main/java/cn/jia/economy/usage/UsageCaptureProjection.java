@@ -5,7 +5,7 @@ import java.util.List;
 /** Capture-local projection. Never registers task membership, posts a price or grants execution. */
 public interface UsageCaptureProjection {
     record Key(String tenant,String client,long pk) {}
-    record Snapshot(long inputRevision,String captureId) {}
+    record Snapshot(long inputRevision,String captureId,String owner,String task,String agent,String execution,String run) {}
     record Row(String recordId,long revisions,String sourceRevision,String evidenceSha256,String evidenceJson) {}
     /** Local dispatch measurement, independently versioned from the price book and from coverage. */
     record DispatchGroup(String version,String executionConfigSha256,String routeSha256,String toolConfigSha256,
