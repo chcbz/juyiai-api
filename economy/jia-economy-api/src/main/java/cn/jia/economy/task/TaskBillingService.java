@@ -30,11 +30,11 @@ public interface TaskBillingService {
     /** Immutable per recommendation+candidate binding. Replay returns stored prices without recalculating. */
     Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, String reportedModel);
     /** Only the authoritative candidate configuration; labels or the actual cost ledger are not grouping keys. */
-    record MeasuredGroup(String executionConfigSha256, String routeVersion, String toolConfigSha256, String capturePolicyVersion) {
+    record MeasuredGroup(String dispatchGroupVersion, String executionConfigSha256, String localRouteSha256, String routeVersion, String toolConfigSha256, String capturePolicyVersion) {
         public MeasuredGroup {
-            for (String hash : java.util.List.of(executionConfigSha256, toolConfigSha256))
+            for (String hash : java.util.List.of(executionConfigSha256, localRouteSha256, toolConfigSha256))
                 if (!hash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("Missing configuration commitment");
-            if (routeVersion.isBlank() || capturePolicyVersion.isBlank()) throw new IllegalArgumentException("Unknown group");
+            if (dispatchGroupVersion.isBlank() || routeVersion.isBlank() || capturePolicyVersion.isBlank()) throw new IllegalArgumentException("Unknown group");
         }
     }
     /** Prepared outside the task lock. No pricing or encoding in the write transaction. */

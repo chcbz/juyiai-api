@@ -137,6 +137,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.TaskMembershipDelivery membershipDelivery;
     private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
     private PersonalWorkspaceExecutionDaoImpl executionRows;
+    private cn.jia.economy.usage.ConfirmedSampleEvidence sampleEvidence;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -174,6 +175,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var global = new GlobalConfig(); global.setIdentifierGenerator(new DefaultIdentifierGenerator());
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
+        config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         var sql = new SqlSessionTemplate(factory.getObject());
         var meta = new AgentTaskMetaDaoImpl();
         ReflectionTestUtils.setField(meta, "baseMapper", sql.getMapper(AgentTaskMetaMapper.class));
@@ -250,6 +252,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
         var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
+        sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
         var schedules=new cn.jia.task.scheduling.ScheduledWorkStore(sql.getMapper(cn.jia.task.mapper.ScheduledWorkMapper.class),fixed,manager);
         var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
         var receipts=proxy(new cn.jia.economy.service.impl.TaskMembershipReceiptStore(sql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.usage.TaskMembershipReceipt.class);
@@ -480,7 +483,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"draw","frame","fixture-proof",new MeasuredTaskRepricing.Units(unit,BigDecimal.ONE));
         var reference=new MeasuredTaskRepricing.Reference("book",Map.of("draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
         var estimate=MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
-        var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("c".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
+        var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
         return new PreparedFixture(binding,features,offer);
     }
@@ -517,6 +520,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test void cancelledMeasuredTaskRemainsExcludedAfterReleaseEvenWithoutMembers() throws Exception {
         prepareCancellation();confirmMeasured();prepareRunning();cancellation.cancel(TENANT,CLIENT,OWNER,PAYER,TASK,3);deliverTerminal();
         assertEquals("RELEASED",charge());assertEquals(100,wallet(jdbc));assertEquals("EXCLUDED",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE lifecycle_state='CANCELLED'",String.class));
+    }
+    @Test void confirmedEligibilityComparesEveryCurrentMemberButNeverTreatsReferenceRouteAsActualIdentity(){
+        confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        assertNull(sampleEvidence.inspect(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),sid));
+        assertEquals("ACTIVE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());prepareSubmitted();
+        locked(()->{for(int i=0;i<65;i++){var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("exec"+i).setRunId("run").setRequestHash("a".repeat(64));m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(m.getExecutionId(),m.getRunId()));}return null;});
+        decide("accepted");deliverTerminal();deliverTerminal();
+        assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
+        // Synthetic independently projected facts, not a real provider coverage grant or READY label.
+        jdbc.update("INSERT INTO economy_usage_capture(tenant_id,client_id,owner_jiacn,task_id,agent_id,execution_id,run_id,capture_id,input_revision,projection_revision,coverage_state) SELECT ?,?,?,?,?,execution_id,run_id,capture_id,1,1,'COMPLETE' FROM economy_task_cost_sample_member",TENANT,CLIENT,OWNER,TASK,AGENT);
+        jdbc.update("INSERT INTO economy_usage_capture_dispatch_group SELECT id,1,'NATIVE_DISPATCH_GROUP_V1',REPEAT('c',64),REPEAT('f',64),REPEAT('d',64),'cp',REPEAT('9',64) FROM economy_usage_capture");
+        var matched=sampleEvidence.inspect(BILLING_TASK,sid);assertEquals(65,matched.members());assertEquals("MATCHED",matched.verdict().name());
+        jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
+        assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
+        jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");
+        assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
     }
     @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
         var task=new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK);var key=new TaskQuoteBatches.Key(task,PAYER,"same-key");
