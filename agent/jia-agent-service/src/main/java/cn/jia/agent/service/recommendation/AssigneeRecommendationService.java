@@ -167,21 +167,12 @@ public final class AssigneeRecommendationService {
         if (!before.candidates().stream().map(c -> c.agent().agentId()).toList()
                 .equals(after.candidates().stream().map(c -> c.agent().agentId()).toList())) throw stale("CANDIDATE_SET");
         if (!before.providerOwners().equals(after.providerOwners())) throw stale("CANDIDATE_FACTS");
-        if (!stableSkills(before.skillFacts()).equals(stableSkills(after.skillFacts()))) throw stale("SKILL_EVIDENCE");
+        if (!before.skillFacts().equals(after.skillFacts())) throw stale("SKILL_EVIDENCE");
         for (int i = 0; i < before.candidates().size(); i++) {
             var old = before.candidates().get(i); var now = after.candidates().get(i);
             if (old.agent().boundToMe() != now.agent().boundToMe() || old.agent().canOperate() != now.agent().canOperate()
                     || !old.agent().abilities().equals(now.agent().abilities())) throw stale("CANDIDATE_FACTS");
         }
-    }
-    // A recommendation is advice, not execution admission. Catalog health may
-    // change during a model call without changing what skill was installed.
-    private record StableSkill(String installationId, String key, String version, String title, String description, String kind) { }
-    private static Map<String,List<StableSkill>> stableSkills(Map<String,List<SkillManagementService.RecommendationSkill>> facts) {
-        var result = new LinkedHashMap<String,List<StableSkill>>();
-        facts.forEach((agent, rows) -> result.put(agent, rows.stream().map(s -> new StableSkill(
-                s.installationId(), s.skillKey(), s.skillVersion(), s.title(), s.description(), s.kind())).toList()));
-        return result;
     }
     private static Result refreshAvailability(Result result, List<Candidate> current) {
         var byAgent = new HashMap<String,Candidate>();

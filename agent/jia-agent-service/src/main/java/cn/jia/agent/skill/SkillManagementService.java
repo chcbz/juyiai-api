@@ -701,7 +701,8 @@ public final class SkillManagementService {
     /** Read-only recommendation facts. Unlike the management screen, never prepares/downloads
      * candidate packages, quotes upgrades or checks unrelated unpublished products. */
     public record RecommendationSkill(String installationId,String skillKey,String skillVersion,
-            String title,String description,boolean available,String runtimeState,String kind) { }
+            String title,String description,boolean available,String runtimeState,String kind,
+            String evidenceKey,String factDigest) { }
     // Citable installed experience is not executable admission. runtime() has already checked
     // the authenticated catalog, installation, package/version and active policy before these states.
     static boolean recommendationEvidenceAvailable(String kind,boolean enabled,boolean admission,String runtimeState) {
@@ -770,8 +771,20 @@ public final class SkillManagementService {
                     if(product==null)continue;
                     boolean ready=recommendationEvidenceAvailable(text(pkg,"kind"),Boolean.TRUE.equals(state.getDesiredEnabled()),
                             Boolean.TRUE.equals(state.getAdmissionEnabled()),text(status,"state"));
+                    // Internal content-addressed source identity, never a display ordinal or a wire field.
+                    var key=hash("recommendation/installation-key/v1",List.of(a.tenantId(),a.clientId(),agent,
+                            providerOwner,auth.getInstallationId()));
+                    var relation=relationship==null?null:Arrays.asList(Long.toString(relationship.bindingId()),
+                            relationship.leaseId(),relationship.intentId(),relationship.captureTransactionId());
+                    var digest=hash("recommendation/installation-fact/v1",Arrays.asList(key,relation,
+                            auth.getChangeId(),auth.getEntitlementId(),auth.getPermissionsSha256(),
+                            auth.getRuntimeHostId(),auth.getRuntimeInstallationId(),text(pkg,"packageSha256"),
+                            state.getSkillKey(),Objects.toString(state.getSkillRevision(),null),
+                            Objects.toString(state.getActivePolicyRevision(),null),versionId,text(pkg,"skillVersion"),
+                            product.getProductId(),product.getCurrentProductVersionId(),Objects.toString(product.getVersion(),null),
+                            product.getName(),product.getDescription(),text(pkg,"kind"),text(status,"state"),ready));
                     rows.add(new RecommendationSkill(auth.getInstallationId(),state.getSkillKey(),text(pkg,"skillVersion"),
-                            product.getName(),product.getDescription(),ready,text(status,"state"),text(pkg,"kind")));
+                            product.getName(),product.getDescription(),ready,text(status,"state"),text(pkg,"kind"),key,digest));
                 }
                 rows.sort(Comparator.comparing(RecommendationSkill::installationId));result.put(agent,List.copyOf(rows));
             }

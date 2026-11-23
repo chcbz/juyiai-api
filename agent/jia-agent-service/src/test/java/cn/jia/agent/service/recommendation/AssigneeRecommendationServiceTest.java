@@ -185,7 +185,7 @@ class AssigneeRecommendationServiceTest {
         var a = new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("a", "Agent", null, true, "online"), List.of(), "owner");
         when(agents.getTaskRecommendationInput("task")).thenReturn(task("7")); when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(a));
         when(skills.recommendationSkills(eq(ACTOR), anyList())).thenReturn(Map.of("a", List.of(new SkillManagementService.RecommendationSkill(
-                "installed", "image", "1", "图片", "经验", false, "VERSION_MISMATCH", "INSTRUCTION"))));
+                "installed", "image", "1", "图片", "经验", false, "VERSION_MISMATCH", "INSTRUCTION","internal-key","fact-digest"))));
         when(model.judge(any(AgentAssigneeRecommendationModel.Context.class), anyString(), anyString())).thenReturn(ANSWER.replace("HIGH", "UNKNOWN").replace("[\"A1E1\"]", "[]"));
         var result = new AssigneeRecommendationService(agents, skills, model, mock(RecommendationMaterials.class), quotePassThrough()).recommend(ACTOR, "task", new Request("7"));
         assertEquals("NO_MATCH", result.state()); assertEquals("UNKNOWN", result.recommendations().getFirst().recommendationLevel());
@@ -201,7 +201,7 @@ class AssigneeRecommendationServiceTest {
         var a = new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("a", "Agent", null, true, "online"), List.of(), "owner");
         when(agents.getTaskRecommendationInput("task")).thenReturn(task("7")); when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(a));
         when(skills.recommendationSkills(eq(ACTOR), anyList())).thenReturn(Map.of("a", List.of(new SkillManagementService.RecommendationSkill(
-                "installed", "writing", "1", "写作", "写作经验", true, "NOT_EXECUTABLE", "INSTRUCTION"))));
+                "installed", "writing", "1", "写作", "写作经验", true, "NOT_EXECUTABLE", "INSTRUCTION","internal-key","fact-digest"))));
         when(model.judge(any(AgentAssigneeRecommendationModel.Context.class), anyString(), anyString())).thenReturn(ANSWER);
         var result = new AssigneeRecommendationService(agents, skills, model, mock(RecommendationMaterials.class), quotePassThrough()).recommend(ACTOR, "task", new Request("7"));
         assertEquals("READY", result.state());
@@ -293,24 +293,19 @@ class AssigneeRecommendationServiceTest {
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(online),List.of(changed));
         assertEquals(409,assertThrows(Failure.class,()->service.recommend(ACTOR,"task",new Request("7"))).status());
     }
-    @Test void transientSkillReadinessChangeReturnsCurrentAdviceWithoutRetryingModel() {
+    @Test void changedCitationEligibilityOrInstallationVersionInvalidatesObservationWithoutRetry() {
         var agents=mock(AgentService.class);var skills=mock(SkillManagementService.class);var model=mock(AgentAssigneeRecommendationModel.class);
         var service=new AssigneeRecommendationService(agents,skills,model,mock(RecommendationMaterials.class), quotePassThrough());
         when(agents.getTaskRecommendationInput("task")).thenReturn(task("7"));
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(new AgentTaskAssigneeCandidateDTO(
                 new AgentTaskTargetSummaryDTO("a","A",null,true,"online"),List.of(), "owner")));
-        var ready=new SkillManagementService.RecommendationSkill("installation","vision","1.0.0","识图","读图片",true,"NOT_EXECUTABLE","INSTRUCTION");
-        var disabled=new SkillManagementService.RecommendationSkill("installation","vision","1.0.0","识图","读图片",false,"UNKNOWN","INSTRUCTION");
+        var ready=new SkillManagementService.RecommendationSkill("installation","vision","1.0.0","识图","读图片",true,"NOT_EXECUTABLE","INSTRUCTION","internal-key","fact-digest");
+        var disabled=new SkillManagementService.RecommendationSkill("installation","vision","1.0.0","识图","读图片",false,"UNKNOWN","INSTRUCTION","internal-key","fact-digest");
         when(skills.recommendationSkills(eq(ACTOR), anyList())).thenReturn(Map.of("a",List.of(ready)),Map.of("a",List.of(disabled)));
         when(model.judge(any(AgentAssigneeRecommendationModel.Context.class), anyString(),anyString())).thenReturn(ANSWER);
-        var result=service.recommend(ACTOR,"task",new Request("7"));
-        assertEquals("NO_MATCH",result.state());
-        assertEquals(new Workload(Workload.Kind.DOCUMENT, 20000, 5000, 1), result.workload());
-        assertEquals("UNKNOWN",result.recommendations().getFirst().recommendationLevel());
-        assertTrue(result.recommendations().getFirst().evidence().isEmpty());
-        assertTrue(result.recommendations().getFirst().gaps().stream().anyMatch(g->g.contains("技能当前未就绪")));
+        assertEquals(409,assertThrows(Failure.class,()->service.recommend(ACTOR,"task",new Request("7"))).status());
         verify(model,times(1)).judge(any(AgentAssigneeRecommendationModel.Context.class), anyString(),anyString());
-        var upgraded=new SkillManagementService.RecommendationSkill("installation","vision","2.0.0","识图","读图片",true,"NOT_EXECUTABLE","INSTRUCTION");
+        var upgraded=new SkillManagementService.RecommendationSkill("installation","vision","2.0.0","识图","读图片",true,"NOT_EXECUTABLE","INSTRUCTION","internal-key","fact-digest");
         when(skills.recommendationSkills(eq(ACTOR), anyList())).thenReturn(Map.of("a",List.of(ready)),Map.of("a",List.of(upgraded)));
         assertEquals(409,assertThrows(Failure.class,()->service.recommend(ACTOR,"task",new Request("7"))).status());
     }
@@ -320,7 +315,7 @@ class AssigneeRecommendationServiceTest {
         var agents=mock(AgentService.class);var skills=mock(SkillManagementService.class);var model=mock(AgentAssigneeRecommendationModel.class);
         var a=new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("external","External",null,false,"online"),List.of(),"private-owner");
         when(agents.getTaskRecommendationInput("task")).thenReturn(task("7"));when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(a));
-        var fact=new SkillManagementService.RecommendationSkill("private-installation","private-key","private-version","甜点制作","制作蛋糕和甜点",true,"NOT_EXECUTABLE","INSTRUCTION");
+        var fact=new SkillManagementService.RecommendationSkill("private-installation","private-key","private-version","甜点制作","制作蛋糕和甜点",true,"NOT_EXECUTABLE","INSTRUCTION","internal-key","fact-digest");
         when(skills.recommendationSkills(ACTOR,List.of(a))).thenReturn(Map.of("external",List.of(fact)));
         when(model.judge(any(AgentAssigneeRecommendationModel.Context.class), anyString(),anyString())).thenReturn(ANSWER);
         var result=new AssigneeRecommendationService(agents,skills,model,mock(RecommendationMaterials.class), quotePassThrough()).recommend(ACTOR,"task",new Request("7"));

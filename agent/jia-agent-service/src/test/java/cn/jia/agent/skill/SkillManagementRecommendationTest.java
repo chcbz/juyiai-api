@@ -103,6 +103,17 @@ class SkillManagementRecommendationTest {
         verify(f.catalog,times(2)).lookup(any(),any());verify(f.db,never()).findAuthorization(anyString(),anyString(),anyString());
         verifyNoInteractions(f.packages,f.writer,f.sessions);
     }
+    @Test void stableInstallationKeyButNewFactDigestForCatalogEditOrPolicyRevision() {
+        var f=new Fixture(); f.installed("a");
+        var old=f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst();
+        assertTrue(old.evidenceKey().matches("[0-9a-f]{64}"));
+        var current=f.db.products("0","client").getFirst(); current.setCurrentProductVersionId("new-catalog-version");
+        var edited=f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst();
+        assertEquals(old.evidenceKey(),edited.evidenceKey()); assertNotEquals(old.factDigest(),edited.factDigest());
+        f.states.get("a").setActivePolicyRevision(2L);
+        var policy=f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst();
+        assertEquals(edited.evidenceKey(),policy.evidenceKey()); assertNotEquals(edited.factDigest(),policy.factDigest());
+    }
     @Test void heartbeatTimestampDoesNotBlanketInvalidateAndNextObservationReloadsFacts() {
         var f=new Fixture();f.installed("a");
         when(f.catalog.lookup(any(),any())).thenReturn(f.view("a",1L,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE),
