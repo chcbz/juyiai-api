@@ -32,6 +32,39 @@ class MeasuredTaskRepricingTest {
         assertThrows(IllegalArgumentException.class,()->MeasuredNeighborEstimate.aggregate(book,List.of(above,costly)));
         assertThrows(Unavailable.class,()->MeasuredNeighborEstimate.aggregate(book,List.of()));
     }
+    private static TaskEstimateFeatures features(float component,int files,Integer deliverables){
+        var vector=new ArrayList<>(Collections.nCopies(1024,0f));vector.set(0,component);vector.set(1,1f-Math.abs(component));
+        return new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),vector,
+                Collections.nCopies(files,new TaskEstimateFeatures.File("INPUT","text/plain",1024,1)),deliverables);
+    }
+    @Test void streamingNeighborsUseTrainingRangesUnknownIsNotZeroAndTiesDoNotDependOnPages(){
+        var query=features(1,0,null);var knownZero=features(1,0,0);var orthogonal=features(0,0,null);var large=features(1,2,4);
+        var scales=TaskNeighborSearch.trainingScales(List.of(knownZero,large));assertEquals(2,scales.fileCount());assertEquals(4,scales.deliverables());assertEquals(Math.log1p(2048),scales.logBytes());
+        var parameters=new TaskNeighborSearch.Parameters(scales,1,1,1,1,1,0.125,0.75,2,2,1,1);
+        var search=new TaskNeighborSearch(query,parameters);search.accept("a",1,knownZero);
+        assertEquals("NO_BASELINE",assertThrows(Unavailable.class,search::selected).getMessage());
+        search.accept("b",3,orthogonal);assertEquals("OUT_OF_DISTRIBUTION",assertThrows(Unavailable.class,search::selected).getMessage());
+        search.accept("c",4,query);var initial=search.selected();assertEquals(List.of("c","a"),initial.stream().map(TaskNeighborSearch.Hit::id).toList());
+        assertTrue(initial.getFirst().weight().compareTo(initial.getLast().weight())>0);assertEquals(0.125,initial.getFirst().distance());assertEquals(0.75,initial.getLast().distance());
+        search.accept("d",7,query);search.accept("e",9,query);search.accept("f",11,large);
+        assertEquals(List.of("c","d"),search.selected().stream().map(TaskNeighborSearch.Hit::id).toList());assertThrows(IllegalArgumentException.class,()->search.accept("f",12,query));
+        var constant=TaskNeighborSearch.trainingScales(List.of(query));var fixed=new TaskNeighborSearch(query,new TaskNeighborSearch.Parameters(constant,1,1,1,1,1,0.1,0.2,1,1,999,1));
+        fixed.accept("out",1,large);assertEquals("OUT_OF_DISTRIBUTION",assertThrows(Unavailable.class,fixed::selected).getMessage());
+    }
+    @Test void evaluationRejectsTemporalFamilyAndRosterLeaksAndNeverTreatsAbstentionAsZero(){
+        var train=new TaskEstimateEvaluation.Case("train","A",1,2,TaskEstimateEvaluation.Split.TRAIN);
+        var tune=new TaskEstimateEvaluation.Case("tune","B",3,4,TaskEstimateEvaluation.Split.CALIBRATE);
+        var h=TaskEstimateEvaluation.Split.HOLDOUT;var cases=List.of(train,tune,new TaskEstimateEvaluation.Case("p","C",5,6,h),new TaskEstimateEvaluation.Case("z","D",5,7,h),new TaskEstimateEvaluation.Case("abstain","D",5,8,h));
+        var pos=new TaskEstimateEvaluation.Prediction("p",new BigDecimal("0.20"),10L);var zero=new TaskEstimateEvaluation.Prediction("z",BigDecimal.ZERO,1L);
+        var absent=new TaskEstimateEvaluation.Prediction("abstain",BigDecimal.TEN,null);var scores=TaskEstimateEvaluation.score(cases,List.of(zero,pos,absent));
+        assertEquals(3,scores.eligible());assertEquals(2,scores.quoted());assertEquals(1,scores.underestimates());assertEquals(new BigDecimal("0.01"),scores.zeroAbsoluteYuanSum());
+        assertEquals(0,scores.wape().compareTo(new TaskEstimateEvaluation.Ratio(new BigDecimal("0.55"),BigDecimal.ONE)));
+        assertEquals(0,scores.p90Relative().compareTo(new TaskEstimateEvaluation.Ratio(new BigDecimal("0.50"),BigDecimal.ONE)));
+        assertThrows(IllegalArgumentException.class,()->TaskEstimateEvaluation.score(cases,List.of(pos,zero)));
+        assertThrows(IllegalArgumentException.class,()->TaskEstimateEvaluation.checkSplit(List.of(train,tune,new TaskEstimateEvaluation.Case("p","A",5,7,h))));
+        assertThrows(IllegalArgumentException.class,()->TaskEstimateEvaluation.checkSplit(List.of(train,tune,new TaskEstimateEvaluation.Case("p","C",4,7,h))));
+        var onlyZero=TaskEstimateEvaluation.score(List.of(train,tune,cases.get(3)),List.of(zero));assertNull(onlyZero.wape());assertNull(onlyZero.p90Relative());
+    }
     @Test void noFallbackWhenEvidenceOrAnExclusiveBasisIsMissing(){
         var book=new Reference("ref",Map.of("image",Map.of("render",frames)));
         var good=fact("i","image","render",new Units(image,BigDecimal.ONE));var doubleCharge=fact("i","image","image-tokens",new Tokens("disjoint-v1",Map.of(INPUT,1L)));

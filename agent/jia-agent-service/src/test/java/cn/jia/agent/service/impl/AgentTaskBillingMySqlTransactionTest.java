@@ -555,6 +555,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var entries=historyCatalog.page(query,group,"");assertEquals(1,entries.size());var selected=entries.getFirst().source();assertEquals(sid,selected.sampleId());
         assertTrue(historyCatalog.page(BILLING_TASK,group,"").isEmpty());assertTrue(historyCatalog.page(new TaskBillingService.Task(query.scope(),"other","new-task"),group,"").isEmpty());
         assertTrue(historyCatalog.page(query,group,sid).isEmpty());assertTrue(historyCatalog.page(query,new cn.jia.economy.task.TaskHistoryCatalog.Group(group.execution(),group.featureVersion(),"different-template",group.embedding()),"").isEmpty());
+        var needle=entries.getFirst().features();var scales=cn.jia.economy.pricing.TaskNeighborSearch.trainingScales(List.of(needle));
+        var searchParams=new cn.jia.economy.pricing.TaskNeighborSearch.Parameters(scales,1,1,1,1,1,0.1,0.2,1,1,1,1);
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,(priceScope,v,routes,kinds)->{
+            assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
+            var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
+            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
+        var prediction=engine.estimate(query,group.execution(),needle,searchParams,Map.of());assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
         var recovered=historyCatalog.quantities(query,group,selected);assertEquals(measured.operations().stream().map(o->o.fact()).toList(),recovered);
         assertNull(historyCatalog.quantities(new TaskBillingService.Task(query.scope(),"other","new-task"),group,selected));
         assertTrue(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertEquals(1024,entries.getFirst().features().vector().size());
