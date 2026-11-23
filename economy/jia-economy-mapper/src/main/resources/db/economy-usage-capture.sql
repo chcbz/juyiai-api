@@ -119,3 +119,17 @@ CREATE TABLE IF NOT EXISTS economy_task_cost_sample_revision (
     operation_refs LONGTEXT NOT NULL, PRIMARY KEY(sample_id,sample_revision),
     CONSTRAINT fk_cost_sample_revision FOREIGN KEY(sample_id) REFERENCES economy_task_cost_sample(sample_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Private calibrated estimator revisions. Explicit maintenance only; empty tables enable no group.
+CREATE TABLE IF NOT EXISTS economy_task_estimator_evidence (
+    tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL, owner_jiacn VARCHAR(100) NOT NULL,
+    group_sha CHAR(64) NOT NULL, receipt_sha CHAR(64) NOT NULL, receipt_json LONGTEXT NOT NULL,
+    PRIMARY KEY(tenant_id,client_id,owner_jiacn,group_sha,receipt_sha)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE IF NOT EXISTS economy_task_estimator_current (
+    tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL, owner_jiacn VARCHAR(100) NOT NULL,
+    group_sha CHAR(64) NOT NULL, generation BIGINT NOT NULL, receipt_sha CHAR(64) DEFAULT NULL,
+    PRIMARY KEY(tenant_id,client_id,owner_jiacn,group_sha),
+    CONSTRAINT fk_estimator_evidence FOREIGN KEY(tenant_id,client_id,owner_jiacn,group_sha,receipt_sha)
+        REFERENCES economy_task_estimator_evidence(tenant_id,client_id,owner_jiacn,group_sha,receipt_sha)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

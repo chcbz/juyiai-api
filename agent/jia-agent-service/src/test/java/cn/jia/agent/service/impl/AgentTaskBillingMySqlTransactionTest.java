@@ -138,6 +138,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
     private PersonalWorkspaceExecutionDaoImpl executionRows;
     private cn.jia.economy.usage.ConfirmedSampleEvidence sampleEvidence;
+    private cn.jia.economy.task.TaskCalibrationCatalog calibrationCatalog;
     private cn.jia.economy.task.TaskHistoryCatalog historyCatalog;
     private cn.jia.agent.service.usage.ConfirmedSampleRecovery recovery;
     private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
@@ -179,6 +180,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        config.addMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class);
         var sql = new SqlSessionTemplate(factory.getObject());
         var meta = new AgentTaskMetaDaoImpl();
         ReflectionTestUtils.setField(meta, "baseMapper", sql.getMapper(AgentTaskMetaMapper.class));
@@ -255,6 +257,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
         var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
+        calibrationCatalog=proxy(new cn.jia.economy.service.impl.TaskCalibrationCatalogService(sql.getMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationCatalog.class);
         historyCatalog=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskHistoryCatalog.class);
         sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
         sampleProjection=proxy(new cn.jia.economy.service.impl.ConfirmedSampleProjectionService(sampleEvidence,sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper(),manager),cn.jia.economy.usage.ConfirmedSampleProjection.class);
@@ -557,16 +560,39 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(historyCatalog.page(query,group,sid).isEmpty());assertTrue(historyCatalog.page(query,new cn.jia.economy.task.TaskHistoryCatalog.Group(group.execution(),group.featureVersion(),"different-template",group.embedding()),"").isEmpty());
         var needle=entries.getFirst().features();var scales=cn.jia.economy.pricing.TaskNeighborSearch.trainingScales(List.of(needle));
         var searchParams=new cn.jia.economy.pricing.TaskNeighborSearch.Parameters(scales,1,1,1,1,1,0.1,0.2,1,1,1,1);
+        assertNull(calibrationCatalog.resolve(query,group));
+        var gate=new cn.jia.economy.pricing.TaskEstimateCalibration.Gate(1,BigDecimal.ONE);
+        var ratio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(BigDecimal.ZERO,BigDecimal.ONE);
+        var scores=new cn.jia.economy.pricing.TaskEstimateEvaluation.Scores(1,1,0,1,0,BigDecimal.ZERO,ratio,ratio);
+        var fitted=new cn.jia.economy.pricing.TaskEstimateCalibration.Fit("fixture",searchParams,scores);
+        var report=new cn.jia.economy.pricing.TaskEstimateCalibration.Report(group.digest(),group.execution().routeVersion(),fitted,scores,true);
+        var receipt=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(cn.jia.economy.pricing.TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),"3".repeat(64),"4".repeat(64),gate,report);
+        var receiptJson=new ObjectMapper().writeValueAsString(receipt);
+        jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,OWNER,group.digest(),receiptJson,receiptJson);
+        jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,group.digest(),receiptJson);
+        var active=calibrationCatalog.resolve(query,group);assertEquals(searchParams,active.parameters());assertTrue(locked(()->calibrationCatalog.lockCurrent(query,active.pin())));
+        assertNull(calibrationCatalog.resolve(new TaskBillingService.Task(query.scope(),"different-owner","offer"),group));
+        jdbc.update("UPDATE economy_task_estimator_current SET generation=2,receipt_sha=NULL WHERE group_sha=?",group.digest());
+        assertNull(calibrationCatalog.resolve(query,group));assertFalse(locked(()->calibrationCatalog.lockCurrent(query,active.pin())));
+        jdbc.update("UPDATE economy_task_estimator_current SET generation=3,receipt_sha=SHA2(?,256) WHERE group_sha=?",receiptJson,group.digest());
+        assertFalse(locked(()->calibrationCatalog.lockCurrent(query,active.pin()))); // reactivation of same bytes cannot resurrect stale preparation
         var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,(priceScope,v,routes,kinds)->{
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
             return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
         var prediction=engine.estimate(query,group.execution(),needle,searchParams,Map.of());assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
+        var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine);
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING),estimator.prepare(query,needle,null));
+        assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(new TaskBillingService.Task(query.scope(),"other","offer"),needle,terms));
+        var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
+        locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
         var recovered=historyCatalog.quantities(query,group,selected);assertEquals(measured.operations().stream().map(o->o.fact()).toList(),recovered);
         assertNull(historyCatalog.quantities(new TaskBillingService.Task(query.scope(),"other","new-task"),group,selected));
         assertTrue(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertEquals(1024,entries.getFirst().features().vector().size());
         assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operation_refs) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'"); // synthetic source invalidation, journal/CAS tested independently
+        assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->locked(()->{estimator.lockSelected(query,List.of(available));return null;}));
         assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertNull(historyCatalog.quantities(query,group,selected));
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
