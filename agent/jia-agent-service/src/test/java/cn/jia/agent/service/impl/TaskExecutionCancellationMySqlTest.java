@@ -77,6 +77,17 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
             admin.execute("DROP DATABASE `"+database+"`");
         }
     }
+    @Test void nativeMembershipRollsBackWithItsRunAndDoesNotInferZeroFromMissingCapture() {
+        var member=new PersonalWorkspaceExecutionEntity().setOwnerJiacn("owner").setTaskId("task").setExecutionId("exec").setRunId("run-exec").setRequestHash("a".repeat(64));
+        member.setTenantId("0");member.setClientId("client");
+        tx.executeWithoutResult(status->{row("exec","owner","task","CONVERSATION","QUEUED",6);
+            executions.registerTaskMember(member,null);status.setRollbackOnly();});
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_personal_workspace_execution WHERE execution_id='exec'",Integer.class));
+        tx.executeWithoutResult(status->{row("exec","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,null);});
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->tx.executeWithoutResult(status->executions.registerTaskMember(member,"b".repeat(64))));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE capture_id IS NULL AND admission_sha256=REPEAT('a',64)",Integer.class));
+    }
     void row(String id,String owner,String task,String mode,String state,Integer protocol) {
         jdbc.update("""
             INSERT INTO agent_personal_workspace_execution
