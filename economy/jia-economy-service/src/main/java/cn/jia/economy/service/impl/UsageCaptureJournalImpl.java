@@ -41,23 +41,23 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
     private LinkedEvidence dependency(long pk,String id){
         var first=db.evidence(pk,id,key(BigInteger.ONE));return first==null?null:new LinkedEvidence(db.head(pk,id)!=null,first.evidenceJson());
     }
-    public Result recover(String tenant,String client,long pk,String receipt,SourceLinks links,ResponseOrigin origin){
+    public Result recover(String tenant,String client,long pk,String receipt,MetadataLinks links,ResponseOrigin origin){
         var r=db.recovery(tenant,client,pk,receipt);if(r==null)return status(State.NOT_FOUND);
         var b=new Binding(r.tenantId(),r.clientId(),r.ownerJiacn(),r.agentId(),r.taskId(),r.executionId(),r.runId(),r.captureId());
-        return switch(r.kind()){case "SOURCE" -> linkSource(b,receipt,links);case "RESPONSE" -> bindResponse(b,receipt,origin);default -> status(State.NOT_FOUND);};
+        return switch(r.kind()){case "SOURCE","PLAN","REQUEST","SOURCE_FINAL","CAPTURE_FINAL" -> linkMetadata(b,receipt,links);case "RESPONSE" -> bindResponse(b,receipt,origin);default -> status(State.NOT_FOUND);};
     }
     private static Result waiting(Result r,long pk){return new Result(r.state(),r.ackJson(),r.work(),pk);}
-    public Result linkSource(Binding b,String receiptId,SourceLinks adapter){
+    public Result linkMetadata(Binding b,String receiptId,MetadataLinks adapter){
         var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
         var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);if(c.conflictReason()!=null)return status(State.CONFLICT);
         long pk=c.id();var r=db.receipt(pk,receiptId);var result=stored(r);if(result.state()!=State.DURABLE)return result;
-        var e=db.evidence(pk,r.recordId(),r.revisionKey());if(!"SOURCE".equals(e.kind()))throw new IllegalStateException("Not a SOURCE receipt");
+        var e=db.evidence(pk,r.recordId(),r.revisionKey());if("RESPONSE".equals(e.kind()))throw new IllegalStateException("Response requires settlement");
         var current=db.head(pk,r.recordId());var n=new BigInteger(e.sourceRevision());
         var head=current==null?BigInteger.ZERO:new BigInteger(current.sourceRevision());
         if(n.compareTo(head)<=0)return result;
         if(!head.add(BigInteger.ONE).equals(n))return waiting(result,pk);
-        var relation=adapter.resolve(e.evidenceJson(),id->dependency(pk,id));
-        if(relation==Link.CONFLICT)return conflict(pk,members,"SOURCE_LINEAGE");
+        var relation=adapter.resolve(e.evidenceJson(),head.signum()==0?null:db.evidence(pk,e.recordId(),key(head)).evidenceJson(),id->dependency(pk,id));
+        if(relation==Link.CONFLICT)return conflict(pk,members,"METADATA_LINEAGE");
         if(relation==Link.ASSOCIATED){publishHead(pk,e.recordId(),r.revisionKey(),null);change(pk,members,null);}
         return relation==Link.WAITING?waiting(result,pk):result; // durable receipt does not assert association, cost or coverage
     }
@@ -131,10 +131,6 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         }
         db.appendSubmission(new EconomyUsageCaptureMapper.Receipt(pk,s.receiptId(),s.recordId(),k,s.requestId(),s.requestSha256(),s.expectedRevision(),"PENDING",null));
         if("RESPONSE".equals(s.kind()))return status(State.PENDING); // never manufacture a ledger receipt
-        if("PLAN".equals(s.kind())){
-            var head=db.head(pk,s.recordId());
-            if(head==null?n.equals(BigInteger.ONE):new BigInteger(head.sourceRevision()).add(BigInteger.ONE).equals(n))publishHead(pk,s.recordId(),k,null);
-        }
         return ack(b,pk,s.receiptId(),s.requestSha256(),s.recordId(),s.sourceRevision(),s.evidenceSha256(),null);
     }
     private Result ack(Binding b,long pk,EconomyUsageCaptureMapper.Receipt receipt,EconomyUsageCaptureMapper.Evidence e,Object ledger){

@@ -55,8 +55,8 @@ public final class NativeExecutionUsageCostController {
             var result=authentication.withNativeFence(principal,()->{
                 var binding=authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId);
                 var registered=journal.register(binding,submission);
-                if(registered.state()==UsageCaptureJournal.State.DURABLE&&"SOURCE".equals(e.kind()))
-                    registered=journal.linkSource(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::resolve);
+                if(registered.state()==UsageCaptureJournal.State.DURABLE&&!"RESPONSE".equals(e.kind()))
+                    registered=journal.linkMetadata(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::metadata);
                 registered=registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
                         ?journal.bindResponse(binding,e.receiptId(),cn.jia.agent.service.usage.NativeResponseOrigin::resolve):registered;
                 if(registered.recoveryPk()!=0)recovery.signal(binding,e.receiptId(),registered.recoveryPk());

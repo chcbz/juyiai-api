@@ -37,7 +37,7 @@ public final class NativeCaptureRecovery implements ScheduledJobHandler {
         var key=invocation.key();scope.requireAdmitted(invocation.tenantId(),key.clientId());
         if(!NAME.equals(key.handler())||!"".equals(key.targetNode())||TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Invalid recovery context");
         String id=key.businessKey();int colon=id.indexOf(':');long pk=Long.parseLong(id.substring(0,colon));String receipt=id.substring(colon+1);
-        var r=tx.execute(s->journal.recover(invocation.tenantId(),key.clientId(),pk,receipt,NativeSourceLineage::resolve,NativeResponseOrigin::resolve));
+        var r=tx.execute(s->journal.recover(invocation.tenantId(),key.clientId(),pk,receipt,NativeSourceLineage::metadata,NativeResponseOrigin::resolve));
         if(r.work()!=null)r=settlement.apply(r.work()); // outside the short preparation transaction
         if(r.recoveryPk()!=0){ // unresolved predecessor: bounded backoff, no global scan
             long delay=5000L<<Math.min(9L,Math.max(0L,invocation.revision()));

@@ -58,6 +58,23 @@ class NativeCaptureEvidenceTest {
         obs.put("measuredQuantities",null);var partial=NativeResponseOrigin.resolve(JSON.writeValueAsString(envelope),null,k->source);
         assertEquals(attempt,partial.attemptId());assertNull(partial.facts().quantities());
     }
+    @Test void requestMayWaitForItsOwnResponseButNeverRebindAfterResolution(){
+        String pending="{\"kind\":\"REQUEST\",\"captureId\":\"c\",\"observation\":{\"sourceId\":\"s\",\"epoch\":\"0\",\"resolution\":\"PENDING\",\"sourceAttemptId\":null}}";
+        var resolved=pending.replace("PENDING","RESPONSE").replace(":null",":\"r\"");
+        var db=new HashMap<String,cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence>();
+        var src=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2","c","SOURCE",List.of("s","0")));
+        var res=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2","c","RESPONSE",List.of("r")));
+        assertEquals("WAITING",NativeSourceLineage.metadata(pending,null,db::get).name());
+        db.put(src,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,"{}"));
+        assertEquals("ASSOCIATED",NativeSourceLineage.metadata(pending,null,db::get).name());
+        assertEquals("WAITING",NativeSourceLineage.metadata(resolved,pending,db::get).name());
+        db.put(res,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,resolved));
+        assertEquals("ASSOCIATED",NativeSourceLineage.metadata(resolved,pending,db::get).name());
+        assertEquals("CONFLICT",NativeSourceLineage.metadata(resolved.replace("\"r\"","\"other\""),resolved,db::get).name());
+        assertEquals("CONFLICT",NativeSourceLineage.metadata(pending,resolved,db::get).name());
+        db.put(res,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,resolved.replace("\"0\"","\"1\"")));
+        assertEquals("CONFLICT",NativeSourceLineage.metadata(resolved,pending,db::get).name());
+    }
     @Test void onlyRootedSourceAndEarlierEpochCanAuthorizeANewSource(){
         String cap="a".repeat(64);var db=new HashMap<String,cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence>();
         String plan=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));

@@ -60,6 +60,7 @@ class NativeExecutionUsageCostControllerTest {
             when(executions.findForNativeUsageCost("t","client","executor","agent",exec,run)).thenReturn(row);
             var accepted=new cn.jia.economy.usage.UsageCaptureJournal.Result(cn.jia.economy.usage.UsageCaptureJournal.State.DURABLE,m.get("ack").get("body").get("data").toString());
             when(journal.register(any(),any())).thenAnswer(i->{var b=i.getArgument(0,cn.jia.economy.usage.UsageCaptureJournal.Binding.class);assertEquals("original",b.ownerJiacn());assertEquals("original-task",b.taskId());return accepted;});
+            when(journal.linkMetadata(any(),eq(receipt),any())).thenReturn(accepted);
             java.util.Map<String,Object> payload=json.convertValue(d,java.util.Map.class);
             assertEquals(200,ctrl.submit(exec,run,new JsonRequest<>(1,receipt,payload),receipt,principal).getStatusCode().value());
             when(journal.readReceipt(any(),eq(receipt))).thenReturn(accepted);assertEquals(200,ctrl.receipt(exec,run,receipt,principal).getStatusCode().value());

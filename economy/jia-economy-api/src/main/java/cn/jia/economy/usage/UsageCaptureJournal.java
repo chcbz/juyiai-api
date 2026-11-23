@@ -18,10 +18,10 @@ public interface UsageCaptureJournal {
     interface ResponseOrigin { Origin resolve(String response,String previous,java.util.function.Function<String,String> firstRevision); }
     enum Link { ASSOCIATED, WAITING, CONFLICT }
     record LinkedEvidence(boolean associated,String canonical) {}
-    interface SourceLinks { Link resolve(String source,java.util.function.Function<String,LinkedEvidence> first); }
-    Result linkSource(Binding trusted,String receiptId,SourceLinks adapter);
+    interface MetadataLinks { Link resolve(String evidence,String previous,java.util.function.Function<String,LinkedEvidence> first); }
+    Result linkMetadata(Binding trusted,String receiptId,MetadataLinks adapter);
     /** Resolve only authenticated, stored bytes referenced by the scheduler. */
-    Result recover(String tenant,String client,long capturePk,String receiptId,SourceLinks links,ResponseOrigin origin);
+    Result recover(String tenant,String client,long capturePk,String receiptId,MetadataLinks links,ResponseOrigin origin);
     Result bindResponse(Binding trusted,String receiptId,ResponseOrigin adapter);
     Result register(Binding trusted,Submission source);
     Result readRecord(Binding trusted,String recordId);
