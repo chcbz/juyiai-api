@@ -13,6 +13,11 @@ public interface EconomyUsageCaptureMapper {
         SELECT input_revision,capture_id FROM economy_usage_capture WHERE id=#{pk} AND tenant_id=#{tenant}
         AND client_id=#{client} AND conflict_reason IS NULL AND (projection_revision IS NULL OR projection_revision<>input_revision)
         """) UsageCaptureProjection.Snapshot pendingProjection(UsageCaptureProjection.Key key);
+    @Select("""
+        SELECT EXISTS(SELECT 1 FROM economy_usage_capture c JOIN economy_usage_capture_record r ON r.capture_pk=c.id
+            WHERE c.id=#{k.pk} AND c.tenant_id=#{k.tenant} AND c.client_id=#{k.client}
+            AND r.record_id=#{recordId} AND r.is_associated_head=1)
+        """) boolean hasProjectionHead(@Param("k") UsageCaptureProjection.Key key,@Param("recordId") String recordId);
     // An associated head at revision N proves the prefix [1,N]. Any extra immutable revision is not yet associated.
     @Select("""
         SELECT g.record_id,g.revisions,h.source_revision,h.evidence_sha256,h.evidence_json FROM (

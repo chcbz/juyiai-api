@@ -13,6 +13,7 @@ public class UsageCaptureProjectionStore implements UsageCaptureProjection {
     private final EconomyUsageCaptureMapper db;
     public UsageCaptureProjectionStore(EconomyUsageCaptureMapper db){this.db=db;}
     public Snapshot pending(Key key){return db.pendingProjection(key);}
+    public boolean hasAssociated(Key key,String recordId){return db.hasProjectionHead(key,recordId);}
     public List<Row> page(Key key,String after){return db.projectionPage(key,after);}
     @Transactional(propagation=Propagation.REQUIRES_NEW)
     public boolean publish(Key key,long revision,Coverage state){return db.publishProjection(key,revision,state.name())==1;}

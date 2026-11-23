@@ -9,6 +9,7 @@ public interface UsageCaptureProjection {
     record Row(String recordId,long revisions,String sourceRevision,String evidenceSha256,String evidenceJson) {}
     enum Coverage { WAITING_EVIDENCE, INCOMPLETE, COMPLETE }
     Snapshot pending(Key key);
+    boolean hasAssociated(Key key,String recordId);
     List<Row> page(Key key,String after);
     boolean publish(Key key,long inputRevision,Coverage state);
 }

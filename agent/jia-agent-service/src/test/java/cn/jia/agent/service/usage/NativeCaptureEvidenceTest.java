@@ -92,6 +92,17 @@ class NativeCaptureEvidenceTest {
             }
         }
     }
+    @Test void openCaptureHandlerUsesOnlyScopedFinalLookupAndRevisionCas(){
+        var store=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCaptureProjection.class);
+        var worker=new NativeCaptureProjection(store,null,new cn.jia.core.security.FixedTenantAdmissionPolicy("t","c"));
+        var key=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","c",7);var cap="a".repeat(64);
+        org.mockito.Mockito.when(store.pending(key)).thenReturn(new cn.jia.economy.usage.UsageCaptureProjection.Snapshot(19,cap));
+        var schedule=new cn.jia.task.scheduling.ScheduleKey("c",worker.getName(),"7","");
+        worker.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("t",schedule,1));
+        org.mockito.Mockito.verify(store).pending(key);org.mockito.Mockito.verify(store).hasAssociated(key,NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"CAPTURE_FINAL",List.of())));
+        org.mockito.Mockito.verify(store).publish(key,19,cn.jia.economy.usage.UsageCaptureProjection.Coverage.WAITING_EVIDENCE);
+        org.mockito.Mockito.verifyNoMoreInteractions(store);
+    }
     @Test void onlyRootedSourceAndEarlierEpochCanAuthorizeANewSource(){
         String cap="a".repeat(64);var db=new HashMap<String,cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence>();
         String plan=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));
