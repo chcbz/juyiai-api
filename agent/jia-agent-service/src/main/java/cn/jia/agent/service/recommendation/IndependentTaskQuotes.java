@@ -35,8 +35,15 @@ public final class IndependentTaskQuotes {
         var terms=execution.map(x->Map.copyOf(x.observe(inputs,fresh.candidates()))).orElse(Map.of());
         if(!intent.agentIds().containsAll(terms.keySet()))throw new IllegalStateException("Unrequested pricing configuration");
         var prepared=new LinkedHashMap<String,TaskBudgetEstimator.Outcome>();var available=new ArrayList<TaskBudgetEstimator.Available>();
-        for(var agent:intent.agentIds()){var proof=terms.get(agent);var offer=estimates.prepare(task,f,proof==null?null:proof.terms());
-            prepared.put(agent,offer);if(offer instanceof TaskBudgetEstimator.Available ready)available.add(ready);}
+        // Only within this authorized intent: task/features are fixed. Equality includes the entire
+        // execution group AND all pricing routes. Never share persisted quotes or candidate bindings.
+        var byTerms=new HashMap<TaskBudgetEstimator.Terms,TaskBudgetEstimator.Outcome>();
+        for(var agent:intent.agentIds()){
+            var proof=terms.get(agent);
+            var offer=byTerms.computeIfAbsent(proof==null?null:proof.terms(),t->Objects.requireNonNull(estimates.prepare(task,f,t)));
+            prepared.put(agent,offer);
+        }
+        for(var offer:byTerms.values())if(offer instanceof TaskBudgetEstimator.Available ready)available.add(ready);
         return intents.finish(actor,fresh,batch->{
             if(execution.isPresent()&&!execution.get().current(inputs,fresh.candidates(),terms))throw new Changed();
             estimates.lockSelected(task,available);var result=new ArrayList<TaskQuoteBatches.Item>();

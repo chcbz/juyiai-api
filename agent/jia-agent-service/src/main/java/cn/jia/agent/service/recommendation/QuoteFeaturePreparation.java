@@ -35,7 +35,7 @@ final class QuoteFeaturePreparation {
     }
     TaskEstimateFeatures prepare(Actor actor,Input input){
         if(TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Quote encoding must be outside task transaction");
-        var encoded=vectors.encode(actor,input.text()).block();if(encoded==null||encoded.identity().dimensions()!=1024)throw new TaskFeatureEncoder.InvalidResult();
+        var encoded=vectors.encodeQuote(actor,input.text()).block();if(encoded==null||encoded.identity().dimensions()!=1024)throw new TaskFeatureEncoder.InvalidResult();
         var id=encoded.identity();var values=new ArrayList<Float>(id.dimensions());for(float v:encoded.values())values.add(v);
         var files=input.catalogue().inputs().stream().map(i->new TaskEstimateFeatures.File(i.purpose(),i.contentMimeType(),i.byteLength(),i.version())).toList();
         // The current task form has no structured requested-deliverables count. Do not infer one from text or material count.

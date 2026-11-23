@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
+import cn.jia.economy.pricing.TaskReferencePricing;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -85,6 +87,45 @@ class TaskQueryVectorsTest {
         when(intents.begin(OWNER,"task","key",intent)).thenReturn(new TaskQuoteIntentService.Replay(result));assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
         when(intents.begin(OWNER,"task","key",intent)).thenThrow(new TaskFeatureEncoder.Unavailable());when(intents.replay(OWNER,"task","key",intent)).thenReturn(result);
         assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
+    }
+    @Test void batchPreparesOncePerExactExecutionAndPricingContractButPreservesEachTarget() {
+        var intents=mock(TaskQuoteIntentService.class);var source=mock(ProspectiveTaskExecution.class);
+        var estimator=mock(TaskBudgetEstimator.class);var billing=mock(TaskBillingService.class);
+        var app=new IndependentTaskQuotes(intents,java.util.Optional.of(source),estimator,billing);
+        var intent=new TaskQuoteBatches.Intent("3",List.of("c","b","a"));var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");
+        var features=mock(cn.jia.economy.pricing.TaskEstimateFeatures.class);var targets=intent.agentIds().stream()
+                .map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();
+        var fresh=new TaskQuoteIntentService.Fresh(new TaskQuoteBatches.Key(task,OWNER.actorId(),"key"),intent,1,features,targets,List.of());
+        var sha="a".repeat(64);var group=new TaskBillingService.MeasuredGroup("dispatch",sha,sha,"route",sha,"coverage");
+        var terms=new TaskBudgetEstimator.Terms(group,Map.of("op",Map.of("cost",new TaskReferencePricing.ZeroRoute("one"))));
+        var different=new TaskBudgetEstimator.Terms(group,Map.of("op",Map.of("cost",new TaskReferencePricing.ZeroRoute("two"))));
+        var proofs=Map.of("a",new ProspectiveTaskExecution.Evidence("revision-a",terms),"b",new ProspectiveTaskExecution.Evidence("revision-b",new TaskBudgetEstimator.Terms(group,terms.routes())),"c",new ProspectiveTaskExecution.Evidence("revision-c",different));
+        when(intents.begin(OWNER,"task","key",intent)).thenReturn(fresh);when(source.observe(any(),eq(targets))).thenReturn(proofs);
+        when(source.current(any(),eq(targets),eq(proofs))).thenReturn(true);
+        when(estimator.prepare(task,features,terms)).thenReturn(new TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE));
+        when(estimator.prepare(task,features,different)).thenReturn(new TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.PRICE_MISSING));
+        when(intents.finish(eq(OWNER),eq(fresh),any())).thenAnswer(c->new TaskQuoteBatches.Result("task","3",12,
+                c.<java.util.function.Function<String,List<TaskQuoteBatches.Item>>>getArgument(2).apply("batch")));
+        var rows=app.quote(OWNER,"task","key",intent).quotes();assertEquals(intent.agentIds(),rows.stream().map(TaskQuoteBatches.Item::agentId).toList());
+        assertEquals(List.of(TaskQuoteBatches.Reason.NO_BASELINE,TaskQuoteBatches.Reason.NO_BASELINE,TaskQuoteBatches.Reason.PRICE_MISSING),rows.stream().map(TaskQuoteBatches.Item::unavailableReason).toList());
+        verify(estimator).prepare(task,features,terms);verify(estimator).prepare(task,features,different);verify(estimator).lockSelected(task,List.of());verifyNoMoreInteractions(estimator);verifyNoInteractions(billing);
+    }
+    @Test void featureStageObservationsDistinguishHitFromEncodeAcrossBothOperations() {
+        var registry=io.micrometer.observation.ObservationRegistry.create();
+        var events=new java.util.concurrent.CopyOnWriteArrayList<String>();
+        registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>() {
+            public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+            public void onStop(io.micrometer.observation.Observation.Context c){
+                var labels=new java.util.TreeMap<String,String>();c.getLowCardinalityKeyValues().forEach(k->labels.put(k.getKey(),k.getValue()));
+                assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());events.add(c.getName()+labels);
+            }
+        });
+        var vectors=new TaskQueryVectors(new TaskFeatureEncoder(){public Identity identity(){return ID;}
+            public Vector encode(String text){if(text.contains("invalid"))throw new InvalidResult();return VALUE;}},2,1,Duration.ofMinutes(1),java.util.Optional.of(registry));
+        vectors.encode(OWNER,input("private title")).block();vectors.encodeQuote(OWNER,input("private title")).block();
+        assertThrows(TaskFeatureEncoder.InvalidResult.class,()->vectors.encodeQuote(OWNER,input("invalid")).block());
+        assertEquals(List.of("cyf.task.feature.cache{operation=recommendation, path=miss}","cyf.task.feature.encode{operation=recommendation, outcome=ok}",
+                "cyf.task.feature.cache{operation=quote, path=hit}","cyf.task.feature.cache{operation=quote, path=miss}","cyf.task.feature.encode{operation=quote, outcome=invalid}"),events);
     }
     @Test void failedEncodingIsNotACompletedEntry() {
         var calls = new AtomicInteger(); var c = cache(() -> {
