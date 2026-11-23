@@ -44,7 +44,7 @@ final class TaskRetrievalText {
         });
         return new TaskRetrievalText(b);
     }
-    private static String normalized(String value) {
+    static String normalized(String value) {
         return SPACE.matcher(Normalizer.normalize(value, Normalizer.Form.NFC)).replaceAll(" ").strip();
     }
     private static final class Buffer {

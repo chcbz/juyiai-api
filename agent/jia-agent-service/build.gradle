@@ -4,6 +4,8 @@ dependencies {
     // Strict metadata/request codecs intentionally use Jackson2, independently of networknt3/Jackson3.
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
     api project(':agent:jia-agent-api')
+    compileOnly(libs.spring.boot.starter.elasticsearch)
+    testImplementation(libs.spring.boot.starter.elasticsearch)
     implementation project(':chat:jia-chat-api')
     implementation project(':economy:jia-economy-api')
     implementation project(':economy:jia-economy-mapper')
@@ -1081,6 +1083,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         srcDir 'src/test/java'
         srcDir rootProject.file('economy/jia-economy-service/src/test/java')
         include 'cn/jia/agent/service/recommendation/CandidateRankFusionTest.java'
+        include 'cn/jia/agent/service/recommendation/CapabilitySearchTest.java'
         include 'cn/jia/agent/service/recommendation/TaskQueryVectorsTest.java'
         include 'cn/jia/agent/skill/SkillManagementRecommendationTest.java'
         include 'cn/jia/agent/skill/SkillManagementRetainedAuthorizationTest.java'
