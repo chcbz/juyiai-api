@@ -7,7 +7,7 @@ import cn.jia.agent.entity.PersonalWorkspaceExecutionOutputEntity;
 import java.util.List;
 
 /** Exact owner-scoped persistence boundary for private execution grants and output receipts. */
-public interface PersonalWorkspaceExecutionDao {
+public interface PersonalWorkspaceExecutionDao extends TaskExecutionClosureDao {
     /** Current reads under the task root; immutable terminal executions are not rewritten. */
     List<PersonalWorkspaceExecutionEntity> findUnfinishedTaskExecutions(
             String tenantId, String clientId, String ownerJiacn, String taskId);

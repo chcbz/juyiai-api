@@ -110,7 +110,7 @@ class AgentTaskCancellationTransactionTest {
                 mock(cn.jia.agent.service.TaskExecutionCancellationService.class),
                 mock(cn.jia.chat.service.TaskDiscussionCancellation.class),
                 mock(cn.jia.agent.service.AgentWorkItemLeaseService.class),
-                mock(cn.jia.agent.service.AgentTaskProviderCostConsentService.class));
+                mock(cn.jia.agent.service.AgentTaskProviderCostConsentService.class),mock(cn.jia.agent.dao.TaskExecutionClosureDao.class));
     }
     AgentTaskMetaEntity readRoot(String owner,String task,boolean lock) {
         var rows=jdbc.query("SELECT * FROM root WHERE owner=? AND task_id=?"+(lock ? " FOR UPDATE" : ""),(rs,n) -> {

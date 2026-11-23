@@ -7,6 +7,26 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWorkspaceExecutionEntity> {
+    @org.apache.ibatis.annotations.Insert("""
+        INSERT INTO agent_task_execution_set(tenant_id,client_id,owner_jiacn,task_id,membership_revision,execution_count,execution_set_sha256)
+        VALUES(#{t},#{c},#{o},#{id},0,0,SHA2('',256)) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)
+        """)
+    void ensureMemberSet(@Param("t") String tenant,@Param("c") String client,@Param("o") String owner,@Param("id") String task);
+    @Update("""
+        UPDATE agent_task_execution_set s JOIN agent_task_execution_member m USING (tenant_id,client_id,owner_jiacn,task_id)
+        SET s.membership_revision=m.membership_revision,s.execution_count=s.execution_count+1,
+            s.execution_set_sha256=SHA2(CONCAT(s.execution_set_sha256,#{leaf}),256)
+        WHERE s.tenant_id=#{r.tenantId} AND s.client_id=#{r.clientId} AND s.owner_jiacn=#{r.ownerJiacn} AND s.task_id=#{r.taskId}
+          AND m.execution_id=#{r.executionId} AND m.run_id=#{r.runId} AND s.terminal_state IS NULL AND m.membership_revision>s.membership_revision
+        """)
+    int advanceMemberSet(@Param("r") PersonalWorkspaceExecutionEntity row,@Param("leaf") String leaf);
+    @Update("""
+        UPDATE agent_task_execution_set SET terminal_state=#{state},terminal_fact_id=#{fact},terminal_revision=#{revision},closed_at=#{time},delivery_state='PENDING'
+        WHERE tenant_id=#{t} AND client_id=#{c} AND owner_jiacn=#{o} AND task_id=#{id} AND terminal_state IS NULL
+        """)
+    int freezeMemberSet(@Param("t") String tenant,@Param("c") String client,@Param("o") String owner,@Param("id") String task,
+        @Param("state") String state,@Param("fact") String fact,@Param("revision") long revision,@Param("time") long time);
+
     /** Append under the original task-root lock. Revision is an ordering cursor, not a count. */
     @org.apache.ibatis.annotations.Insert("""
         INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)

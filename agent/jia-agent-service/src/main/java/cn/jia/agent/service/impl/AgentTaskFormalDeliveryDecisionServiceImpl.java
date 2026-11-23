@@ -58,21 +58,22 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
     private final AgentTaskMutationTransaction mutationTransaction;
     private final AgentTaskEventWriter eventWriter;
     private final TaskBillingService billing;
+    private final cn.jia.agent.dao.TaskExecutionClosureDao closure;
     private final LongSupplier clock;
 
     @Inject
     public AgentTaskFormalDeliveryDecisionServiceImpl(AgentTaskFormalDeliveryDao deliveryDao,
             AgentTaskMetaDao taskMetaDao, AgentTaskMemberDao memberDao,
             AgentTaskWorkItemDao workItemDao, AgentTaskMutationTransaction mutationTransaction,
-            AgentTaskEventWriter eventWriter, TaskBillingService billing) {
-        this(deliveryDao, taskMetaDao, memberDao, workItemDao, mutationTransaction, eventWriter, billing,
+            AgentTaskEventWriter eventWriter, TaskBillingService billing, cn.jia.agent.dao.TaskExecutionClosureDao closure) {
+        this(deliveryDao, taskMetaDao, memberDao, workItemDao, mutationTransaction, eventWriter, billing, closure,
                 System::currentTimeMillis);
     }
 
     AgentTaskFormalDeliveryDecisionServiceImpl(AgentTaskFormalDeliveryDao deliveryDao,
             AgentTaskMetaDao taskMetaDao, AgentTaskMemberDao memberDao,
             AgentTaskWorkItemDao workItemDao, AgentTaskMutationTransaction mutationTransaction,
-            AgentTaskEventWriter eventWriter, TaskBillingService billing, LongSupplier clock) {
+            AgentTaskEventWriter eventWriter, TaskBillingService billing, cn.jia.agent.dao.TaskExecutionClosureDao closure, LongSupplier clock) {
         this.deliveryDao = Objects.requireNonNull(deliveryDao, "deliveryDao");
         this.taskMetaDao = Objects.requireNonNull(taskMetaDao, "taskMetaDao");
         this.memberDao = Objects.requireNonNull(memberDao, "memberDao");
@@ -80,6 +81,7 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
         this.mutationTransaction = Objects.requireNonNull(mutationTransaction, "mutationTransaction");
         this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
         this.billing = Objects.requireNonNull(billing, "billing");
+        this.closure=Objects.requireNonNull(closure);
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
@@ -158,6 +160,8 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
                 tenantId, clientId, ownerJiacn, workItem.getWorkItemId(), workItem.getVersion(), workUpdate);
         if (workUpdated == 0) throw conflict("Work item changed during formal delivery decision");
         requireOne(workUpdated, "Formal delivery work-item CAS affected an unexpected row count");
+        if (member != null) closure.closeTaskMembers(tenantId,clientId,ownerJiacn,taskId,
+                cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,delivery.getDeliveryId(),root.getTaskVersion()+1,decidedAt);
         if (member != null) completeMember(tenantId, clientId, ownerJiacn, taskId, member, decidedAt);
 
         AgentTaskFormalDeliveryEntity result = copyDecision(delivery, decision, ownerJiacn, decidedAt);

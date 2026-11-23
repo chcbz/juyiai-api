@@ -109,7 +109,17 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         if(count<0||count>1)throw new IllegalStateException("execution protocol catalog ambiguity");
         return count==1;
     }
-    @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) { executions.registerTaskMember(execution,captureId); }
+    @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) {
+        String t=execution.getTenantId(),c=execution.getClientId(),o=execution.getOwnerJiacn(),id=execution.getTaskId();
+        String leaf=cn.jia.agent.common.TaskMembershipDigest.tuple("TASK_MEMBER_V1",t,c,o,id,execution.getExecutionId(),execution.getRunId(),captureId,execution.getRequestHash());
+        executions.ensureMemberSet(t,c,o,id);executions.registerTaskMember(execution,captureId);
+        if(executions.advanceMemberSet(execution,leaf)!=1) throw new IllegalStateException("Task execution set closed or stale");
+    }
+    @Override public void closeTaskMembers(String t,String c,String o,String id,Outcome outcome,String ref,long revision,long time) {
+        String fact=cn.jia.agent.common.TaskMembershipDigest.tuple("TASK_TERMINAL_V1",t,c,o,id,outcome.name(),ref,Long.toString(revision));
+        executions.ensureMemberSet(t,c,o,id);
+        if(executions.freezeMemberSet(t,c,o,id,outcome.name(),fact,revision,time)!=1) throw new IllegalStateException("Task execution set already closed");
+    }
     @Override public void insert(PersonalWorkspaceExecutionEntity execution) { init(execution); executions.insert(execution); }
     @Override public void update(PersonalWorkspaceExecutionEntity execution) { execution.setUpdateTime(DateUtil.nowTime()); executions.updateById(execution); }
     @Override public void insertInput(PersonalWorkspaceExecutionInputEntity input) { init(input); inputs.insert(input); }

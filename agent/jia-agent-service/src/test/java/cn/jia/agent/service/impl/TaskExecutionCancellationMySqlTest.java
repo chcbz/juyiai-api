@@ -87,6 +87,13 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         tx.executeWithoutResult(status->{row("exec","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,null);});
         assertThrows(org.springframework.dao.DuplicateKeyException.class,()->tx.executeWithoutResult(status->executions.registerTaskMember(member,"b".repeat(64))));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE capture_id IS NULL AND admission_sha256=REPEAT('a',64)",Integer.class));
+        member.setExecutionId("retry").setRunId("run-retry");
+        tx.executeWithoutResult(status->{row("retry","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,"b".repeat(64));});
+        tx.executeWithoutResult(status->executions.closeTaskMembers("0","client","owner","task",TaskExecutionClosureDao.Outcome.ACCEPTED,"delivery",15,777));
+        assertEquals("8ddbea4eaabfe535083e36b0f2f6822291d707ee4330051a2127fa70b6c99c49",jdbc.queryForObject("SELECT execution_set_sha256 FROM agent_task_execution_set WHERE terminal_state='ACCEPTED' AND execution_count=2 AND membership_revision=(SELECT MAX(membership_revision) FROM agent_task_execution_member)",String.class));
+        member.setExecutionId("late").setRunId("run-late");
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(status->{row("late","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,null);}));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member",Integer.class));
     }
     void row(String id,String owner,String task,String mode,String state,Integer protocol) {
         jdbc.update("""

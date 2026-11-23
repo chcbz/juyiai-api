@@ -137,6 +137,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc = new JdbcTemplate(source);
         independent = new JdbcTemplate(source(database));
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/agent-task-execution-members-v1.sql")).execute(source);
         // Read unchanged production definitions; no parallel hand-written table schema.
         String schema = Files.readString(DDL.resolve("schema.sql"));
         for (String table : List.of("agent_task_meta", "agent_task_member", "agent_task_work_item", "agent_task_event", "agent_task_artifact", "agent_persona_binding")) {
@@ -233,9 +234,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         deliveryReads = proxy(new AgentTaskFormalDeliveryReadServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)), meta),
                 AgentTaskFormalDeliveryReadService.class);
+        var executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
+                sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
         decisions = proxy(new AgentTaskFormalDeliveryDecisionServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)),
-                meta, members, work, roots, events, billing), AgentTaskFormalDeliveryDecisionService.class);
+                meta, members, work, roots, events, billing,executionRows), AgentTaskFormalDeliveryDecisionService.class);
         var cancelDao = spy(new AgentTaskCancellationDaoImpl(sql.getMapper(AgentTaskCancellationMapper.class)));
         doAnswer(call -> {
             Object changed = call.callRealMethod();
@@ -245,8 +248,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var leases = new AgentWorkItemLeaseServiceImpl(members, work, roots, events, 900000);
         leases.setAssigneeAuthority(authority);
         when(authority.requireTaskAgent(TENANT,CLIENT,OWNER,TASK,AGENT,false)).thenReturn(AGENT);
-        var executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
-                sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
+
         var executionCancellation=proxy(new TaskExecutionCancellationServiceImpl(executionRows,
                 NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(sql.getMapper(SkillExecutionMapper.class)),
                         mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,TASK,AGENT,roots)),TaskExecutionCancellationService.class);
@@ -258,7 +260,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)), cancelDao, billing,
                 executionCancellation,
                 mock(cn.jia.chat.service.TaskDiscussionCancellation.class),
-                proxy(leases,AgentWorkItemLeaseService.class),consentCancellation);
+                proxy(leases,AgentWorkItemLeaseService.class),consentCancellation,executionRows);
         var rentBindings = new cn.jia.agent.dao.impl.AgentPersonaBindingDaoImpl();
         ReflectionTestUtils.setField(rentBindings, "baseMapper", sql.getMapper(AgentPersonaBindingMapper.class));
         rentSettlement = new cn.jia.agent.hosting.HostingRentTaskSettlement(sql.getMapper(HostingRentFinishingMapper.class),
@@ -455,6 +457,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals("HELD", charge()); assertEquals(1, count("economy_transaction"));
         assertEquals(50, wallet(jdbc)); assertEquals("running", taskState());
         assertTrue(decide("changes_requested").getReplayed());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_set WHERE terminal_revision IS NOT NULL",Integer.class));
     }
 
     @Test void runningCancellationReleasesHoldAndClosesExecutionLeaseAndGrantTogether() throws Exception {
@@ -498,6 +501,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var accept=pool.submit(()->{start.await();try {decide("accepted");return true;}catch(RuntimeException lost){return false;}});
             start.countDown();assertNotEquals(cancel.get(20,TimeUnit.SECONDS),accept.get(20,TimeUnit.SECONDS));
         }
+        assertEquals("cancelled".equals(taskState())?"CANCELLED":"ACCEPTED",jdbc.queryForObject("SELECT terminal_state FROM agent_task_execution_set WHERE delivery_state='PENDING' AND terminal_revision=5",String.class));
         assertEquals(2,count("economy_transaction"));
         if("cancelled".equals(taskState())) {assertEquals("RELEASED",charge());assertEquals(100,wallet(jdbc));}
         else {assertEquals("completed",taskState());assertEquals("CAPTURED",charge());assertEquals(50,wallet(jdbc));}
@@ -627,6 +631,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         failOccupation = true;
         assertThrows(InjectedFailure.class, this::cancel);
         assertCancellationRolledBack(); verifyNoInteractions(broker);
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_set",Integer.class));
         failOccupation = false;
         new TransactionTemplate(manager).executeWithoutResult(status -> {
             cancel();
@@ -689,7 +694,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 "agent-personal-workspace-v1_14-conversation-output.sql",
                 "agent-personal-workspace-v1_15-conversation-lease.sql",
                 "agent-personal-workspace-v1_16-conversation-provider-start.sql",
-                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql","agent-task-execution-members-v1.sql")) {
+                "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql")) {
             new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/" + file))
                     .execute(jdbc.getDataSource());
         }
