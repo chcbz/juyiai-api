@@ -41,11 +41,12 @@ public interface EconomyTaskBillingMapper {
     // Full features/configuration and repricing proof remain on the immutable quote; the sample references it.
     @Insert("""
         INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,
-          initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state)
+          initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,history_group_sha256,lifecycle_state,evidence_revision,sample_state)
         SELECT #{sid},tenant_id,client_id,owner_jiacn,task_id,quote_id,'TASK_LIFECYCLE_V1',
           JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.requirementSha256')),
           JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.inputSnapshotDigest')),
-          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.featureSha256')),'ACTIVE',1,'WAITING_EVIDENCE'
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.featureSha256')),
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.historyGroupSha256')),'ACTIVE',1,'WAITING_EVIDENCE'
         FROM economy_task_quote WHERE tenant_id=#{q.tenantId} AND client_id=#{q.clientId} AND owner_jiacn=#{q.ownerJiacn}
           AND task_id=#{q.taskId} AND quote_id=#{q.quoteId} AND payer_user_id=#{q.payerUserId}
           AND JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='MEASURED_TASK_QUOTE_V1'

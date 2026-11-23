@@ -17,6 +17,23 @@ public interface ConfirmedSampleMapper {
     record Target(String owner,String taskId) {}
     @Select("SELECT owner_jiacn,task_id FROM economy_task_cost_sample WHERE sample_id=#{id} AND tenant_id=#{tenant} AND client_id=#{client} AND projection_pending=1")
     Target target(@Param("tenant") String tenant,@Param("client") String client,@Param("id") String id);
+    // Accepted confirmed rows only. A new task may use another agent's same-config history under this owner,
+    // but cannot train on its own record, previous READY revisions, benchmark rows or another namespace.
+    String HISTORY="""
+        s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn}
+        AND s.history_group_sha256=#{group} AND s.task_id<>#{t.taskId} AND s.sample_state='READY'
+        AND s.lifecycle_state='ACCEPTED' AND s.evidence_revision=s.projection_revision
+        AND s.benchmark_case_id IS NULL AND s.sample_definition_version='TASK_LIFECYCLE_V1'
+        """;
+    record HistoryRow(String id,long revision,String taskId,String featureSha,String featuresJson){}
+    @Select("""
+        SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,JSON_EXTRACT(q.snapshot_json,'$.preparation.features')
+        FROM economy_task_cost_sample s JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+        AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
+        """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
+    List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
+    @Select("SELECT s.projection_revision FROM economy_task_cost_sample s WHERE "+HISTORY+" AND s.sample_id=#{id} AND s.projection_revision=#{revision} FOR SHARE")
+    Long lockHistory(@Param("t") Task query,@Param("group") String group,@Param("id") String id,@Param("revision") long revision);
     record Header(String lifecycle,long evidenceRevision,String fact,String outcome,Boolean verified,Long memberCount,
                   String agent,String groupVersion,String executionConfig,String localRoute,String referenceRoute,String tools,String policy) {}
     @Select("""

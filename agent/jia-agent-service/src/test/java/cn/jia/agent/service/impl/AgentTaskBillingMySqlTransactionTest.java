@@ -138,6 +138,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
     private PersonalWorkspaceExecutionDaoImpl executionRows;
     private cn.jia.economy.usage.ConfirmedSampleEvidence sampleEvidence;
+    private cn.jia.economy.task.TaskHistoryCatalog historyCatalog;
     private cn.jia.agent.service.usage.ConfirmedSampleRecovery recovery;
     private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
 
@@ -254,6 +255,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
         var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
+        historyCatalog=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskHistoryCatalog.class);
         sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
         sampleProjection=proxy(new cn.jia.economy.service.impl.ConfirmedSampleProjectionService(sampleEvidence,sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper(),manager),cn.jia.economy.usage.ConfirmedSampleProjection.class);
         var schedules=new cn.jia.task.scheduling.ScheduledWorkStore(sql.getMapper(cn.jia.task.mapper.ScheduledWorkMapper.class),fixed,manager);
@@ -548,8 +550,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertFalse(sampleProjection.refresh(BILLING_TASK,sid,textFixture(r->{if(firstLine.getAndSet(false)) independent.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1 WHERE sample_id=?",sid);return fixtureDecoder.decode(r);})));
         assertEquals(0,count("economy_task_cost_sample_revision"));
         assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertFalse(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));
+        var group=new cn.jia.economy.task.TaskHistoryCatalog.Group(new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp"),TaskEstimateFeatures.VERSION,"template",new TaskEstimateFeatures.Identity("cfg","fixture",1024));
+        var query=new TaskBillingService.Task(BILLING_TASK.scope(),OWNER,"new-task");
+        var entries=historyCatalog.page(query,group,"");assertEquals(1,entries.size());var selected=entries.getFirst().source();assertEquals(sid,selected.sampleId());
+        assertTrue(historyCatalog.page(BILLING_TASK,group,"").isEmpty());assertTrue(historyCatalog.page(new TaskBillingService.Task(query.scope(),"other","new-task"),group,"").isEmpty());
+        assertTrue(historyCatalog.page(query,group,sid).isEmpty());assertTrue(historyCatalog.page(query,new cn.jia.economy.task.TaskHistoryCatalog.Group(group.execution(),group.featureVersion(),"different-template",group.embedding()),"").isEmpty());
+        assertTrue(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertEquals(1024,entries.getFirst().features().vector().size());
         assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operation_refs) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'"); // synthetic source invalidation, journal/CAS tested independently
+        assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
         assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='EXCLUDED' AND reason_code='MIXED_EXECUTION_CONFIG'",Integer.class));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));

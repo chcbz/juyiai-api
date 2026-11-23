@@ -98,14 +98,15 @@ public class TaskBillingServiceImpl implements TaskBillingService {
 
     private static final String MEASURED_PREFIX = "tq_m1_";
     private static final String MEASURED_SCHEMA = "MEASURED_TASK_QUOTE_V1";
-    private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, MeasuredPreparation preparation) { }
+    private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, String historyGroupSha256, MeasuredPreparation preparation) { }
 
     @Override public Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared) {
         Objects.requireNonNull(payerUserId);
         if (!binding.requirementSha256().equals(prepared.features().requirementSha256())
                 || !binding.inputSnapshotDigest().equals(prepared.features().inputSnapshotSha256()))
             throw new TaskBillingException(QUOTE_BINDING_CHANGED);
-        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, prepared.features().digest(), prepared);
+        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, prepared.features().digest(),
+                cn.jia.economy.task.TaskHistoryCatalog.Group.of(prepared.group(),prepared.features()).digest(), prepared);
         return insertQuote(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payerUserId,
                 prepared.estimate().wen(), encode(snapshot));
     }
