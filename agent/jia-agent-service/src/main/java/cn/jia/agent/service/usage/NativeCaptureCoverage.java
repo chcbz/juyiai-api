@@ -46,6 +46,20 @@ final class NativeCaptureCoverage {
             &&BASIS.equals(g.source.path("adapterVersion").asText())
             &&approved.equals(profileSha(d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256(),g.source.path("channelNamespace").asText()));
     }
+    // The journal keeps contradictory evidence; only its eligibility for normalized use is denied.
+    private static boolean quantityReasonsOnly(JsonNode observation){
+        var reasons=observation.path("reasonCodes");if(!reasons.isArray())return false;
+        for(var reason:reasons)if(!"BILLING_IDENTITY_UNKNOWN".equals(reason.asText()))return false;
+        return true;
+    }
+    private static boolean consistentTextTokens(JsonNode observation,JsonNode q){
+        // Wire validation already bounded reported counts to non-negative safe integers.
+        var raw=observation.path("reportedUsage");long input=raw.path("input_tokens").asLong(-1),output=raw.path("output_tokens").asLong(-1),
+            cached=raw.path("input_tokens_details").path("cached_tokens").asLong(-1),reasoning=raw.path("output_tokens_details").path("reasoning_tokens").asLong(-1);
+        var tokens=q.path("tokens");return cached>=0&&cached<=input&&reasoning>=0&&reasoning<=output&&input+output==raw.path("total_tokens").asLong(-1)
+            &&"COMPLETE".equals(q.path("coverage").asText())&&tokens.size()==3&&Long.toString(input-cached).equals(tokens.path("INPUT").asText())
+            &&Long.toString(cached).equals(tokens.path("CACHED_INPUT").asText())&&Long.toString(output).equals(tokens.path("OUTPUT").asText());
+    }
     void accept(Row r){
         if(last.compareTo(r.recordId())>=0)throw new IllegalArgumentException("Unordered capture projection");last=r.recordId();
         if(r.sourceRevision()==null){waiting=true;return;}
@@ -60,9 +74,10 @@ final class NativeCaptureCoverage {
         switch(kind){
             case "SOURCE" -> g.source=o;
             case "REQUEST" -> {g.requests++;g.max=g.max.max(number(o,"sequence"));
+                if(approved!=null&&!quantityReasonsOnly(o))incomplete=true;
                 if(!o.get("resolution").asText().equals("RESPONSE")||!g.refs.add(o.get("sourceAttemptId").asText()))incomplete=true;}
             case "RESPONSE" -> {g.responses++;var q=o.get("measuredQuantities");
-                if(q.isNull()||!(approved!=null?BASIS.equals(q.get("normalizationBasis").asText()):trusted!=null&&trusted.basis().equals(q.get("normalizationBasis").asText())))incomplete=true;
+                if(q.isNull()||approved!=null&&(!quantityReasonsOnly(o)||!consistentTextTokens(o,q))||!(approved!=null?BASIS.equals(q.get("normalizationBasis").asText()):trusted!=null&&trusted.basis().equals(q.get("normalizationBasis").asText())))incomplete=true;
                 else for(var count:q.get("tokens").properties())g.quantity=g.quantity.add(new BigInteger(count.getValue().asText()));}
             default -> throw new IllegalStateException("Unknown capture head kind");
         }
