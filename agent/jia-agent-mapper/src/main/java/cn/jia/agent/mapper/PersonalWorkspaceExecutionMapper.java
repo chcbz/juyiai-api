@@ -27,6 +27,25 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
     int freezeMemberSet(@Param("t") String tenant,@Param("c") String client,@Param("o") String owner,@Param("id") String task,
         @Param("state") String state,@Param("fact") String fact,@Param("revision") long revision,@Param("time") long time);
 
+    @Select("""
+        SELECT tenant_id,client_id,owner_jiacn,task_id,terminal_fact_id,terminal_state,terminal_revision,closed_at,membership_revision,execution_count,execution_set_sha256
+        FROM agent_task_execution_set WHERE tenant_id=#{t} AND client_id=#{c} AND terminal_fact_id=#{id} AND delivery_state='PENDING'
+        """) cn.jia.economy.usage.TaskMembership.Terminal pendingTerminal(@Param("t") String t,@Param("c") String c,@Param("id") String id);
+    @Select("""
+        SELECT membership_revision,execution_id,run_id,capture_id,admission_sha256 FROM agent_task_execution_member
+        WHERE tenant_id=#{t.tenant} AND client_id=#{t.client} AND owner_jiacn=#{t.owner} AND task_id=#{t.task}
+          AND membership_revision>#{after} AND membership_revision<=#{t.membershipRevision} ORDER BY membership_revision LIMIT #{limit}
+        """) java.util.List<cn.jia.economy.usage.TaskMembership.Member> membersPage(@Param("t") cn.jia.economy.usage.TaskMembership.Terminal t,@Param("after") long after,@Param("limit") int limit);
+    @Update("""
+        UPDATE agent_task_execution_set SET delivery_state='DELIVERED' WHERE tenant_id=#{tenant} AND client_id=#{client} AND owner_jiacn=#{owner}
+          AND task_id=#{task} AND terminal_fact_id=#{fact} AND delivery_state='PENDING'
+        """) int markMembershipDelivered(cn.jia.economy.usage.TaskMembership.Terminal t);
+
+    @Select("""
+        <script>SELECT client_id,terminal_fact_id FROM agent_task_execution_set WHERE tenant_id=#{t} AND delivery_state='PENDING'
+        <if test="c != null">AND client_id=#{c}</if> AND terminal_fact_id &gt; #{after} ORDER BY terminal_fact_id LIMIT #{limit}</script>
+        """) java.util.List<cn.jia.economy.usage.TaskMembership.Pending> pendingMembershipPage(@Param("t") String tenant,@Param("c") String client,@Param("after") String after,@Param("limit") int limit);
+
     /** Append under the original task-root lock. Revision is an ordering cursor, not a count. */
     @org.apache.ibatis.annotations.Insert("""
         INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)

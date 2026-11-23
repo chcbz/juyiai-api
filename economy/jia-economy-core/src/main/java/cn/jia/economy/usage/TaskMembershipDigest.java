@@ -1,4 +1,4 @@
-package cn.jia.agent.common;
+package cn.jia.economy.usage;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -11,6 +11,14 @@ import java.util.HexFormat;
  * Empty chain = SHA256(empty bytes). Revision is sparse, not a count. */
 public final class TaskMembershipDigest {
     private TaskMembershipDigest() {}
+    public static final String EMPTY="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    public static String next(String previous,String leaf){
+        try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest((previous+leaf).getBytes(StandardCharsets.US_ASCII)));}
+        catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}
+    }
+    public static String member(String tenant,String client,String owner,String task,String execution,String run,String capture,String admission){
+        return tuple("TASK_MEMBER_V1",tenant,client,owner,task,execution,run,capture,admission);
+    }
     public static String tuple(String... fields) {
         try {
             var hash=MessageDigest.getInstance("SHA-256");

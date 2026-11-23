@@ -128,6 +128,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
     }
 
+    private cn.jia.agent.service.usage.TaskMembershipDelivery membershipDelivery;
+    private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
+    private PersonalWorkspaceExecutionDaoImpl executionRows;
+
     @BeforeEach
     void setUp() throws Exception {
         // Owned ephemeral MySQL only; never connect to a configured/production database.
@@ -150,6 +154,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(file))).execute(source);
         }
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-hosting-rent.sql")).execute(source);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/task-scheduled-work-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(source);
         manager = new DataSourceTransactionManager(source);
         var config = new MybatisConfiguration(); config.setMapUnderscoreToCamelCase(true);
         for (Class<?> mapper : List.of(AgentTaskMetaMapper.class, AgentTaskMemberMapper.class,
@@ -158,7 +163,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 PersonalWorkspaceExecutionMapper.class, PersonalWorkspaceExecutionInputMapper.class, PersonalWorkspaceExecutionOutputMapper.class, SkillExecutionMapper.class, AgentTaskProviderCostConsentMapper.class,
                 EconomyLedgerMapper.class, EconomyTaskBillingMapper.class, ControlledImageBridgeOperationMapper.class,
                 cn.jia.economy.mapper.EconomyHostingRentMapper.class, cn.jia.economy.mapper.EconomyHostingRenewalMapper.class,
-                HostingRentFinishingMapper.class, AgentPersonaBindingMapper.class)) config.addMapper(mapper);
+                HostingRentFinishingMapper.class, AgentPersonaBindingMapper.class,cn.jia.task.mapper.ScheduledWorkMapper.class,cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)) config.addMapper(mapper);
         var global = new GlobalConfig(); global.setIdentifierGenerator(new DefaultIdentifierGenerator());
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
@@ -234,8 +239,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         deliveryReads = proxy(new AgentTaskFormalDeliveryReadServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)), meta),
                 AgentTaskFormalDeliveryReadService.class);
-        var executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
+        executionRows=new PersonalWorkspaceExecutionDaoImpl(sql.getMapper(PersonalWorkspaceExecutionMapper.class),
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
+        var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
+        var schedules=new cn.jia.task.scheduling.ScheduledWorkStore(sql.getMapper(cn.jia.task.mapper.ScheduledWorkMapper.class),fixed,manager);
+        var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
+        var receipts=proxy(new cn.jia.economy.service.impl.TaskMembershipReceiptStore(sql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.usage.TaskMembershipReceipt.class);
+        membershipDelivery=new cn.jia.agent.service.usage.TaskMembershipDelivery(executionRows,receipts,beans.getBeanProvider(cn.jia.task.scheduling.ScheduleService.class),fixed);
+        membershipSweep=new cn.jia.agent.service.usage.TaskMembershipSweep(executionRows,fixed,manager,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         decisions = proxy(new AgentTaskFormalDeliveryDecisionServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)),
                 meta, members, work, roots, events, billing,executionRows), AgentTaskFormalDeliveryDecisionService.class);
@@ -450,6 +461,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(2, count("economy_transaction")); assertEquals("CAPTURED", charge());
     }
 
+    @Test void frozenMembersResumeAfterLostAckAndCorruptLastPageCannotVerify() {
+        assign();prepareSubmitted();
+        locked(()->{for(int i=0;i<65;i++) {var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("exec"+i).setRunId("r"+i).setRequestHash("a".repeat(64));
+            m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,null);}return null;});
+        decide("accepted");assertEquals("CAPTURED",charge());
+        assertEquals(0,count("economy_task_membership_receipt"));
+        var sweepKey=new cn.jia.task.scheduling.ScheduleKey(CLIENT,membershipSweep.getName(),"cron:fixture","");
+        membershipSweep.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation(TENANT,sweepKey,1));
+        var fact=jdbc.queryForObject("SELECT business_key FROM task_scheduled_work WHERE handler=?",String.class,membershipDelivery.getName());
+        var job=new cn.jia.task.scheduling.ScheduledInvocation(TENANT,new cn.jia.task.scheduling.ScheduleKey(CLIENT,membershipDelivery.getName(),fact,""),2);
+        membershipDelivery.executeScheduled(job);assertEquals(64,count("economy_task_membership_received_run"));
+        jdbc.update("UPDATE agent_task_execution_member SET admission_sha256=REPEAT('b',64) WHERE execution_id='exec64'");
+        assertThrows(IllegalStateException.class,()->membershipDelivery.executeScheduled(job));
+        assertEquals(64,count("economy_task_membership_received_run"));assertEquals("PENDING",jdbc.queryForObject("SELECT delivery_state FROM agent_task_execution_set",String.class));
+        jdbc.update("UPDATE agent_task_execution_member SET admission_sha256=REPEAT('a',64) WHERE execution_id='exec64'");
+        membershipDelivery.executeScheduled(job);assertTrue(jdbc.queryForObject("SELECT membership_verified FROM economy_task_membership_receipt",Boolean.class));
+        assertEquals("DELIVERED",jdbc.queryForObject("SELECT delivery_state FROM agent_task_execution_set",String.class));
+        jdbc.update("UPDATE agent_task_execution_set SET delivery_state='PENDING'"); // crash window after Economy commit, before source ACK
+        membershipDelivery.executeScheduled(job);assertEquals(65,count("economy_task_membership_received_run"));assertEquals(0,count("economy_task_cost_sample"));
+        assertEquals("DELIVERED",jdbc.queryForObject("SELECT delivery_state FROM agent_task_execution_set",String.class));
+    }
     @Test
     void reworkKeepsOriginalHoldAndNeverCaptures() {
         assign(); prepareSubmitted();

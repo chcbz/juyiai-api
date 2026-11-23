@@ -76,8 +76,24 @@ CREATE TABLE IF NOT EXISTS economy_task_cost_sample (
     UNIQUE KEY uk_sample_benchmark (tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
 CREATE TABLE IF NOT EXISTS economy_task_cost_sample_member (
-    sample_id CHAR(64) NOT NULL, execution_id VARCHAR(100) NOT NULL, run_id VARCHAR(100) NOT NULL, capture_id CHAR(64) NOT NULL,
-    PRIMARY KEY (sample_id,execution_id,run_id,capture_id),
+    sample_id CHAR(64) NOT NULL, execution_id VARCHAR(100) NOT NULL, run_id VARCHAR(100) NOT NULL, capture_id CHAR(64) DEFAULT NULL,
+    -- Missing capture is an observed, unmetered member; not zero cost and not a different run identity.
+    PRIMARY KEY (sample_id,execution_id,run_id),
     KEY ix_sample_capture (capture_id,sample_id),
     CONSTRAINT fk_sample_member FOREIGN KEY (sample_id) REFERENCES economy_task_cost_sample(sample_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Trusted terminal membership inbox. Exists independently of a confirmed quote or READY sample.
+CREATE TABLE IF NOT EXISTS economy_task_membership_receipt (
+    tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL, owner_jiacn VARCHAR(100) NOT NULL, task_id VARCHAR(100) NOT NULL,
+    fact_id CHAR(64) NOT NULL, outcome VARCHAR(16) NOT NULL, terminal_revision BIGINT NOT NULL, closed_at BIGINT NOT NULL,
+    membership_revision BIGINT NOT NULL, member_count BIGINT NOT NULL, set_digest CHAR(64) NOT NULL,
+    received_revision BIGINT NOT NULL, received_count BIGINT NOT NULL, received_digest CHAR(64) NOT NULL, membership_verified BOOLEAN NOT NULL,
+    PRIMARY KEY (tenant_id,client_id,owner_jiacn,task_id), UNIQUE KEY uk_membership_fact (tenant_id,client_id,fact_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE IF NOT EXISTS economy_task_membership_received_run (
+    tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL, fact_id CHAR(64) NOT NULL, membership_revision BIGINT NOT NULL,
+    execution_id VARCHAR(100) NOT NULL, run_id VARCHAR(100) NOT NULL, capture_id CHAR(64) NULL, admission_sha256 CHAR(64) NOT NULL,
+    PRIMARY KEY (tenant_id,client_id,fact_id,membership_revision), UNIQUE KEY uk_membership_received_run (tenant_id,client_id,fact_id,execution_id,run_id),
+    CONSTRAINT fk_task_membership_receipt FOREIGN KEY (tenant_id,client_id,fact_id) REFERENCES economy_task_membership_receipt(tenant_id,client_id,fact_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

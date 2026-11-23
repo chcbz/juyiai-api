@@ -111,12 +111,16 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
     }
     @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) {
         String t=execution.getTenantId(),c=execution.getClientId(),o=execution.getOwnerJiacn(),id=execution.getTaskId();
-        String leaf=cn.jia.agent.common.TaskMembershipDigest.tuple("TASK_MEMBER_V1",t,c,o,id,execution.getExecutionId(),execution.getRunId(),captureId,execution.getRequestHash());
+        String leaf=cn.jia.economy.usage.TaskMembershipDigest.member(t,c,o,id,execution.getExecutionId(),execution.getRunId(),captureId,execution.getRequestHash());
         executions.ensureMemberSet(t,c,o,id);executions.registerTaskMember(execution,captureId);
         if(executions.advanceMemberSet(execution,leaf)!=1) throw new IllegalStateException("Task execution set closed or stale");
     }
+    @Override public cn.jia.economy.usage.TaskMembership.Terminal pending(String t,String c,String fact){return executions.pendingTerminal(t,c,fact);}
+    @Override public java.util.List<cn.jia.economy.usage.TaskMembership.Member> members(cn.jia.economy.usage.TaskMembership.Terminal t,long after){return executions.membersPage(t,after,cn.jia.economy.usage.TaskMembership.PAGE);}
+    @Override public void delivered(cn.jia.economy.usage.TaskMembership.Terminal t){executions.markMembershipDelivered(t);}
+    @Override public java.util.List<cn.jia.economy.usage.TaskMembership.Pending> pendingPage(String tenant,String client,String after){return executions.pendingMembershipPage(tenant,client,after,cn.jia.economy.usage.TaskMembership.PAGE);}
     @Override public void closeTaskMembers(String t,String c,String o,String id,Outcome outcome,String ref,long revision,long time) {
-        String fact=cn.jia.agent.common.TaskMembershipDigest.tuple("TASK_TERMINAL_V1",t,c,o,id,outcome.name(),ref,Long.toString(revision));
+        String fact=cn.jia.economy.usage.TaskMembershipDigest.tuple("TASK_TERMINAL_V1",t,c,o,id,outcome.name(),ref,Long.toString(revision));
         executions.ensureMemberSet(t,c,o,id);
         if(executions.freezeMemberSet(t,c,o,id,outcome.name(),fact,revision,time)!=1) throw new IllegalStateException("Task execution set already closed");
     }

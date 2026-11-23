@@ -105,6 +105,10 @@ class UsageCaptureJournalTransactionTest {
         var journal=new UsageCaptureJournalImpl(db,event->{});var jdbc=new JdbcTemplate(ds);var tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
         for(String sampleId:new String[]{sample,h}) jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state) VALUES(?,'t','c','own','task',?,'v',?,?,?,'ACCEPTED',1,1,'READY')",sampleId,sampleId,h,h,h);
         jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,'exec','r',?)",sample,h);
+        jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,'retry','r2',NULL)",sample);
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,'retry','r2',?)",sample,h));
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,'exec','r',?)",sample,sample));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_member WHERE sample_id=? AND capture_id IS NULL",Integer.class,sample));
         // Revision 4 arrived first. A different attempt in revision 1 conflicts even with 2/3 absent.
         var separate=new Binding("t","c","own","agent",null,"other","r",sample);
         var fourth=sub("fourth","REQUEST",h,"4",h,sample);
