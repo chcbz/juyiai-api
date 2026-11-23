@@ -1,0 +1,29 @@
+package cn.jia.agent.service.usage;
+
+import tools.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+class NativeCaptureEvidenceTest {
+    private static final ObjectMapper JSON=new ObjectMapper();
+    @Test void fixedRuntimeMessagesHavePortableJavaDigestsAndClosedScope() throws Exception {
+        try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
+            var fixture=JSON.readTree(Objects.requireNonNull(in));int count=0;
+            for(var c:fixture.get("cases"))for(var m:c.get("messages")){
+                var req=m.get("request");var data=JSON.convertValue(req.get("body").get("data"),Map.class);
+                var receipt=req.get("headers").get("Idempotency-Key").asText();String exec=(String)data.get("executionId"),run=(String)data.get("runId");
+                var result=NativeCaptureEvidence.parse(exec,run,receipt,data);count++;
+                assertEquals(m.get("ack").get("body").get("data").get("evidenceSha256").asText(),result.evidenceSha256());
+                assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.parse("foreign",run,receipt,data));
+                assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.parse(exec,run,"different",data));
+                if(result.kind().equals("RESPONSE")){
+                    var o=(Map)data.get("observation");o.put("reportedUsage",Map.of("authorization","fixture-only"));
+                    var rehashed=new HashMap(data);for(var key:List.of("expectedRevision","receiptId","evidenceSha256"))rehashed.remove(key);data.put("evidenceSha256",NativeCaptureEvidence.digest(rehashed));
+                    assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.parse(exec,run,receipt,data));
+                }
+            }
+            assertEquals(19,count);
+        }
+    }
+}

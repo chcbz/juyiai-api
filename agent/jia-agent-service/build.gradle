@@ -1092,6 +1092,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/agent/service/recommendation/RecommendationMaterialsTest.java'
         include 'cn/jia/agent/api/AssigneeRecommendationControllerTest.java'
         include 'cn/jia/agent/service/usage/NativeProviderUsageCostRecorderTest.java'
+        include 'cn/jia/agent/service/usage/NativeCaptureEvidenceTest.java'
         include 'cn/jia/agent/service/usage/PlatformKnowledgeUsageRecorderTest.java'
         include 'cn/jia/agent/service/usage/PlatformKnowledgeMaintenanceFixture.java'
         include 'cn/jia/agent/security/PlatformKnowledgeUsageHttpMySqlTest.java'
