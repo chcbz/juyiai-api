@@ -8,7 +8,6 @@
     "taskVersion": "7",
     "observedAt": 1000,
     "state": "NO_MATCH",
-    "requirementSummary": "资料不足",
     "recommendations": [
       {
         "agent": {
@@ -23,20 +22,12 @@
         "recommendationLevel": "UNKNOWN",
         "reason": "尚无能力介绍",
         "evidence": [],
-        "gaps": [],
-        "quote": {
-          "state": "AVAILABLE",
-          "quoteId": "quote-1",
-          "recommendationId": "recommendation-1",
-          "amount": {
-            "amountMinor": "13",
-            "currency": "WEN"
-          },
-          "unavailableReason": null
-        }
+        "gaps": []
       }
     ],
-    "questions": [],
-    "candidateSetComplete": true
+    "candidateSetComplete": true,
+    "retrievalMode": "HYBRID",
+    "rankingVersion": "candidate-rrf-k60-v1",
+    "degradedReasons": []
   }
 }

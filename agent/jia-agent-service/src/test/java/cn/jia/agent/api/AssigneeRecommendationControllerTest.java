@@ -30,7 +30,7 @@ class AssigneeRecommendationControllerTest {
         mvc = MockMvcBuilders.standaloneSetup(new AssigneeRecommendationController(service))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter()).setControllerAdvice(new ApiEnvelopeAdvice())
                 .addFilters(new RequestIdFilter()).build();
-        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", "资料不足", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of(), new Quotation("AVAILABLE", "quote-1", "recommendation-1", cn.jia.economy.common.Money.wen(13), null))), List.of(), true, new Workload(Workload.Kind.DOCUMENT, 20000, 5000, 1)));
+        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of())), true, "HYBRID", "candidate-rrf-k60-v1", List.of()));
     }
     @AfterEach void cleanup() { EsContextHolder.clearContext(); }
     @Test void sameEndpointReturnsNewObjectInOneEnvelopeWithoutLegacyScores() throws Exception {
@@ -39,17 +39,16 @@ class AssigneeRecommendationControllerTest {
                 .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.protocolVersion").value(1)).andExpect(jsonPath("$.code").value("E0"))
                 .andExpect(jsonPath("$.data.workload").doesNotExist())
-                .andExpect(jsonPath("$.data.recommendations[0].quote.amount.amountMinor").value("13"))
-                .andExpect(jsonPath("$.data.recommendations[0].quote.amount.currency").value("WEN"))
-                .andExpect(jsonPath("$.data.recommendations[0].quote.quoteId").value("quote-1"))
+                .andExpect(jsonPath("$.data.recommendations[0].quote").doesNotExist())
+                .andExpect(jsonPath("$.data.retrievalMode").value("HYBRID"))
                 .andExpect(jsonPath("$.data.state").value("NO_MATCH")).andExpect(jsonPath("$.data.taskVersion").value("7"))
                 .andExpect(jsonPath("$.data.recommendations[0].recommendationLevel").value("UNKNOWN")).andExpect(jsonPath("$.data.score").doesNotExist());
     }
-    @Test void responseMatchesSharedWebQuoteFixture() throws Exception {
+    @Test void responseMatchesSharedWebRecommendationFixture() throws Exception {
         var response = mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY)
                 .header("X-Request-Id", "recommend-test")).andExpect(status().isOk()).andReturn().getResponse();
         var mapper = new tools.jackson.databind.ObjectMapper();
-        try (var fixture = getClass().getResourceAsStream("/billing/task-recommendation-quote.json")) {
+        try (var fixture = getClass().getResourceAsStream("/billing/task-recommendation.json")) {
             org.junit.jupiter.api.Assertions.assertEquals(mapper.readTree(fixture), mapper.readTree(response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8)));
         }
     }

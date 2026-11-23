@@ -33,6 +33,8 @@ final class TaskQueryVectors {
         this.capacity = capacity; this.concurrency = concurrency; this.ttlNanos = ttl.toNanos();
     }
 
+    TaskFeatureEncoder.Identity identity() { return encoder.identity(); }
+
     Mono<TaskFeatureEncoder.Vector> encode(Actor actor, TaskRetrievalText input) {
         return Mono.defer(() -> lookup(new Key(actor.tenantId(), actor.clientId(), actor.ownerJiacn(),
                 TaskRetrievalText.VERSION, input.sha256(), encoder.identity()), input));
