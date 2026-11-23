@@ -64,6 +64,11 @@ public final class NativeExecutionUsageCostController {
         try{return response(authentication.withNativeFence(principal,()->journal.readReceipt(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),receiptId)));}
         catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
     }
+    @GetMapping(value="/{executionId}/runs/{runId}/usage/records/{recordId}",produces="application/json")
+    public ResponseEntity<?> current(@PathVariable String executionId,@PathVariable String runId,@PathVariable String recordId,Authentication principal){
+        try{return response(authentication.withNativeFence(principal,()->journal.readRecord(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),recordId)));}
+        catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+    }
     private static ResponseEntity<?> response(UsageCaptureJournal.Result result){return switch(result.state()){
         case NOT_FOUND -> error(404,"USAGE_CAPTURE_NOT_FOUND");case PENDING -> error(409,"USAGE_ACK_PENDING");case CONFLICT -> error(409,"USAGE_CAPTURE_CONFLICT");
         case DURABLE -> ResponseEntity.ok().header("Cache-Control","private, no-store").body(JsonResult.success(JSON.readTree(result.ackJson())));

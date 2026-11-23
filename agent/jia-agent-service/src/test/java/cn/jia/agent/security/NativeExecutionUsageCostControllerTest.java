@@ -19,6 +19,9 @@ class NativeExecutionUsageCostControllerTest {
         assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(new MockHttpServletRequest("POST",PATH)));
         assertTrue(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",PATH)));
         assertTrue(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",PATH+"/receipts/key")));
+        assertTrue(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",PATH+"/records/"+"a".repeat(64))));
+        assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",PATH+"/records/not-a-digest")));
+        assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",PATH+"/records/"+"a".repeat(64))));
         assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("POST",PATH+"/receipts/key")));
         for(String method : new String[]{"GET","PUT","DELETE"})
             assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest(method,PATH)));
@@ -61,6 +64,9 @@ class NativeExecutionUsageCostControllerTest {
             assertEquals(200,ctrl.submit(exec,run,new JsonRequest<>(1,receipt,payload),receipt,principal).getStatusCode().value());
             when(journal.readReceipt(any(),eq(receipt))).thenReturn(accepted);assertEquals(200,ctrl.receipt(exec,run,receipt,principal).getStatusCode().value());
             assertThrows(cn.jia.agent.service.PersonalWorkspaceExecutionService.Failure.class,()->ctrl.receipt(exec,"other",receipt,principal));
+            when(journal.readRecord(any(),eq(d.get("recordId").asText()))).thenReturn(accepted);
+            assertEquals(200,ctrl.current(exec,run,d.get("recordId").asText(),principal).getStatusCode().value());
+            assertThrows(cn.jia.agent.service.PersonalWorkspaceExecutionService.Failure.class,()->ctrl.current(exec,"other",d.get("recordId").asText(),principal));
             row.setUsageMode(null);assertThrows(cn.jia.agent.service.PersonalWorkspaceExecutionService.Failure.class,()->ctrl.receipt(exec,run,receipt,principal));
             verify(journal,times(1)).readReceipt(any(),any());
         }

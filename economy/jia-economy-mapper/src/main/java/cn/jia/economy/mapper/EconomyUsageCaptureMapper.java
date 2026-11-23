@@ -61,6 +61,15 @@ public interface EconomyUsageCaptureMapper {
     int application(@Param("pk") long pk,@Param("record") String record,@Param("key") String key,@Param("receipt") String receipt,@Param("state") String state);
     @Update("UPDATE economy_usage_capture_receipt SET processing_state='CAS_CONFLICT' WHERE capture_pk=#{pk} AND receipt_id=#{receipt} AND processing_state='PENDING'")
     int rejectCas(@Param("pk") long pk,@Param("receipt") String receipt);
+    record Head(String sourceRevision,String evidenceSha256,String ledgerAttemptId) {}
+    @Select("SELECT source_revision,evidence_sha256,ledger_attempt_id FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{id} AND is_associated_head=1 FOR UPDATE")
+    Head head(@Param("pk") long pk,@Param("id") String id);
+    @Update("UPDATE economy_usage_capture_record SET is_associated_head=0 WHERE capture_pk=#{pk} AND record_id=#{id} AND is_associated_head=1")
+    int clearHead(@Param("pk") long pk,@Param("id") String id);
+    @Update("UPDATE economy_usage_capture_record SET is_associated_head=1,ledger_attempt_id=#{attempt} WHERE capture_pk=#{pk} AND record_id=#{id} AND revision_key=#{key}")
+    int publishHead(@Param("pk") long pk,@Param("id") String id,@Param("key") String key,@Param("attempt") String attempt);
+    @Select("SELECT revision FROM economy_usage_attempt WHERE tenant_id=#{tenant} AND client_id=#{client} AND attempt_id=#{attempt} FOR UPDATE")
+    Long ledgerRevision(@Param("tenant") String tenant,@Param("client") String client,@Param("attempt") String attempt);
     record Origin(String tenantId,String clientId,String sourceAttemptId,long capturePk,String recordId) {}
     @Insert("""
         INSERT INTO economy_usage_response_origin (tenant_id,client_id,source_attempt_id,capture_pk,record_id)

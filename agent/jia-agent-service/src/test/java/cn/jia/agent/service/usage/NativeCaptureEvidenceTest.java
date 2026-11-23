@@ -22,9 +22,14 @@ class NativeCaptureEvidenceTest {
                 records.put(d.get("recordId").asText(),d.toString());
             }
         }
-        assertNull(NativeResponseOrigin.resolve(response,k->null).attemptId());
-        assertEquals(id,NativeResponseOrigin.resolve(response,records::get).attemptId());
-        assertTrue(NativeResponseOrigin.resolve(response.replace("response_1\"","different\""),records::get).conflict());
+        assertNull(NativeResponseOrigin.resolve(response,null,k->null).attemptId());
+        assertEquals(id,NativeResponseOrigin.resolve(response,null,records::get).attemptId());
+        var tree=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var obs=(tools.jackson.databind.node.ObjectNode)tree.get("observation");
+        obs.putNull("reportedUsage");String missing=tree.toString();
+        assertEquals(id,NativeResponseOrigin.resolve(response,missing,records::get).attemptId());
+        assertTrue(NativeResponseOrigin.resolve(missing,response,records::get).conflict());
+        assertTrue(NativeResponseOrigin.resolve(response.replace("\"input_tokens\":100","\"input_tokens\":101"),response,records::get).conflict());
+        assertTrue(NativeResponseOrigin.resolve(response.replace("response_1\"","different\""),null,records::get).conflict());
     }
     @Test void fixedRuntimeMessagesHavePortableJavaDigestsAndClosedScope() throws Exception {
         try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){

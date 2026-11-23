@@ -28,6 +28,16 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
     private void change(long pk,List<String> members,String reason){if(db.invalidateCapture(pk,reason)!=1)throw new IllegalStateException("Capture disappeared");for(String id:members)if(db.invalidateSample(id)!=1)throw new IllegalStateException("Membership disappeared");}
     private Result conflict(long pk,List<String> members,String reason){change(pk,members,reason);return status(State.CONFLICT);}
     public Result readReceipt(Binding b,String receiptId){var c=db.lockCapture(key(b));if(!matches(b,c))return status(State.NOT_FOUND);return c.conflictReason()!=null?status(State.CONFLICT):stored(db.receipt(c.id(),receiptId));}
+    private void publishHead(long pk,String id,String revisionKey,String attempt){
+        db.clearHead(pk,id);if(db.publishHead(pk,id,revisionKey,attempt)!=1)throw new IllegalStateException("Missing associated revision");
+    }
+    public Result readRecord(Binding b,String id){
+        var c=db.lockCapture(key(b));if(!matches(b,c))return status(State.NOT_FOUND);if(c.conflictReason()!=null)return status(State.CONFLICT);
+        var head=db.head(c.id(),id);if(head==null)return status(db.recordBinding(c.id(),id)==null?State.NOT_FOUND:State.PENDING);
+        var view=new LinkedHashMap<String,Object>();view.put("recordId",id);view.put("sourceRevision",head.sourceRevision());view.put("evidenceSha256",head.evidenceSha256());
+        view.put("ledgerRevision",head.ledgerAttemptId()==null?null:Objects.requireNonNull(db.ledgerRevision(b.tenantId(),b.clientId(),head.ledgerAttemptId())).toString());
+        return new Result(State.DURABLE,JSON.writeValueAsString(view));
+    }
     /** Source ownership is decided before the separate ledger transaction, never by ledger owner/task alone. */
     public Result bindResponse(Binding b,String receiptId,ResponseOrigin adapter){
         var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
@@ -37,8 +47,13 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         var response=db.evidence(pk,receipt.recordId(),receipt.revisionKey());
         if(response==null||!"RESPONSE".equals(response.kind()))throw new IllegalStateException("Missing pending response");
         // A future revision may arrive first; do not let a gap reserve a provider identity.
-        if(!"1".equals(response.sourceRevision()))return result;
-        var origin=adapter.resolve(response.evidenceJson(),id->{var row=db.evidence(pk,id,key(BigInteger.ONE));return row==null?null:row.evidenceJson();});
+        String previous=null;
+        if(!"1".equals(response.sourceRevision())){
+            var prev=db.evidence(pk,response.recordId(),key(new BigInteger(response.sourceRevision()).subtract(BigInteger.ONE)));
+            if(prev==null||!"APPLIED".equals(prev.associationState()))return result;
+            previous=prev.evidenceJson();
+        }
+        var origin=adapter.resolve(response.evidenceJson(),previous,id->{var row=db.evidence(pk,id,key(BigInteger.ONE));return row==null?null:row.evidenceJson();});
         if(origin.conflict())return conflict(pk,members,"RESPONSE_ORIGIN");
         if(origin.attemptId()==null)return result;
         var claim=new EconomyUsageCaptureMapper.Origin(b.tenantId(),b.clientId(),origin.attemptId(),pk,response.recordId());
@@ -71,7 +86,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
             db.application(pk,r.recordId(),r.revisionKey(),null,"WAITING");return rejectCas(pk,id);
         }
         var ledger=new LinkedHashMap<String,Object>();ledger.put("attemptId",applied.attemptId());ledger.put("revision",Long.toString(applied.revision()));ledger.put("status",applied.status().name());ledger.put("costYuan",applied.costYuan()==null?null:applied.costYuan().toPlainString());
-        db.application(pk,r.recordId(),r.revisionKey(),id,"APPLIED");change(pk,members,null);
+        db.application(pk,r.recordId(),r.revisionKey(),id,"APPLIED");publishHead(pk,r.recordId(),r.revisionKey(),applied.attemptId());change(pk,members,null);
         return ack(b,pk,r,db.evidence(pk,r.recordId(),r.revisionKey()),ledger);
     }
     public Result register(Binding b,Submission s){
@@ -92,10 +107,17 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         }
         db.appendSubmission(new EconomyUsageCaptureMapper.Receipt(pk,s.receiptId(),s.recordId(),k,s.requestId(),s.requestSha256(),s.expectedRevision(),"PENDING",null));
         if("RESPONSE".equals(s.kind()))return status(State.PENDING); // never manufacture a ledger receipt
-        return ack(b,pk,db.receipt(pk,s.receiptId()),db.evidence(pk,s.recordId(),k),null);
+        if("PLAN".equals(s.kind())){
+            var head=db.head(pk,s.recordId());
+            if(head==null?n.equals(BigInteger.ONE):new BigInteger(head.sourceRevision()).add(BigInteger.ONE).equals(n))publishHead(pk,s.recordId(),k,null);
+        }
+        return ack(b,pk,s.receiptId(),s.requestSha256(),s.recordId(),s.sourceRevision(),s.evidenceSha256(),null);
     }
     private Result ack(Binding b,long pk,EconomyUsageCaptureMapper.Receipt receipt,EconomyUsageCaptureMapper.Evidence e,Object ledger){
-        var ack=new LinkedHashMap<String,Object>();ack.put("schemaVersion",2);ack.put("executionId",b.executionId());ack.put("runId",b.runId());ack.put("captureId",b.captureId());ack.put("receiptId",receipt.receiptId());ack.put("recordId",e.recordId());ack.put("sourceRevision",e.sourceRevision());ack.put("evidenceSha256",e.evidenceSha256());ack.put("acceptedAt",System.currentTimeMillis());ack.put("acceptance","DURABLE");ack.put("ledger",ledger);
-        String raw=JSON.writeValueAsString(ack);if(db.finishReceipt(pk,receipt.receiptId(),receipt.requestSha256(),raw)!=1)throw new IllegalStateException("Receipt transition lost");return new Result(State.DURABLE,raw);
+        return ack(b,pk,receipt.receiptId(),receipt.requestSha256(),e.recordId(),e.sourceRevision(),e.evidenceSha256(),ledger);
+    }
+    private Result ack(Binding b,long pk,String receiptId,String requestHash,String recordId,String sourceRevision,String evidenceSha,Object ledger){
+        var ack=new LinkedHashMap<String,Object>();ack.put("schemaVersion",2);ack.put("executionId",b.executionId());ack.put("runId",b.runId());ack.put("captureId",b.captureId());ack.put("receiptId",receiptId);ack.put("recordId",recordId);ack.put("sourceRevision",sourceRevision);ack.put("evidenceSha256",evidenceSha);ack.put("acceptedAt",System.currentTimeMillis());ack.put("acceptance","DURABLE");ack.put("ledger",ledger);
+        String raw=JSON.writeValueAsString(ack);if(db.finishReceipt(pk,receiptId,requestHash,raw)!=1)throw new IllegalStateException("Receipt transition lost");return new Result(State.DURABLE,raw);
     }
 }

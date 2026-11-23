@@ -12,8 +12,9 @@ public interface UsageCaptureJournal {
     Result finish(Work work,UsageCostService.Receipt applied,UsageCostConflict.Reason rejected);
     /** Adapter receives only previously registered bytes for this capture. Null attempt = missing/unsupported source. */
     record Origin(String attemptId,boolean conflict,long observedAt) {}
-    interface ResponseOrigin { Origin resolve(String response,java.util.function.Function<String,String> firstRevision); }
+    interface ResponseOrigin { Origin resolve(String response,String previous,java.util.function.Function<String,String> firstRevision); }
     Result bindResponse(Binding trusted,String receiptId,ResponseOrigin adapter);
     Result register(Binding trusted,Submission source);
+    Result readRecord(Binding trusted,String recordId);
     Result readReceipt(Binding trusted,String receiptId);
 }
