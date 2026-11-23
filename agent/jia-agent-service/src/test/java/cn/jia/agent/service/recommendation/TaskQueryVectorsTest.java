@@ -1,6 +1,9 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.entity.AgentTaskDTO;
+import cn.jia.economy.task.TaskBudgetEstimator;
+import cn.jia.economy.task.TaskQuoteBatches;
+import cn.jia.economy.task.TaskBillingService;
 import cn.jia.agent.hosting.HostingRentHttp.Actor;
 import cn.jia.agent.service.TaskFeatureEncoder;
 import org.junit.jupiter.api.Test;
@@ -69,6 +72,19 @@ class TaskQueryVectorsTest {
         when(batches.replay(any(),eq(intent))).thenReturn(original);assertSame(original,((TaskQuoteIntentService.Replay)service.begin(OWNER,"task","key",intent)).stored());
         var different=new cn.jia.economy.task.TaskQuoteBatches.Intent("4",List.of("agent"));when(batches.replay(any(),eq(different))).thenThrow(new cn.jia.economy.task.TaskQuoteBatches.IntentConflict());
         assertThrows(cn.jia.economy.task.TaskQuoteBatches.IntentConflict.class,()->service.begin(OWNER,"task","key",different));verifyNoInteractions(requirements,grants,agents,materials,features);
+    }
+    @Test void independentBudgetSeparatesPrepareFromCommitAndDoesNotTouchBillingForUnavailableOrReplayedIntent(){
+        var intents=mock(TaskQuoteIntentService.class);var budget=mock(TaskBudgetEstimator.class);var billing=mock(TaskBillingService.class);
+        var app=new IndependentTaskQuotes(intents,java.util.Optional.empty(),budget,billing);var intent=new TaskQuoteBatches.Intent("3",List.of("agent"));
+        var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
+        var f=mock(cn.jia.economy.pricing.TaskEstimateFeatures.class);var fresh=new TaskQuoteIntentService.Fresh(key,intent,1,f,List.of(new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget("agent","owner",7,0)),List.of());
+        when(intents.begin(OWNER,"task","key",intent)).thenReturn(fresh);when(budget.prepare(task,f,null)).thenReturn(new TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING));
+        when(intents.finish(eq(OWNER),eq(fresh),any())).thenAnswer(call->{var items=call.<java.util.function.Function<String,List<TaskQuoteBatches.Item>>>getArgument(2).apply("batch");return new TaskQuoteBatches.Result("task","3",12,items);});
+        var result=app.quote(OWNER,"task","key",intent);assertEquals(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING,result.quotes().getFirst().unavailableReason());assertNull(result.quotes().getFirst().amount());
+        verify(budget).lockSelected(task,List.of());verifyNoInteractions(billing);clearInvocations(budget);
+        when(intents.begin(OWNER,"task","key",intent)).thenReturn(new TaskQuoteIntentService.Replay(result));assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
+        when(intents.begin(OWNER,"task","key",intent)).thenThrow(new TaskFeatureEncoder.Unavailable());when(intents.replay(OWNER,"task","key",intent)).thenReturn(result);
+        assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
     }
     @Test void failedEncodingIsNotACompletedEntry() {
         var calls = new AtomicInteger(); var c = cache(() -> {

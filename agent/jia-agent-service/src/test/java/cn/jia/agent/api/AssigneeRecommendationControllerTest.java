@@ -32,6 +32,23 @@ class AssigneeRecommendationControllerTest {
                 .addFilters(new RequestIdFilter()).build();
         when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of())), true, "HYBRID", "candidate-rrf-k60-v1", List.of()));
     }
+    @Test void independentQuoteEndpointUsesHeaderAndOnlyExplicitIdsNotBrowserPrices() throws Exception {
+        var app=mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        var api=MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app)).setMessageConverters(new JacksonJsonHttpMessageConverter())
+                .setControllerAdvice(new ApiEnvelopeAdvice()).addFilters(new RequestIdFilter()).build();
+        var intent=new cn.jia.economy.task.TaskQuoteBatches.Intent("7",List.of("a","z"));
+        var item=new cn.jia.economy.task.TaskQuoteBatches.Item("a",cn.jia.economy.task.TaskQuoteBatches.State.UNAVAILABLE,null,"batch",null,cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE,null);
+        when(app.quote(any(),eq("task"),eq("key"),eq(intent))).thenReturn(new cn.jia.economy.task.TaskQuoteBatches.Result("task","7",12,List.of(item,new cn.jia.economy.task.TaskQuoteBatches.Item("z",cn.jia.economy.task.TaskQuoteBatches.State.UNAVAILABLE,null,"batch",null,cn.jia.economy.task.TaskQuoteBatches.Reason.PRICE_MISSING,null))));
+        String body=BODY.replace("\"7\"","\"7\",\"agentIds\":[\"z\",\"a\",\"z\"]");
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key").header("X-Request-Id","recommend-test"))
+          .andExpect(status().isOk()).andExpect(jsonPath("$.data.quotes[0].unavailableReason").value("NO_BASELINE")).andExpect(header().string("Cache-Control","private, no-store"));
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body.replace("\"agentIds\"","\"amount\":0,\"agentIds\"")).header("Idempotency-Key","key"))
+          .andExpect(status().isBadRequest());
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isBadRequest());
+        when(app.quote(any(),eq("task"),eq("key"),eq(intent))).thenThrow(new cn.jia.agent.service.TaskFeatureEncoder.InvalidResult(),new cn.jia.agent.service.TaskFeatureEncoder.Unavailable());
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isBadGateway()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_INVALID"));
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_UNAVAILABLE"));
+    }
     @AfterEach void cleanup() { EsContextHolder.clearContext(); }
     @Test void sameEndpointReturnsNewObjectInOneEnvelopeWithoutLegacyScores() throws Exception {
         mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY)

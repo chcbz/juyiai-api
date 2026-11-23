@@ -28,6 +28,10 @@ final class TaskQuoteIntentService {
     private final AgentTaskExecutionGrantService grants;private final AgentExternalServicePolicyService agents;private final RecommendationMaterials materials;private final QuoteFeaturePreparation features;
     TaskQuoteIntentService(AgentTaskMutationTransaction roots,TaskQuoteBatches batches,AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,
                            AgentExternalServicePolicyService agents,RecommendationMaterials materials,QuoteFeaturePreparation features){this.roots=roots;this.batches=batches;this.requirements=requirements;this.grants=grants;this.agents=agents;this.materials=materials;this.features=features;}
+    TaskQuoteBatches.Result replay(Actor actor,String task,String idempotencyKey,TaskQuoteBatches.Intent intent){
+        var key=new TaskQuoteBatches.Key(new TaskBillingService.Task(actor.scope(),actor.ownerJiacn(),task),actor.actorId(),idempotencyKey);
+        return roots.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),task,root->batches.replay(key,intent));
+    }
     Start begin(Actor actor,String task,String idempotencyKey,TaskQuoteBatches.Intent intent){
         var key=new TaskQuoteBatches.Key(new TaskBillingService.Task(actor.scope(),actor.ownerJiacn(),task),actor.actorId(),idempotencyKey);
         var scope=new AgentTaskExecutionGrantService.Scope(actor.tenantId(),actor.clientId(),actor.ownerJiacn());
