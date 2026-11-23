@@ -1082,6 +1082,8 @@ gradle.projectsEvaluated {
 def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
         srcDir 'src/test/java'
+        srcDir 'src/taskQuoteRegression/java'
+        include 'cn/jia/agent/service/recommendation/CapabilityIndexElasticsearchTest.java'
         srcDir rootProject.file('economy/jia-economy-service/src/test/java')
         include 'cn/jia/agent/service/impl/AgentServiceImplTest.java'
         include 'cn/jia/agent/service/recommendation/CandidateRankFusionTest.java'
@@ -1126,6 +1128,13 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    // The owned ES fixture is never resolved from application/production properties.
+    if (providers.gradleProperty('ownedCapabilityEsPort').isPresent()) {
+        systemProperty 'cyf.capabilityEsPort', providers.gradleProperty('ownedCapabilityEsPort').get()
+        systemProperty 'cyf.capabilityEsCluster', providers.gradleProperty('ownedCapabilityEsCluster').get()
+    } else {
+        filter { excludeTestsMatching 'cn.jia.agent.service.recommendation.CapabilityIndexElasticsearchTest' }
+    }
     useJUnitPlatform()
     maxParallelForks = 1
     maxHeapSize = '256m'
