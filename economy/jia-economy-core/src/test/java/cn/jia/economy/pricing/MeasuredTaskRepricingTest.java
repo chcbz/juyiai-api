@@ -65,6 +65,22 @@ class MeasuredTaskRepricingTest {
         assertThrows(IllegalArgumentException.class,()->TaskEstimateEvaluation.checkSplit(List.of(train,tune,new TaskEstimateEvaluation.Case("p","C",4,7,h))));
         var onlyZero=TaskEstimateEvaluation.score(List.of(train,tune,cases.get(3)),List.of(zero));assertNull(onlyZero.wape());assertNull(onlyZero.p90Relative());
     }
+    @Test void calibrationChoosesOnlyOnTuneThenScoresUntouchedHoldoutWithoutRetryOrCoverageInflation(){
+        var book=new Reference("book",Map.of("render",Map.of("frames",new UnitRate(image,new TaskQuoteCalculator.ToolPrice("p","fixture",BigDecimal.ONE)))));
+        var train=new TaskEstimateEvaluation.Case("tr","a",1,2,TaskEstimateEvaluation.Split.TRAIN);
+        var tune=new TaskEstimateEvaluation.Case("tu","b",3,4,TaskEstimateEvaluation.Split.CALIBRATE);
+        var hold=new TaskEstimateEvaluation.Case("ho","c",5,6,TaskEstimateEvaluation.Split.HOLDOUT);
+        java.util.function.BiFunction<TaskEstimateEvaluation.Case,Integer,TaskEstimateCalibration.Sample> row=(c,units)->new TaskEstimateCalibration.Sample("group",c.task(),1,c,features(1,0,null),List.of(fact(c.task(),"render","frames",new Units(image,BigDecimal.valueOf(units)))));
+        var fits=new TaskEstimateCalibration.Trial("supported",1,1,1,1,1,0.1,0.2,1,1,0.1,1);
+        var outside=new TaskEstimateCalibration.Trial("excluded",1,1,1,1,1,0.1,0.2,1,1,0.01,1);
+        var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var grid=List.of(outside,fits);
+        var good=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate);
+        assertTrue(good.meetsPointCriteria());assertEquals("supported",good.winner().trial());
+        var drift=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,10)),grid,gate);
+        assertEquals(good.winner(),drift.winner());assertFalse(drift.meetsPointCriteria());assertEquals(1,drift.holdout().underestimates());
+        var insufficient=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,1)),grid,new TaskEstimateCalibration.Gate(2,BigDecimal.ONE));
+        assertNull(insufficient.winner());assertEquals(1,insufficient.holdout().eligible());assertEquals(0,insufficient.holdout().quoted());assertFalse(insufficient.meetsPointCriteria());
+    }
     @Test void noFallbackWhenEvidenceOrAnExclusiveBasisIsMissing(){
         var book=new Reference("ref",Map.of("image",Map.of("render",frames)));
         var good=fact("i","image","render",new Units(image,BigDecimal.ONE));var doubleCharge=fact("i","image","image-tokens",new Tokens("disjoint-v1",Map.of(INPUT,1L)));

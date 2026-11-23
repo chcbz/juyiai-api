@@ -31,7 +31,11 @@ public final class TaskEstimateEvaluation {
                          Ratio wape,Ratio p90Relative){ }
     /** Join against the full eligible holdout roster. Missing cases cannot be silently omitted to raise coverage. */
     public static Scores score(Collection<Case> manifest,Collection<Prediction> predictions){
-        checkSplit(manifest);var expected=new HashSet<String>();for(var c:manifest)if(c.split()==Split.HOLDOUT)expected.add(c.task());int eligible=expected.size();
+        return score(manifest,predictions,Split.HOLDOUT);
+    }
+    static Scores score(Collection<Case> manifest,Collection<Prediction> predictions,Split partition){
+        if(partition==Split.TRAIN)throw new IllegalArgumentException("Training predictions are not validation evidence");
+        checkSplit(manifest);var expected=new HashSet<String>();for(var c:manifest)if(c.split()==partition)expected.add(c.task());int eligible=expected.size();
         int quoted=0,under=0,zero=0;var truth=BigDecimal.ZERO;var error=BigDecimal.ZERO;var zeroError=BigDecimal.ZERO;var relative=new ArrayList<Ratio>();
         for(var row:predictions){if(!expected.remove(row.task()))throw new IllegalArgumentException("Duplicate or non-holdout prediction");if(row.predictedWen()==null)continue;
             quoted++;var actual=row.truthYuan();var delta=BigDecimal.valueOf(row.predictedWen(),2).subtract(actual);if(delta.signum()<0)under++;
