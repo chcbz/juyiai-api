@@ -55,11 +55,13 @@ public final class RecommendationMaterials {
             cursor = page.nextCursor();
         } while (cursor != null);
         for (var selection : byFile.entrySet()) {
-            var detail = files.get(fileScope,selection.getKey());
+            var detail = files.selectedVersions(fileScope, selection.getKey(),
+                    selection.getValue().stream().map(LinkView::version).distinct().toList());
             var versions = new HashMap<Integer,VersionView>();
             for (var version : detail.versions()) versions.put(version.version(), version);
             for (var link : selection.getValue()) {
-                var version = versions.computeIfAbsent(link.version(), n -> linkedVersion(fileScope,link.fileId(),n));
+                var version = versions.get(link.version());
+                if (version == null) throw new Failure(409, "RECOMMENDATION_STALE");
                 var file = detail.file();
                 result.add(new Observation(link.relationId(), link.relationRevision(), link.fileId(),
                         file.metadataRevision(), version.sha256(), version.byteLength(), new Material(file.displayName(),
@@ -69,17 +71,6 @@ public final class RecommendationMaterials {
         }
         result.sort(Comparator.comparing(Observation::relationId));
         return List.copyOf(result);
-    }
-
-    private VersionView linkedVersion(PersonalWorkspaceService.Scope scope, String fileId, int version) {
-        String cursor = null;
-        do {
-            var page = files.versionsPage(scope, fileId, cursor);
-            for (var item : page.items()) if (item.version() == version) return item;
-            cursor = page.nextCursor();
-        } while (cursor != null);
-        // Missing referenced version is not permission to substitute latest metadata or omit the attachment.
-        throw new Failure(409, "RECOMMENDATION_STALE");
     }
 
     void verifyUnchanged(HostingRentHttp.Actor actor, String taskId, List<Observation> before) {

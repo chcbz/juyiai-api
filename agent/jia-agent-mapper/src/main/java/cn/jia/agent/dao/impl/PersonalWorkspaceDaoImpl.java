@@ -72,6 +72,19 @@ public class PersonalWorkspaceDaoImpl implements PersonalWorkspaceDao {
                 .eq(PersonalWorkspaceVersionEntity::getVersion, version);
         exact(q, "file_id", fileId); return versions.selectOne(q.last("limit 1"));
     }
+    @Override public List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId, String clientId,
+            String ownerJiacn, String fileId, List<Integer> numbers) {
+        requireScope(tenantId, clientId, ownerJiacn); requireId(fileId, "fileId", 100);
+        if (numbers.isEmpty()) return List.of(); // an empty IN must never become an unrestricted query
+        numbers.forEach(PersonalWorkspaceDaoImpl::requireVersion);
+        var q = versionScope(tenantId, clientId, ownerJiacn).eq(PersonalWorkspaceVersionEntity::getFileId, fileId)
+                .in(PersonalWorkspaceVersionEntity::getVersion, numbers);
+        exact(q, "file_id", fileId);
+        return versions.selectList(q.select(PersonalWorkspaceVersionEntity::getFileId, PersonalWorkspaceVersionEntity::getVersion,
+                PersonalWorkspaceVersionEntity::getContentHash, PersonalWorkspaceVersionEntity::getByteLength,
+                PersonalWorkspaceVersionEntity::getOriginalFilename, PersonalWorkspaceVersionEntity::getContentMimeType,
+                PersonalWorkspaceVersionEntity::getCreatedAt));
+    }
     @Override public List<PersonalWorkspaceVersionEntity> listVersions(String tenantId, String clientId,
             String ownerJiacn, String fileId, int limit) {
         requireScope(tenantId, clientId, ownerJiacn); requireId(fileId, "fileId", 100);

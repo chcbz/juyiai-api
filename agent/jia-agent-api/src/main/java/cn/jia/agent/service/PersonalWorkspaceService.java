@@ -15,6 +15,9 @@ import java.util.List;
 public interface PersonalWorkspaceService {
     ListView list(Scope scope, ListQuery query);
     FileDetailView get(Scope scope, String fileId);
+    /** Internal scoped observation, not download authority. File state is returned even when trashed. */
+    record SelectedVersions(FileView file, List<VersionView> versions) { }
+    SelectedVersions selectedVersions(Scope scope, String fileId, List<Integer> numbers);
     List<VersionView> versions(Scope scope, String fileId);
     /** Exact active-file metadata only; no latest substitution or content conversion. */
     VersionView readableVersion(Scope scope, String fileId, int version);

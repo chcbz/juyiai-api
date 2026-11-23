@@ -680,6 +680,13 @@ class PersonalWorkspaceServiceImplTest {
         }
 
         @Override
+        public List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId,String clientId,
+                String ownerJiacn,String fileId,List<Integer> numbers) {
+            return numbers.stream().map(n -> findVersion(tenantId,clientId,ownerJiacn,fileId,n))
+                    .filter(java.util.Objects::nonNull).toList();
+        }
+
+        @Override
         public List<PersonalWorkspaceVersionEntity> listVersions(String tenantId, String clientId,
                 String ownerJiacn, String fileId, int limit) {
             events.add("dao.listVersions");

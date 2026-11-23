@@ -19,6 +19,9 @@ public interface PersonalWorkspaceDao {
     void updateFile(PersonalWorkspaceFileEntity entity);
     PersonalWorkspaceVersionEntity findVersion(String tenantId, String clientId, String ownerJiacn,
             String fileId, int version);
+    /** Scoped metadata projection for explicit immutable versions; no storage location. */
+    List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId, String clientId, String ownerJiacn,
+            String fileId, List<Integer> numbers);
     List<PersonalWorkspaceVersionEntity> listVersions(String tenantId, String clientId, String ownerJiacn,
             String fileId, int limit);
     List<PersonalWorkspaceVersionEntity> listVersionsBefore(String tenantId, String clientId, String ownerJiacn, String fileId, Integer beforeVersion);

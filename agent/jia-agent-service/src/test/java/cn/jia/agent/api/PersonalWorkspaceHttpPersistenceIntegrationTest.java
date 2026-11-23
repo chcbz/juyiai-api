@@ -84,6 +84,7 @@ class PersonalWorkspaceHttpPersistenceIntegrationTest {
     private Connection schemaConnection;
     private JdbcTemplate jdbc;
     private PersonalWorkspaceDao dao;
+    private PersonalWorkspaceService service;
     private CountingStorage storage;
     private MockMvc mvc;
     private final cn.jia.agent.service.AgentTaskArtifactContentService artifactContents = org.mockito.Mockito.mock(cn.jia.agent.service.AgentTaskArtifactContentService.class);
@@ -120,6 +121,25 @@ class PersonalWorkspaceHttpPersistenceIntegrationTest {
 
         storage = newStorage();
         mvc = controller(dataSource);
+    }
+
+    @Test void selectedVersionsReadExactScopedMetadataWithoutLoadingLocationsOrWalkingHistory() {
+        jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "file", OWNER,"UPLOAD","renamed","document","TRASHED",4,205,1,"0",CLIENT);
+        for (int i=1;i<=205;i++) jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "file",OWNER,i,"draft-"+i,MIME,i,"a".repeat(64),"private://not-read",i,"0",CLIENT);
+        var scope = new PersonalWorkspaceService.Scope("0",CLIENT,OWNER);
+        var picked = service.selectedVersions(scope,"file",List.of(2,1,2));
+        assertEquals("TRASHED",picked.file().state()); assertEquals(4L,picked.file().metadataRevision());
+        assertEquals(List.of("draft-1","draft-2"),picked.versions().stream().map(v -> v.originalFilename()).sorted().toList());
+        assertEquals(104,service.selectedVersions(scope,"file",java.util.stream.IntStream.rangeClosed(1,104).boxed().toList()).versions().size());
+        var raw = dao.selectedVersionMetadata("0",CLIENT,OWNER,"file",List.of(1));
+        org.junit.jupiter.api.Assertions.assertNull(raw.getFirst().getStorageUri());
+        assertTrue(dao.selectedVersionMetadata("0",CLIENT,OWNER.toLowerCase(java.util.Locale.ROOT),"file",List.of(1)).isEmpty());
+        assertTrue(dao.selectedVersionMetadata("0",CLIENT,OWNER,"file",List.of()).isEmpty());
+        assertEquals(cn.jia.agent.exception.PersonalWorkspaceException.Reason.VERSION_CONFLICT,
+                org.junit.jupiter.api.Assertions.assertThrows(cn.jia.agent.exception.PersonalWorkspaceException.class,
+                        () -> service.selectedVersions(scope,"file",List.of(1,206))).getReason());
     }
 
     @AfterEach
@@ -397,7 +417,7 @@ class PersonalWorkspaceHttpPersistenceIntegrationTest {
         proxyFactory.addAdvice(transactions);
         PersonalWorkspaceWriteService transactionalWrites =
                 (PersonalWorkspaceWriteService) proxyFactory.getProxy();
-        PersonalWorkspaceService service = new PersonalWorkspaceServiceImpl(
+        service = new PersonalWorkspaceServiceImpl(
                 dao, storage, transactionalWrites, artifactContents);
         return MockMvcBuilders.standaloneSetup(new PersonalWorkspaceController(service)).build();
     }

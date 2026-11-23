@@ -58,6 +58,18 @@ public class PersonalWorkspaceServiceImpl implements PersonalWorkspaceService {
         PersonalWorkspaceViews.VersionView latest=versions.stream().filter(v->v.version()==file.getLatestVersion()).findFirst().orElseThrow(()->new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT));
         return new PersonalWorkspaceViews.FileDetailView(view(file),latest,versions,List.of(),List.of());
     }
+    @Override public SelectedVersions selectedVersions(Scope scope, String fileId, List<Integer> numbers) {
+        var header = file(scope, fileId);
+        var unique = numbers.stream().distinct().toList();
+        var rows = new ArrayList<PersonalWorkspaceViews.VersionView>();
+        for (int start = 0; start < unique.size(); start += 100) {
+            var page = unique.subList(start, Math.min(start + 100, unique.size()));
+            var selected = dao.selectedVersionMetadata(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), fileId, page);
+            if (selected.size() != page.size()) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.VERSION_CONFLICT);
+            selected.stream().map(this::version).forEach(rows::add);
+        }
+        return new SelectedVersions(view(header), List.copyOf(rows));
+    }
     @Override public PersonalWorkspaceViews.VersionView readableVersion(Scope scope,String fileId,int number) {
         var file=file(scope,fileId);
         if(!"ACTIVE".equals(file.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
