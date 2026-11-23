@@ -35,4 +35,17 @@ public interface ConfirmedSampleMapper {
         WHERE r.tenant_id=#{t.scope.tenantId} AND r.client_id=#{t.scope.clientId} AND r.fact_id=#{fact} AND r.membership_revision>#{after}
         ORDER BY r.membership_revision LIMIT 64
         """) List<Member> members(@Param("t") Task task,@Param("id") String id,@Param("fact") String fact,@Param("agent") String agent,@Param("after") long after);
+    // LEFT JOIN preserves a member with no associated responses. Never treat missing as a free run.
+    @Select("""
+        SELECT r.membership_revision,c.capture_id,c.input_revision,e.record_id,e.source_revision,e.evidence_sha256,e.evidence_json
+        FROM economy_task_membership_received_run r
+        JOIN economy_usage_capture c ON c.tenant_id=r.tenant_id AND c.client_id=r.client_id AND c.owner_jiacn=#{t.ownerJiacn} AND c.task_id=#{t.taskId}
+          AND c.agent_id=#{agent} AND c.execution_id=r.execution_id AND c.run_id=r.run_id AND c.capture_id=r.capture_id
+          AND c.projection_revision=c.input_revision AND c.coverage_state='COMPLETE' AND c.conflict_reason IS NULL
+        LEFT JOIN economy_usage_capture_record e ON e.capture_pk=c.id AND e.is_associated_head=1 AND e.kind='RESPONSE'
+        WHERE r.tenant_id=#{t.scope.tenantId} AND r.client_id=#{t.scope.clientId} AND r.fact_id=#{fact}
+          AND (r.membership_revision>#{rev} OR (r.membership_revision=#{rev} AND e.record_id>#{record}))
+        ORDER BY r.membership_revision,e.record_id LIMIT 64
+        """) List<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> responses(@Param("t") Task task,@Param("fact") String fact,
+            @Param("agent") String agent,@Param("rev") long after,@Param("record") String afterRecord);
 }

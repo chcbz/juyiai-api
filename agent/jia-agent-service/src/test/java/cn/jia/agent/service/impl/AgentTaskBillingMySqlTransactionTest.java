@@ -521,6 +521,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         prepareCancellation();confirmMeasured();prepareRunning();cancellation.cancel(TENANT,CLIENT,OWNER,PAYER,TASK,3);deliverTerminal();
         assertEquals("RELEASED",charge());assertEquals(100,wallet(jdbc));assertEquals("EXCLUDED",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE lifecycle_state='CANCELLED'",String.class));
     }
+    private static cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder textFixture(java.util.function.Function<cn.jia.economy.usage.ConfirmedSampleEvidence.Response,MeasuredTaskRepricing.Fact> fn){
+        return new cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder(){public boolean coversAllOperations(String group,String policy){return "NATIVE_DISPATCH_GROUP_V1".equals(group)&&"cp".equals(policy);} public MeasuredTaskRepricing.Fact decode(cn.jia.economy.usage.ConfirmedSampleEvidence.Response r){return fn.apply(r);}};
+    }
     @Test void confirmedEligibilityComparesEveryCurrentMemberButNeverTreatsReferenceRouteAsActualIdentity(){
         confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
         assertNull(sampleEvidence.inspect(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),sid));
@@ -532,6 +535,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("INSERT INTO economy_usage_capture(tenant_id,client_id,owner_jiacn,task_id,agent_id,execution_id,run_id,capture_id,input_revision,projection_revision,coverage_state) SELECT ?,?,?,?,?,execution_id,run_id,capture_id,1,1,'COMPLETE' FROM economy_task_cost_sample_member",TENANT,CLIENT,OWNER,TASK,AGENT);
         jdbc.update("INSERT INTO economy_usage_capture_dispatch_group SELECT id,1,'NATIVE_DISPATCH_GROUP_V1',REPEAT('c',64),REPEAT('f',64),REPEAT('d',64),'cp',REPEAT('9',64) FROM economy_usage_capture");
         var matched=sampleEvidence.inspect(BILLING_TASK,sid);assertEquals(65,matched.members());assertEquals("MATCHED",matched.verdict().name());
+        var noResponses=sampleEvidence.measure(BILLING_TASK,sid,textFixture(r->{throw new AssertionError("No responses yet");}));assertTrue(noResponses.operations().isEmpty());assertEquals("USAGE_INCOMPLETE",noResponses.assessment().verdict().name());
+        jdbc.update("INSERT INTO economy_usage_capture_record(capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,binding_sha256,evidence_json,is_associated_head,association_state) SELECT id,REPEAT('1',64),REPEAT('2',64),'1','RESPONSE',REPEAT('3',64),REPEAT('4',64),'{}',1,'APPLIED' FROM economy_usage_capture");
+        cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder fixtureDecoder=textFixture(r->new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture",r.captureId()),"MODEL_RESPONSE","INFERENCE",r.evidenceSha(),new MeasuredTaskRepricing.Tokens("fixture",Map.of(ModelTokenPrice.Category.INPUT,1L))));
+        var measured=sampleEvidence.measure(BILLING_TASK,sid,fixtureDecoder);assertEquals(65,measured.operations().size());assertEquals(65,measured.operations().stream().map(x->x.fact().operation()).distinct().count());
+        var partial=sampleEvidence.measure(BILLING_TASK,sid,textFixture(r->r.memberRevision()==measured.operations().getLast().memberRevision()?null:fixtureDecoder.decode(r)));assertEquals("USAGE_INCOMPLETE",partial.assessment().verdict().name());assertTrue(partial.operations().isEmpty());
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");

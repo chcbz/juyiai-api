@@ -33,6 +33,11 @@ class NativeCaptureEvidenceTest {
                 records.put(d.get("recordId").asText(),d.toString());
             }
         }
+        var persisted=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var decode=new NativeSampleResponseDecoder();assertFalse(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","NATIVE_EXECUTION_UNVERIFIED_V1"));assertTrue(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","TEXT_MODEL_ONLY_V1"));
+        var q=(tools.jackson.databind.node.ObjectNode)persisted.path("observation").path("measuredQuantities");
+        java.util.function.Supplier<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> row=()->new cn.jia.economy.usage.ConfirmedSampleEvidence.Response(1, persisted.get("captureId").asText(),3,persisted.get("recordId").asText(),persisted.get("sourceRevision").asText(),"h",persisted.toString());
+        assertNull(decode.decode(row.get()));q.put("normalizationBasis","RESPONSES_TEXT_TOKENS_V1");var decoded=decode.decode(row.get());assertEquals(id,decoded.operation().externalId());
+        assertEquals(100L,((cn.jia.economy.pricing.MeasuredTaskRepricing.Tokens)decoded.quantity()).disjoint().get(cn.jia.economy.pricing.ModelTokenPrice.Category.INPUT));
         assertNull(NativeResponseOrigin.resolve(response,null,k->null).attemptId());
         assertEquals(id,NativeResponseOrigin.resolve(response,null,records::get).attemptId());
         var tree=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var obs=(tools.jackson.databind.node.ObjectNode)tree.get("observation");

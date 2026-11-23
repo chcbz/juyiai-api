@@ -8,5 +8,16 @@ public interface ConfirmedSampleEvidence {
     enum Verdict { ACTIVE, CANCELLED_OUTCOME, MEMBERSHIP_PENDING, EXECUTION_SET_CONFLICT, CONFIG_UNKNOWN,
         MIXED_EXECUTION_CONFIG, USAGE_INCOMPLETE, MATCHED }
     record Assessment(String sampleId,long evidenceRevision,String terminalFactId,long members,Verdict verdict) {}
+    /** Already-associated head only; raw wire JSON is private to the trusted source adapter and not returned. */
+    record Response(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
+                    String evidenceSha,String evidenceJson) { @Override public String toString(){return "Response[private]";} }
+    interface Decoder { boolean coversAllOperations(String groupVersion,String capturePolicy); cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decode(Response response); }
+    record Operation(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
+                     cn.jia.economy.pricing.MeasuredTaskRepricing.Fact fact) {}
+    record Measured(Assessment assessment,java.util.List<Operation> operations) {
+        public Measured { operations=java.util.List.copyOf(operations); }
+    }
+    /** One repeatable read covers selection AND operation extraction. No partial costs on incomplete evidence. */
+    Measured measure(Task task,String sampleId,Decoder decoder);
     Assessment inspect(Task task,String sampleId);
 }
