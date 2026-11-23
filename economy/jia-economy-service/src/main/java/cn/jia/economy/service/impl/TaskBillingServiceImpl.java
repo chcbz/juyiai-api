@@ -93,10 +93,28 @@ public class TaskBillingServiceImpl implements TaskBillingService {
                 new WorkloadSnapshot(workload.kind(), workload.inputTokens(), workload.outputTokens(), workload.deliverables()),
                 estimate.ruleId(), estimate.ruleVersion(),
                 estimate.tokens(), modelPrice, tools, calculated.estimatedYuan(), calculated.amountWen()));
-        EconomyTaskQuoteEntity row = new EconomyTaskQuoteEntity().setQuoteId("tq_" + UUID.randomUUID())
+        return insertQuote("tq_" + UUID.randomUUID(), task, bindingHash, payerUserId, calculated.amountWen(), snapshot);
+    }
+
+    private static final String MEASURED_PREFIX = "tq_m1_";
+    private static final String MEASURED_SCHEMA = "MEASURED_TASK_QUOTE_V1";
+    private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, MeasuredPreparation preparation) { }
+
+    @Override public Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared) {
+        Objects.requireNonNull(payerUserId);
+        if (!binding.requirementSha256().equals(prepared.features().requirementSha256())
+                || !binding.inputSnapshotDigest().equals(prepared.features().inputSnapshotSha256()))
+            throw new TaskBillingException(QUOTE_BINDING_CHANGED);
+        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, prepared.features().digest(), prepared);
+        return insertQuote(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payerUserId,
+                prepared.estimate().wen(), encode(snapshot));
+    }
+
+    private Quote insertQuote(String id, Task task, String bindingHash, String payerUserId, long amountWen, String snapshot) {
+        EconomyTaskQuoteEntity row = new EconomyTaskQuoteEntity().setQuoteId(id)
                 .setBindingSha256(bindingHash).setTenantId(task.scope().tenantId()).setClientId(task.scope().clientId())
                 .setOwnerJiacn(task.ownerJiacn()).setTaskId(task.taskId()).setPayerUserId(payerUserId)
-                .setAmountWen(calculated.amountWen()).setSnapshotJson(snapshot).setCreatedAt(System.currentTimeMillis());
+                .setAmountWen(amountWen).setSnapshotJson(snapshot).setCreatedAt(System.currentTimeMillis());
         mapper.insertQuote(row);
         return receipt(row);
     }
@@ -138,6 +156,13 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         }
         row.setState(State.HELD.name());
         requireTransition(mapper.markHeld(row));
+        // Namespace comes from the validated immutable DB quote, not an unchecked client ID.
+        // Old snapshots do not contain initial features. Do not invent them at assignment time.
+        if (quote.getQuoteId().startsWith(MEASURED_PREFIX)) {
+            String sampleId = HexFormat.of().formatHex(digest(encode(List.of("TASK_LIFECYCLE_V1",task.scope().tenantId(),
+                    task.scope().clientId(),task.ownerJiacn(),task.taskId(),quote.getQuoteId())).getBytes(StandardCharsets.UTF_8)));
+            requireTransition(mapper.confirmMeasuredSample(quote, sampleId));
+        }
         return receipt(row);
     }
 

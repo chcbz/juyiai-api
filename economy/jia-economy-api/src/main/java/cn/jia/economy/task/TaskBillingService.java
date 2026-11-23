@@ -29,6 +29,26 @@ public interface TaskBillingService {
 
     /** Immutable per recommendation+candidate binding. Replay returns stored prices without recalculating. */
     Quote quote(Task task, Binding binding, String payerUserId, TaskWorkload workload, String reportedModel);
+    /** Only the authoritative candidate configuration; labels or the actual cost ledger are not grouping keys. */
+    record MeasuredGroup(String executionConfigSha256, String routeVersion, String toolConfigSha256, String capturePolicyVersion) {
+        public MeasuredGroup {
+            for (String hash : java.util.List.of(executionConfigSha256, toolConfigSha256))
+                if (!hash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("Missing configuration commitment");
+            if (routeVersion.isBlank() || capturePolicyVersion.isBlank()) throw new IllegalArgumentException("Unknown group");
+        }
+    }
+    /** Prepared outside the task lock. No pricing or encoding in the write transaction. */
+    record MeasuredPreparation(cn.jia.economy.pricing.TaskEstimateFeatures features, MeasuredGroup group,
+            String estimatorVersion, String calibrationVersion, String qualityStatus,
+            cn.jia.economy.pricing.MeasuredNeighborEstimate.Estimate estimate) {
+        public MeasuredPreparation {
+            Objects.requireNonNull(features); Objects.requireNonNull(group);
+            if (estimatorVersion.isBlank() || calibrationVersion.isBlank() || qualityStatus.isBlank() || estimate.contributions().isEmpty())
+                throw new IllegalArgumentException("Missing measured quote evidence");
+        }
+    }
+    /** Called once by the winning quote-batch writer, only after version revalidation. Never reserves funds. */
+    Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared);
     /** Reserve exactly the selected quote, or replay the same reservation; never top up/reprice.
      * payerUserId comes from the caller's authenticated actor, never the request body or ownerJiacn.
      * Matching the quote payer is required even for zero-price quotes and reservation replays.

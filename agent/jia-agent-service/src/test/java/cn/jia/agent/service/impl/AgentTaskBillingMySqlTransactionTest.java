@@ -1,5 +1,9 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.pricing.TaskEstimateFeatures;
+import cn.jia.economy.pricing.TaskQuoteCalculator;
+import cn.jia.economy.pricing.MeasuredTaskRepricing;
+import cn.jia.economy.pricing.MeasuredNeighborEstimate;
 import cn.jia.economy.task.TaskQuoteBatches;
 import cn.jia.agent.common.TaskEventType;
 import cn.jia.agent.api.AgentTaskDeliberationOperationController;
@@ -463,6 +467,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertNotEquals(a.get(20, TimeUnit.SECONDS), b.get(20, TimeUnit.SECONDS));
         }
         assertEquals(2, count("economy_transaction")); assertEquals("CAPTURED", charge());
+    }
+
+    @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
+        String inputs=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK).digest());
+        var binding=new TaskBillingService.Binding(1,"a".repeat(64),inputs,AGENT,"measured-batch");
+        var vec=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));vec.set(0,1f);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template",binding.requirementSha256(),inputs,"b".repeat(64),
+                new TaskEstimateFeatures.Identity("cfg","fixture",1024),vec,List.of(),null);
+        var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
+        var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"draw","frame","fixture-proof",new MeasuredTaskRepricing.Units(unit,BigDecimal.ONE));
+        var reference=new MeasuredTaskRepricing.Reference("book",Map.of("draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
+        var estimate=MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
+        var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("c".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
+        var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
+        assertEquals(25,offer.amountWen());assertEquals(0,count("economy_task_cost_sample"));
+        assertThrows(InjectedFailure.class,()->locked(()->{billing.reserve(BILLING_TASK,offer.quoteId(),binding,PAYER);throw new InjectedFailure();}));
+        assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));assertEquals(0,count("economy_transaction"));
+        var held=locked(()->billing.reserve(BILLING_TASK,offer.quoteId(),binding,PAYER));assertEquals(held,locked(()->billing.reserve(BILLING_TASK,offer.quoteId(),binding,PAYER)));
+        assertEquals(held,locked(()->billing.reservation(BILLING_TASK,offer.quoteId(),PAYER,binding.recommendationId())));
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals(features.digest(),jdbc.queryForObject("SELECT initial_feature_sha256 FROM economy_task_cost_sample WHERE quote_id=? AND initial_input_snapshot_sha256=? AND lifecycle_state='ACTIVE' AND sample_state='WAITING_EVIDENCE'",String.class,offer.quoteId(),inputs));
+        assertEquals(1,count("economy_transaction"));
     }
 
     @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
