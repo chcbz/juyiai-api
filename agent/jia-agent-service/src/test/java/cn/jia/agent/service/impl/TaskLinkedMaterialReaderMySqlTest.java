@@ -200,6 +200,38 @@ class TaskLinkedMaterialReaderMySqlTest {
     @AfterEach void cleanup() {
         if(admin!=null&&database!=null&&database.startsWith(namespace))admin.execute("DROP DATABASE IF EXISTS `"+database+"`");
     }
+    @Test void selectedMetadataQueryCountDependsOnSelectedVersionsNotAge() throws Exception {
+        installCanonicalWorkspaceSchema();
+        var configuration = new MybatisConfiguration(); configuration.setMapUnderscoreToCamelCase(true);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceFileMapper.class);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceVersionMapper.class);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceOperationMapper.class);
+        var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(jdbc.getDataSource());
+        factory.setConfiguration(configuration);
+        var session = new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
+        var dao = spy(new cn.jia.agent.dao.impl.PersonalWorkspaceDaoImpl(
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceFileMapper.class),
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceVersionMapper.class),
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceOperationMapper.class)));
+        var writes = mock(PersonalWorkspaceWriteService.class);
+        var service = new PersonalWorkspaceServiceImpl(dao,storage,writes);
+        var scope = new cn.jia.agent.service.PersonalWorkspaceService.Scope("0","client","owner");
+        jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES('file','owner','UPLOAD','renamed','DOCUMENT','TRASHED',4,1,1,'0','client')");
+        String insert = "INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES('file','owner',?,'old.txt','text/plain',7,?,'private:v',1,'0','client')";
+        jdbc.update(insert,1,metadata.sha256());
+        var pick = java.util.List.of(1,1);
+        var before = service.selectedVersions(scope,"file",pick);
+        var extra = java.util.stream.IntStream.rangeClosed(2,251).mapToObj(i -> new Object[]{i,metadata.sha256()}).toList();
+        jdbc.batchUpdate(insert,extra);
+        jdbc.update("UPDATE agent_personal_workspace_file SET latest_version=251");
+        var after = service.selectedVersions(scope,"file",pick);
+        assertEquals(before.versions(),after.versions()); assertEquals(1,after.versions().size());
+        assertEquals("TRASHED",after.file().state()); assertEquals(251,after.file().latestVersion());
+        verify(dao,times(2)).findFile("0","client","owner","file");
+        verify(dao,times(2)).selectedVersionMetadata("0","client","owner","file",java.util.List.of(1));
+        verifyNoMoreInteractions(dao); verifyNoInteractions(writes,storage);
+    }
+
     @Test void canonicalMySqlSchemaAllowsIndependentTenantLinksAndOperations() {
         installCanonicalWorkspaceSchema();
         exerciseTenantLinks();
