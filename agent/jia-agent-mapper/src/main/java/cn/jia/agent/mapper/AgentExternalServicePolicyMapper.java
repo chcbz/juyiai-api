@@ -44,7 +44,9 @@ public interface AgentExternalServicePolicyMapper extends BaseMapper<AgentExtern
     AgentIdentityRegistryEntity identity(@Param("tenant") String tenant, @Param("client") String client,
             @Param("agent") String agent);
     @Select("""
-        SELECT i.* FROM agent_identity_registry i
+        SELECT i.canonical_agent_id AS agentId, i.owner_jiacn AS ownerJiacn,
+               COALESCE(NULLIF(r.name,''), i.canonical_agent_id) AS displayName, r.status AS status
+        FROM agent_identity_registry i
         JOIN agent_persona_binding b ON b.id=i.binding_id
           AND BINARY b.client_id=BINARY i.client_id AND BINARY b.jiacn=BINARY i.owner_jiacn
           AND (b.tenant_id IS NULL OR BINARY b.tenant_id=BINARY i.tenant_id)
@@ -56,6 +58,10 @@ public interface AgentExternalServicePolicyMapper extends BaseMapper<AgentExtern
               AND BINARY a.canonical_agent_id=BINARY i.canonical_agent_id
               AND a.alias_type='LEGACY_AGENT_ID' AND a.alias_status='ACTIVE'
               AND a.valid_from>0 AND a.valid_to IS NULL AND a.audit_reason IS NOT NULL AND a.audit_reason!=''))
+        LEFT JOIN agent_runtime r ON r.agent_id=i.canonical_agent_id
+          AND BINARY r.agent_id=BINARY i.canonical_agent_id AND BINARY r.tenant_id=BINARY i.tenant_id
+          AND BINARY r.client_id=BINARY i.client_id AND BINARY r.owner_jiacn=BINARY i.owner_jiacn
+          AND r.binding_id=i.binding_id
         WHERE BINARY i.tenant_id=BINARY #{tenant} AND BINARY i.client_id=BINARY #{client}
           AND i.lifecycle_status='ACTIVE' AND i.canonical_type != 'SYSTEM' AND i.binding_id IS NOT NULL
           AND BINARY i.canonical_agent_id > BINARY #{after}
@@ -68,6 +74,6 @@ public interface AgentExternalServicePolicyMapper extends BaseMapper<AgentExtern
                   AND p2.agent_id=p.agent_id AND p2.binding_id=p.binding_id)))
         ORDER BY BINARY i.canonical_agent_id LIMIT #{limit}
         """)
-    List<AgentIdentityRegistryEntity> candidates(@Param("tenant") String tenant, @Param("client") String client,
+    List<cn.jia.agent.dao.AgentExternalServicePolicyDao.CandidateRow> candidates(@Param("tenant") String tenant, @Param("client") String client,
             @Param("owner") String owner, @Param("after") String after, @Param("limit") int limit);
 }

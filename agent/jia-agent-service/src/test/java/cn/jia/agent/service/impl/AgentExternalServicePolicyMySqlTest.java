@@ -425,6 +425,19 @@ class AgentExternalServicePolicyMySqlTest {
         assertFailure(NOT_FOUND, () -> policies.read(PROVIDER, "legacy-provider-c"));
     }
 
+    @Test void recommendationProjectionDoesNotDiscloseAnotherScopeRuntimeOrDropAuthorizedIdentity() {
+        policies.write(PROVIDER, B, "open", true, 0);
+        jdbc.update("UPDATE agent_runtime SET name='display-ok' WHERE agent_id=?", B);
+        assertEquals("display-ok",policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target().displayName());
+        for (String mutation : List.of("tenant_id='1'", "client_id='CLIENT-A'", "owner_jiacn='PROVIDER'", "binding_id=binding_id+1")) {
+            new TransactionTemplate(transactions).executeWithoutResult(tx -> {
+                jdbc.update("UPDATE agent_runtime SET name='private-runtime'," + mutation + " WHERE agent_id=?", B);
+                var item=policies.recommendationCandidates(TASK_OWNER,"task-a").getLast();
+                assertEquals(B,item.target().displayName()); assertEquals("unavailable",item.target().availability());
+                assertTrue(item.abilities().isEmpty()); tx.setRollbackOnly();
+            });
+        }
+    }
     @Test void oldBindingPolicyCannotOpenReplacementAndRuntimeMismatchIsUnavailableNotLoginLeak() {
         policies.write(PROVIDER, B, "open", true, 0);
         jdbc.update("UPDATE agent_runtime SET binding_id=binding_id+1000,name='internal-login-secret' WHERE agent_id=?", B);

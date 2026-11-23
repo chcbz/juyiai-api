@@ -16,7 +16,7 @@ public final class AgentExternalServicePolicyDaoImpl implements AgentExternalSer
     public AgentExternalServicePolicyEntity latest(String t,String c,String a,long b) { return mapper.latest(t,c,a,b); }
     public AgentExternalServicePolicyEntity receipt(String t,String c,String o,String k) { return mapper.receipt(t,c,o,k); }
     public AgentIdentityRegistryEntity identity(String t,String c,String a) { return mapper.identity(t,c,a); }
-    public List<AgentIdentityRegistryEntity> candidates(String t,String c,String o,String a,int n) { return mapper.candidates(t,c,o,a,n); }
+    public List<CandidateRow> candidates(String t,String c,String o,String a,int n) { return mapper.candidates(t,c,o,a,n); }
     public void insert(AgentExternalServicePolicyEntity policy) {
         if (mapper.insert(policy)!=1) throw new IllegalStateException("Policy receipt insert failed");
     }
