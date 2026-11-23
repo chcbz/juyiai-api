@@ -138,6 +138,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
     private PersonalWorkspaceExecutionDaoImpl executionRows;
     private cn.jia.economy.usage.ConfirmedSampleEvidence sampleEvidence;
+    private cn.jia.agent.service.usage.ConfirmedSampleRecovery recovery;
     private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
 
     @BeforeEach
@@ -259,6 +260,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
         var receipts=proxy(new cn.jia.economy.service.impl.TaskMembershipReceiptStore(sql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.usage.TaskMembershipReceipt.class);
         membershipDelivery=new cn.jia.agent.service.usage.TaskMembershipDelivery(executionRows,receipts,beans.getBeanProvider(cn.jia.task.scheduling.ScheduleService.class),fixed);
+        recovery=new cn.jia.agent.service.usage.ConfirmedSampleRecovery(sampleProjection,new cn.jia.agent.service.usage.NativeSampleResponseDecoder(),fixed,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         membershipSweep=new cn.jia.agent.service.usage.TaskMembershipSweep(executionRows,fixed,manager,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         decisions = proxy(new AgentTaskFormalDeliveryDecisionServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)),
@@ -554,6 +556,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'");
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");
         assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
+        assertEquals(sid,sampleProjection.pending(TENANT,null,"").getFirst().sampleId());
+        assertTrue(sampleProjection.pending(TENANT,"other","").isEmpty());assertTrue(sampleProjection.pending(TENANT,CLIENT,sid).isEmpty());
+        assertFalse(sampleProjection.refreshPending(TENANT,"other",sid,fixtureDecoder));
+        var sweep=new cn.jia.task.scheduling.ScheduleKey(CLIENT,recovery.getName(),"cron:fixture","");
+        recovery.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation(TENANT,sweep,1));
+        assertEquals(sid,jdbc.queryForObject("SELECT business_key FROM task_scheduled_work WHERE handler=?",String.class,recovery.getName()));
+        var work=new cn.jia.task.scheduling.ScheduledInvocation(TENANT,new cn.jia.task.scheduling.ScheduleKey(CLIENT,recovery.getName(),sid,""),2);
+        int history=count("economy_task_cost_sample_revision"),money=count("economy_transaction");
+        recovery.executeScheduled(work);recovery.executeScheduled(work);assertTrue(sampleProjection.pending(TENANT,CLIENT,"").isEmpty());
+        assertEquals(history+1,count("economy_task_cost_sample_revision"));assertEquals(money,count("economy_transaction"));
     }
     @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
         var task=new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK);var key=new TaskQuoteBatches.Key(task,PAYER,"same-key");

@@ -16,6 +16,12 @@ public class ConfirmedSampleProjectionService implements ConfirmedSampleProjecti
     public ConfirmedSampleProjectionService(ConfirmedSampleEvidence evidence,ConfirmedSampleMapper db,ObjectMapper json,PlatformTransactionManager manager){
         this.evidence=evidence;this.db=db;this.json=json;this.tx=new TransactionTemplate(manager);
     }
+    public java.util.List<Pending> pending(String tenant,String client,String after){return db.pending(tenant,client,after,PAGE_SIZE);}
+    @Transactional(propagation=Propagation.NEVER)
+    public boolean refreshPending(String tenant,String client,String id,ConfirmedSampleEvidence.Decoder decoder){
+        var row=db.target(tenant,client,id);if(row==null)return false;
+        return refresh(new Task(new cn.jia.economy.service.EconomyScope(tenant,client),row.owner(),row.taskId()),id,decoder);
+    }
     private record Ref(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,String evidenceSha256){}
     @Transactional(propagation=Propagation.NEVER)
     public boolean refresh(Task task,String id,ConfirmedSampleEvidence.Decoder decoder){

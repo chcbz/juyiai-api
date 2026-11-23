@@ -71,6 +71,9 @@ CREATE TABLE IF NOT EXISTS economy_task_cost_sample (
     initial_requirement_sha256 CHAR(64) NOT NULL, initial_input_snapshot_sha256 CHAR(64) NOT NULL,
     initial_feature_sha256 CHAR(64) NOT NULL, lifecycle_state VARCHAR(24) NOT NULL,
     evidence_revision BIGINT NOT NULL, projection_revision BIGINT DEFAULT NULL, sample_state VARCHAR(24) NOT NULL,
+    projection_pending TINYINT GENERATED ALWAYS AS (benchmark_case_id IS NULL AND sample_definition_version='TASK_LIFECYCLE_V1' AND (projection_revision IS NULL OR projection_revision<>evidence_revision)),
+    KEY ix_sample_pending (tenant_id,projection_pending,sample_id),
+    KEY ix_sample_client_pending (tenant_id,client_id,projection_pending,sample_id),
     PRIMARY KEY (sample_id),
     UNIQUE KEY uk_sample_quote (tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version),
     UNIQUE KEY uk_sample_benchmark (tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version)

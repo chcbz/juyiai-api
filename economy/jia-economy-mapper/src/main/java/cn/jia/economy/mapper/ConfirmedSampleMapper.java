@@ -9,6 +9,14 @@ import org.apache.ibatis.annotations.Select;
 
 /** Only Economy projections; never read Agent task or runtime-state tables. */
 public interface ConfirmedSampleMapper {
+    @Select("""
+        <script>SELECT client_id,sample_id FROM economy_task_cost_sample WHERE tenant_id=#{tenant}
+        <if test="client != null"> AND client_id=#{client}</if> AND projection_pending=1 AND sample_id &gt; #{after}
+        ORDER BY sample_id LIMIT #{limit}</script>
+        """) List<cn.jia.economy.usage.ConfirmedSampleProjection.Pending> pending(@Param("tenant") String tenant,@Param("client") String client,@Param("after") String after,@Param("limit") int limit);
+    record Target(String owner,String taskId) {}
+    @Select("SELECT owner_jiacn,task_id FROM economy_task_cost_sample WHERE sample_id=#{id} AND tenant_id=#{tenant} AND client_id=#{client} AND projection_pending=1")
+    Target target(@Param("tenant") String tenant,@Param("client") String client,@Param("id") String id);
     record Header(String lifecycle,long evidenceRevision,String fact,String outcome,Boolean verified,Long memberCount,
                   String agent,String groupVersion,String executionConfig,String localRoute,String referenceRoute,String tools,String policy) {}
     @Select("""
