@@ -469,7 +469,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(2, count("economy_transaction")); assertEquals("CAPTURED", charge());
     }
 
-    @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
+    private record PreparedFixture(TaskBillingService.Binding binding,TaskEstimateFeatures features,TaskBillingService.Quote offer) {}
+    private PreparedFixture measuredOffer(){
         String inputs=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK).digest());
         var binding=new TaskBillingService.Binding(1,"a".repeat(64),inputs,AGENT,"measured-batch");
         var vec=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));vec.set(0,1f);
@@ -481,6 +482,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var estimate=MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
         var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("c".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
+        return new PreparedFixture(binding,features,offer);
+    }
+    @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
+        var fixture=measuredOffer();var offer=fixture.offer();var features=fixture.features();var binding=fixture.binding();var inputs=binding.inputSnapshotDigest();
         assertEquals(25,offer.amountWen());assertEquals(0,count("economy_task_cost_sample"));
         assertThrows(InjectedFailure.class,()->locked(()->{billing.reserve(BILLING_TASK,offer.quoteId(),binding,PAYER);throw new InjectedFailure();}));
         assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));assertEquals(0,count("economy_transaction"));
@@ -490,6 +495,29 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1,count("economy_transaction"));
     }
 
+    private void confirmMeasured(){
+        var prepared=measuredOffer();assignment.assignForDeliberation(SCOPE,TASK,"assign-1",AGENT,0,1,
+                new AgentTaskExecutionGrantService.Payment(PAYER,prepared.offer().quoteId(),prepared.binding().recommendationId()));
+    }
+    private void deliverTerminal(){
+        var sweepKey=new cn.jia.task.scheduling.ScheduleKey(CLIENT,membershipSweep.getName(),"cron:fixture","");
+        membershipSweep.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation(TENANT,sweepKey,1));
+        var fact=jdbc.queryForObject("SELECT business_key FROM task_scheduled_work WHERE handler=?",String.class,membershipDelivery.getName());
+        membershipDelivery.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation(TENANT,new cn.jia.task.scheduling.ScheduleKey(CLIENT,membershipDelivery.getName(),fact,""),2));
+    }
+    @Test void acceptedMeasuredTaskIncludesUnmeteredRetryAndNeverPromotesOnMembershipAlone(){
+        confirmMeasured();prepareSubmitted();
+        locked(()->{for(int i=0;i<2;i++){var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("exec").setRunId("run"+i).setRequestHash("a".repeat(64));m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,i==0?"a".repeat(64):null);}return null;});
+        decide("accepted");deliverTerminal();assertEquals("CAPTURED",charge());assertEquals(2,count("economy_task_cost_sample_member"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_member WHERE capture_id IS NULL AND run_id='run1'",Integer.class));
+        assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE lifecycle_state='ACCEPTED'",String.class));
+        jdbc.update("UPDATE agent_task_execution_set SET delivery_state='PENDING'");deliverTerminal();assertEquals(2,count("economy_task_cost_sample_member"));
+        assertEquals(2L,jdbc.queryForObject("SELECT evidence_revision FROM economy_task_cost_sample",Long.class));
+    }
+    @Test void cancelledMeasuredTaskRemainsExcludedAfterReleaseEvenWithoutMembers() throws Exception {
+        prepareCancellation();confirmMeasured();prepareRunning();cancellation.cancel(TENANT,CLIENT,OWNER,PAYER,TASK,3);deliverTerminal();
+        assertEquals("RELEASED",charge());assertEquals(100,wallet(jdbc));assertEquals("EXCLUDED",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE lifecycle_state='CANCELLED'",String.class));
+    }
     @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
         var task=new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK);var key=new TaskQuoteBatches.Key(task,PAYER,"same-key");
         var input=new TaskQuoteBatches.Intent("4",List.of("z","a","z"));assertEquals(List.of("a","z"),input.agentIds());

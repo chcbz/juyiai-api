@@ -31,6 +31,12 @@ public class TaskMembershipReceiptStore implements TaskMembershipReceipt {
         if(last)require(revision==t.membershipRevision() && digest.equals(t.digest()));
         else require(!page.isEmpty() && revision<t.membershipRevision());
         var next=new Cursor(revision,count,digest,last);if(!page.isEmpty())require(db.add(t,page)==page.size());
+        String sample=db.confirmed(t);
+        if(sample!=null){
+            // Same bounded page transaction as cursor advance. A partial prefix never makes a sample eligible.
+            if(!page.isEmpty())require(db.attachReceived(sample,t,c.revision(),revision)==page.size());
+            if(last)require(db.closeSample(sample,t)==1);
+        }
         require(db.advance(t,c.revision(),next)==1);return next;
     }
 }
