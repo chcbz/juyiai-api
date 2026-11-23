@@ -26,6 +26,18 @@ public class AgentRuntimeDaoImpl extends BaseDaoImpl<AgentRuntimeMapper, AgentRu
     }
 
     @Override
+    public java.util.List<AgentRuntimeEntity> findOwnedCapabilityRows(String tenant, String client, String owner, java.util.Set<String> ids) {
+
+        if (ids.isEmpty()) return java.util.List.of();
+        var q = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentRuntimeEntity>();
+        IdentityExactQuerySupport.exact(q,"tenant_id",tenant,200);
+        IdentityExactQuerySupport.exact(q,"client_id",client,200);
+        IdentityExactQuerySupport.exact(q,"owner_jiacn",owner,200);
+        q.select("agent_id","tenant_id","client_id","owner_jiacn","binding_id","persona_code","abilities");
+        return baseMapper.selectList(q.in("agent_id",ids));
+    }
+
+    @Override
     public int updateRegistration(AgentRuntimeEntity entity) {
         // The service holds the authorized runtime row lock. Include nullable model in this
         // existing write; ordinary updateById deliberately does not update that field.

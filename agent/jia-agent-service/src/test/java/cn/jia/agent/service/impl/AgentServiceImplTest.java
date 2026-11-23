@@ -1657,7 +1657,11 @@ class AgentServiceImplTest extends BaseMockTest {
                 agent.getAgentId(), agent.getName(), null, true, agent.getStatus())).toList();
         when(externalServicePolicies.recommendationCandidates(any(), org.mockito.ArgumentMatchers.eq("task-001")))
                 .thenReturn(items.stream().map(t->new AgentTaskAssigneeCandidateDTO(t,List.of(),"jiacn")).toList());
-        for (var agent : agents) when(agentRuntimeDao.findByAgentId(agent.getAgentId())).thenReturn(agent);
+        var ids=agents.stream().map(AgentRuntimeEntity::getAgentId).collect(java.util.stream.Collectors.toSet());
+        when(agentRuntimeDao.findOwnedCapabilityRows("0","fixture-client_id-1","jiacn",ids)).thenReturn(agents);
+        when(agentIdentityService.activeBindingsForCandidates("0","fixture-client_id-1","jiacn",ids)).thenReturn(
+                agents.stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeEntity::getAgentId,AgentRuntimeEntity::getBindingId)));
+
     }
 
     @Test

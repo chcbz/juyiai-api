@@ -6,6 +6,7 @@ import cn.jia.core.dao.IBaseDao;
 import java.util.List;
 
 public interface AgentRuntimeDao extends IBaseDao<AgentRuntimeEntity> {
+    java.util.List<AgentRuntimeEntity> findOwnedCapabilityRows(String tenant, String client, String owner, java.util.Set<String> ids);
     /** Registration alone owns model updates; presence must not overwrite a newer report. */
     int updateRegistration(AgentRuntimeEntity entity);
 

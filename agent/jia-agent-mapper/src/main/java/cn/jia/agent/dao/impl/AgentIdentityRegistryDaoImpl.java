@@ -13,6 +13,18 @@ public class AgentIdentityRegistryDaoImpl
         extends BaseDaoImpl<AgentIdentityRegistryMapper, AgentIdentityRegistryEntity>
         implements AgentIdentityRegistryDao {
     @Override
+    public java.util.List<AgentIdentityRegistryEntity> findActiveCanonicals(String tenant, String client, String owner, java.util.Set<String> ids) {
+        requireStrictOwnerScope(tenant,client,owner);
+        if (ids.isEmpty()) return java.util.List.of();
+        var q = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentIdentityRegistryEntity>();
+        IdentityExactQuerySupport.exact(q,"tenant_id",tenant,200);
+        IdentityExactQuerySupport.exact(q,"client_id",client,200);
+        IdentityExactQuerySupport.exact(q,"owner_jiacn",owner,200);
+
+        return baseMapper.selectList(q.eq("lifecycle_status","ACTIVE").in("canonical_agent_id",ids));
+    }
+
+    @Override
     public AgentIdentityRegistryEntity findExactByCanonicalInScope(String tenantId, String clientId,
             String ownerJiacn, String canonicalAgentId) {
         requireStrictOwnerScope(tenantId, clientId, ownerJiacn);

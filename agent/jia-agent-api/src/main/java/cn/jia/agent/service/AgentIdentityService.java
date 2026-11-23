@@ -31,6 +31,9 @@ public interface AgentIdentityService {
     String resolveAgentIdInScope(
             String tenantId, String clientId, String ownerJiacn, String requestedAgentId);
 
+    /** Read-only active owner proofs; not a reservation or execution grant. */
+    java.util.Map<String,Long> activeBindingsForCandidates(String tenantId,String clientId,String ownerJiacn,java.util.Set<String> ids);
+
     String requireCanonicalAgentIdInScope(
             String tenantId, String clientId, String ownerJiacn, String canonicalAgentId);
 
