@@ -23,10 +23,11 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
     private static void reasons(Map<?,?> o){check(o.get("reasonCodes") instanceof List<?> l&&l.stream().allMatch(x->x instanceof String s&&!s.isBlank()));}
     private static long safeCount(Object v){check(v instanceof Integer||v instanceof Long||v instanceof BigInteger);var n=new BigInteger(v.toString());check(n.signum()>=0&&n.compareTo(BigInteger.valueOf(9007199254740991L))<=0);return n.longValueExact();}
     public static String digest(Object value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(SkillCanonicalJson.write(value).getBytes(StandardCharsets.UTF_8)));}catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
+    public static String captureIdentity(String execution,String run){return digest(List.of("CAPTURE_V2",execution,run));}
     public static NativeCaptureEvidence parse(String execution,String run,String idempotencyKey,Map<String,Object> d){
         check(d!=null&&d.keySet().equals(COMMON));if(safeCount(d.get("schemaVersion"))!=2)throw new IllegalArgumentException("USAGE_CAPTURE_VERSION_UNSUPPORTED");
         check(field(d,"executionId",ID).equals(execution)&&field(d,"runId",ID).equals(run));String cap=field(d,"captureId",SHA);
-        check(cap.equals(digest(List.of("CAPTURE_V2",execution,run))));String receipt=field(d,"receiptId",ID);check(receipt.equals(idempotencyKey));
+        check(cap.equals(captureIdentity(execution,run)));String receipt=field(d,"receiptId",ID);check(receipt.equals(idempotencyKey));
         String kind=text(d,"kind"), revision=field(d,"sourceRevision",POS);safeCount(d.get("observedAt"));nullableSha(d,"previousEvidenceSha256");
         check(revision.equals("1")== (d.get("previousEvidenceSha256")==null));if(kind.equals("RESPONSE"))field(d,"expectedRevision",DEC);else check(d.get("expectedRevision")==null);
         var o=obj(d.get("observation"));List<String> identity;

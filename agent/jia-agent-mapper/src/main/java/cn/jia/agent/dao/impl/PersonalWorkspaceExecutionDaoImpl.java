@@ -109,6 +109,7 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         if(count<0||count>1)throw new IllegalStateException("execution protocol catalog ambiguity");
         return count==1;
     }
+    @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) { executions.registerTaskMember(execution,captureId); }
     @Override public void insert(PersonalWorkspaceExecutionEntity execution) { init(execution); executions.insert(execution); }
     @Override public void update(PersonalWorkspaceExecutionEntity execution) { execution.setUpdateTime(DateUtil.nowTime()); executions.updateById(execution); }
     @Override public void insertInput(PersonalWorkspaceExecutionInputEntity input) { init(input); inputs.insert(input); }

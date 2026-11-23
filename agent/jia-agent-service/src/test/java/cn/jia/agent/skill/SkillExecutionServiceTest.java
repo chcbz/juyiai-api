@@ -37,6 +37,7 @@ public class SkillExecutionServiceTest {
     PersonalWorkspaceExecutionServiceImpl service;
     PersonalWorkspaceExecutionEntity execution;
     SkillExecutionEntity skill;
+    AgentTaskMetaEntity root;
     final Map<String,Object> outputs=new LinkedHashMap<>();
     final ConversationFence fence=new ConversationFence(1,"fence-token");
     static final String HASH="a".repeat(64);
@@ -58,7 +59,7 @@ public class SkillExecutionServiceTest {
             SkillManagementCodec.map("executionId",i.getArgument(2),"scopeSha256",i.getArgument(3),"grantRevision",Long.toString(i.getArgument(4,Long.class)),
                 "agentId",i.getArgument(5),"skillKey","analysis","skillInstallationId",i.getArgument(6),"productVersionId","spv_analysis_1",
                 "skillVersion","1.0.0","packageSha256",HASH,"manifestSha256",HASH,"approvedPermissionsSha256",HASH));
-        var root=new AgentTaskMetaEntity().setTaskId("task").setAssignedAgentId("agent").setTaskVersion(7L).setOwnerJiacn("owner");root.setTenantId("0");root.setClientId("client");
+        root=new AgentTaskMetaEntity().setTaskId("task").setAssignedAgentId("agent").setTaskVersion(7L).setOwnerJiacn("owner");root.setTenantId("0");root.setClientId("client");
         var transactions=mock(AgentTaskMutationTransaction.class);
         when(transactions.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->((AgentTaskMutationTransaction.LockedTaskMutation<?>)i.getArgument(4)).apply(root));
         service.setConversationAdmission(grants,transactions);
@@ -191,6 +192,7 @@ public class SkillExecutionServiceTest {
         var result=service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot()));
         var ordering=inOrder(pwe,attachments,hints);
         ordering.verify(pwe).insert(any());ordering.verify(attachments).insertReady(any());
+        ordering.verify(pwe).registerTaskMember(same(execution),isNull());
         ordering.verify(hints).afterCommit(new NativeConversationWorkAvailable("0","client","agent"));
         assertTrue(result.executionId().matches("pwe_[a-f0-9]{60}"));assertTrue(result.runId().matches("pwe_run_[a-f0-9]{64}"));assertEquals("READY",skill.getPhase());assertNull(execution.getControlledConsentId());assertEquals(6,execution.getExecutionProtocolVersion());assertNull(execution.getOutputContentMimeType());
         verify(grants).admit(any(),eq("task"),eq("grant"),eq(1L),eq(7L),eq("agent"),eq("EXECUTE_SKILL"),eq(false));
@@ -210,6 +212,7 @@ public class SkillExecutionServiceTest {
         snapshot.put("scope",new SkillExecutionService.PrivateScope("42",1).wire().asMap());
         snapshot.put("actionEventId","private-action");insertFixtures();clearInvocations(grants,management,pwe);
         var result=service.create(owner,new SkillExecutionService.Create("private-action",new SkillExecutionService.PrivateScope("42",1),"agent",snapshot));
+        verify(pwe,never()).registerTaskMember(any(),any());
         assertNull(result.taskId());assertEquals("PRIVATE",execution.getBusinessScope());
         assertNull(execution.getTaskId());assertNull(execution.getTaskGrantId());assertNull(execution.getTaskGrantVersion());
         assertNull(execution.getAssignmentRevision());assertEquals("CONVERSATION",execution.getExecutionMode());
@@ -390,10 +393,21 @@ public class SkillExecutionServiceTest {
         assertEquals(6,execution.getExecutionProtocolVersion());assertEquals("[]",skill.getTaskSkillBindingJson());assertNull(skill.getSkillKey());
         assertEquals(sha(json(snapshot)),created.snapshotDigest());verifyNoInteractions(installed,management,capabilities,policy);
     }
+    @Test void completedTaskReplaysExistingMemberButCannotRegisterAnotherRun() {
+        var snap=snapshot();snap.put("skills",List.of());insertFixtures();
+        var cmd=new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap);
+        var admitted=service.create(owner,cmd);root.setRewardStatus("completed");
+        when(pwe.findByIdempotency("0","client","owner",execution.getIdempotencyKey())).thenReturn(execution);
+        assertEquals(admitted,service.create(owner,cmd));
+        snap.put("actionEventId","another");
+        assertThrows(Failure.class,()->service.create(owner,new SkillExecutionService.Create("another",cmd.scope(),"agent",snap)));
+        verify(pwe,times(1)).registerTaskMember(any(),isNull());verify(pwe,times(1)).insert(any());
+    }
     @Test void admissionFreezesMeteringButPollingDoesNotConsultCurrentRollout() {
         ReflectionTestUtils.setField(service,"meteredCaptureEnabled",true);
         var snap=snapshot();snap.put("skills",List.of());insertFixtures();
         service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snap));
+        verify(pwe).registerTaskMember(same(execution),eq(cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(execution.getExecutionId(),execution.getRunId())));
         assertEquals("RESPONSE_V2",execution.getUsageMode());assertEquals("METERED_CAPTURE_V2",execution.getCaptureProtocol());
         ReflectionTestUtils.setField(service,"meteredCaptureEnabled",false);
         when(pwe.listQueuedConversationsByTarget(eq("0"),eq("client"),eq("owner"),eq("agent"),isNull(),isNull(),eq(16))).thenReturn(List.of(execution));

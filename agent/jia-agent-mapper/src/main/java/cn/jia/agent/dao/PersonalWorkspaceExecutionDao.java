@@ -43,6 +43,7 @@ public interface PersonalWorkspaceExecutionDao {
             Long afterCreatedAt, String afterExecutionId, int limit);
     /** True only when the follow-up-v3 execution protocol column is present in the current catalog. */
     boolean hasExecutionProtocolVersionColumn();
+    void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId);
     void insert(PersonalWorkspaceExecutionEntity execution);
     void update(PersonalWorkspaceExecutionEntity execution);
     void insertInput(PersonalWorkspaceExecutionInputEntity input);

@@ -7,6 +7,13 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWorkspaceExecutionEntity> {
+    /** Append under the original task-root lock. Revision is an ordering cursor, not a count. */
+    @org.apache.ibatis.annotations.Insert("""
+        INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)
+        VALUES(#{row.tenantId},#{row.clientId},#{row.ownerJiacn},#{row.taskId},#{row.executionId},#{row.runId},#{row.requestHash},#{capture})
+        """)
+    void registerTaskMember(@Param("row") PersonalWorkspaceExecutionEntity row,@Param("capture") String capture);
+
     @Select("""
             SELECT * FROM agent_personal_workspace_execution
             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}

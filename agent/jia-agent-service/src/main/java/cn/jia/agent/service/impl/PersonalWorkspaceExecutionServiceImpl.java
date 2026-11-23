@@ -1544,13 +1544,15 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         if(!sourceDigest.equals(snapshot.get("sourceSnapshotDigest")))throw failure(Reason.BAD_REQUEST);
         String digest=plainSha(skillJson(snapshot));String seed=skillJson(List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),command.actionEventId()));
         String executionId="pwe_"+plainSha(seed+"\\nexecution").substring(0,60);String runId="pwe_run_"+plainSha(seed+"\\nrun");String key="skill_"+plainSha(seed);
-        java.util.function.Function<WorkspaceConversationAccessService.ConversationView,cn.jia.agent.service.SkillExecutionService.Creation> admit=access->{
+        java.util.function.BiFunction<AgentTaskMetaEntity,WorkspaceConversationAccessService.ConversationView,cn.jia.agent.service.SkillExecutionService.Creation> admit=(lockedTask,access)->{
             var prior=executions.findByIdempotency(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),key);
             if(prior!=null) {
                 if(!Objects.equals(6,prior.getExecutionProtocolVersion())||!same(prior.getRequestHash(),digest)||!same(prior.getExecutionId(),executionId))throw failure(Reason.IDEMPOTENCY_CONFLICT);
                 var frozen=skillRow(scope,executionId,false);if(!same(frozen.getSnapshotSha256(),digest))throw failure(Reason.IDEMPOTENCY_CONFLICT);
                 requireSkillConversationScope(access,prior);return skillCreation(prior,frozen);
             }
+            // A replay above reads an existing member; only a new registration is fenced.
+            if(lockedTask!=null && "completed".equals(lockedTask.getRewardStatus())) throw failure(Reason.GRANT_REVOKED);
             if(task!=null) assigneeAuthority.requireGrantTarget(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
                     task.taskId(),task.taskGrantId(),task.taskGrantVersion());
             else requirePrivateAgent(scope,command.targetAgentId());
@@ -1575,19 +1577,21 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 .setTaskSkillBindingJson(skillJson(bindings.stream().map(b->Map.of("skill",cn.jia.agent.skill.SkillManagementCodec.map("key",b.skill().key(),"version",b.skill().version(),"packageSha256",b.skill().packageSha256(),"manifestSha256",b.skill().manifestSha256()),"executionBinding",b.executionBinding())).toList()));
             if (meteredCaptureEnabled) row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2");
             executions.insert(row);skillExecutions.insertReady(skill);
+            if(task!=null) executions.registerTaskMember(row,row.getCaptureProtocol()==null?null:
+                    cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(executionId,runId));
             if (workDiscovery!=null) workDiscovery.afterCommit(new cn.jia.agent.entity.NativeConversationWorkAvailable(
                     scope.tenantId(),scope.clientId(),command.targetAgentId()));
             for(var input:inputs)verifySkillInput(scope,row,input);
             return skillCreation(row,skillRow(scope,executionId,false));
         };
-        java.util.function.Supplier<cn.jia.agent.service.SkillExecutionService.Creation> conversationAdmission=()->
+        java.util.function.Function<AgentTaskMetaEntity,cn.jia.agent.service.SkillExecutionService.Creation> conversationAdmission=lockedTask->
                 conversationAccess.withLockedAccessible(new WorkspaceConversationAccessService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),
-                        expectedScope.conversationId(),admit);
+                        expectedScope.conversationId(),access->admit.apply(lockedTask,access));
         java.util.function.Supplier<cn.jia.agent.service.SkillExecutionService.Creation> accept=()->{
-            if(task==null)return conversationAdmission.get();
+            if(task==null)return conversationAdmission.apply(null);
             return taskMutations.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task.taskId(),root->{
                 requireConversationRoot(root,scope,task.taskId(),command.targetAgentId(),task.assignmentRevision());
-                return conversationAdmission.get();
+                return conversationAdmission.apply(root);
             });
         };
         if(executions.findByIdempotency(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),key)!=null)return accept.get();
