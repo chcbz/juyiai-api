@@ -772,6 +772,8 @@ tasks.register('runtimeCapabilityRegression', Test) {
 def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
         srcDir 'src/test/java'
+        include 'cn/jia/chat/service/recommendation/SpringTaskFeatureEncoderTest.java'
+        include 'cn/jia/chat/ai/AiProviderConfigurationTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationCostRecorderTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationUsageRecoveryTest.java'

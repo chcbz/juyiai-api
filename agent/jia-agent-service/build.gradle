@@ -1080,6 +1080,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
         srcDir 'src/test/java'
         srcDir rootProject.file('economy/jia-economy-service/src/test/java')
+        include 'cn/jia/agent/service/recommendation/CandidateRankFusionTest.java'
         include 'cn/jia/agent/service/recommendation/AssigneeRecommendationQuotesTest.java'
         include 'cn/jia/agent/service/recommendation/AssigneeRecommendationServiceTest.java'
         include 'cn/jia/agent/api/AssigneeRecommendationControllerTest.java'
