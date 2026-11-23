@@ -20,6 +20,18 @@ class MeasuredTaskRepricingTest {
         var result=reprice(book,List.of(small,second,large,draw,draw));assertEquals(4,result.lines().size());assertEquals(0,new BigDecimal("0.031220").compareTo(result.yuan()));
         assertEquals(4L,CnyAmounts.quoteWen(result.yuan()));assertEquals(frames,result.lines().getFirst().price());assertEquals(result,reprice(book,List.of(draw,large,second,small)));
     }
+    @Test void normalizedWholeTaskWeightsRoundOnlyOnceEvenJustAboveAnIntegerWen(){
+        var book=new Reference("same-current-book",Map.of("render",Map.of("frames",frames)));
+        var cheap=new MeasuredNeighborEstimate.Neighbor("a","7",BigDecimal.ONE,List.of(fact("i","render","frames",new Units(image,BigDecimal.ZERO))));
+        var costly=new MeasuredNeighborEstimate.Neighbor("b","1",BigDecimal.valueOf(2),List.of(fact("j","render","frames",new Units(image,BigDecimal.ONE))));
+        var estimate=MeasuredNeighborEstimate.aggregate(book,List.of(cheap,costly));
+        assertEquals(1,estimate.wen());assertEquals(0,new BigDecimal("0.030").compareTo(estimate.weightedYuan()));assertEquals(BigDecimal.valueOf(3),estimate.totalWeight());
+        assertEquals("same-current-book",estimate.contributions().getLast().repricing().referenceVersion());
+        var above=new MeasuredNeighborEstimate.Neighbor("b","2",BigDecimal.valueOf(2),List.of(fact("j","render","frames",new Units(image,BigDecimal.ONE.add(BigDecimal.ONE.scaleByPowerOfTen(-50))))));
+        assertEquals(2,MeasuredNeighborEstimate.aggregate(book,List.of(cheap,above)).wen());
+        assertThrows(IllegalArgumentException.class,()->MeasuredNeighborEstimate.aggregate(book,List.of(above,costly)));
+        assertThrows(Unavailable.class,()->MeasuredNeighborEstimate.aggregate(book,List.of()));
+    }
     @Test void noFallbackWhenEvidenceOrAnExclusiveBasisIsMissing(){
         var book=new Reference("ref",Map.of("image",Map.of("render",frames)));
         var good=fact("i","image","render",new Units(image,BigDecimal.ONE));var doubleCharge=fact("i","image","image-tokens",new Tokens("disjoint-v1",Map.of(INPUT,1L)));
