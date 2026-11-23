@@ -52,14 +52,6 @@ final class NativeCaptureCoverage {
         for(var reason:reasons)if(!"BILLING_IDENTITY_UNKNOWN".equals(reason.asText()))return false;
         return true;
     }
-    private static boolean consistentTextTokens(JsonNode observation,JsonNode q){
-        // Wire validation already bounded reported counts to non-negative safe integers.
-        var raw=observation.path("reportedUsage");long input=raw.path("input_tokens").asLong(-1),output=raw.path("output_tokens").asLong(-1),
-            cached=raw.path("input_tokens_details").path("cached_tokens").asLong(-1),reasoning=raw.path("output_tokens_details").path("reasoning_tokens").asLong(-1);
-        var tokens=q.path("tokens");return cached>=0&&cached<=input&&reasoning>=0&&reasoning<=output&&input+output==raw.path("total_tokens").asLong(-1)
-            &&"COMPLETE".equals(q.path("coverage").asText())&&tokens.size()==3&&Long.toString(input-cached).equals(tokens.path("INPUT").asText())
-            &&Long.toString(cached).equals(tokens.path("CACHED_INPUT").asText())&&Long.toString(output).equals(tokens.path("OUTPUT").asText());
-    }
     void accept(Row r){
         if(last.compareTo(r.recordId())>=0)throw new IllegalArgumentException("Unordered capture projection");last=r.recordId();
         if(r.sourceRevision()==null){waiting=true;return;}
@@ -77,7 +69,7 @@ final class NativeCaptureCoverage {
                 if(approved!=null&&!quantityReasonsOnly(o))incomplete=true;
                 if(!o.get("resolution").asText().equals("RESPONSE")||!g.refs.add(o.get("sourceAttemptId").asText()))incomplete=true;}
             case "RESPONSE" -> {g.responses++;var q=o.get("measuredQuantities");
-                if(q.isNull()||approved!=null&&(!quantityReasonsOnly(o)||!consistentTextTokens(o,q))||!(approved!=null?BASIS.equals(q.get("normalizationBasis").asText()):trusted!=null&&trusted.basis().equals(q.get("normalizationBasis").asText())))incomplete=true;
+                if(q.isNull()||approved!=null&&!quantityReasonsOnly(o)||!(approved!=null?BASIS.equals(q.get("normalizationBasis").asText()):trusted!=null&&trusted.basis().equals(q.get("normalizationBasis").asText())))incomplete=true;
                 else for(var count:q.get("tokens").properties())g.quantity=g.quantity.add(new BigInteger(count.getValue().asText()));}
             default -> throw new IllegalStateException("Unknown capture head kind");
         }

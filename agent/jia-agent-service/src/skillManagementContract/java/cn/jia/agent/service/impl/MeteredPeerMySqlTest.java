@@ -54,6 +54,13 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         proxy.addAdvice(new TransactionInterceptor(manager,new AnnotationTransactionAttributeSource()));return type.cast(proxy.getProxy());
     }
     @Test void lostResponseAfterCommitReturnsOriginalMySqlRevision(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null);
+    }
+    @Test void realArtifactTurnProjectsCompleteWithoutInventingInvoice(@TempDir Path temp) throws Exception {
+        var fixture=json.readTree(new ClassPathResource("metered-local-artifact-fixture.json").getContentAsString(StandardCharsets.UTF_8));
+        verifyPeer(temp,fixture);
+    }
+    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured) throws Exception {
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -69,8 +76,9 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         row("exec1","owner","task","CONVERSATION","RESULT_COMMITTED",6);
         jdbc.update("UPDATE agent_personal_workspace_execution SET target_agent_id=?,task_grant_id='g',task_grant_version=1,usage_mode='RESPONSE_V2',capture_protocol='METERED_CAPTURE_V2' WHERE execution_id='exec1'",AGENT);
         skill("exec1","COMPLETE");
-        jdbc.update("UPDATE agent_personal_workspace_execution SET capture_profile_sha256=? WHERE execution_id='exec1'","e".repeat(64));
-        assertEquals("e".repeat(64),executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","run-exec1"));
+        String admitted=measured==null?"e".repeat(64):measured.get("admission").asText();
+        jdbc.update("UPDATE agent_personal_workspace_execution SET capture_profile_sha256=? WHERE execution_id='exec1'",admitted);
+        assertEquals(admitted,executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","run-exec1"));
         assertNull(executions.admittedCaptureProfile("0","client","executor","task",AGENT,"exec1","run-exec1"));
         assertNull(executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","foreign"));
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
@@ -95,6 +103,20 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions,skills),journal,settle,recovery);
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
         var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
+        if(measured!=null){
+            // Original, unchanged wire records from an isolated CLI + loopback TLS run. Independent pin predated PLAN.
+            var records=measured.get("records");assertEquals(10,records.size());var keys=new ArrayList<>(List.of("plan","source-0","request-1-1","request-1-2","request-2-1","request-2-2"));
+            for(int i=1;i<=2;i++)keys.add("response-"+records.get("request-"+i+"-2").get("observation").get("sourceAttemptId").asText()+"-1");
+            keys.addAll(List.of("source-final-1","capture-final-1"));
+            for(String name:keys){var record=records.get(name);String id=record.get("receiptId").asText();var request=post("/internal/agent/executions/exec1/runs/run-exec1/usage").header("Authorization","AgentRuntime "+session.sessionToken()).header("X-Agent-Id",AGENT).header("X-Agent-Installation-Id",INSTALL).header("X-Agent-Host-Id","host").header("X-Agent-Runtime-Id","rt").header("X-Agent-Session-Generation","1").header("X-Request-Id",id).header("Idempotency-Key",id).contentType("application/json").content(json.writeValueAsBytes(Map.of("protocolVersion",1,"requestId",id,"data",record)));
+                var reply=mvc.perform(request).andReturn().getResponse();assertEquals(200,reply.getStatus(),name+":"+reply.getContentAsString());}
+            String jobs="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
+            for(var key:jdbc.queryForList(jobs,String.class,recovery.getName()))recovery.executeScheduled(new ScheduledInvocation("0",new ScheduleKey("client",recovery.getName(),key,""),1));
+            String key=jdbc.queryForObject(jobs,String.class,projection.getName());projection.executeScheduled(new ScheduledInvocation("0",new ScheduleKey("client",projection.getName(),key,""),1));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture WHERE coverage_state='COMPLETE' AND projection_revision=input_revision",Integer.class));
+            assertEquals(10,count("economy_usage_capture_receipt"));assertEquals(2,count("economy_usage_attempt"));assertEquals(2,count("economy_usage_revision"));
+            assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision WHERE cost_yuan IS NULL AND revision=1",Integer.class));return;
+        }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
         server.createContext("/",exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
             byte[] input=exchange.getRequestBody().readAllBytes();if(input.length>0)req.content(input);

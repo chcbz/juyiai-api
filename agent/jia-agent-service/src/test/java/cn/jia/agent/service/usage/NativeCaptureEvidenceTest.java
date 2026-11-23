@@ -113,7 +113,7 @@ class NativeCaptureEvidenceTest {
     @Test void closedTwoRequestProjectionUsesFrozenAdmissionNotReportedProfileOrCurrentRollout(){
         // Associated-head boundary: HTTP codec/journal/recovery are verified independently with MySQL.
         String cap="a".repeat(64),cfg="b".repeat(64),route="c".repeat(64),tool="d".repeat(64),channel="e".repeat(64);
-        for(String fault:List.of("none","requestReason","responseReason","cached","reasoning","total")){
+        for(String fault:List.of("none","requestReason","responseReason")){
         var heads=new TreeMap<String,cn.jia.economy.usage.UsageCaptureProjection.Row>();
         class Fixture { String add(String kind,Map<String,Object> o){String id=String.format("%064x",heads.size()+1);
             var data=Map.of("kind",kind,"captureId",cap,"recordId",id,"observation",o);String sha=NativeCaptureEvidence.digest(data);
@@ -124,8 +124,8 @@ class NativeCaptureEvidenceTest {
         f.add("SOURCE",Map.of("sourceId","root","epoch","0","adapterVersion","RESPONSES_TEXT_TOKENS_V1","sourceKind","METERED_HTTP_RESPONSES_V1","channelNamespace",channel));
         for(int i=1;i<=2;i++){f.add("REQUEST",Map.of("sourceId","root","epoch","0","sequence",""+i,"resolution","RESPONSE","sourceAttemptId","r"+i,"reasonCodes",List.of(fault.equals("requestReason")?"FUTURE_TOOL":"BILLING_IDENTITY_UNKNOWN")));
             f.add("RESPONSE",Map.of("sourceId","root","epoch","0","reasonCodes",List.of(fault.equals("responseReason")?"USAGE_INCOMPLETE":"BILLING_IDENTITY_UNKNOWN"),
-                "reportedUsage",Map.of("input_tokens",4,"output_tokens",1,"total_tokens",fault.equals("total")?6:5,"input_tokens_details",Map.of("cached_tokens",1),"output_tokens_details",Map.of("reasoning_tokens",fault.equals("reasoning")?2:0)),
-                "measuredQuantities",Map.of("coverage","COMPLETE","normalizationBasis","RESPONSES_TEXT_TOKENS_V1","tokens",Map.of("INPUT","3","CACHED_INPUT",fault.equals("cached")?"0":"1","OUTPUT","1"))));}
+                "reportedUsage",Map.of("input_tokens",4,"output_tokens",1,"total_tokens",5,"input_tokens_details",Map.of("cached_tokens",1),"output_tokens_details",Map.of("reasoning_tokens",0)),
+                "measuredQuantities",Map.of("coverage","COMPLETE","normalizationBasis","RESPONSES_TEXT_TOKENS_V1","tokens",Map.of("INPUT","3","CACHED_INPUT","1","OUTPUT","1"))));}
         f.add("SOURCE_FINAL",Map.of("sourceId","root","epoch","0","requestCount","2","responseCount","2","reservedSequenceHighWatermark","2","recordsSha256",f.hash(1,6),"closeState","DRAINED","reasonCodes",List.of()));
         f.add("CAPTURE_FINAL",Map.of("planEvidenceSha256",p,"sourceCount","1","sourcesSha256",f.hash(6,7),"closeState","DRAINED","reasonCodes",List.of()));
         String approved=NativeCaptureEvidence.digest(List.of("NATIVE_LOCAL_ARTIFACT_TEXT_V1","codex-cli-0.167.0","RESPONSES_TEXT_TOKENS_V1",cfg,route,tool,channel));

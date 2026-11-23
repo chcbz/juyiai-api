@@ -519,7 +519,7 @@ tasks.register('nativeSkillResultRegression', Test) {
     def meteredPeer = providers.gradleProperty('ownedMeteredRuntime')
     if (meteredPeer.isPresent()) {
         systemProperty 'ownedMeteredRuntime', meteredPeer.get()
-        filter.includeTestsMatching 'cn.jia.agent.service.impl.MeteredPeerMySqlTest.lostResponseAfterCommitReturnsOriginalMySqlRevision'
+        filter.includeTestsMatching 'cn.jia.agent.service.impl.MeteredPeerMySqlTest.*'
     }
     filter {
         includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker'
