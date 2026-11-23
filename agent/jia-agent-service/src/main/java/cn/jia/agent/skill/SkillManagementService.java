@@ -1296,7 +1296,7 @@ public final class SkillManagementService {
             var currentRelationship=relationship(scope);
             require(installationId.equals(state.getActiveInstallationId())&&Boolean.TRUE.equals(state.getDesiredEnabled())
                     &&Boolean.TRUE.equals(state.getAdmissionEnabled())&&e!=null&&(retained(auth,currentRelationship)||"ACTIVE".equals(e.getStatus())),409,"SKILL_STATE_CONFLICT");
-            var live=runtime(a,scope.agentId(),state,auth,catalog(a,scope.agentId()),true,currentRelationship);require("READY".equals(live.get("state")),409,"SKILL_STATE_CONFLICT");
+            var live=runtime(state,auth,catalog(a,scope.agentId()),true,currentRelationship);require("READY".equals(live.get("state")),409,"SKILL_STATE_CONFLICT");
             require(currentPositionSource(scope,auth,currentRelationship),403,"AGENT_FORBIDDEN");return taskAdmission.get();
         };
         return !retained(auth,relationship)&&positionChange(change)?ownedChange(change,admission):owned(a,scope.agentId(),null,true,admission);

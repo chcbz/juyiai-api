@@ -438,6 +438,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         var list=service.skills(ACTOR,AGENT,false);
         var item=object(((List<?>)list.get("items")).stream().filter(row->"pdf-export".equals(object(row).get("skillKey"))).findFirst().orElseThrow());
         assertEquals(false,item.get("admissionEnabled"));assertEquals("NOT_EXECUTABLE",object(item.get("runtime")).get("state"));
+        var citable=service.citableSkillPurposes("0",ACTOR.clientId(),AGENT);assertEquals(1,citable.size());assertEquals("pdf-export",citable.getFirst().skillKey());
         String id=text(target,"skillInstallationId");var rows=service.descriptors(scope());assertEquals(1,rows.size());
         var descriptor=rows.getFirst();assertTrue(descriptor.verifiedNative());assertNull(descriptor.manifestJson());assertNull(descriptor.manifestSha256());
         var binding=service.admitNative(scope(),"pdf-export",id,()->service.executionBinding("0",ACTOR.clientId(),"exec-native","a".repeat(64),1,AGENT,id));
@@ -445,6 +446,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertThrows(SkillMarketplaceException.class,()->SkillManagementCodec.validate("TaskSkillBinding",binding));
         assertDoesNotThrow(()->SkillManagementCodec.validateExecutionBinding(binding));
         policyChange("DISABLE",first);
+        assertTrue(service.citableSkillPurposes("0",ACTOR.clientId(),AGENT).isEmpty());
         assertThrows(SkillMarketplaceException.class,()->service.admitNative(scope(),"pdf-export",id,()->"never"));
     }
     @Test void nativeAdmissionRejectsSelfConsistentPermissionsNotMatchingEntitlement() throws Exception {
