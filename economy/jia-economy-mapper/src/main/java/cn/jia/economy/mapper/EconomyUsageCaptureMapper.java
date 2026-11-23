@@ -1,5 +1,6 @@
 package cn.jia.economy.mapper;
 
+import cn.jia.economy.usage.UsageCaptureProjection;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -8,6 +9,24 @@ import org.apache.ibatis.annotations.Update;
 /** Evidence transaction primitives. A capture PK is obtained from the authenticated binding,
  * never from HTTP input. No mapper operation updates evidence bytes or ledger amounts. */
 public interface EconomyUsageCaptureMapper {
+    @Select("""
+        SELECT input_revision,capture_id FROM economy_usage_capture WHERE id=#{pk} AND tenant_id=#{tenant}
+        AND client_id=#{client} AND conflict_reason IS NULL AND (projection_revision IS NULL OR projection_revision<>input_revision)
+        """) UsageCaptureProjection.Snapshot pendingProjection(UsageCaptureProjection.Key key);
+    // An associated head at revision N proves the prefix [1,N]. Any extra immutable revision is not yet associated.
+    @Select("""
+        SELECT g.record_id,g.revisions,h.source_revision,h.evidence_sha256,h.evidence_json FROM (
+          SELECT r.capture_pk,r.record_id,COUNT(*) AS revisions FROM economy_usage_capture_record r
+          JOIN economy_usage_capture c ON c.id=r.capture_pk AND c.tenant_id=#{k.tenant} AND c.client_id=#{k.client}
+          WHERE r.capture_pk=#{k.pk} AND r.record_id>#{after} GROUP BY r.capture_pk,r.record_id ORDER BY r.record_id LIMIT 64
+        ) g LEFT JOIN economy_usage_capture_record h ON h.capture_pk=g.capture_pk AND h.record_id=g.record_id AND h.is_associated_head=1
+        ORDER BY g.record_id
+        """) java.util.List<UsageCaptureProjection.Row> projectionPage(@Param("k") UsageCaptureProjection.Key key,@Param("after") String after);
+    @Update("""
+        UPDATE economy_usage_capture SET projection_revision=#{rev},coverage_state=#{state} WHERE id=#{k.pk}
+        AND tenant_id=#{k.tenant} AND client_id=#{k.client} AND input_revision=#{rev} AND conflict_reason IS NULL
+        AND (projection_revision IS NULL OR projection_revision<>input_revision)
+        """) int publishProjection(@Param("k") UsageCaptureProjection.Key key,@Param("rev") long revision,@Param("state") String state);
     record Binding(String tenantId,String clientId,String executionId,String runId,String captureId,
                    String ownerJiacn,String agentId,String taskId) {}
     record Capture(long id,String ownerJiacn,String agentId,String taskId,long inputRevision,

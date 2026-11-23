@@ -19,7 +19,12 @@ import java.util.*;
 public class UsageCaptureJournalImpl implements UsageCaptureJournal {
     private static final ObjectMapper JSON=new ObjectMapper();
     private final EconomyUsageCaptureMapper db;
-    public UsageCaptureJournalImpl(EconomyUsageCaptureMapper db){this.db=db;}
+    private final org.springframework.context.ApplicationEventPublisher events;
+    public UsageCaptureJournalImpl(EconomyUsageCaptureMapper db,org.springframework.context.ApplicationEventPublisher events){this.db=db;this.events=events;}
+    private void changed(Binding b,long pk,List<String> members){
+        change(pk,members,null);
+        events.publishEvent(new UsageCaptureProjection.Key(b.tenantId(),b.clientId(),pk));
+    }
     private static EconomyUsageCaptureMapper.Binding key(Binding b){return new EconomyUsageCaptureMapper.Binding(b.tenantId(),b.clientId(),b.executionId(),b.runId(),b.captureId(),b.ownerJiacn(),b.agentId(),b.taskId());}
     private static boolean matches(Binding b,EconomyUsageCaptureMapper.Capture c){return c!=null&&Objects.equals(b.ownerJiacn(),c.ownerJiacn())&&Objects.equals(b.agentId(),c.agentId())&&Objects.equals(b.taskId(),c.taskId());}
     private static Result status(State s){return new Result(s,null);}
@@ -58,7 +63,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         if(!head.add(BigInteger.ONE).equals(n))return waiting(result,pk);
         var relation=adapter.resolve(e.evidenceJson(),head.signum()==0?null:db.evidence(pk,e.recordId(),key(head)).evidenceJson(),id->dependency(pk,id));
         if(relation==Link.CONFLICT)return conflict(pk,members,"METADATA_LINEAGE");
-        if(relation==Link.ASSOCIATED){publishHead(pk,e.recordId(),r.revisionKey(),null);change(pk,members,null);}
+        if(relation==Link.ASSOCIATED){publishHead(pk,e.recordId(),r.revisionKey(),null);changed(b,pk,members);}
         return relation==Link.WAITING?waiting(result,pk):result; // durable receipt does not assert association, cost or coverage
     }
     /** Source ownership is decided before the separate ledger transaction, never by ledger owner/task alone. */
@@ -110,7 +115,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
             db.application(pk,r.recordId(),r.revisionKey(),null,"WAITING");return rejectCas(pk,id);
         }
         var ledger=new LinkedHashMap<String,Object>();ledger.put("attemptId",applied.attemptId());ledger.put("revision",Long.toString(applied.revision()));ledger.put("status",applied.status().name());ledger.put("costYuan",applied.costYuan()==null?null:applied.costYuan().toPlainString());
-        db.application(pk,r.recordId(),r.revisionKey(),id,"APPLIED");publishHead(pk,r.recordId(),r.revisionKey(),applied.attemptId());change(pk,members,null);
+        db.application(pk,r.recordId(),r.revisionKey(),id,"APPLIED");publishHead(pk,r.recordId(),r.revisionKey(),applied.attemptId());changed(b,pk,members);
         return ack(b,pk,r,db.evidence(pk,r.recordId(),r.revisionKey()),ledger);
     }
     public Result register(Binding b,Submission s){
@@ -127,7 +132,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
             var next=db.evidence(pk,s.recordId(),key(n.add(BigInteger.ONE)));
             if(prev!=null&&!prev.evidenceSha256().equals(s.previousEvidenceSha256())||next!=null&&!s.evidenceSha256().equals(next.previousEvidenceSha256()))return conflict(pk,members,"REVISION_LINK");
             db.appendEvidence(new EconomyUsageCaptureMapper.Evidence(pk,s.recordId(),k,s.sourceRevision(),s.kind(),s.evidenceSha256(),s.previousEvidenceSha256(),s.canonicalEvidence(),s.bindingSha256(),"WAITING"));
-            change(pk,members,null);
+            changed(b,pk,members);
         }
         db.appendSubmission(new EconomyUsageCaptureMapper.Receipt(pk,s.receiptId(),s.recordId(),k,s.requestId(),s.requestSha256(),s.expectedRevision(),"PENDING",null));
         if("RESPONSE".equals(s.kind()))return status(State.PENDING); // never manufacture a ledger receipt

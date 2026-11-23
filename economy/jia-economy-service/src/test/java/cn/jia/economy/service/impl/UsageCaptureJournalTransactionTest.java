@@ -28,7 +28,7 @@ class UsageCaptureJournalTransactionTest {
         var config=new Configuration(new Environment("test",new SpringManagedTransactionFactory(),ds));config.setMapUnderscoreToCamelCase(true);
         config.addMapper(EconomyUsageCaptureMapper.class);config.addMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class);
         var sql=new SqlSessionTemplate(new SqlSessionFactoryBuilder().build(config));var manager=new DataSourceTransactionManager(ds);var tx=new TransactionTemplate(manager);
-        var journal=proxy(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class)),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
+        var journal=proxy(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class),event->{}),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
         var costs=proxy(new UsageCostServiceImpl(sql.getMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class),new tools.jackson.databind.ObjectMapper()),manager,cn.jia.economy.usage.UsageCostService.class);
         var settlement=proxy(new UsageCaptureSettlement(costs,journal),manager,Settlement.class);
         ResponseOrigin adapter=(raw,previous,lookup)->new Origin(sample,false,123);var first=sub("r1","RESPONSE",sample,"1",null,h);
@@ -65,12 +65,23 @@ class UsageCaptureJournalTransactionTest {
         assertEquals(0,new java.math.BigDecimal("0.12").compareTo(jdbc.queryForObject("SELECT cost_yuan FROM economy_task_cost",java.math.BigDecimal.class)));
         assertEquals(usage,costs.observationAt(work.observation().binding(),3).orElseThrow().normalizedUsage());
         assertEquals(State.DURABLE,settlement.apply(next.work()).state());
+        var projection=new UsageCaptureProjectionStore(sql.getMapper(EconomyUsageCaptureMapper.class));
+        var key=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","c",pk);
+        var snapshot=projection.pending(key);var rows=projection.page(key,"");
+        assertEquals(1,rows.size());assertEquals(2,rows.getFirst().revisions());assertEquals("2",rows.getFirst().sourceRevision());
+        assertTrue(projection.page(key,rows.getFirst().recordId()).isEmpty());
+        var alien=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","foreign",pk);
+        assertNull(projection.pending(alien));assertTrue(projection.page(alien,"").isEmpty());
         var third=new Submission("q3",h,"r3","RESPONSE",sample,"3",sample,h,"3","{\"test\":3}",h);
         var plan=sub("plan","PLAN",h,"1",null,h);var plan2=sub("late-plan","PLAN",h,"2",h,sample);
         var originalAck=tx.execute(s->journal.register(b,plan2));
         var pending=tx.execute(s->journal.linkMetadata(b,"late-plan",(raw,prev,lookup)->{throw new AssertionError("missing predecessor");}));
         assertEquals(pk,pending.recoveryPk());assertEquals(originalAck.ackJson(),pending.ackJson());
         tx.execute(s->journal.register(b,plan));tx.execute(s->journal.linkMetadata(b,"plan",(raw,prev,lookup)->Link.ASSOCIATED));
+        var state=cn.jia.economy.usage.UsageCaptureProjection.Coverage.WAITING_EVIDENCE;
+        assertFalse(tx.execute(s->projection.publish(key,snapshot.inputRevision(),state)).booleanValue());
+        var fresh=projection.pending(key);assertTrue(tx.execute(s->projection.publish(key,fresh.inputRevision(),state)).booleanValue());
+        assertNull(projection.pending(key));
         var resumed=tx.execute(s->journal.recover("t","c",pk,"late-plan",(raw,prev,lookup)->{assertEquals(plan.canonicalEvidence(),prev);return Link.ASSOCIATED;},null));
         assertEquals(originalAck,resumed);assertEquals("2",json.readTree(tx.execute(s->journal.readRecord(b,h)).ackJson()).get("sourceRevision").asText());assertTrue(json.readTree(tx.execute(s->journal.readRecord(b,h)).ackJson()).get("ledgerRevision").isNull());
         String srcId="9".repeat(64);var src=sub("src","SOURCE",srcId,"1",null,sample);tx.execute(s->journal.register(b,src));
@@ -91,7 +102,7 @@ class UsageCaptureJournalTransactionTest {
             String sql=new String(in.readAllBytes(),StandardCharsets.UTF_8).replace(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin","");RunScript.execute(c,new StringReader(sql));}
         var config=new Configuration(new Environment("test",new SpringManagedTransactionFactory(),ds));config.addMapper(EconomyUsageCaptureMapper.class);
         var db=new SqlSessionTemplate(new SqlSessionFactoryBuilder().build(config)).getMapper(EconomyUsageCaptureMapper.class);
-        var journal=new UsageCaptureJournalImpl(db);var jdbc=new JdbcTemplate(ds);var tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
+        var journal=new UsageCaptureJournalImpl(db,event->{});var jdbc=new JdbcTemplate(ds);var tx=new TransactionTemplate(new DataSourceTransactionManager(ds));
         for(String sampleId:new String[]{sample,h}) jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state) VALUES(?,'t','c','own','task',?,'v',?,?,?,'ACCEPTED',1,1,'READY')",sampleId,sampleId,h,h,h);
         jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,'exec','r',?)",sample,h);
         // Revision 4 arrived first. A different attempt in revision 1 conflicts even with 2/3 absent.
