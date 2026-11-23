@@ -38,6 +38,21 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         view.put("ledgerRevision",head.ledgerAttemptId()==null?null:Objects.requireNonNull(db.ledgerRevision(b.tenantId(),b.clientId(),head.ledgerAttemptId())).toString());
         return new Result(State.DURABLE,JSON.writeValueAsString(view));
     }
+    private LinkedEvidence dependency(long pk,String id){
+        var first=db.evidence(pk,id,key(BigInteger.ONE));return first==null?null:new LinkedEvidence(db.head(pk,id)!=null,first.evidenceJson());
+    }
+    public Result linkSource(Binding b,String receiptId,SourceLinks adapter){
+        var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
+        var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);if(c.conflictReason()!=null)return status(State.CONFLICT);
+        long pk=c.id();var r=db.receipt(pk,receiptId);var result=stored(r);if(result.state()!=State.DURABLE)return result;
+        var e=db.evidence(pk,r.recordId(),r.revisionKey());if(!"SOURCE".equals(e.kind()))throw new IllegalStateException("Not a SOURCE receipt");
+        var current=db.head(pk,r.recordId());var n=new BigInteger(e.sourceRevision());
+        if(current==null?!BigInteger.ONE.equals(n):!new BigInteger(current.sourceRevision()).add(BigInteger.ONE).equals(n))return result;
+        var relation=adapter.resolve(e.evidenceJson(),id->dependency(pk,id));
+        if(relation==Link.CONFLICT)return conflict(pk,members,"SOURCE_LINEAGE");
+        if(relation==Link.ASSOCIATED){publishHead(pk,e.recordId(),r.revisionKey(),null);change(pk,members,null);}
+        return result; // durable receipt does not assert association, cost or coverage
+    }
     /** Source ownership is decided before the separate ledger transaction, never by ledger owner/task alone. */
     public Result bindResponse(Binding b,String receiptId,ResponseOrigin adapter){
         var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
@@ -53,7 +68,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
             if(prev==null||!"APPLIED".equals(prev.associationState()))return result;
             previous=prev.evidenceJson();
         }
-        var origin=adapter.resolve(response.evidenceJson(),previous,id->{var row=db.evidence(pk,id,key(BigInteger.ONE));return row==null?null:row.evidenceJson();});
+        var origin=adapter.resolve(response.evidenceJson(),previous,id->{var dep=dependency(pk,id);return dep==null||!dep.associated()?null:dep.canonical();});
         if(origin.conflict())return conflict(pk,members,"RESPONSE_ORIGIN");
         if(origin.attemptId()==null)return result;
         var claim=new EconomyUsageCaptureMapper.Origin(b.tenantId(),b.clientId(),origin.attemptId(),pk,response.recordId());

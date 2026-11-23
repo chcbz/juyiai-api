@@ -28,8 +28,32 @@ class NativeCaptureEvidenceTest {
         obs.putNull("reportedUsage");String missing=tree.toString();
         assertEquals(id,NativeResponseOrigin.resolve(response,missing,records::get).attemptId());
         assertTrue(NativeResponseOrigin.resolve(missing,response,records::get).conflict());
+        var changed=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var tokens=(tools.jackson.databind.node.ObjectNode)changed.get("observation").get("measuredQuantities").get("tokens");
+        tokens.put("CACHED_INPUT","0");assertEquals(id,NativeResponseOrigin.resolve(changed.toString(),response,records::get).attemptId());
+        tokens.put("CACHED_INPUT","1");assertTrue(NativeResponseOrigin.resolve(changed.toString(),response,records::get).conflict());
         assertTrue(NativeResponseOrigin.resolve(response.replace("\"input_tokens\":100","\"input_tokens\":101"),response,records::get).conflict());
         assertTrue(NativeResponseOrigin.resolve(response.replace("response_1\"","different\""),null,records::get).conflict());
+    }
+    @Test void onlyRootedSourceAndEarlierEpochCanAuthorizeANewSource(){
+        String cap="a".repeat(64);var db=new HashMap<String,cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence>();
+        String plan=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));
+        db.put(plan,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,"{\"observation\":{\"rootSourceId\":\"root\"}}"));
+        var root=source(cap,"root","0",null,null);var rootId=JSON.readTree(root).get("recordId").asText();
+        assertEquals("ASSOCIATED",NativeSourceLineage.resolve(root,db::get).name());
+        var child=source(cap,"child","0",rootId,null);assertEquals("WAITING",NativeSourceLineage.resolve(child,db::get).name());
+        db.put(rootId,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,root));
+        assertEquals("ASSOCIATED",NativeSourceLineage.resolve(child,db::get).name());
+        String childId=JSON.readTree(child).get("recordId").asText();var resume=source(cap,"child","9007199254740993123456",rootId,childId);
+        db.put(childId,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(false,child));
+        assertEquals("WAITING",NativeSourceLineage.resolve(resume,db::get).name());
+        db.put(childId,new cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence(true,child));
+        assertEquals("ASSOCIATED",NativeSourceLineage.resolve(resume,db::get).name());
+        assertEquals("CONFLICT",NativeSourceLineage.resolve(source(cap,"child","1",rootId,rootId),db::get).name());
+        assertEquals("CONFLICT",NativeSourceLineage.resolve(source(cap,"child","0",childId,null),db::get).name());
+    }
+    private String source(String cap,String id,String epoch,String parent,String prev){
+        var facts=new HashMap<String,Object>();facts.put("sourceId",id);facts.put("epoch",epoch);facts.put("parentSourceRecordId",parent);facts.put("previousEpochSourceRecordId",prev);
+        return JSON.writeValueAsString(Map.of("captureId",cap,"kind","SOURCE","recordId",NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"SOURCE",List.of(id,epoch))),"observation",facts));
     }
     @Test void fixedRuntimeMessagesHavePortableJavaDigestsAndClosedScope() throws Exception {
         try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){

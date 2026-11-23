@@ -63,6 +63,10 @@ class UsageCaptureJournalTransactionTest {
         assertEquals(State.DURABLE,settlement.apply(next.work()).state());
         var third=new Submission("q3",h,"r3","RESPONSE",sample,"3",sample,h,"3","{\"test\":3}",h);
         var plan=sub("plan","PLAN",h,"1",null,h);tx.execute(s->journal.register(b,plan));assertTrue(json.readTree(tx.execute(s->journal.readRecord(b,h)).ackJson()).get("ledgerRevision").isNull());
+        String srcId="9".repeat(64);var src=sub("src","SOURCE",srcId,"1",null,sample);tx.execute(s->journal.register(b,src));
+        assertEquals(State.DURABLE,tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->Link.WAITING)).state());assertEquals(State.PENDING,tx.execute(s->journal.readRecord(b,srcId)).state());
+        tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->{assertTrue(lookup.apply(h).associated());return Link.ASSOCIATED;}));
+        assertEquals(State.DURABLE,tx.execute(s->journal.readRecord(b,srcId)).state());tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->{throw new AssertionError("already associated");}));
         tx.execute(s->journal.register(b,third));var mismatch=tx.execute(s->journal.bindResponse(b,"r3",(raw,previous,lookup)->new Origin(sample,false,126,new Facts(null,null,null,"disjoint",java.util.Map.of("INPUT","100001")))));
         assertEquals(State.CONFLICT,settlement.apply(mismatch.work()).state());assertEquals(State.CONFLICT,tx.execute(s->journal.readRecord(b,sample)).state());
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision",Integer.class));assertEquals(0,new java.math.BigDecimal("0.12").compareTo(jdbc.queryForObject("SELECT cost_yuan FROM economy_task_cost",java.math.BigDecimal.class)));

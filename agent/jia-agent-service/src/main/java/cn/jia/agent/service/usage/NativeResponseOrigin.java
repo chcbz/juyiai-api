@@ -6,7 +6,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.function.Function;
 
-/** The current Runtime captures one original HTTP Responses root. Other source graphs wait for their adapter. */
+/** Resolve only from capture-scoped, already associated source records. No HTTP-supplied ancestry. */
 public final class NativeResponseOrigin {
     private NativeResponseOrigin() {}
     private static final ObjectMapper JSON=new ObjectMapper();
@@ -16,16 +16,14 @@ public final class NativeResponseOrigin {
         if(previous!=null){
             var old=JSON.readTree(previous).get("observation");
             // A new observation may fill missing facts, not silently replace an already reported counter/identity.
-            for(String field:List.of("reportedUsage","measuredQuantities","actualBillingIdentity")){
+            for(String field:List.of("reportedUsage","actualBillingIdentity")){
                 if(!containsFacts(r.get(field),old.get(field)))return CONFLICT;
             }
+            var measured=old.get("measuredQuantities");
+            if(!measured.isNull()&&!sameQuantities(measured,r.get("measuredQuantities")))return CONFLICT;
         }
         String sourceId=r.get("sourceId").asText(),epoch=r.get("epoch").asText();
-        if(!"0".equals(epoch))return WAIT;
-        var plan=observation(first,cap,"PLAN",List.of());
-        if(plan==null||!sourceId.equals(plan.get("rootSourceId").asText()))return WAIT;
         var source=observation(first,cap,"SOURCE",List.of(sourceId,epoch));if(source==null)return WAIT;
-        if(!source.get("parentSourceRecordId").isNull()||!source.get("previousEpochSourceRecordId").isNull())return CONFLICT;
         if(!"METERED_HTTP_RESPONSES_V1".equals(source.get("sourceKind").asText()))return WAIT;
         String attempt=NativeCaptureEvidence.digest(List.of("NATIVE_RESPONSE_USAGE",source.get("channelNamespace").asText(),r.get("providerResponseId").asText()));
         if(!attempt.equals(r.get("sourceAttemptId").asText()))return CONFLICT;
@@ -36,6 +34,14 @@ public final class NativeResponseOrigin {
         }
         var facts=new cn.jia.economy.usage.UsageCaptureJournal.Facts(actual.isNull()?null:actual.get("channel").asText(),actual.isNull()?null:actual.get("model").asText(),actual.isNull()?null:actual.get("tier").asText(),q.isNull()?null:q.get("normalizationBasis").asText(),tokens==null?null:java.util.Map.copyOf(tokens));
         return new Origin(attempt,false,evidence.get("observedAt").asLong(),facts);
+    }
+    private static boolean sameQuantities(JsonNode a,JsonNode b){
+        if(b==null||b.isNull()||!a.get("normalizationBasis").equals(b.get("normalizationBasis")))return false;
+        for(var category:cn.jia.economy.pricing.ModelTokenPrice.Category.values()){
+            var x=a.get("tokens").get(category.name());var y=b.get("tokens").get(category.name());
+            if(!(x==null?"0":x.asText()).equals(y==null?"0":y.asText()))return false;
+        }
+        return true;
     }
     private static boolean containsFacts(JsonNode current,JsonNode previous){
         if(previous==null||previous.isNull())return true;

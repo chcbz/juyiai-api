@@ -16,6 +16,10 @@ public interface UsageCaptureJournal {
         public Origin(String attemptId,boolean conflict,long observedAt){this(attemptId,conflict,observedAt,null);}
     }
     interface ResponseOrigin { Origin resolve(String response,String previous,java.util.function.Function<String,String> firstRevision); }
+    enum Link { ASSOCIATED, WAITING, CONFLICT }
+    record LinkedEvidence(boolean associated,String canonical) {}
+    interface SourceLinks { Link resolve(String source,java.util.function.Function<String,LinkedEvidence> first); }
+    Result linkSource(Binding trusted,String receiptId,SourceLinks adapter);
     Result bindResponse(Binding trusted,String receiptId,ResponseOrigin adapter);
     Result register(Binding trusted,Submission source);
     Result readRecord(Binding trusted,String recordId);
