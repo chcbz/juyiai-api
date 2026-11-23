@@ -29,8 +29,10 @@ public final class NativeExecutionUsageCostController {
     private static final ObjectMapper JSON=new ObjectMapper();
     private final NativeCaptureAuthority authority;
     private final UsageCaptureJournal journal;
+    private final UsageCaptureJournal.Settlement settlement;
     public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,
-            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal) {
+            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal,UsageCaptureJournal.Settlement settlement) {
+        this.settlement=settlement;
         this.authority=authority;this.journal=journal;
         this.recorder = recorder; this.authentication = authentication;
     }
@@ -54,7 +56,7 @@ public final class NativeExecutionUsageCostController {
                 return registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
                         ?journal.bindResponse(binding,e.receiptId(),cn.jia.agent.service.usage.NativeResponseOrigin::resolve):registered;
             });
-            return response(result); // fence transaction has committed, including any conflict quarantine
+            return response(result.work()==null?result:settlement.apply(result.work())); // original fence transaction has committed
         } catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
     }
     @GetMapping(value="/{executionId}/runs/{runId}/usage/receipts/{receiptId}",produces="application/json")

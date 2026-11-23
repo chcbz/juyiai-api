@@ -55,6 +55,12 @@ public interface EconomyUsageCaptureMapper {
         SELECT capture_pk,receipt_id,record_id,revision_key,request_id,request_sha256,expected_revision,processing_state,ack_json
         FROM economy_usage_capture_receipt WHERE capture_pk=#{pk} AND receipt_id=#{receiptId} FOR UPDATE
         """) Receipt receipt(@Param("pk") long pk,@Param("receiptId") String receiptId);
+    @Select("SELECT applying_receipt FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{record} AND revision_key=#{key} FOR UPDATE")
+    String applying(@Param("pk") long pk,@Param("record") String record,@Param("key") String key);
+    @Update("UPDATE economy_usage_capture_record SET applying_receipt=#{receipt},association_state=#{state} WHERE capture_pk=#{pk} AND record_id=#{record} AND revision_key=#{key}")
+    int application(@Param("pk") long pk,@Param("record") String record,@Param("key") String key,@Param("receipt") String receipt,@Param("state") String state);
+    @Update("UPDATE economy_usage_capture_receipt SET processing_state='CAS_CONFLICT' WHERE capture_pk=#{pk} AND receipt_id=#{receipt} AND processing_state='PENDING'")
+    int rejectCas(@Param("pk") long pk,@Param("receipt") String receipt);
     record Origin(String tenantId,String clientId,String sourceAttemptId,long capturePk,String recordId) {}
     @Insert("""
         INSERT INTO economy_usage_response_origin (tenant_id,client_id,source_attempt_id,capture_pk,record_id)

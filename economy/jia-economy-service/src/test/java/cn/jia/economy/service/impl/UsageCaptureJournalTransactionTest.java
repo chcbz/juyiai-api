@@ -21,6 +21,34 @@ class UsageCaptureJournalTransactionTest {
     final String h="e".repeat(64),sample="f".repeat(64);
     final Binding b=new Binding("t","c","own","agent","task","exec","r",h);
     Submission sub(String receipt,String kind,String id,String rev,String prev,String sha){return new Submission("request-"+receipt,sha,receipt,kind,id,rev,prev,sha,kind.equals("RESPONSE")?"0":null,"{\"test\":1}",h);}
+    @Test void crashAfterIndependentLedgerCommitReplaysOriginalWithoutDuplicateOrFalseZero() throws Exception {
+        var ds=new JdbcDataSource();ds.setURL("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
+        for(String script:new String[]{"economy-usage-cost","economy-usage-capture"})try(var in=getClass().getResourceAsStream("/db/"+script+".sql");var c=ds.getConnection()){
+            RunScript.execute(c,new StringReader(new String(in.readAllBytes(),StandardCharsets.UTF_8).replace(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin","")));}
+        var config=new Configuration(new Environment("test",new SpringManagedTransactionFactory(),ds));config.setMapUnderscoreToCamelCase(true);
+        config.addMapper(EconomyUsageCaptureMapper.class);config.addMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class);
+        var sql=new SqlSessionTemplate(new SqlSessionFactoryBuilder().build(config));var manager=new DataSourceTransactionManager(ds);var tx=new TransactionTemplate(manager);
+        var journal=proxy(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class)),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
+        var costs=proxy(new UsageCostServiceImpl(sql.getMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class),new tools.jackson.databind.ObjectMapper()),manager,cn.jia.economy.usage.UsageCostService.class);
+        var settlement=proxy(new UsageCaptureSettlement(costs,journal),manager,Settlement.class);
+        ResponseOrigin adapter=(raw,lookup)->new Origin(sample,false,123);var first=sub("r1","RESPONSE",sample,"1",null,h);
+        var bad=new Submission("bad",h,"bad","RESPONSE",sample,"1",null,h,"1",first.canonicalEvidence(),h);
+        tx.execute(s->journal.register(b,bad));var stale=tx.execute(s->journal.bindResponse(b,"bad",adapter)).work();
+        assertEquals(State.CONFLICT,settlement.apply(stale).state());assertEquals(State.CONFLICT,tx.execute(s->journal.readReceipt(b,"bad")).state());
+        tx.execute(s->journal.register(b,first));var work=tx.execute(s->journal.bindResponse(b,"r1",adapter)).work();
+        assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->tx.execute(s->settlement.apply(work)));
+        costs.record(work.observation()); // simulated stop before saving ACK
+        assertEquals(State.PENDING,tx.execute(s->journal.readReceipt(b,"r1")).state());
+        var recovered=tx.execute(s->journal.bindResponse(b,"r1",adapter)).work();assertEquals(work,recovered);
+        var ack=settlement.apply(recovered);assertEquals(State.DURABLE,ack.state());
+        var ledger=new tools.jackson.databind.ObjectMapper().readTree(ack.ackJson()).get("ledger");assertEquals("1",ledger.get("revision").asText());assertTrue(ledger.get("costYuan").isNull());assertEquals("PENDING_USAGE",ledger.get("status").asText());
+        assertEquals(ack,tx.execute(s->journal.readReceipt(b,"r1")));assertEquals(ack,settlement.apply(work));
+        tx.execute(s->journal.register(b,sub("alias","RESPONSE",sample,"1",null,h)));assertEquals(State.DURABLE,tx.execute(s->journal.bindResponse(b,"alias",adapter)).state());
+        var jdbc=new JdbcTemplate(ds);assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision",Integer.class));assertEquals(1L,jdbc.queryForObject("SELECT pending_usage FROM economy_task_cost",Long.class));
+    }
+    private static <T>T proxy(Object target,DataSourceTransactionManager manager,Class<T> type){
+        var p=new org.springframework.aop.framework.ProxyFactory(target);p.addAdvice(new org.springframework.transaction.interceptor.TransactionInterceptor(manager,new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));return type.cast(p.getProxy());
+    }
     @Test void incompleteOrderedEvidenceInvalidatesOnlyRegisteredSampleAndConflictCommitsBefore409() throws Exception {
         var ds=new JdbcDataSource();ds.setURL("jdbc:h2:mem:"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1");
         try(var in=getClass().getResourceAsStream("/db/economy-usage-capture.sql");var c=ds.getConnection()){
@@ -44,7 +72,7 @@ class UsageCaptureJournalTransactionTest {
         assertEquals("READY",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample WHERE sample_id=?",String.class,h));
         var response=sub("response","RESPONSE",sample,"1",null,"c".repeat(64));assertEquals(State.PENDING,tx.execute(st->journal.register(b,response)).state());
         assertEquals(State.PENDING,tx.execute(st->journal.readReceipt(b,"response")).state());
-        ResponseOrigin adapter=(raw,first)->new Origin(sample,false);
+        ResponseOrigin adapter=(raw,first)->new Origin(sample,false,123);
         assertEquals(State.PENDING,tx.execute(st->journal.bindResponse(b,"response",adapter)).state());
         assertEquals(State.PENDING,tx.execute(st->journal.bindResponse(b,"response",adapter)).state());
         var copied=new Binding("t","c","own","agent","task","copy","r",sample);

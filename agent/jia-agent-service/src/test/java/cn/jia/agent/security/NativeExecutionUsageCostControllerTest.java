@@ -35,7 +35,7 @@ class NativeExecutionUsageCostControllerTest {
             return new UsageCostService.Receipt("b".repeat(64),2,TokenUsageCost.Status.PENDING_USAGE,null,false);
         });
         var body=new NativeExecutionUsageCostController.Request("exec",NativeExecutionUsageCostRecorder.Phase.TERMINAL,"requested-only",new ObjectMapper().readTree("{\"status\":\"UNVERIFIED\"}"));
-        var controller=new NativeExecutionUsageCostController(recorder,auth,null,null);
+        var controller=new NativeExecutionUsageCostController(recorder,auth,null,null,null);
         var response=controller.record("exec","run",new JsonRequest<>(1,"fixture",body),principal);
         assertEquals(200,response.getStatusCode().value());
         var receipt=response.getBody().getData();
@@ -49,7 +49,7 @@ class NativeExecutionUsageCostControllerTest {
         var principal=new AgentRuntimeAuthentication(new AgentRuntimeAuthentication.Scope("t","client","executor","agent","instance"));
         principal.setDetails(new AgentRuntimeAuthenticationService.Proof(principal.getPrincipal(),"installation","host",1,"digest",1,1));
         when(auth.withNativeFence(eq(principal),any())).thenAnswer(i->((Supplier<?>)i.getArgument(1)).get());
-        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions),journal);
+        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions),journal,null);
         var json=new ObjectMapper();try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var m=json.readTree(in).get("cases").get(0).get("messages").get(0);var d=m.get("request").get("body").get("data");
             String exec=d.get("executionId").asText(),run=d.get("runId").asText(),receipt=d.get("receiptId").asText();
@@ -67,7 +67,7 @@ class NativeExecutionUsageCostControllerTest {
     }
     @Test void startedEvidenceCannotClaimUsageAndMissingPhaseCannotGuessSemantics() {
         var recorder=mock(NativeExecutionUsageCostRecorder.class);
-        var controller=new NativeExecutionUsageCostController(recorder,mock(AgentRuntimeAuthenticationService.class),null,null);
+        var controller=new NativeExecutionUsageCostController(recorder,mock(AgentRuntimeAuthenticationService.class),null,null,null);
         for (var phase : new NativeExecutionUsageCostRecorder.Phase[]{null, NativeExecutionUsageCostRecorder.Phase.STARTED}) {
             var body=new NativeExecutionUsageCostController.Request("exec",phase,"requested-only",new ObjectMapper().readTree("{}"));
             assertThrows(IllegalArgumentException.class, () -> controller.record("exec","run",new JsonRequest<>(1,"fixture",body),null));

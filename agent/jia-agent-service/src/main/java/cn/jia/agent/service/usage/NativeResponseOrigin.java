@@ -10,7 +10,7 @@ import java.util.function.Function;
 public final class NativeResponseOrigin {
     private NativeResponseOrigin() {}
     private static final ObjectMapper JSON=new ObjectMapper();
-    private static final Origin WAIT=new Origin(null,false), CONFLICT=new Origin(null,true);
+    private static final Origin WAIT=new Origin(null,false,0), CONFLICT=new Origin(null,true,0);
     public static Origin resolve(String persisted,Function<String,String> first){
         var evidence=JSON.readTree(persisted);String cap=evidence.get("captureId").asText();var r=evidence.get("observation");
         String sourceId=r.get("sourceId").asText(),epoch=r.get("epoch").asText();
@@ -21,7 +21,7 @@ public final class NativeResponseOrigin {
         if(!source.get("parentSourceRecordId").isNull()||!source.get("previousEpochSourceRecordId").isNull())return CONFLICT;
         if(!"METERED_HTTP_RESPONSES_V1".equals(source.get("sourceKind").asText()))return WAIT;
         String attempt=NativeCaptureEvidence.digest(List.of("NATIVE_RESPONSE_USAGE",source.get("channelNamespace").asText(),r.get("providerResponseId").asText()));
-        return attempt.equals(r.get("sourceAttemptId").asText())?new Origin(attempt,false):CONFLICT;
+        return attempt.equals(r.get("sourceAttemptId").asText())?new Origin(attempt,false,evidence.get("observedAt").asLong()):CONFLICT;
     }
     private static JsonNode observation(Function<String,String> first,String cap,String kind,List<String> id){
         String stored=first.apply(NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,kind,id)));
