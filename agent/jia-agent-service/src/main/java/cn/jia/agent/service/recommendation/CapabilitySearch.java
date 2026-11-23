@@ -108,19 +108,19 @@ final class CapabilitySearch {
         private final String partition;
         Batch(String partition) { this.partition = partition; }
         private List<Object> filters() { return new ArrayList<>(List.of(Map.of("ids", Map.of("values", docs.keySet())),
-                Map.of("term", Map.of("partition", partition)))); }
+                Map.of("term", Map.of("partition", Map.of("value",partition))))); }
         Map<String,Object> coverage() { return Map.of("size",0,"track_total_hits",true,"query",Map.of("bool",Map.of("filter",filters())),
                 "aggs",Map.of("encoded",Map.of("filter",Map.of("exists",Map.of("field","vector"))))); }
         Map<String,Object> ranked(String text, float[] vector) {
             var filters = filters(); Object query;
-            if (vector == null) query = Map.of("bool", Map.of("filter",filters,"must",Map.of("match",Map.of("text",text))));
+            if (vector == null) query = Map.of("bool", Map.of("filter",filters,"must",List.of(Map.of("match",Map.of("text",Map.of("query",text))))));
             else {
                 filters.add(Map.of("exists",Map.of("field","vector")));
                 query = Map.of("script_score",Map.of("query",Map.of("bool",Map.of("filter",filters)),"script",Map.of(
                         "source","cosineSimilarity(params.v, 'vector') + 1.0", "params",Map.of("v",vector))));
             }
             return Map.of("size",agents.size(),"_source",false,"track_total_hits",false,"query",query,
-                    "collapse",Map.of("field","agent_id"),"sort",List.of(Map.of("_score","desc"),Map.of("evidence_key","asc")));
+                    "collapse",Map.of("field","agent_id"),"sort",List.of(Map.of("_score",Map.of("order","desc")),Map.of("evidence_key",Map.of("order","asc"))));
         }
         void collect(SearchResponse<Void> response, List<CandidateRankFusion.Hit> hits) throws IOException {
             var seen = new HashSet<String>();

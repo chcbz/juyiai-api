@@ -74,7 +74,7 @@ class CapabilitySearchTest {
                 assertEquals("/_search",paths.get(i));var req=requests.get(i);
                 assertEquals("view-"+i,req.at("/pit/id").asText());
                 var filter=req.at(i==3?"/query/script_score/query/bool/filter":"/query/bool/filter");
-                assertEquals(doc.id(),filter.at("/0/ids/values/0").asText());assertEquals(doc.partition(),filter.at("/1/term/partition").asText());
+                assertEquals(doc.id(),filter.at("/0/ids/values/0").asText());assertEquals(doc.partition(),filter.at("/1/term/partition/value").asText());
                 if(i>1)assertEquals("agent_id",req.at("/collapse/field").asText());
             }
             assertEquals("view-"+(requests.size()-1),requests.getLast().path("id").asText());
