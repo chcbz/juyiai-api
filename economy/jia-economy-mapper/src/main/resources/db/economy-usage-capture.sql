@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS economy_usage_capture_record (
     kind VARCHAR(24) NOT NULL,
     evidence_sha256 CHAR(64) NOT NULL,
     previous_evidence_sha256 CHAR(64) DEFAULT NULL,
+    binding_sha256 CHAR(64) NOT NULL,
     evidence_json LONGTEXT NOT NULL,
     association_state VARCHAR(24) NOT NULL,
     PRIMARY KEY (capture_pk,record_id,revision_key),

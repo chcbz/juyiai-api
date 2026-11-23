@@ -10,7 +10,7 @@ import java.util.*;
 /** Agent wire adapter, after original-run authorization, before any durable write.
  * A valid digest proves content identity only: source linkage, pricing and coverage remain unresolved. */
 public record NativeCaptureEvidence(String captureId,String recordId,String receiptId,String kind,String sourceRevision,
-        String expectedRevision,String previousEvidenceSha256,String evidenceSha256,String canonicalEvidence) {
+        String expectedRevision,String previousEvidenceSha256,String evidenceSha256,String canonicalEvidence,String bindingSha256) {
     private static final String ID="[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", SHA="[a-f0-9]{64}", DEC="0|[1-9][0-9]*", POS="[1-9][0-9]*";
     private static final Set<String> COMMON=Set.of("schemaVersion","executionId","runId","captureId","receiptId","kind","recordId",
             "sourceRevision","previousEvidenceSha256","evidenceSha256","observedAt","expectedRevision","observation");
@@ -42,7 +42,19 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         String record=field(d,"recordId",SHA);check(record.equals(digest(List.of("USAGE_RECORD_V2",cap,kind,identity))));var evidence=new HashMap<>(d);
         for(String key:List.of("receiptId","expectedRevision","evidenceSha256"))evidence.remove(key);
         String sha=field(d,"evidenceSha256",SHA);check(sha.equals(digest(evidence)));
-        return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence));
+        return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence),bindingDigest(kind,o,identity));
+    }
+    // Select immutable wire facts here; Economy enforces equality without interpreting Runtime JSON.
+    static String bindingDigest(String kind,Map<?,?> o,List<String> identity){
+        Object facts=switch(kind){
+            case "PLAN", "SOURCE" -> o;
+            case "REQUEST" -> List.of(identity,o.get("attemptId"));
+            case "RESPONSE" -> List.of(identity,o.get("sourceId"),o.get("epoch"),o.get("providerResponseId"));
+            case "SOURCE_FINAL" -> List.of(identity,o.get("reservedSequenceHighWatermark"));
+            case "CAPTURE_FINAL" -> identity;
+            default -> throw new IllegalArgumentException("USAGE_CAPTURE_INVALID");
+        };
+        return digest(List.of(kind,facts));
     }
     private static List<String> source(Map<?,?> o){return List.of(field(o,"sourceId",ID),field(o,"epoch",DEC));}
     private static void close(Map<?,?> o){check(Set.of("DRAINED","SEALED_INCOMPLETE").contains(text(o,"closeState")));reasons(o);}

@@ -46,7 +46,7 @@ public final class NativeExecutionUsageCostController {
             return error(400,"USAGE_CAPTURE_VERSION_UNSUPPORTED".equals(ex.getMessage())?ex.getMessage():"USAGE_CAPTURE_INVALID");
         }
         var submission=new UsageCaptureJournal.Submission(request.requestId(),NativeCaptureEvidence.digest(List.of(request.requestId(),data)),
-                e.receiptId(),e.kind(),e.recordId(),e.sourceRevision(),e.previousEvidenceSha256(),e.evidenceSha256(),e.expectedRevision(),e.canonicalEvidence());
+                e.receiptId(),e.kind(),e.recordId(),e.sourceRevision(),e.previousEvidenceSha256(),e.evidenceSha256(),e.expectedRevision(),e.canonicalEvidence(),e.bindingSha256());
         try {
             var result=authentication.withNativeFence(principal,()->journal.register(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),submission));
             return response(result); // fence transaction has committed, including any conflict quarantine

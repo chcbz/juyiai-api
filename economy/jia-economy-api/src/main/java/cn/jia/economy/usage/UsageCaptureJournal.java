@@ -4,7 +4,7 @@ package cn.jia.economy.usage;
 public interface UsageCaptureJournal {
     record Binding(String tenantId,String clientId,String ownerJiacn,String agentId,String taskId,String executionId,String runId,String captureId) {}
     record Submission(String requestId,String requestSha256,String receiptId,String kind,String recordId,String sourceRevision,
-                      String previousEvidenceSha256,String evidenceSha256,String expectedRevision,String canonicalEvidence) {}
+                      String previousEvidenceSha256,String evidenceSha256,String expectedRevision,String canonicalEvidence,String bindingSha256) {}
     enum State { DURABLE, PENDING, CONFLICT, NOT_FOUND }
     record Result(State state,String ackJson) {}
     Result register(Binding trusted,Submission source);

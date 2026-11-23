@@ -35,10 +35,12 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         var n=new BigInteger(s.sourceRevision());String k=key(n);var record=db.evidence(pk,s.recordId(),k);
         if(record!=null && (!record.sourceRevision().equals(s.sourceRevision())||!record.evidenceSha256().equals(s.evidenceSha256())||!record.evidenceJson().equals(s.canonicalEvidence())))return conflict(pk,members,"RECORD_CONTENT");
         if(record==null){
+            String bindingSha=db.recordBinding(pk,s.recordId());
+            if(bindingSha!=null&&!bindingSha.equals(s.bindingSha256()))return conflict(pk,members,"RECORD_BINDING");
             var prev=n.equals(BigInteger.ONE)?null:db.evidence(pk,s.recordId(),key(n.subtract(BigInteger.ONE)));
             var next=db.evidence(pk,s.recordId(),key(n.add(BigInteger.ONE)));
             if(prev!=null&&!prev.evidenceSha256().equals(s.previousEvidenceSha256())||next!=null&&!s.evidenceSha256().equals(next.previousEvidenceSha256()))return conflict(pk,members,"REVISION_LINK");
-            db.appendEvidence(new EconomyUsageCaptureMapper.Evidence(pk,s.recordId(),k,s.sourceRevision(),s.kind(),s.evidenceSha256(),s.previousEvidenceSha256(),s.canonicalEvidence(),"WAITING"));
+            db.appendEvidence(new EconomyUsageCaptureMapper.Evidence(pk,s.recordId(),k,s.sourceRevision(),s.kind(),s.evidenceSha256(),s.previousEvidenceSha256(),s.canonicalEvidence(),s.bindingSha256(),"WAITING"));
             change(pk,members,null);
         }
         db.appendSubmission(new EconomyUsageCaptureMapper.Receipt(pk,s.receiptId(),s.recordId(),k,s.requestId(),s.requestSha256(),s.expectedRevision(),"PENDING",null));

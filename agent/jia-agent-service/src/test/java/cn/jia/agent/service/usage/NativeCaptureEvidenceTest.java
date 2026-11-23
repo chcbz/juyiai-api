@@ -7,6 +7,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class NativeCaptureEvidenceTest {
     private static final ObjectMapper JSON=new ObjectMapper();
+    @Test void requestOutcomeCanChangeButAttemptCannot(){
+        var identity=List.of("source","0","1");var o=new HashMap<String,Object>();o.put("attemptId","a");o.put("resolution","PENDING");
+        String first=NativeCaptureEvidence.bindingDigest("REQUEST",o,identity);o.put("resolution","RESPONSE");
+        assertEquals(first,NativeCaptureEvidence.bindingDigest("REQUEST",o,identity));o.put("attemptId","b");
+        assertNotEquals(first,NativeCaptureEvidence.bindingDigest("REQUEST",o,identity));
+    }
     @Test void fixedRuntimeMessagesHavePortableJavaDigestsAndClosedScope() throws Exception {
         try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var fixture=JSON.readTree(Objects.requireNonNull(in));int count=0;

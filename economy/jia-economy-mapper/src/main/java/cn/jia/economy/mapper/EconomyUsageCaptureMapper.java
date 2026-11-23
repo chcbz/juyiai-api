@@ -13,7 +13,7 @@ public interface EconomyUsageCaptureMapper {
     record Capture(long id,String ownerJiacn,String agentId,String taskId,long inputRevision,
                    Long projectionRevision,String coverageState,String conflictReason) {}
     record Evidence(long capturePk,String recordId,String revisionKey,String sourceRevision,String kind,
-                    String evidenceSha256,String previousEvidenceSha256,String evidenceJson,String associationState) {}
+                    String evidenceSha256,String previousEvidenceSha256,String evidenceJson,String bindingSha256,String associationState) {}
     record Receipt(long capturePk,String receiptId,String recordId,String revisionKey,String requestId,
                    String requestSha256,String expectedRevision,String processingState,String ackJson) {}
 
@@ -26,8 +26,11 @@ public interface EconomyUsageCaptureMapper {
     int invalidateSample(@Param("id") String id);
     @Update("UPDATE economy_usage_capture SET input_revision=input_revision+1,coverage_state=CASE WHEN #{reason} IS NULL THEN 'WAITING_EVIDENCE' ELSE 'INCOMPLETE' END,conflict_reason=#{reason} WHERE id=#{pk}")
     int invalidateCapture(@Param("pk") long pk,@Param("reason") String reason);
-    @Select("SELECT capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,previous_evidence_sha256,evidence_json,association_state FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} AND revision_key=#{key}")
+    @Select("SELECT capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,previous_evidence_sha256,evidence_json,binding_sha256,association_state FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} AND revision_key=#{key}")
     Evidence evidence(@Param("pk") long pk,@Param("recordId") String recordId,@Param("key") String key);
+    // Caller holds the capture lock. Every admitted revision has the same binding, even across gaps.
+    @Select("SELECT binding_sha256 FROM economy_usage_capture_record WHERE capture_pk=#{pk} AND record_id=#{recordId} LIMIT 1")
+    String recordBinding(@Param("pk") long pk,@Param("recordId") String recordId);
     @Insert("""
         INSERT INTO economy_usage_capture(tenant_id,client_id,execution_id,run_id,capture_id,owner_jiacn,agent_id,task_id)
         VALUES(#{tenantId},#{clientId},#{executionId},#{runId},#{captureId},#{ownerJiacn},#{agentId},#{taskId})
@@ -40,8 +43,8 @@ public interface EconomyUsageCaptureMapper {
         """) Capture lockCapture(Binding binding);
     @Insert("""
         INSERT INTO economy_usage_capture_record(capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,
-            previous_evidence_sha256,evidence_json,association_state) VALUES(#{capturePk},#{recordId},#{revisionKey},
-            #{sourceRevision},#{kind},#{evidenceSha256},#{previousEvidenceSha256},#{evidenceJson},#{associationState})
+            previous_evidence_sha256,evidence_json,binding_sha256,association_state) VALUES(#{capturePk},#{recordId},#{revisionKey},
+            #{sourceRevision},#{kind},#{evidenceSha256},#{previousEvidenceSha256},#{evidenceJson},#{bindingSha256},#{associationState})
         """) int appendEvidence(Evidence evidence);
     @Insert("""
         INSERT INTO economy_usage_capture_receipt(capture_pk,receipt_id,record_id,revision_key,request_id,request_sha256,

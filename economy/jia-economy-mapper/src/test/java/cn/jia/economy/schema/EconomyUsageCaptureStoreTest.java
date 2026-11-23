@@ -30,7 +30,7 @@ class EconomyUsageCaptureStoreTest {
             var m=s.getMapper(EconomyUsageCaptureMapper.class);m.ensureCapture(original);m.ensureCapture(original);
             var cap=m.lockCapture(original);pk=cap.id();assertEquals("WAITING_EVIDENCE",cap.coverageState());assertNull(cap.projectionRevision());
             var foreign=new Binding("other","c","exec","run",h,"owner","agent",null);assertNull(m.lockCapture(foreign));m.ensureCapture(foreign);assertNotEquals(pk,m.lockCapture(foreign).id());
-            m.appendEvidence(new Evidence(pk,h,h,revision,"RESPONSE",h,null,"{\"reportedUsage\":null}","WAITING"));
+            m.appendEvidence(new Evidence(pk,h,h,revision,"RESPONSE",h,null,"{\"reportedUsage\":null}",h,"WAITING"));
             m.appendSubmission(new Receipt(pk,"receipt",h,h,"request",h,"0",null,null));s.commit();
         }
         try(var s=factory.openSession()){
@@ -41,7 +41,7 @@ class EconomyUsageCaptureStoreTest {
             var m=s.getMapper(EconomyUsageCaptureMapper.class);assertNull(m.receipt(pk,"receipt").ackJson());
             assertEquals(1,m.finishReceipt(pk,"receipt",h,ack));s.commit();
             assertEquals(0,m.finishReceipt(pk,"receipt",h,"replacement"));assertEquals(ack,m.receipt(pk,"receipt").ackJson());
-            assertThrows(PersistenceException.class,()->m.appendEvidence(new Evidence(pk,h,h,revision,"RESPONSE",h,null,"changed","WAITING")));s.rollback();
+            assertThrows(PersistenceException.class,()->m.appendEvidence(new Evidence(pk,h,h,revision,"RESPONSE",h,null,"changed",h,"WAITING")));s.rollback();
             assertThrows(PersistenceException.class,()->m.appendSubmission(new Receipt(pk,"new",h,"b".repeat(64),"request2",h,"1",null,null)));s.rollback();
         }
     }
