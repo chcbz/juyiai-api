@@ -30,10 +30,28 @@ public final class NativeResponseOrigin {
         var actual=r.get("actualBillingIdentity");var q=r.get("measuredQuantities");
         java.util.Map<String,String> tokens=null;
         if(!q.isNull()){
+            String adapter=source.get("adapterVersion").asText(),basis=q.get("normalizationBasis").asText();
+            if(TEXT_TOKENS.equals(adapter)||TEXT_TOKENS.equals(basis)){
+                if(!adapter.equals(basis)||!matchesResponses(r.get("reportedUsage"),q.get("tokens")))return CONFLICT;
+            }
             tokens=new java.util.HashMap<>();for(var entry:q.get("tokens").properties())tokens.put(entry.getKey(),entry.getValue().asText());
         }
         var facts=new cn.jia.economy.usage.UsageCaptureJournal.Facts(actual.isNull()?null:actual.get("channel").asText(),actual.isNull()?null:actual.get("model").asText(),actual.isNull()?null:actual.get("tier").asText(),q.isNull()?null:q.get("normalizationBasis").asText(),tokens==null?null:java.util.Map.copyOf(tokens));
         return new Origin(attempt,false,evidence.get("observedAt").asLong(),facts);
+    }
+    private static final String TEXT_TOKENS="RESPONSES_TEXT_TOKENS_V1";
+    // The ingress codec already bounds raw counters to nonnegative JS safe integers.
+    // Reasoning is a subset of output; cached input is removed from ordinary input.
+    private static boolean matchesResponses(JsonNode raw,JsonNode tokens){
+        if(raw==null||raw.isNull())return false;
+        long input=raw.path("input_tokens").asLong(-1),output=raw.path("output_tokens").asLong(-1);
+        long cached=raw.path("input_tokens_details").path("cached_tokens").asLong(-1);
+        long reasoning=raw.path("output_tokens_details").path("reasoning_tokens").asLong(-1);
+        return cached>=0 && cached<=input && reasoning>=0 && reasoning<=output
+            && input+output==raw.path("total_tokens").asLong(-1) && tokens.size()==3
+            && Long.toString(input-cached).equals(tokens.path("INPUT").asText())
+            && Long.toString(cached).equals(tokens.path("CACHED_INPUT").asText())
+            && Long.toString(output).equals(tokens.path("OUTPUT").asText());
     }
     private static boolean sameQuantities(JsonNode a,JsonNode b){
         if(b==null||b.isNull()||!a.get("normalizationBasis").equals(b.get("normalizationBasis")))return false;

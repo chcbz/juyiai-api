@@ -34,6 +34,30 @@ class NativeCaptureEvidenceTest {
         assertTrue(NativeResponseOrigin.resolve(response.replace("\"input_tokens\":100","\"input_tokens\":101"),response,records::get).conflict());
         assertTrue(NativeResponseOrigin.resolve(response.replace("response_1\"","different\""),null,records::get).conflict());
     }
+    @Test void captureFinalMayRebindExactRevisionsButNotGrowTheClosedSourceSet(){
+        var id=List.<String>of();var close=new HashMap<String,Object>();close.put("sourceCount","2");
+        var first=NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",close,id);
+        close.put("sourcesSha256","new");assertEquals(first,NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",close,id));
+        close.put("sourceCount","3");assertNotEquals(first,NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",close,id));
+    }
+    @Test void responsesAdapterCrossChecksProviderCountersBeforeLedgerAssociation(){
+        String basis="RESPONSES_TEXT_TOKENS_V1", channel="test", provider="response";
+        String attempt=NativeCaptureEvidence.digest(List.of("NATIVE_RESPONSE_USAGE",channel,provider));
+        var raw=Map.of("input_tokens",100,"output_tokens",20,"total_tokens",120,"input_tokens_details",Map.of("cached_tokens",30),"output_tokens_details",Map.of("reasoning_tokens",6));
+        var measured=Map.of("normalizationBasis",basis,"coverage","COMPLETE","tokens",Map.of("INPUT","70","CACHED_INPUT","30","OUTPUT","20"));
+        var obs=new HashMap<String,Object>(Map.of("sourceId","s","epoch","0","providerResponseId",provider,"sourceAttemptId",attempt,"reportedUsage",raw,"measuredQuantities",measured));obs.put("actualBillingIdentity",null);
+        var envelope=Map.of("captureId","c","observedAt",1,"observation",obs);
+        String source=JSON.writeValueAsString(Map.of("observation",Map.of("sourceKind","METERED_HTTP_RESPONSES_V1","channelNamespace",channel,"adapterVersion",basis)));
+        String good=JSON.writeValueAsString(envelope);
+        assertEquals(attempt,NativeResponseOrigin.resolve(good,null,k->source).attemptId());
+        for(String bad:List.of(good.replace("\"70\"","\"100\""),good.replace(":120",":121"),good.replace(":6}",":21}"),good.replace(":30}",":101}"))){
+            assertTrue(NativeResponseOrigin.resolve(bad,null,k->source).conflict());
+        }
+        assertTrue(NativeResponseOrigin.resolve(good,null,k->source.replace(basis,"UNKNOWN")).conflict());
+        obs.put("reportedUsage",null);assertTrue(NativeResponseOrigin.resolve(JSON.writeValueAsString(envelope),null,k->source).conflict());
+        obs.put("measuredQuantities",null);var partial=NativeResponseOrigin.resolve(JSON.writeValueAsString(envelope),null,k->source);
+        assertEquals(attempt,partial.attemptId());assertNull(partial.facts().quantities());
+    }
     @Test void onlyRootedSourceAndEarlierEpochCanAuthorizeANewSource(){
         String cap="a".repeat(64);var db=new HashMap<String,cn.jia.economy.usage.UsageCaptureJournal.LinkedEvidence>();
         String plan=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));

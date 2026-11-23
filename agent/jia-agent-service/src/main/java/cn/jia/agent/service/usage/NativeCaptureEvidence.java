@@ -51,7 +51,7 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
             case "REQUEST" -> List.of(identity,o.get("attemptId"));
             case "RESPONSE" -> List.of(identity,o.get("sourceId"),o.get("epoch"),o.get("providerResponseId"));
             case "SOURCE_FINAL" -> List.of(identity,o.get("reservedSequenceHighWatermark"));
-            case "CAPTURE_FINAL" -> identity;
+            case "CAPTURE_FINAL" -> List.of(identity,o.get("sourceCount"));
             default -> throw new IllegalArgumentException("USAGE_CAPTURE_INVALID");
         };
         return digest(List.of(kind,facts));
