@@ -8,6 +8,9 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import cn.jia.agent.service.PersonalWorkspaceTaskLinkService.LinkView;
 import java.util.Objects;
 import static cn.jia.agent.entity.AssigneeRecommendation.*;
 
@@ -24,7 +27,7 @@ public final class RecommendationMaterials {
 
     // Observation fields are for stale checks only; never serialize the snapshot into model input.
     record Observation(String relationId, long relationRevision, String fileId, long metadataRevision,
-                       String sha256, Material material) { }
+                       String sha256, long byteLength, Material material) { }
     record Material(String name, String originalFilename, String contentMimeType, int version,
                     String role, String fileState, String summary) { }
 
@@ -32,23 +35,31 @@ public final class RecommendationMaterials {
         var linkScope = new PersonalWorkspaceTaskLinkService.Scope(actor.tenantId(), actor.clientId(), actor.ownerJiacn());
         var fileScope = new PersonalWorkspaceService.Scope(actor.tenantId(), actor.clientId(), actor.ownerJiacn());
         var result = new ArrayList<Observation>();
+        // Group relation headers, not file details (each can carry 100 unrelated versions).
+        // Never share an observation between owners or reuse it during final revalidation.
+        var byFile = new LinkedHashMap<String,List<LinkView>>();
         String cursor = null;
         do {
             var page = links.list(linkScope, taskId, cursor);
             for (var link : page.items()) {
-                if (!"ACTIVE".equals(link.state()) || !("INPUT".equals(link.role()) || "REFERENCE".equals(link.role()))) continue;
-                var detail = files.get(fileScope, link.fileId());
-                var version = detail.versions().stream().filter(v -> v.version() == link.version()).findFirst().orElse(null);
-                // get() exposes a bounded recent-version list. An older linked version is not the latest version.
-                if (version == null) version = linkedVersion(fileScope, link.fileId(), link.version());
-                var file = detail.file();
-                result.add(new Observation(link.relationId(), link.relationRevision(), link.fileId(),
-                        file.metadataRevision(), version.sha256(), new Material(file.displayName(),
-                        version.originalFilename(), version.contentMimeType(), link.version(), link.role(), file.state(),
-                        null))); // No authoritative summary field exists in workspace metadata yet.
+                if ("ACTIVE".equals(link.state()) && ("INPUT".equals(link.role()) || "REFERENCE".equals(link.role())))
+                    byFile.computeIfAbsent(link.fileId(), unused -> new ArrayList<>()).add(link);
             }
             cursor = page.nextCursor();
         } while (cursor != null);
+        for (var selection : byFile.entrySet()) {
+            var detail = files.get(fileScope,selection.getKey());
+            var versions = new HashMap<Integer,VersionView>();
+            for (var version : detail.versions()) versions.put(version.version(), version);
+            for (var link : selection.getValue()) {
+                var version = versions.computeIfAbsent(link.version(), n -> linkedVersion(fileScope,link.fileId(),n));
+                var file = detail.file();
+                result.add(new Observation(link.relationId(), link.relationRevision(), link.fileId(),
+                        file.metadataRevision(), version.sha256(), version.byteLength(), new Material(file.displayName(),
+                        version.originalFilename(), version.contentMimeType(), link.version(), link.role(), file.state(),
+                        null))); // No authoritative summary field exists in workspace metadata yet.
+            }
+        }
         result.sort(Comparator.comparing(Observation::relationId));
         return List.copyOf(result);
     }

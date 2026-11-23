@@ -64,5 +64,13 @@ class AssigneeRecommendationServiceTest {
     @Test void missingSkillSnapshotIsNotEmptySuccess(){when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of());assertEquals(503,assertThrows(Failure.class,this::recommend).status());verifyNoInteractions(search);}
     @Test void candidateRevokedDuringRetrievalCannotLeakPriorResult(){when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row),List.of());assertEquals(409,assertThrows(Failure.class,this::recommend).status());}
     @Test void changedAbilityInvalidatesEvidence(){when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row),List.of(candidate("绘图")));assertEquals(409,assertThrows(Failure.class,this::recommend).status());}
+    @Test void reorderingPublicNumbersUsesCurrentCitationAndOfflineStatusWithoutRejecting() {
+        var initial=new AgentTaskAssigneeCandidateDTO(row.target(),List.of("写作","排版"),"owner");
+        var changed=new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("a","新名称",null,true,"offline"),List.of("排版","写作"),"owner");
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(initial),List.of(changed));
+        var item=recommend().recommendations().getFirst(); var citation=item.evidence().getFirst();
+        assertEquals(changed.abilities().get(Integer.parseInt(citation.id().substring(8))),citation.label());
+        assertEquals("新名称",item.agent().name()); assertFalse(item.gaps().isEmpty()); assertEquals("UNKNOWN",item.recommendationLevel());
+    }
     @Test void materialConflictIsNotRetrievalDegradation(){doThrow(new Failure(409,"RECOMMENDATION_STALE")).when(materials).verifyUnchanged(actor,"task",List.of());assertEquals(409,assertThrows(Failure.class,this::recommend).status());}
 }

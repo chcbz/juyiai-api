@@ -58,6 +58,13 @@ class RecommendationMaterialsTest {
         assertEquals(1, rows.size()); assertEquals("image/png", rows.getFirst().material().contentMimeType());
         verify(files).versionsPage(FILE_SCOPE, "file", "old"); verify(files, times(1)).get(FILE_SCOPE, "file");
     }
+    @Test void sameFileInTwoRolesReadsOncePerObservationAndKeepsExactBytesOutsideText() {
+        single(); when(links.list(LINK_SCOPE,"task",null)).thenReturn(new LinkListView(List.of(
+                link("a","INPUT","ACTIVE"),link("b","REFERENCE","ACTIVE")),null));
+        var before = subject.observe(ACTOR,"task"); assertEquals(2,before.size()); assertEquals(30,before.getFirst().byteLength());
+        verify(files).get(FILE_SCOPE,"file"); subject.verifyUnchanged(ACTOR,"task",before);
+        verify(files,times(2)).get(FILE_SCOPE,"file");
+    }
     @Test void excludesDetachedAndOutputAndAllowsEmptyMaterials() {
         when(links.list(LINK_SCOPE, "task", null)).thenReturn(new LinkListView(List.of(link("a", "INPUT", "DETACHED"), link("b", "OUTPUT", "ACTIVE")), null));
         assertTrue(subject.observe(ACTOR, "task").isEmpty()); verifyNoInteractions(files);

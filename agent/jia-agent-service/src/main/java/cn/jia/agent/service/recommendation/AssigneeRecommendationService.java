@@ -67,7 +67,10 @@ public final class AssigneeRecommendationService {
     private record CandidateFacts(Agent agent,String provider, Map<String,CapabilityDocuments.Citation> citations) {
         boolean sameFacts(CandidateFacts now) {
             return agent.boundToMe()==now.agent.boundToMe() && Objects.equals(provider,now.provider)
-                    && agent.abilities().equals(now.agent.abilities()) && citations.equals(now.citations);
+                    && citations.size()==now.citations.size() && citations.entrySet().stream().allMatch(e -> {
+                        var current=now.citations.get(e.getKey());
+                        return current!=null && current.doc().equals(e.getValue().doc());
+                    });
         }
     }
     private Map<String,CandidateFacts> observe(Actor actor,String taskId) {
@@ -99,7 +102,8 @@ public final class AssigneeRecommendationService {
             }
             // No calibrated thresholds yet. A retrieval hit is a citation, not a capability verdict.
             String reason=evidence.isEmpty()?"当前没有可用于判断匹配度的检索依据。":"检索到相关能力声明，匹配等级尚未校准。";
-            rows.add(new Recommendation(c.agent,"UNKNOWN",reason,List.copyOf(evidence.values()),List.of()));
+            rows.add(new Recommendation(c.agent,"UNKNOWN",reason,List.copyOf(evidence.values()),
+                    "online".equalsIgnoreCase(c.agent.status()) ? List.of() : List.of("当前可能需要等待承办人就绪。")));
         }
         rows.sort(Comparator.comparing((Recommendation r)->!r.agent().boundToMe())); // stable within each group
         String state=switch(found.mode()){case "NOT_NEEDED"->"NO_CANDIDATES";case "HYBRID"->"NO_MATCH";default->"DEGRADED";};
