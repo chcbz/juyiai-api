@@ -33,9 +33,14 @@ final class CapabilityIndexWriter {
             if (e.status() != 409 || !"version_conflict_engine_exception".equals(e.error().type())) throw e;
         }
     }
+    boolean encoded(CapabilityDocuments.Doc doc) throws IOException {
+        // Dense vectors may be excluded from ES _source. Atomically store a small completion marker with the vector.
+        var r=clients.getObject().get(g->g.index(GENERATION+"_write").id(doc.id()).sourceIncludes("encoded"),Map.class);
+        return r.found()&&r.source()!=null&&Boolean.TRUE.equals(r.source().get("encoded"));
+    }
     void publishVector(CapabilityDocuments.Doc doc, Vector result) throws IOException {
         if (!doc.embedding().equals(result.identity())) throw new IllegalArgumentException("wrong capability encoding generation");
-        var source = new LinkedHashMap<>(source(doc)); source.put("vector",result.values());
+        var source = new LinkedHashMap<>(source(doc)); source.put("vector",result.values()); source.put("encoded",true);
         clients.getObject().index(b -> b.index(GENERATION+"_write").requireAlias(true).id(doc.id()).document(source));
     }
 }

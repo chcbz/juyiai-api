@@ -17,6 +17,7 @@
       "model": {"type": "keyword"},
       "dimensions": {"type": "integer"},
       "template_version": {"type": "keyword"},
+      "encoded": {"type": "boolean"},
       "vector": {"type": "dense_vector", "dims": 1024, "index": false}
     }
   }

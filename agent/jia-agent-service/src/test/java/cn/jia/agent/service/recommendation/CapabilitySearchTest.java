@@ -35,6 +35,25 @@ class CapabilitySearchTest {
         assertNotEquals(one.get(0).doc().id(),swapped.getFirst().doc().id());
         assertThrows(IllegalArgumentException.class,()->CapabilitySearch.batches(Set.of("other"),List.of(one.get(0).doc())));
     }
+    @Test void declaredRepairReadsScopeAndPublishesEveryKeywordBeforeAnyEncoding() throws Exception {
+        var facts=org.mockito.Mockito.mock(DeclaredCapabilityFacts.class);
+        var writer=org.mockito.Mockito.mock(CapabilityIndexWriter.class);
+        var encoder=org.mockito.Mockito.mock(TaskFeatureEncoder.class);
+        var schedules=org.mockito.Mockito.mock(cn.jia.task.scheduling.ScheduleService.class);
+        var repair=new DeclaredCapabilityRepair(schedules,new cn.jia.core.security.FixedTenantAdmissionPolicy("0","client"),facts,encoder,writer);
+        var key=new cn.jia.task.scheduling.ScheduleKey("client",repair.getName(),"7","");var invocation=new cn.jia.task.scheduling.ScheduledInvocation("0",key,1);
+        org.mockito.Mockito.when(facts.declaredCapabilities("0","client",7)).thenReturn(Optional.of(new DeclaredCapabilityFacts.Snapshot("0","client","provider","a",List.of("写作","调研"))));
+        org.mockito.Mockito.when(encoder.identity()).thenReturn(ID);
+        var docs=CapabilityDocuments.observe(OWNER,agent("a",List.of("写作","调研")),List.of(),ID);
+        org.mockito.Mockito.when(encoder.encode("写作")).thenThrow(new TaskFeatureEncoder.Unavailable());
+        assertThrows(TaskFeatureEncoder.Unavailable.class,()->repair.executeScheduled(invocation));
+        var order=org.mockito.Mockito.inOrder(writer,encoder);for(var d:docs)order.verify(writer).publishText(d.doc());order.verify(encoder).encode("写作");
+        org.mockito.Mockito.when(writer.encoded(org.mockito.ArgumentMatchers.any())).thenReturn(true);
+        org.mockito.Mockito.clearInvocations(writer,encoder);repair.executeScheduled(invocation);
+        org.mockito.Mockito.verify(encoder,org.mockito.Mockito.never()).encode(org.mockito.ArgumentMatchers.anyString());
+        org.mockito.Mockito.verify(writer,org.mockito.Mockito.never()).publishText(org.mockito.ArgumentMatchers.any());
+        assertThrows(IllegalArgumentException.class,()->repair.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("foreign",key,1)));
+    }
     @Test void oneRotatingPitAndAuthorizedFiltersForBothRankings() throws Exception { exchange(1,1,"HYBRID"); }
     @Test void missingVectorKeepsOnlyTrustedLexicalResults() throws Exception { exchange(1,0,"LEXICAL_ONLY"); }
     @Test void staleOrUnindexedDocumentsCannotBecomeNoMatch() throws Exception { exchange(0,0,"UNAVAILABLE"); }

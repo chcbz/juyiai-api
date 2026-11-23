@@ -24,13 +24,7 @@ final class CapabilityDocuments {
         String partition = digest("partition-v1", actor.tenantId(), actor.clientId());
         String agent = candidate.target().agentId();
         var docs = new LinkedHashMap<String,Citation>();
-        for (int i = 0; i < candidate.abilities().size(); i++) {
-            String text = TaskRetrievalText.normalized(candidate.abilities().get(i));
-            if (text.isEmpty()) continue;
-            String source = digest("declared-ability-v1", partition, agent, candidate.skillProviderOwnerJiacn(), text);
-            add(docs, partition, agent, source, digest("disclosed-ability-v1", source, text), text,
-                    generation, "ability:" + i);
-        }
+        for(var c:declared(actor.tenantId(),actor.clientId(),candidate.skillProviderOwnerJiacn(),agent,candidate.abilities(),generation))docs.put(c.doc().id(),c);
         for (int i = 0; i < skills.size(); i++) {
             var skill = skills.get(i);
             if (!skill.available()) continue;
@@ -39,6 +33,18 @@ final class CapabilityDocuments {
             String text = (title + "\n" + purpose).strip();
             if (!text.isEmpty()) add(docs, partition, agent, skill.evidenceKey(), skill.factDigest(), text,
                     generation, "public-skill:" + (i + 1));
+        }
+        return List.copyOf(docs.values());
+    }
+    static List<Citation> declared(String tenant,String client,String owner,String agent,List<String> abilities,Identity generation){
+        String partition=digest("partition-v1",tenant,client);
+        var docs=new LinkedHashMap<String,Citation>();
+        for (int i = 0; i < abilities.size(); i++) {
+            String text = TaskRetrievalText.normalized(abilities.get(i));
+            if (text.isEmpty()) continue;
+            String source = digest("declared-ability-v1", partition, agent, owner, text);
+            add(docs, partition, agent, source, digest("disclosed-ability-v1", source, text), text,
+                    generation, "ability:" + i);
         }
         return List.copyOf(docs.values());
     }

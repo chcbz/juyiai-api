@@ -432,6 +432,11 @@ class AgentExternalServicePolicyMySqlTest {
         assertEquals(java.util.Map.of(B,providerBinding,C,c),identities.activeBindingsForCandidates("0","client-a","provider",ids));
         jdbc.update("UPDATE agent_runtime SET abilities='[\"writing\"]' WHERE agent_id=?",B);
         var rows=runtimeRows.findOwnedCapabilityRows("0","client-a","provider",java.util.Set.of(A,B));
+        var scan=runtimeRows.capabilityRepairPage("0","client-a",0);
+        assertFalse(scan.isEmpty());var pk=scan.stream().map(r->r.getId()).filter(id->B.equals(runtimeRows.capabilityOwner("0","client-a",id).getAgentId())).findFirst().orElseThrow();
+        assertNull(runtimeRows.capabilityOwner("0","CLIENT-A",pk));assertNull(runtimeRows.capabilityOwner("other","client-a",pk));
+        var hint=runtimeRows.capabilityOwner("0","client-a",pk);assertEquals("provider",hint.getOwnerJiacn());assertNull(hint.getAbilities());assertNull(hint.getTokenHash());
+        assertTrue(runtimeRows.capabilityRepairPage("0","client-a",pk).stream().allMatch(r->r.getId()>pk));
         assertEquals(1,rows.size()); assertEquals(B,rows.getFirst().getAgentId()); assertEquals("[\"writing\"]",rows.getFirst().getAbilities());
         assertThrows(RuntimeException.class,()->identities.activeBindingsForCandidates("0","client-a","provider",java.util.Set.of(A,B)));
         jdbc.update("UPDATE agent_identity_alias SET audit_reason=' bad ' WHERE alias_value='legacy-c'");

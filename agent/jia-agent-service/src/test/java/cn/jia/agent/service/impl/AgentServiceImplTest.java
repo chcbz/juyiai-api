@@ -1691,6 +1691,12 @@ class AgentServiceImplTest extends BaseMockTest {
 
         List<AgentTaskAssigneeCandidateDTO> result = agentService.listTaskAssigneeCandidates("task-001");
 
+        when(agentRuntimeDao.capabilityOwner("0","fixture-client_id-1",71)).thenReturn(planner);
+        var one=java.util.Set.of("agent-wuyong");when(agentIdentityService.activeBindingsForCandidates("0","fixture-client_id-1","jiacn",one)).thenReturn(java.util.Map.of("agent-wuyong",1L));
+        when(agentRuntimeDao.findOwnedCapabilityRows("0","fixture-client_id-1","jiacn",one)).thenReturn(List.of(planner));
+        var background=agentService.declaredCapabilities("0","fixture-client_id-1",71).orElseThrow();assertEquals(List.of("planning","analysis"),background.abilities());
+        assertEquals("jiacn",background.owner());assertTrue(agentService.declaredCapabilities("0","fixture-client_id-1",72).isEmpty());
+        assertThrows(IllegalArgumentException.class,()->agentService.declaredCapabilities("other","fixture-client_id-1",71));
         assertEquals(5, result.size());
         assertEquals(List.of("agent-linchong", "agent-offline", "agent-error", "agent-busy", "agent-wuyong"),
                 result.stream().map(c -> c.target().agentId()).toList());
