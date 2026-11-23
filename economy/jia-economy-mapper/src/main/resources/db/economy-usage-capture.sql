@@ -106,3 +106,11 @@ CREATE TABLE IF NOT EXISTS economy_usage_capture_dispatch_group (
     capture_policy_version VARCHAR(100) NOT NULL, plan_evidence_sha256 CHAR(64) NOT NULL,
     PRIMARY KEY(capture_pk), CONSTRAINT fk_dispatch_group_capture FOREIGN KEY(capture_pk) REFERENCES economy_usage_capture(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Immutable eligibility and operation references. Normalized source quantities stay on their original source revision.
+CREATE TABLE IF NOT EXISTS economy_task_cost_sample_revision (
+    sample_id CHAR(64) NOT NULL, sample_revision BIGINT NOT NULL, terminal_fact_id CHAR(64) DEFAULT NULL,
+    sample_state VARCHAR(24) NOT NULL, reason_code VARCHAR(48) NOT NULL, member_count BIGINT NOT NULL,
+    operation_refs LONGTEXT NOT NULL, PRIMARY KEY(sample_id,sample_revision),
+    CONSTRAINT fk_cost_sample_revision FOREIGN KEY(sample_id) REFERENCES economy_task_cost_sample(sample_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

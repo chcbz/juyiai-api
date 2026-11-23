@@ -3,6 +3,8 @@ package cn.jia.economy.mapper;
 import cn.jia.economy.task.TaskBillingService.Task;
 import java.util.List;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Update;
 import org.apache.ibatis.annotations.Select;
 
 /** Only Economy projections; never read Agent task or runtime-state tables. */
@@ -23,6 +25,16 @@ public interface ConfirmedSampleMapper {
         WHERE s.sample_id=#{id} AND s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn}
           AND s.task_id=#{t.taskId} AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.benchmark_case_id IS NULL
         """) Header confirmed(@Param("t") Task task,@Param("id") String sampleId);
+    @Update("""
+        UPDATE economy_task_cost_sample SET projection_revision=#{rev},sample_state=#{state}
+        WHERE sample_id=#{id} AND tenant_id=#{t.scope.tenantId} AND client_id=#{t.scope.clientId} AND owner_jiacn=#{t.ownerJiacn} AND task_id=#{t.taskId}
+          AND evidence_revision=#{rev} AND (projection_revision IS NULL OR projection_revision<>#{rev})
+        """) int project(@Param("t") Task task,@Param("id") String sample,@Param("rev") long revision,@Param("state") String state);
+    @Insert("""
+        INSERT INTO economy_task_cost_sample_revision(sample_id,sample_revision,terminal_fact_id,sample_state,reason_code,member_count,operation_refs)
+        VALUES(#{id},#{rev},#{fact},#{state},#{reason},#{count},#{refs})
+        """) void append(@Param("id") String sample,@Param("rev") long revision,@Param("fact") String fact,@Param("state") String state,
+                          @Param("reason") String reason,@Param("count") long count,@Param("refs") String refs);
     record Member(long revision,String attached,String coverage,String groupVersion,String executionConfig,String route,String tools,String policy) {}
     @Select("""
         SELECT r.membership_revision,m.execution_id,c.coverage_state,g.group_version,g.execution_config_sha256,g.route_sha256,g.tool_config_sha256,g.capture_policy_version

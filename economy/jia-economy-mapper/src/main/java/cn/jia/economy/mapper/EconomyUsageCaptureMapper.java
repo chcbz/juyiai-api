@@ -32,6 +32,8 @@ public interface EconomyUsageCaptureMapper {
         AND tenant_id=#{k.tenant} AND client_id=#{k.client} AND input_revision=#{rev} AND conflict_reason IS NULL
         AND (projection_revision IS NULL OR projection_revision<>input_revision)
         """) int publishProjection(@Param("k") UsageCaptureProjection.Key key,@Param("rev") long revision,@Param("state") String state);
+    @Select("SELECT tenant_id,client_id,execution_id,run_id,capture_id,owner_jiacn,agent_id,task_id FROM economy_usage_capture WHERE id=#{pk} AND tenant_id=#{tenant} AND client_id=#{client}")
+    Binding projectionBinding(UsageCaptureProjection.Key key);
     @Insert("""
         INSERT INTO economy_usage_capture_dispatch_group(capture_pk,projection_revision,group_version,execution_config_sha256,
           route_sha256,tool_config_sha256,capture_policy_version,plan_evidence_sha256)

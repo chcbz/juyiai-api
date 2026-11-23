@@ -64,13 +64,17 @@ class CaptureProjectionMySqlTest extends SkillManagementMySqlFixture {
                 assertFalse(store.publish(key,old.inputRevision(),waiting));assertTrue(store.hasAssociated(key,sample));
                 assertFalse(store.hasAssociated(other,sample));assertTrue(store.page(other,"").isEmpty());
                 var fresh=store.pending(key);assertTrue(fresh.inputRevision()>old.inputRevision());assertEquals(2,store.page(key,"").size());
+                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state) VALUES(?,'t','c','own','task','quote','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',5,5,'READY')",sample,h,h,h);
+                jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?, 'exec','r',?)",sample,h);
                 var group=new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup("NATIVE_DISPATCH_GROUP_V1",sample,h,sample,"unverified",h);
                 assertFalse(store.publish(other,fresh.inputRevision(),waiting,group));assertFalse(store.publish(key,old.inputRevision(),waiting,group));
                 assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture_dispatch_group",Integer.class));
                 var broken=new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup("NATIVE_DISPATCH_GROUP_V1",null,h,sample,"unverified",h);
                 assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->store.publish(key,fresh.inputRevision(),waiting,broken));
+                assertEquals(5L,jdbc.queryForObject("SELECT evidence_revision FROM economy_task_cost_sample",Long.class));
                 assertEquals(fresh,store.pending(key));assertTrue(store.publish(key,fresh.inputRevision(),waiting,group));
                 assertEquals(h,jdbc.queryForObject("SELECT g.route_sha256 FROM economy_usage_capture_dispatch_group g JOIN economy_usage_capture c ON c.id=g.capture_pk AND c.input_revision=g.projection_revision AND c.projection_revision=g.projection_revision WHERE c.coverage_state='WAITING_EVIDENCE' AND g.plan_evidence_sha256=?",String.class,h));
+                assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE evidence_revision=6 AND projection_revision=5 AND sample_state='WAITING_EVIDENCE'",Integer.class));
                 assertNull(store.pending(key));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM task_scheduled_work",Integer.class));
             }finally{release.countDown();thread.shutdownNow();assertTrue(thread.awaitTermination(15,java.util.concurrent.TimeUnit.SECONDS));}
         }finally{admin.execute("DROP DATABASE `"+database+"`");}

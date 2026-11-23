@@ -138,6 +138,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.TaskMembershipSweep membershipSweep;
     private PersonalWorkspaceExecutionDaoImpl executionRows;
     private cn.jia.economy.usage.ConfirmedSampleEvidence sampleEvidence;
+    private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -253,6 +254,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 sql.getMapper(PersonalWorkspaceExecutionInputMapper.class),sql.getMapper(PersonalWorkspaceExecutionOutputMapper.class));
         var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
         sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
+        sampleProjection=proxy(new cn.jia.economy.service.impl.ConfirmedSampleProjectionService(sampleEvidence,sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper(),manager),cn.jia.economy.usage.ConfirmedSampleProjection.class);
         var schedules=new cn.jia.task.scheduling.ScheduledWorkStore(sql.getMapper(cn.jia.task.mapper.ScheduledWorkMapper.class),fixed,manager);
         var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
         var receipts=proxy(new cn.jia.economy.service.impl.TaskMembershipReceiptStore(sql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.usage.TaskMembershipReceipt.class);
@@ -540,8 +542,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder fixtureDecoder=textFixture(r->new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture",r.captureId()),"MODEL_RESPONSE","INFERENCE",r.evidenceSha(),new MeasuredTaskRepricing.Tokens("fixture",Map.of(ModelTokenPrice.Category.INPUT,1L))));
         var measured=sampleEvidence.measure(BILLING_TASK,sid,fixtureDecoder);assertEquals(65,measured.operations().size());assertEquals(65,measured.operations().stream().map(x->x.fact().operation()).distinct().count());
         var partial=sampleEvidence.measure(BILLING_TASK,sid,textFixture(r->r.memberRevision()==measured.operations().getLast().memberRevision()?null:fixtureDecoder.decode(r)));assertEquals("USAGE_INCOMPLETE",partial.assessment().verdict().name());assertTrue(partial.operations().isEmpty());
+        var firstLine=new java.util.concurrent.atomic.AtomicBoolean(true);
+        assertFalse(sampleProjection.refresh(BILLING_TASK,sid,textFixture(r->{if(firstLine.getAndSet(false)) independent.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1 WHERE sample_id=?",sid);return fixtureDecoder.decode(r);})));
+        assertEquals(0,count("economy_task_cost_sample_revision"));
+        assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertFalse(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));
+        assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operation_refs) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
+        jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'"); // synthetic source invalidation, journal/CAS tested independently
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
+        assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='EXCLUDED' AND reason_code='MIXED_EXECUTION_CONFIG'",Integer.class));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
+        jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'");
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");
         assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
     }
