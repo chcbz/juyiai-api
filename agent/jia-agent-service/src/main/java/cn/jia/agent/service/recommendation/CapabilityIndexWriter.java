@@ -33,6 +33,12 @@ final class CapabilityIndexWriter {
             if (e.status() != 409 || !"version_conflict_engine_exception".equals(e.error().type())) throw e;
         }
     }
+    void repair(java.util.List<CapabilityDocuments.Citation> docs,cn.jia.agent.service.TaskFeatureEncoder encoder) throws IOException {
+        // Publish all lexical documents first. Failure of the first encoding must not hide later keywords.
+        var missing=new java.util.ArrayList<CapabilityDocuments.Doc>();
+        for(var citation:docs){var doc=citation.doc();if(!encoded(doc)){publishText(doc);missing.add(doc);}}
+        for(var doc:missing)publishVector(doc,encoder.encode(doc.text()));
+    }
     boolean encoded(CapabilityDocuments.Doc doc) throws IOException {
         // Dense vectors may be excluded from ES _source. Atomically store a small completion marker with the vector.
         var r=clients.getObject().get(g->g.index(GENERATION+"_write").id(doc.id()).sourceIncludes("encoded"),Map.class);

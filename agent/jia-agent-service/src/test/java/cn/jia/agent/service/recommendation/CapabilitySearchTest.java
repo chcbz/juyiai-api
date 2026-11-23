@@ -38,6 +38,7 @@ class CapabilitySearchTest {
     @Test void declaredRepairReadsScopeAndPublishesEveryKeywordBeforeAnyEncoding() throws Exception {
         var facts=org.mockito.Mockito.mock(DeclaredCapabilityFacts.class);
         var writer=org.mockito.Mockito.mock(CapabilityIndexWriter.class);
+        org.mockito.Mockito.doCallRealMethod().when(writer).repair(org.mockito.ArgumentMatchers.anyList(),org.mockito.ArgumentMatchers.any());
         var encoder=org.mockito.Mockito.mock(TaskFeatureEncoder.class);
         var schedules=org.mockito.Mockito.mock(cn.jia.task.scheduling.ScheduleService.class);
         var repair=new DeclaredCapabilityRepair(schedules,new cn.jia.core.security.FixedTenantAdmissionPolicy("0","client"),facts,encoder,writer);
@@ -53,6 +54,25 @@ class CapabilitySearchTest {
         org.mockito.Mockito.verify(encoder,org.mockito.Mockito.never()).encode(org.mockito.ArgumentMatchers.anyString());
         org.mockito.Mockito.verify(writer,org.mockito.Mockito.never()).publishText(org.mockito.ArgumentMatchers.any());
         assertThrows(IllegalArgumentException.class,()->repair.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("foreign",key,1)));
+    }
+    @Test void skillSweepEmitsOnlyLocalHintsAndConsumerReadsAuthorityNotScheduledContents() throws Exception {
+        var hints=org.mockito.Mockito.mock(cn.jia.agent.service.SkillCatalogIndexHints.class);
+        var skills=org.mockito.Mockito.mock(cn.jia.agent.skill.SkillManagementService.class);
+        var schedules=org.mockito.Mockito.mock(cn.jia.task.scheduling.ScheduleService.class);
+        var writer=org.mockito.Mockito.mock(CapabilityIndexWriter.class);var encoder=org.mockito.Mockito.mock(TaskFeatureEncoder.class);
+        var repair=new SkillCapabilityRepair(new cn.jia.core.security.FixedTenantAdmissionPolicy("0",null),hints,skills,encoder,writer,schedules,
+                org.mockito.Mockito.mock(cn.jia.task.scheduling.CronScheduleService.class),org.mockito.Mockito.mock(org.springframework.transaction.PlatformTransactionManager.class),"node-a","0 17 * * * *");
+        var key=new cn.jia.task.scheduling.ScheduleKey("client",repair.getName(),"agent:a","node-a");
+        org.mockito.Mockito.when(hints.local("0",null)).thenReturn(List.of(new cn.jia.agent.service.SkillCatalogIndexHints.Key("0","client","a")));
+        repair.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("0",new cn.jia.task.scheduling.ScheduleKey("",repair.getName(),"cron:123","node-a"),1));
+        org.mockito.Mockito.verify(schedules).signal(org.mockito.ArgumentMatchers.eq(key),org.mockito.ArgumentMatchers.anyLong());
+        assertThrows(IllegalArgumentException.class,()->repair.executeScheduled(new cn.jia.task.scheduling.ScheduledInvocation("0",new cn.jia.task.scheduling.ScheduleKey("client",repair.getName(),"agent:a","node-b"),2)));
+        org.mockito.Mockito.verifyNoInteractions(skills,writer,encoder);
+        var skill=new RecommendationSkill("install","skill","1","识图","文字",true,"NOT_EXECUTABLE","INSTRUCTION","key","fact");
+        org.mockito.Mockito.when(encoder.identity()).thenReturn(ID);org.mockito.Mockito.when(skills.citableSkillPurposes("0","client","a")).thenReturn(List.of(skill),List.of());
+        var work=new cn.jia.task.scheduling.ScheduledInvocation("0",key,1);repair.executeScheduled(work);repair.executeScheduled(work);
+        var expected=CapabilityDocuments.observe(OWNER,agent("a",List.of()),List.of(skill),ID);
+        org.mockito.Mockito.verify(writer).repair(expected,encoder);org.mockito.Mockito.verifyNoMoreInteractions(writer);
     }
     @Test void oneRotatingPitAndAuthorizedFiltersForBothRankings() throws Exception { exchange(1,1,"HYBRID"); }
     @Test void missingVectorKeepsOnlyTrustedLexicalResults() throws Exception { exchange(1,0,"LEXICAL_ONLY"); }

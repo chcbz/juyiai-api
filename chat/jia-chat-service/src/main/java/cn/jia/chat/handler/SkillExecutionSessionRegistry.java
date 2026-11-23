@@ -12,7 +12,7 @@ import java.util.function.BooleanSupplier;
  * and a live-binding predicate, never identities or permissions taken from the skill report.
  * The actual authenticated WS registration adapter is a separate integration step. */
 @Component
-public final class SkillExecutionSessionRegistry implements SkillCapabilityLookup {
+public final class SkillExecutionSessionRegistry implements SkillCapabilityLookup, cn.jia.agent.service.SkillCatalogIndexHints {
     private record Key(String sessionId, String agentId) { }
     private record Entry(Key key, Scope scope, SessionFence fence, Catalog catalog, BooleanSupplier current) { }
     private final ConcurrentHashMap<Key, Entry> entries = new ConcurrentHashMap<>();
@@ -75,6 +75,11 @@ public final class SkillExecutionSessionRegistry implements SkillCapabilityLooku
         return new View(State.AVAILABLE, selected.key().sessionId(), selected.fence(), selected.catalog());
     }
 
+    @Override public java.util.List<cn.jia.agent.service.SkillCatalogIndexHints.Key> local(String tenant,String optionalClient){
+        // Weakly consistent hints. lookup() on the eventual claim rechecks the live predicate and ambiguity.
+        return entries.values().stream().map(Entry::scope).filter(s->tenant.equals(s.tenantId())&&(optionalClient==null||optionalClient.equals(s.clientId())))
+                .map(s->new cn.jia.agent.service.SkillCatalogIndexHints.Key(s.tenantId(),s.clientId(),s.agentId())).distinct().toList();
+    }
     private static boolean current(Entry entry) {
         try { return entry.current().getAsBoolean(); }
         catch (RuntimeException unavailable) { return false; }

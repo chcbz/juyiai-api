@@ -56,10 +56,11 @@ public final class SkillMarketplaceService {
         require(market.selectSkillProductsForUpdate(a.tenantId(),a.clientId(),skillKey).stream()
                 .noneMatch(product -> "POSITION".equals(product.getSkillType())),403,"POSITION_MANAGED_SKILL");
     }
-    public boolean available(HostingRentHttp.Actor a) {
+    public boolean available(HostingRentHttp.Actor a) {return available(a.tenantId(),a.clientId());}
+    boolean available(String tenant,String client) {
         var transport=writer.getIfAvailable();
         return packages.getIfAvailable()!=null
-                && transport!=null && transport.allows(a.tenantId(),a.clientId())
+                && transport!=null && transport.allows(tenant,client)
                 && authentication.getIfAvailable()!=null && sessions.getIfAvailable()!=null;
     }
     private boolean hostingSetupEnabled;

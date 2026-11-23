@@ -21,10 +21,14 @@ final class CapabilityDocuments {
 
     static List<Citation> observe(Actor actor, AgentTaskAssigneeCandidateDTO candidate,
                                   List<RecommendationSkill> skills, Identity generation) {
-        String partition = digest("partition-v1", actor.tenantId(), actor.clientId());
         String agent = candidate.target().agentId();
         var docs = new LinkedHashMap<String,Citation>();
         for(var c:declared(actor.tenantId(),actor.clientId(),candidate.skillProviderOwnerJiacn(),agent,candidate.abilities(),generation))docs.put(c.doc().id(),c);
+        for(var c:purposes(actor.tenantId(),actor.clientId(),agent,skills,generation))docs.put(c.doc().id(),c);
+        return List.copyOf(docs.values());
+    }
+    static List<Citation> purposes(String tenant,String client,String agent,List<RecommendationSkill> skills,Identity generation){
+        var docs=new LinkedHashMap<String,Citation>();String partition=digest("partition-v1",tenant,client);
         for (int i = 0; i < skills.size(); i++) {
             var skill = skills.get(i);
             if (!skill.available()) continue;

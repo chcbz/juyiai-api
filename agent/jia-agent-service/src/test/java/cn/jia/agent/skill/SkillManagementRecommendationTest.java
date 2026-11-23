@@ -124,6 +124,16 @@ class SkillManagementRecommendationTest {
         assertFalse(f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst().available());
         verify(f.db,times(3)).products("0","client");verify(f.market,times(3)).selectApprovedProductVersion("0","client","spv_vision");
     }
+    @Test void indexReadsOnlyCurrentProviderConfirmedPublicPurposesWithoutBorrowingAUser(){
+        var f=new Fixture();f.installed("a");when(f.marketplace.available("0","client")).thenReturn(true);
+        var online=f.service.recommendationSkills(ACTOR,candidates("a")).get("a");
+        assertEquals(online,f.service.citableSkillPurposes("0","client","a"));
+        f.states.get("a").setDesiredEnabled(false);assertTrue(f.service.citableSkillPurposes("0","client","a").isEmpty());
+        f.states.get("a").setDesiredEnabled(true);when(f.catalog.lookup(any(),any())).thenReturn(SkillCapabilityLookup.View.unavailable(SkillCapabilityLookup.State.FENCED));
+        assertTrue(f.service.citableSkillPurposes("0","client","a").isEmpty());
+        when(f.auth.currentRegisteredProof("0","client","a")).thenThrow(new IllegalArgumentException("offline"));
+        assertTrue(f.service.citableSkillPurposes("0","client","a").isEmpty());verifyNoInteractions(f.packages,f.writer,f.trade);
+    }
     @Test void fencedCatalogNeverProducesPositiveEvidence() {
         var f=new Fixture();f.installed("a");
         when(f.catalog.lookup(any(),any())).thenReturn(SkillCapabilityLookup.View.unavailable(SkillCapabilityLookup.State.FENCED));

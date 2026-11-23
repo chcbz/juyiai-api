@@ -37,9 +37,6 @@ public class DeclaredCapabilityRepair implements DeclaredCapabilityFacts.Changes
         var current=facts.declaredCapabilities(invocation.tenantId(),key.clientId(),Long.parseLong(key.businessKey()));
         if(current.isEmpty())return;
         var s=current.get();var docs=CapabilityDocuments.declared(s.tenant(),s.client(),s.owner(),s.agent(),s.abilities(),encoder.identity());
-        // Publish all lexical documents first. Failure of the first encoding must not hide later keywords.
-        var missing=new java.util.ArrayList<CapabilityDocuments.Doc>();
-        for(var citation:docs){var doc=citation.doc();if(!writer.encoded(doc)){writer.publishText(doc);missing.add(doc);}}
-        for(var doc:missing)writer.publishVector(doc,encoder.encode(doc.text()));
+        writer.repair(docs,encoder);
     }
 }
