@@ -1,5 +1,6 @@
 package cn.jia.agent.service.recommendation;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.entity.PersonalWorkspaceViews.VersionView;
 import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.agent.service.PersonalWorkspaceService;
@@ -40,7 +41,13 @@ public final class RecommendationMaterials {
         var byFile = new LinkedHashMap<String,List<LinkView>>();
         String cursor = null;
         do {
-            var page = links.list(linkScope, taskId, cursor);
+            PersonalWorkspaceTaskLinkService.LinkListView page;
+            try {
+                page = links.list(linkScope, taskId, cursor);
+            } catch (PersonalWorkspaceTaskLinkService.Failure failure) {
+                if (failure.getReason() != PersonalWorkspaceTaskLinkService.Reason.NOT_FOUND) throw failure;
+                throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND, failure);
+            }
             for (var link : page.items()) {
                 if ("ACTIVE".equals(link.state()) && ("INPUT".equals(link.role()) || "REFERENCE".equals(link.role())))
                     byFile.computeIfAbsent(link.fileId(), unused -> new ArrayList<>()).add(link);

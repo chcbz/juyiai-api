@@ -1,5 +1,6 @@
 package cn.jia.agent.api;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.service.recommendation.AssigneeRecommendationService;
 import cn.jia.core.config.ApiEnvelopeAdvice;
 import cn.jia.core.context.*;
@@ -48,6 +49,26 @@ class AssigneeRecommendationControllerTest {
         when(app.quote(any(),eq("task"),eq("key"),eq(intent))).thenThrow(new cn.jia.agent.service.TaskFeatureEncoder.InvalidResult(),new cn.jia.agent.service.TaskFeatureEncoder.Unavailable());
         api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isBadGateway()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_INVALID"));
         api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_UNAVAILABLE"));
+    }
+    @Test void recommendationAndQuoteDoNotDiscloseRevokedMaterialsOrHideStorageFailure() throws Exception {
+        var missing = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
+        var outage = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE);
+        when(service.recommend(any(), eq("task"), any())).thenThrow(missing, outage);
+        var app = mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        when(app.quote(any(), eq("task"), eq("key"), any())).thenThrow(missing, outage);
+        var api = MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app))
+                .setMessageConverters(new JacksonJsonHttpMessageConverter()).setControllerAdvice(new ApiEnvelopeAdvice())
+                .addFilters(new RequestIdFilter()).build();
+        for (boolean quote : List.of(false, true)) {
+            var request = post(quote ? "/agent/tasks/task/quotes" : "/agent/tasks/task/recommend").principal(login)
+                    .contentType(MediaType.APPLICATION_JSON).header("Idempotency-Key", "key")
+                    .content(quote ? BODY.replace("\"7\"", "\"7\",\"agentIds\":[\"a\"]") : BODY);
+            var client = quote ? api : mvc;
+            var prefix = quote ? "QUOTE" : "RECOMMENDATION";
+            client.perform(request).andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value(prefix + "_NOT_FOUND"))
+                    .andExpect(header().string("Cache-Control", "private, no-store"));
+            client.perform(request).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value(prefix + "_UNAVAILABLE"));
+        }
     }
     @AfterEach void cleanup() { EsContextHolder.clearContext(); }
     @Test void sameEndpointReturnsNewObjectInOneEnvelopeWithoutLegacyScores() throws Exception {

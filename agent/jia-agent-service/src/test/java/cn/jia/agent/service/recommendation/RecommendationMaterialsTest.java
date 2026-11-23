@@ -1,5 +1,6 @@
 package cn.jia.agent.service.recommendation;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.entity.PersonalWorkspaceViews.*;
 import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.agent.service.PersonalWorkspaceService;
@@ -83,6 +84,16 @@ class RecommendationMaterialsTest {
         when(links.list(LINK_SCOPE, "task", null)).thenReturn(new LinkListView(List.of(new LinkView("r", "task", "file", 102, "INPUT", "ACTIVE", 2, 123)), null));
         when(files.get(FILE_SCOPE, "file")).thenReturn(detail("图片", 1, List.of(version(102, "application/pdf"))));
         assertEquals(409, assertThrows(Failure.class, () -> subject.verifyUnchanged(ACTOR, "task", before)).status());
+    }
+    @Test void laterLinkPageAccessLossDoesNotReturnPartialInputsOrMaskAnOutage() {
+        when(links.list(LINK_SCOPE, "task", null)).thenReturn(new LinkListView(List.of(link("r", "INPUT", "ACTIVE")), "next"));
+        var outage = new PersonalWorkspaceTaskLinkService.Failure(PersonalWorkspaceTaskLinkService.Reason.UNAVAILABLE);
+        when(links.list(LINK_SCOPE, "task", "next")).thenThrow(new PersonalWorkspaceTaskLinkService.Failure(
+                PersonalWorkspaceTaskLinkService.Reason.NOT_FOUND), outage);
+        assertEquals(PersonalWorkspaceException.Reason.NOT_FOUND,
+                assertThrows(PersonalWorkspaceException.class, () -> subject.observe(ACTOR, "task")).getReason());
+        assertSame(outage, assertThrows(PersonalWorkspaceTaskLinkService.Failure.class, () -> subject.observe(ACTOR, "task")));
+        verifyNoInteractions(files);
     }
     @Test void metadataFailureIsNotTreatedAsNoAttachments() {
         single(); when(files.get(FILE_SCOPE, "file")).thenThrow(new IllegalStateException("unavailable"));

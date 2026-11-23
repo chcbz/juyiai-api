@@ -1,5 +1,6 @@
 package cn.jia.agent.api;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.agent.hosting.HostingRentApplicationException;
 import cn.jia.agent.service.impl.AgentServiceImpl;
@@ -59,6 +60,14 @@ public final class AssigneeRecommendationController {
             case NOT_FOUND, FORBIDDEN -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
             case VERSION_CONFLICT, INVALID_TRANSITION -> failure(new Failure(409, "RECOMMENDATION_STALE"));
             default -> failure(new Failure(503, "RECOMMENDATION_UNAVAILABLE"));
+        };
+    }
+    @ExceptionHandler(PersonalWorkspaceException.class)
+    public ResponseEntity<JsonResult<Void>> workspace(PersonalWorkspaceException error) {
+        return switch (error.getReason()) {
+            case NOT_FOUND -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+            case VERSION_CONFLICT, METADATA_CHANGED -> failure(new Failure(409, "RECOMMENDATION_STALE"));
+            default -> unavailable(error);
         };
     }
     @ExceptionHandler(RuntimeException.class)
