@@ -64,7 +64,13 @@ class CaptureProjectionMySqlTest extends SkillManagementMySqlFixture {
                 assertFalse(store.publish(key,old.inputRevision(),waiting));assertTrue(store.hasAssociated(key,sample));
                 assertFalse(store.hasAssociated(other,sample));assertTrue(store.page(other,"").isEmpty());
                 var fresh=store.pending(key);assertTrue(fresh.inputRevision()>old.inputRevision());assertEquals(2,store.page(key,"").size());
-                assertFalse(store.publish(other,fresh.inputRevision(),waiting));assertTrue(store.publish(key,fresh.inputRevision(),waiting));
+                var group=new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup("NATIVE_DISPATCH_GROUP_V1",sample,h,sample,"unverified",h);
+                assertFalse(store.publish(other,fresh.inputRevision(),waiting,group));assertFalse(store.publish(key,old.inputRevision(),waiting,group));
+                assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture_dispatch_group",Integer.class));
+                var broken=new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup("NATIVE_DISPATCH_GROUP_V1",null,h,sample,"unverified",h);
+                assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->store.publish(key,fresh.inputRevision(),waiting,broken));
+                assertEquals(fresh,store.pending(key));assertTrue(store.publish(key,fresh.inputRevision(),waiting,group));
+                assertEquals(h,jdbc.queryForObject("SELECT g.route_sha256 FROM economy_usage_capture_dispatch_group g JOIN economy_usage_capture c ON c.id=g.capture_pk AND c.input_revision=g.projection_revision AND c.projection_revision=g.projection_revision WHERE c.coverage_state='WAITING_EVIDENCE' AND g.plan_evidence_sha256=?",String.class,h));
                 assertNull(store.pending(key));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM task_scheduled_work",Integer.class));
             }finally{release.countDown();thread.shutdownNow();assertTrue(thread.awaitTermination(15,java.util.concurrent.TimeUnit.SECONDS));}
         }finally{admin.execute("DROP DATABASE `"+database+"`");}

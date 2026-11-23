@@ -97,3 +97,12 @@ CREATE TABLE IF NOT EXISTS economy_task_membership_received_run (
     PRIMARY KEY (tenant_id,client_id,fact_id,membership_revision), UNIQUE KEY uk_membership_received_run (tenant_id,client_id,fact_id,execution_id,run_id),
     CONSTRAINT fk_task_membership_receipt FOREIGN KEY (tenant_id,client_id,fact_id) REFERENCES economy_task_membership_receipt(tenant_id,client_id,fact_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Current typed dispatch facts. A row is usable only with matching CURRENT input/projection revision.
+-- Keeping this separate from the capture header avoids changing the existing capture lock/row shape.
+CREATE TABLE IF NOT EXISTS economy_usage_capture_dispatch_group (
+    capture_pk BIGINT NOT NULL, projection_revision BIGINT NOT NULL, group_version VARCHAR(64) NOT NULL,
+    execution_config_sha256 CHAR(64) NOT NULL, route_sha256 CHAR(64) NOT NULL, tool_config_sha256 CHAR(64) NOT NULL,
+    capture_policy_version VARCHAR(100) NOT NULL, plan_evidence_sha256 CHAR(64) NOT NULL,
+    PRIMARY KEY(capture_pk), CONSTRAINT fk_dispatch_group_capture FOREIGN KEY(capture_pk) REFERENCES economy_usage_capture(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

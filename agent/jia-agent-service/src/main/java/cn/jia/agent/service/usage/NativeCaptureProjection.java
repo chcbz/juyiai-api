@@ -35,6 +35,6 @@ public final class NativeCaptureProjection implements ScheduledJobHandler {
         var fold=new NativeCaptureCoverage(snap.captureId(),null);String after="";
         while(true){var page=store.page(k,after);if(page.isEmpty())break;for(var row:page)fold.accept(row);after=page.getLast().recordId();}
         // A newer input has its own transactional signal; never overwrite it or replay a provider call.
-        store.publish(k,snap.inputRevision(),fold.finish().state());
+        store.publish(k,snap.inputRevision(),fold.finish().state(),fold.dispatchGroup());
     }
 }

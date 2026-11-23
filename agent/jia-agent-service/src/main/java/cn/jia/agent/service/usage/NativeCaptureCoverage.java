@@ -57,6 +57,12 @@ final class NativeCaptureCoverage {
     }
     private static BigInteger number(JsonNode o,String name){return new BigInteger(o.get(name).asText());}
     private void count(JsonNode o,String field,long actual){int cmp=number(o,field).compareTo(BigInteger.valueOf(actual));if(cmp>0)waiting=true;if(cmp<0)incomplete=true;}
+    cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup dispatchGroup(){
+        if(plan==null || !plan.has("dispatchGroup"))return null;
+        var g=plan.get("dispatchGroup"); // Already validated by the wire adapter, linked to this exact associated PLAN head.
+        return new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup(g.get("version").asText(),g.get("executionConfigSha256").asText(),
+            g.get("routeSha256").asText(),g.get("toolConfigSha256").asText(),plan.get("coveragePolicyVersion").asText(),planSha);
+    }
     Result finish(){
         BigInteger observed=BigInteger.ZERO;
         if(plan==null||close==null)waiting=true;

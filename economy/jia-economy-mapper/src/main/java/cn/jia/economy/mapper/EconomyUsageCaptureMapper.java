@@ -32,6 +32,13 @@ public interface EconomyUsageCaptureMapper {
         AND tenant_id=#{k.tenant} AND client_id=#{k.client} AND input_revision=#{rev} AND conflict_reason IS NULL
         AND (projection_revision IS NULL OR projection_revision<>input_revision)
         """) int publishProjection(@Param("k") UsageCaptureProjection.Key key,@Param("rev") long revision,@Param("state") String state);
+    @Insert("""
+        INSERT INTO economy_usage_capture_dispatch_group(capture_pk,projection_revision,group_version,execution_config_sha256,
+          route_sha256,tool_config_sha256,capture_policy_version,plan_evidence_sha256)
+        VALUES(#{k.pk},#{rev},#{g.version},#{g.executionConfigSha256},#{g.routeSha256},#{g.toolConfigSha256},#{g.capturePolicyVersion},#{g.planEvidenceSha256})
+        ON DUPLICATE KEY UPDATE projection_revision=#{rev},group_version=#{g.version},execution_config_sha256=#{g.executionConfigSha256},
+          route_sha256=#{g.routeSha256},tool_config_sha256=#{g.toolConfigSha256},capture_policy_version=#{g.capturePolicyVersion},plan_evidence_sha256=#{g.planEvidenceSha256}
+        """) void saveDispatchGroup(@Param("k") UsageCaptureProjection.Key key,@Param("rev") long revision,@Param("g") UsageCaptureProjection.DispatchGroup group);
     record Binding(String tenantId,String clientId,String executionId,String runId,String captureId,
                    String ownerJiacn,String agentId,String taskId) {}
     record Capture(long id,String ownerJiacn,String agentId,String taskId,long inputRevision,

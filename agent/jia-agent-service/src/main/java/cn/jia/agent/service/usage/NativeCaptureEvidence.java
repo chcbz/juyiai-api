@@ -52,6 +52,7 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
             keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId");return;
         }
         keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId","dispatchGroup");
+        field(plan,"coveragePolicyVersion",ID);
         var g=obj(plan.get("dispatchGroup"));keys(g,"version","executionConfigSha256","routeSha256","toolConfigSha256");
         check("NATIVE_DISPATCH_GROUP_V1".equals(g.get("version")));
         for(String k:List.of("executionConfigSha256","routeSha256","toolConfigSha256"))field(g,k,SHA);

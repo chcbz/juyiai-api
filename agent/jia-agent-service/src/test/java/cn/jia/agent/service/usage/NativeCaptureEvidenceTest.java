@@ -12,6 +12,9 @@ class NativeCaptureEvidenceTest {
         NativeCaptureEvidence.planKeys(plan);var old=NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of());
         var group=new HashMap<String,Object>(Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256","b".repeat(64),"routeSha256","c".repeat(64),"toolConfigSha256","d".repeat(64)));
         plan.put("dispatchGroup",group);NativeCaptureEvidence.planKeys(plan);assertNotEquals(old,NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of()));
+        var fold=new NativeCaptureCoverage("cap",null);assertNull(fold.dispatchGroup());
+        var r=new cn.jia.economy.usage.UsageCaptureProjection.Row("record",1,"1","f".repeat(64),JSON.writeValueAsString(Map.of("captureId","cap","recordId","record","kind","PLAN","observation",plan)));
+        fold.accept(r);assertEquals("c".repeat(64),fold.dispatchGroup().routeSha256());assertEquals(r.evidenceSha256(),fold.dispatchGroup().planEvidenceSha256());assertNotEquals(cn.jia.economy.usage.UsageCaptureProjection.Coverage.COMPLETE,fold.finish().state());
         group.put("providerUrl","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));group.remove("providerUrl");
         group.put("routeSha256","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));
     }

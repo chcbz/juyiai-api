@@ -16,5 +16,11 @@ public class UsageCaptureProjectionStore implements UsageCaptureProjection {
     public boolean hasAssociated(Key key,String recordId){return db.hasProjectionHead(key,recordId);}
     public List<Row> page(Key key,String after){return db.projectionPage(key,after);}
     @Transactional(propagation=Propagation.REQUIRES_NEW)
-    public boolean publish(Key key,long revision,Coverage state){return db.publishProjection(key,revision,state.name())==1;}
+    public boolean publish(Key key,long revision,Coverage state,DispatchGroup group){
+        if(db.publishProjection(key,revision,state.name())!=1)return false;
+        if(group!=null)db.saveDispatchGroup(key,revision,group);
+        return true;
+    }
+    @Override @Transactional(propagation=Propagation.REQUIRES_NEW)
+    public boolean publish(Key key,long revision,Coverage state){return publish(key,revision,state,null);}
 }
