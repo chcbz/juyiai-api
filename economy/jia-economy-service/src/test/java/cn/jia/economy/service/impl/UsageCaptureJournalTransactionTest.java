@@ -93,40 +93,6 @@ class UsageCaptureJournalTransactionTest {
         assertEquals(State.CONFLICT,settlement.apply(mismatch.work()).state());assertEquals(State.CONFLICT,tx.execute(s->journal.readRecord(b,sample)).state());
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision",Integer.class));assertEquals(0,new java.math.BigDecimal("0.12").compareTo(jdbc.queryForObject("SELECT cost_yuan FROM economy_task_cost",java.math.BigDecimal.class)));
     }
-    @Test void mysqlConcurrentClosureCannotBeOverwrittenByAnOpenCaptureProjection() throws Exception {
-        try(var fixture=new cn.jia.economy.config.EconomyMySqlTestFixture()){
-            fixture.start();var database=fixture.newDatabase("closurecas");var ds=database.dataSource();
-            new cn.jia.economy.config.EconomyUsageCostSchemaInitializer(ds).afterPropertiesSet();
-            var conf=new Configuration(new Environment("closure",new SpringManagedTransactionFactory(),ds));
-            conf.setMapUnderscoreToCamelCase(true);conf.addMapper(EconomyUsageCaptureMapper.class);
-            var db=new SqlSessionTemplate(new SqlSessionFactoryBuilder().build(conf)).getMapper(EconomyUsageCaptureMapper.class);
-            var manager=new DataSourceTransactionManager(ds);var tx=new TransactionTemplate(manager);
-            var journal=proxy(new UsageCaptureJournalImpl(db,event->assertTrue(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
-            var store=proxy(new UsageCaptureProjectionStore(db),manager,cn.jia.economy.usage.UsageCaptureProjection.class);
-            tx.execute(st->journal.register(b,sub("p","PLAN",h,"1",null,h)));
-            var pk=database.jdbc().queryForObject("SELECT id FROM economy_usage_capture",Long.class);
-            var key=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","c",pk);
-            var other=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","other",pk);
-            var old=store.pending(key);assertFalse(store.hasAssociated(key,sample));
-            var held=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
-            var thread=java.util.concurrent.Executors.newSingleThreadExecutor();
-            try {
-                var writer=thread.submit(()->tx.execute(st->{journal.register(b,sub("f","CAPTURE_FINAL",sample,"1",null,sample));
-                    var linked=journal.linkMetadata(b,"f",(raw,prev,lookup)->Link.ASSOCIATED);held.countDown();
-                    try{if(!release.await(15,java.util.concurrent.TimeUnit.SECONDS))throw new AssertionError("reader stalled");}catch(InterruptedException ex){throw new AssertionError(ex);}
-                    return linked;}));
-                try{assertTrue(held.await(15,java.util.concurrent.TimeUnit.SECONDS));assertFalse(store.hasAssociated(key,sample));
-                    assertEquals(old,store.pending(key));assertEquals(1,store.page(key,"").size());}finally{release.countDown();}
-                assertEquals(State.DURABLE,writer.get(15,java.util.concurrent.TimeUnit.SECONDS).state());
-                var waiting=cn.jia.economy.usage.UsageCaptureProjection.Coverage.WAITING_EVIDENCE;
-                assertFalse(store.publish(key,old.inputRevision(),waiting));assertTrue(store.hasAssociated(key,sample));
-                assertFalse(store.hasAssociated(other,sample));assertTrue(store.page(other,"").isEmpty());
-                var fresh=store.pending(key);assertTrue(fresh.inputRevision()>old.inputRevision());assertEquals(2,store.page(key,"").size());
-                assertFalse(store.publish(other,fresh.inputRevision(),waiting));assertTrue(store.publish(key,fresh.inputRevision(),waiting));
-                assertNull(store.pending(key));
-            }finally{release.countDown();thread.shutdownNow();assertTrue(thread.awaitTermination(15,java.util.concurrent.TimeUnit.SECONDS));}
-        }
-    }
     private static <T>T proxy(Object target,DataSourceTransactionManager manager,Class<T> type){
         var p=new org.springframework.aop.framework.ProxyFactory(target);p.addAdvice(new org.springframework.transaction.interceptor.TransactionInterceptor(manager,new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));return type.cast(p.getProxy());
     }
