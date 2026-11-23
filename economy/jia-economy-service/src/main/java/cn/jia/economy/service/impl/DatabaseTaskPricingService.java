@@ -3,6 +3,8 @@ package cn.jia.economy.service.impl;
 import cn.jia.economy.entity.EconomyModelPriceRow;
 import cn.jia.economy.mapper.EconomyPriceCatalogMapper;
 import cn.jia.economy.pricing.ModelPriceCatalog;
+import cn.jia.economy.pricing.MeasuredTaskRepricing;
+import cn.jia.economy.pricing.TaskReferencePricing;
 import cn.jia.economy.pricing.ModelTokenPrice;
 import cn.jia.economy.pricing.TaskPricingService;
 import cn.jia.economy.pricing.TaskQuoteCalculator;
@@ -23,7 +25,7 @@ import static cn.jia.economy.pricing.TaskPricingService.Unavailable.Reason.*;
 
 /** Reads only the selected catalog keys in the caller's existing transaction. No price cache. */
 @Service
-public final class DatabaseTaskPricingService implements TaskPricingService, ModelPriceCatalog {
+public class DatabaseTaskPricingService implements TaskPricingService, ModelPriceCatalog, TaskReferencePricing {
     private final EconomyPriceCatalogMapper mapper;
     private final ObjectMapper json;
 
@@ -76,12 +78,31 @@ public final class DatabaseTaskPricingService implements TaskPricingService, Mod
         for (var entry : units.entrySet()) {
             if (entry.getValue().signum() == 0) continue;
             var key = entry.getKey();
-            var row = mapper.findCurrentTool(scope.tenantId(), scope.clientId(), key.channel(), key.tool(), key.unit());
-            if (row == null) throw new Unavailable(TOOL_PRICE_MISSING);
-            var data = json.readTree(row.getPriceDataJson());
-            tools.put(key, new TaskQuoteCalculator.ToolPrice(row.getPriceVersion(), text(data, "basis"), decimal(data, "yuanPerUnit")));
+            tools.put(key,toolPrice(scope,key));
         }
         return new PreparedQuote(estimate, price, tools, effective);
+    }
+
+    private TaskQuoteCalculator.ToolPrice toolPrice(EconomyScope scope,TaskQuoteCalculator.ToolKey key){
+        var row=mapper.findCurrentTool(scope.tenantId(),scope.clientId(),key.channel(),key.tool(),key.unit());
+        if(row==null)throw new Unavailable(TOOL_PRICE_MISSING);
+        var data=json.readTree(row.getPriceDataJson());return new TaskQuoteCalculator.ToolPrice(row.getPriceVersion(),text(data,"basis"),decimal(data,"yuanPerUnit"));
+    }
+    @Override
+    @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public MeasuredTaskRepricing.Reference freeze(EconomyScope scope,String version,Map<String,Map<String,Route>> contract,java.util.Set<String> kinds){
+        var cache=new java.util.HashMap<Route,MeasuredTaskRepricing.Rate>();var selected=new LinkedHashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
+        for(String kind:kinds){
+            var rules=contract.get(kind);if(rules==null||rules.isEmpty())throw new Unavailable(BILLING_ROUTE_MISSING);
+            var prices=new LinkedHashMap<String,MeasuredTaskRepricing.Rate>();
+            rules.forEach((component,rule)->prices.put(component,cache.computeIfAbsent(rule,r->switch(r){
+                case TokenRoute m -> new MeasuredTaskRepricing.TokenRate(m.normalizationBasis(),find(scope,m.channel(),m.model(),m.tier()).orElseThrow(()->new Unavailable(MODEL_PRICE_MISSING)));
+                case UnitRoute u -> new MeasuredTaskRepricing.UnitRate(u.tool(),toolPrice(scope,u.tool()));
+                case ZeroRoute z -> new MeasuredTaskRepricing.ExplicitZero(z.contractVersion());
+            })));
+            selected.put(kind,prices);
+        }
+        return new MeasuredTaskRepricing.Reference(version,selected);
     }
 
     private ModelTokenPrice modelPrice(EconomyModelPriceRow row) {

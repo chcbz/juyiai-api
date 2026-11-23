@@ -36,6 +36,18 @@ class DatabaseTaskPricingServiceTest {
     private static String tools(String units) {
         return "[{\"channel\":\"tool-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"" + units + "\"}]";
     }
+    @Test void measuredSamplesResolveEachRequiredReferenceRouteOnceWithoutEstimatedUnitsOrActualBills(){
+        price(DATA);var key=new TaskQuoteCalculator.ToolKey("tool-channel","render","image");
+        var row=new EconomyToolPriceRow();row.setPriceVersion("units-v1");row.setPriceDataJson("{\"basis\":\"reference\",\"yuanPerUnit\":\"0.15\"}");
+        when(mapper.findCurrentTool("tenant","client","tool-channel","render","image")).thenReturn(row);
+        var route=new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint");
+        Map<String,Map<String,TaskReferencePricing.Route>> rules=Map.of("text",Map.of("model",route),"combined",Map.of("model",route,"image",new TaskReferencePricing.UnitRoute(key)));
+        var book=service.freeze(scope,"contract-v1",rules,rules.keySet());verify(mapper,times(1)).findCurrentModel("tenant","client","channel","model","standard");
+        verify(mapper,never()).findTaskTariff(any(),any(),any());var op=new MeasuredTaskRepricing.Operation("gw","op");
+        var priced=MeasuredTaskRepricing.reprice(book,java.util.List.of(new MeasuredTaskRepricing.Fact(op,"combined","model","a",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,101L))),new MeasuredTaskRepricing.Fact(op,"combined","image","b",new MeasuredTaskRepricing.Units(key,new BigDecimal("2")))));
+        assertEquals(0,new BigDecimal("0.30013509558").compareTo(priced.yuan()));
+        assertEquals(MODEL_PRICE_MISSING,assertThrows(TaskPricingService.Unavailable.class,()->service.freeze(new EconomyScope("other","client"),"contract-v1",rules,java.util.Set.of("text"))).reason());
+    }
     @Test void missingModelsAndRoutesAreNotImplicitPrices() {
         assertEquals(BILLING_ROUTE_MISSING, assertThrows(TaskPricingService.Unavailable.class, () -> service.prepare(scope, work, null)).reason());
         verifyNoInteractions(mapper);
