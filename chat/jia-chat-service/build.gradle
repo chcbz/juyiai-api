@@ -471,6 +471,7 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     java.include 'cn/jia/agent/service/impl/NativeConversationQueueMySqlTest.java'
     java.include 'cn/jia/agent/service/impl/NativeConversationWorkDiscoveryMySqlTest.java'
     java.include 'cn/jia/agent/service/impl/TaskExecutionCancellationMySqlTest.java'
+    java.include 'cn/jia/agent/service/impl/MeteredPeerMySqlTest.java'
     java.include 'cn/jia/chat/service/WorkspaceProjectionQueryMySqlTest.java'
     java.include 'cn/jia/chat/api/ChatSkillResultControllerTest.java'
     java.include 'cn/jia/agent/service/impl/PersonalWorkspaceConversationExecutionTest.java'
@@ -515,6 +516,11 @@ tasks.register('nativeSkillResultRegression', Test) {
     classpath = nativeSkillResultSourceSet.runtimeClasspath
     useJUnitPlatform()
     maxParallelForks = 1
+    def meteredPeer = providers.gradleProperty('ownedMeteredRuntime')
+    if (meteredPeer.isPresent()) {
+        systemProperty 'ownedMeteredRuntime', meteredPeer.get()
+        filter.includeTestsMatching 'cn.jia.agent.service.impl.MeteredPeerMySqlTest.lostResponseAfterCommitReturnsOriginalMySqlRevision'
+    }
     filter {
         includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker'
         includeTestsMatching 'cn.jia.agent.skill.SkillExecutionServiceTest'
