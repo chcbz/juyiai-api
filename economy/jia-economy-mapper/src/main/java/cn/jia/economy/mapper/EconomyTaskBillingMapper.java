@@ -11,6 +11,17 @@ import org.apache.ibatis.annotations.Param;
 public interface EconomyTaskBillingMapper {
     String SCOPE = "tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn} AND task_id=#{taskId}";
 
+    record Batch(String inputSha,String responseJson) {}
+    String BATCH_KEY="tenant_id=#{k.task.scope.tenantId} AND client_id=#{k.task.scope.clientId} AND owner_jiacn=#{k.task.ownerJiacn} AND task_id=#{k.task.taskId} AND payer_user_id=#{k.payer} AND key_sha256=#{keySha}";
+    @Select("SELECT input_sha256,response_json FROM economy_task_quote_batch WHERE "+BATCH_KEY)
+    Batch readBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.Key key,@Param("keySha") String keySha);
+    @Select("SELECT input_sha256,response_json FROM economy_task_quote_batch WHERE "+BATCH_KEY+" FOR UPDATE")
+    Batch lockBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.Key key,@Param("keySha") String keySha);
+    @Insert("""
+        INSERT INTO economy_task_quote_batch(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,key_sha256,input_sha256,response_json)
+        VALUES(#{k.task.scope.tenantId},#{k.task.scope.clientId},#{k.task.ownerJiacn},#{k.task.taskId},#{k.payer},#{keySha},#{input},#{response})
+        """) void insertBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.Key key,@Param("keySha") String keySha,@Param("input") String input,@Param("response") String response);
+
     @Select("SELECT * FROM economy_task_quote WHERE " + SCOPE + " AND binding_sha256=#{bindingSha256}")
     EconomyTaskQuoteEntity findQuoteByBinding(@Param("tenantId") String tenant, @Param("clientId") String client,
             @Param("ownerJiacn") String owner, @Param("taskId") String task, @Param("bindingSha256") String binding);

@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.task.TaskQuoteBatches;
 import cn.jia.agent.common.TaskEventType;
 import cn.jia.agent.api.AgentTaskDeliberationOperationController;
 import cn.jia.chat.api.AgentTaskDeliveryReviewController;
@@ -93,6 +94,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private DataSourceTransactionManager manager;
     private AgentTaskMutationTransaction roots;
     private TaskBillingService billing;
+    private cn.jia.economy.task.TaskQuoteBatches batches;
     private AgentTaskExecutionGrantServiceImpl assignment;
     private AgentTaskFormalDeliveryDecisionService decisions;
     private AgentTaskCancellationService cancellation;
@@ -155,6 +157,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-hosting-rent.sql")).execute(source);
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/task-scheduled-work-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(source);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-batch-v1.sql")).execute(source);
         manager = new DataSourceTransactionManager(source);
         var config = new MybatisConfiguration(); config.setMapUnderscoreToCamelCase(true);
         for (Class<?> mapper : List.of(AgentTaskMetaMapper.class, AgentTaskMemberMapper.class,
@@ -193,6 +196,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var pricing = TaskPricingTestFixture.install(jdbc, new cn.jia.economy.service.EconomyScope(TENANT, CLIENT),
                 List.of(new ModelTokenPrice("fixture", "fixture-model", "standard", "1", "synthetic fixture",
                         Map.of(ModelTokenPrice.Category.INPUT, new BigDecimal("0.50")), null, Map.of())));
+        batches=proxy(new cn.jia.economy.service.impl.TaskQuoteBatchStore(sql.getMapper(EconomyTaskBillingMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskQuoteBatches.class);
         billing = proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class), ledger,
                 new EconomyPostingServiceImpl(ledger, manager, new EconomyPreviewGate(new EconomyPreviewProperties(
                         true, List.of(new EconomyPreviewProperties.AllowedScope(TENANT, CLIENT))))),
@@ -461,6 +465,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(2, count("economy_transaction")); assertEquals("CAPTURED", charge());
     }
 
+    @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
+        var task=new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK);var key=new TaskQuoteBatches.Key(task,PAYER,"same-key");
+        var input=new TaskQuoteBatches.Intent("4",List.of("z","a","z"));assertEquals(List.of("a","z"),input.agentIds());
+        var writes=new java.util.concurrent.atomic.AtomicInteger();java.util.function.Function<String,List<TaskQuoteBatches.Item>> persist=id->{writes.incrementAndGet();return input.agentIds().stream().map(agent->new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.UNAVAILABLE,null,id,null,TaskQuoteBatches.Reason.NO_BASELINE,null)).toList();};
+        var start=new CountDownLatch(1);TaskQuoteBatches.Result winner;
+        try(var pool=Executors.newFixedThreadPool(2)){var a=pool.submit(()->{start.await();return locked(()->batches.commit(key,input,persist));});var b=pool.submit(()->{start.await();return locked(()->batches.commit(key,input,persist));});start.countDown();winner=a.get(20,TimeUnit.SECONDS);assertEquals(winner,b.get(20,TimeUnit.SECONDS));}
+        assertEquals(1,writes.get());assertEquals(winner,batches.replay(key,new TaskQuoteBatches.Intent("4",List.of("a","z"))));
+        assertThrows(TaskQuoteBatches.IntentConflict.class,()->batches.replay(key,new TaskQuoteBatches.Intent("5",List.of("z","a"))));
+        assertNull(batches.replay(new TaskQuoteBatches.Key(task,"different-payer","same-key"),input));
+        var fresh=new TaskQuoteBatches.Key(task,PAYER,"another-key");assertThrows(InjectedFailure.class,()->locked(()->{batches.commit(fresh,input,persist);throw new InjectedFailure();}));assertNull(batches.replay(fresh,input));
+        assertEquals(1,count("economy_task_quote_batch"));
+    }
     @Test void frozenMembersResumeAfterLostAckAndCorruptLastPageCannotVerify() {
         assign();prepareSubmitted();
         locked(()->{for(int i=0;i<65;i++) {var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("exec"+i).setRunId("r"+i).setRequestHash("a".repeat(64));
