@@ -28,7 +28,14 @@ public final class NativeResponseOrigin {
         if(!source.get("parentSourceRecordId").isNull()||!source.get("previousEpochSourceRecordId").isNull())return CONFLICT;
         if(!"METERED_HTTP_RESPONSES_V1".equals(source.get("sourceKind").asText()))return WAIT;
         String attempt=NativeCaptureEvidence.digest(List.of("NATIVE_RESPONSE_USAGE",source.get("channelNamespace").asText(),r.get("providerResponseId").asText()));
-        return attempt.equals(r.get("sourceAttemptId").asText())?new Origin(attempt,false,evidence.get("observedAt").asLong()):CONFLICT;
+        if(!attempt.equals(r.get("sourceAttemptId").asText()))return CONFLICT;
+        var actual=r.get("actualBillingIdentity");var q=r.get("measuredQuantities");
+        java.util.Map<String,String> tokens=null;
+        if(!q.isNull()){
+            tokens=new java.util.HashMap<>();for(var entry:q.get("tokens").properties())tokens.put(entry.getKey(),entry.getValue().asText());
+        }
+        var facts=new cn.jia.economy.usage.UsageCaptureJournal.Facts(actual.isNull()?null:actual.get("channel").asText(),actual.isNull()?null:actual.get("model").asText(),actual.isNull()?null:actual.get("tier").asText(),q.isNull()?null:q.get("normalizationBasis").asText(),tokens==null?null:java.util.Map.copyOf(tokens));
+        return new Origin(attempt,false,evidence.get("observedAt").asLong(),facts);
     }
     private static boolean containsFacts(JsonNode current,JsonNode previous){
         if(previous==null||previous.isNull())return true;

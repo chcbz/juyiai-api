@@ -72,7 +72,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         var costBinding=new UsageCostService.Binding(new EconomyScope(b.tenantId(),b.clientId()),b.ownerJiacn(),b.taskId(),"NATIVE_RESPONSE_USAGE",origin.attemptId());
         // Runtime's current HTTP adapter has no attested actual billing identity or price. Retain all measured evidence independently.
         var observation=new UsageCostService.Observation(costBinding,receiptId,expected,response.evidenceJson(),null,null,origin.observedAt());
-        return new Result(State.PENDING,null,new Work(b,receipt.requestSha256(),observation));
+        return new Result(State.PENDING,null,new Work(b,receipt.requestSha256(),observation,origin.facts()));
     }
     private Result rejectCas(long pk,String receipt){if(db.rejectCas(pk,receipt)!=1)throw new IllegalStateException("CAS state changed");return status(State.CONFLICT);}
     @Transactional(propagation=Propagation.REQUIRES_NEW,rollbackFor=Exception.class)

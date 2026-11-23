@@ -6,12 +6,15 @@ public interface UsageCaptureJournal {
     record Submission(String requestId,String requestSha256,String receiptId,String kind,String recordId,String sourceRevision,
                       String previousEvidenceSha256,String evidenceSha256,String expectedRevision,String canonicalEvidence,String bindingSha256) {}
     enum State { DURABLE, PENDING, CONFLICT, NOT_FOUND }
-    record Work(Binding binding,String requestHash,UsageCostService.Observation observation) {}
+    record Facts(String channel,String model,String tier,String normalizationBasis,java.util.Map<String,String> quantities) {}
+    record Work(Binding binding,String requestHash,UsageCostService.Observation observation,Facts facts) {}
     record Result(State state,String ackJson,Work work) { public Result(State state,String ackJson){this(state,ackJson,null);} }
     interface Settlement { Result apply(Work work); }
     Result finish(Work work,UsageCostService.Receipt applied,UsageCostConflict.Reason rejected);
     /** Adapter receives only previously registered bytes for this capture. Null attempt = missing/unsupported source. */
-    record Origin(String attemptId,boolean conflict,long observedAt) {}
+    record Origin(String attemptId,boolean conflict,long observedAt,Facts facts) {
+        public Origin(String attemptId,boolean conflict,long observedAt){this(attemptId,conflict,observedAt,null);}
+    }
     interface ResponseOrigin { Origin resolve(String response,String previous,java.util.function.Function<String,String> firstRevision); }
     Result bindResponse(Binding trusted,String receiptId,ResponseOrigin adapter);
     Result register(Binding trusted,Submission source);

@@ -50,12 +50,22 @@ class UsageCaptureJournalTransactionTest {
         var jdbc=new JdbcTemplate(ds);assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision",Integer.class));assertEquals(1L,jdbc.queryForObject("SELECT pending_usage FROM economy_task_cost",Long.class));
         var before=tx.execute(s->journal.readRecord(b,sample));var json=new tools.jackson.databind.ObjectMapper();assertEquals("1",json.readTree(before.ackJson()).get("sourceRevision").asText());
         // A distinct accepted ledger revision does not rewrite the old source ACK or advance sourceRevision.
-        costs.record(new cn.jia.economy.usage.UsageCostService.Observation(work.observation().binding(),"independent",1,"{}",null,null,124));
+        var category=cn.jia.economy.pricing.ModelTokenPrice.Category.INPUT;
+        var price=new cn.jia.economy.pricing.ModelTokenPrice("fixture","actual","standard","r","fixture-only",java.util.Map.of(category,new java.math.BigDecimal("1.2")),null,java.util.Map.of());
+        var usage=new cn.jia.economy.usage.TokenUsageCost.Usage("fixture","actual","standard","disjoint",java.util.Map.of(category,100000L));
+        costs.record(new cn.jia.economy.usage.UsageCostService.Observation(work.observation().binding(),"independent",1,"{}",usage,price,124));
         var repriced=tx.execute(s->journal.readRecord(b,sample));assertEquals("2",json.readTree(repriced.ackJson()).get("ledgerRevision").asText());
-        var next=tx.execute(s->journal.bindResponse(b,"r2",(raw,previous,lookup)->{assertEquals(first.canonicalEvidence(),previous);return new Origin(sample,false,125);}));
+        var next=tx.execute(s->journal.bindResponse(b,"r2",(raw,previous,lookup)->{assertEquals(first.canonicalEvidence(),previous);return new Origin(sample,false,125,new Facts(null,null,null,"disjoint",java.util.Map.of("INPUT","100000")));}));
         assertEquals(State.DURABLE,settlement.apply(next.work()).state());var head=json.readTree(tx.execute(s->journal.readRecord(b,sample)).ackJson());assertEquals("2",head.get("sourceRevision").asText());assertEquals("3",head.get("ledgerRevision").asText());assertEquals(sample,head.get("evidenceSha256").asText());
         assertEquals(ack,tx.execute(s->journal.readReceipt(b,"r1")));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_attempt",Integer.class));
+        assertEquals(0,new java.math.BigDecimal("0.12").compareTo(jdbc.queryForObject("SELECT cost_yuan FROM economy_task_cost",java.math.BigDecimal.class)));
+        assertEquals(usage,costs.observationAt(work.observation().binding(),3).orElseThrow().normalizedUsage());
+        assertEquals(State.DURABLE,settlement.apply(next.work()).state());
+        var third=new Submission("q3",h,"r3","RESPONSE",sample,"3",sample,h,"3","{\"test\":3}",h);
         var plan=sub("plan","PLAN",h,"1",null,h);tx.execute(s->journal.register(b,plan));assertTrue(json.readTree(tx.execute(s->journal.readRecord(b,h)).ackJson()).get("ledgerRevision").isNull());
+        tx.execute(s->journal.register(b,third));var mismatch=tx.execute(s->journal.bindResponse(b,"r3",(raw,previous,lookup)->new Origin(sample,false,126,new Facts(null,null,null,"disjoint",java.util.Map.of("INPUT","100001")))));
+        assertEquals(State.CONFLICT,settlement.apply(mismatch.work()).state());assertEquals(State.CONFLICT,tx.execute(s->journal.readRecord(b,sample)).state());
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision",Integer.class));assertEquals(0,new java.math.BigDecimal("0.12").compareTo(jdbc.queryForObject("SELECT cost_yuan FROM economy_task_cost",java.math.BigDecimal.class)));
     }
     private static <T>T proxy(Object target,DataSourceTransactionManager manager,Class<T> type){
         var p=new org.springframework.aop.framework.ProxyFactory(target);p.addAdvice(new org.springframework.transaction.interceptor.TransactionInterceptor(manager,new org.springframework.transaction.annotation.AnnotationTransactionAttributeSource()));return type.cast(p.getProxy());

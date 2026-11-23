@@ -46,5 +46,7 @@ public interface UsageCostService {
     Receipt record(Observation observation);
     /** Retained source observation for stable redelivery and pre-call price reuse. */
     java.util.Optional<Observation> observation(Binding binding, String receiptId);
+    /** Immutable accepted revision; never substitutes latest pricing for a source replay. */
+    java.util.Optional<Observation> observationAt(Binding binding,long acceptedRevision);
     Summary summary(EconomyScope scope, String ownerJiacn, String taskId);
 }
