@@ -65,7 +65,8 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,size+1);
         boolean more=rows.size()>size;
         var page=rows.subList(0,Math.min(size,rows.size()));
-        return new Candidates(page.stream().map(i->candidateSummary(scope,i)).toList(),more?page.getLast().agentId():null);
+        var ready=pageReadiness(scope,page);
+        return new Candidates(page.stream().map(i->candidateSummary(scope,i,ready)).toList(),more?page.getLast().agentId():null);
     }
     public List<AgentTaskAssigneeCandidateDTO> recommendationCandidates(AgentTaskExecutionGrantService.Scope scope,String task) {
         requireTask(scope,task);
@@ -75,16 +76,27 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
             // Same SQL authority as the public picker: active binding, same scope, owned or external opt-in.
             var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,101);
             var page=rows.subList(0,Math.min(100,rows.size()));
-            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(candidateSummary(scope,identity),List.of(),identity.ownerJiacn()));
+            var ready=pageReadiness(scope,page);
+            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(candidateSummary(scope,identity,ready),List.of(),identity.ownerJiacn()));
             if(rows.size()<=100)return List.copyOf(result);
             String next=page.getLast().agentId();
             if(next.equals(after))throw new IllegalStateException("Candidate pagination did not advance");
             after=next;
         }
     }
-    private AgentTaskTargetSummaryDTO candidateSummary(AgentTaskExecutionGrantService.Scope scope,AgentExternalServicePolicyDao.CandidateRow row) {
-        boolean ready=row.status()!=null && deliberationRuntime.ready(new TaskDeliberationRuntimeLookup.Scope(
-                scope.tenantId(),scope.clientId(),row.ownerJiacn(),row.agentId()));
+    private Set<TaskDeliberationRuntimeLookup.Scope> pageReadiness(AgentTaskExecutionGrantService.Scope scope,
+            List<AgentExternalServicePolicyDao.CandidateRow> page) {
+        var targets=new HashSet<TaskDeliberationRuntimeLookup.Scope>();
+        for(var row:page) if(row.status()!=null) targets.add(executorScope(scope,row));
+        return targets.isEmpty()?Set.of():deliberationRuntime.readyScopes(targets);
+    }
+    private static TaskDeliberationRuntimeLookup.Scope executorScope(AgentTaskExecutionGrantService.Scope scope,
+            AgentExternalServicePolicyDao.CandidateRow row) {
+        return new TaskDeliberationRuntimeLookup.Scope(scope.tenantId(),scope.clientId(),row.ownerJiacn(),row.agentId());
+    }
+    private AgentTaskTargetSummaryDTO candidateSummary(AgentTaskExecutionGrantService.Scope scope,AgentExternalServicePolicyDao.CandidateRow row,
+            Set<TaskDeliberationRuntimeLookup.Scope> readyScopes) {
+        boolean ready=row.status()!=null && readyScopes.contains(executorScope(scope,row));
         return new AgentTaskTargetSummaryDTO(row.agentId(),row.displayName(),null,
                 scope.ownerJiacn().equals(row.ownerJiacn()),ready?row.status():"unavailable");
     }

@@ -8,6 +8,25 @@ class TypedDeliberationSessionRegistryTest {
     private final TypedDeliberationSessionRegistry registry=new TypedDeliberationSessionRegistry();
     private final TypedDeliberationSessionRegistry.Scope scope=
             new TypedDeliberationSessionRegistry.Scope("0","owner","client");
+    @Test void pageReadinessMatchesLiveAdmissionWithoutInspectingForeignBindings() {
+        var requested = new java.util.HashSet<cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope>();
+        var raw = TypedDeliberationDeclarationTest.declaration("READY");
+        for (int i=0; i<129; i++) {
+            String id="agent-"+i, owner="owner-"+(i%3);
+            requested.add(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0","client",owner,id));
+            registry.register("s"+i,"0",owner,"client",id,raw);
+            registry.register("foreign"+i,"1",owner,"client",id,raw,()->{throw new AssertionError("foreign binding read");});
+        }
+        var live = new AtomicBoolean(true);
+        registry.register("duplicate","0","owner-0","client","agent-0",TypedDeliberationDeclarationTest.declaration("UNAVAILABLE"),live::get);
+        assertEquals(128,registry.readyScopes(requested).size());
+        for (var target:requested) assertEquals(!target.agentId().equals("agent-0"),registry.ready(target));
+        live.set(false);
+        assertEquals(requested,registry.readyScopes(requested));
+        registry.remove("s0");
+        assertFalse(registry.readyScopes(requested).contains(new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0","client","owner-0","agent-0")));
+    }
+
     @Test void assignmentReadinessRequiresDiscussionProtocolAndLiveBindingNotOutputFormats() {
         var executor = new cn.jia.agent.service.TaskDeliberationRuntimeLookup.Scope("0", "client", "owner", "agent");
         assertFalse(registry.ready(executor));

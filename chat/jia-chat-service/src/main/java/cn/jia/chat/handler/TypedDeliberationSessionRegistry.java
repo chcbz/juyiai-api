@@ -1,5 +1,8 @@
 package cn.jia.chat.handler;
 
+import cn.jia.agent.service.TaskDeliberationRuntimeLookup;
+import java.util.HashSet;
+import java.util.Set;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -83,6 +86,21 @@ public final class TypedDeliberationSessionRegistry implements cn.jia.agent.serv
             requireSingleReady(new Scope(scope.tenantId(), scope.ownerJiacn(), scope.clientId()), scope.agentId());
             return true;
         } catch (IllegalStateException unavailable) { return false; }
+    }
+
+    @Override public Set<TaskDeliberationRuntimeLookup.Scope> readyScopes(Set<TaskDeliberationRuntimeLookup.Scope> requested) {
+        if (requested.isEmpty()) return Set.of();
+        var seen = new HashSet<TaskDeliberationRuntimeLookup.Scope>();
+        var ready = new HashSet<TaskDeliberationRuntimeLookup.Scope>();
+        for (Session session : sessions.values()) {
+            var scope = session.scope();
+            var target = new TaskDeliberationRuntimeLookup.Scope(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), session.agentId());
+            if (!requested.contains(target) || !current(session)) continue;
+            // Count current sessions regardless of declaration: READY + UNAVAILABLE is ambiguous.
+            if (!seen.add(target)) ready.remove(target);
+            else if (session.declaration().state() == TypedDeliberationDeclaration.State.READY) ready.add(target);
+        }
+        return Set.copyOf(ready);
     }
 
     /** Observation only. Discussion readiness does not require file-generation
