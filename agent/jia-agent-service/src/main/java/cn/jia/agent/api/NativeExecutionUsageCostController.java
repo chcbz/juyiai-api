@@ -29,9 +29,11 @@ public final class NativeExecutionUsageCostController {
     private static final ObjectMapper JSON=new ObjectMapper();
     private final NativeCaptureAuthority authority;
     private final UsageCaptureJournal journal;
+    private final cn.jia.agent.service.usage.NativeCaptureRecovery recovery;
     private final UsageCaptureJournal.Settlement settlement;
     public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,
-            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal,UsageCaptureJournal.Settlement settlement) {
+            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal,UsageCaptureJournal.Settlement settlement,cn.jia.agent.service.usage.NativeCaptureRecovery recovery) {
+        this.recovery=recovery;
         this.settlement=settlement;
         this.authority=authority;this.journal=journal;
         this.recorder = recorder; this.authentication = authentication;
@@ -54,9 +56,11 @@ public final class NativeExecutionUsageCostController {
                 var binding=authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId);
                 var registered=journal.register(binding,submission);
                 if(registered.state()==UsageCaptureJournal.State.DURABLE&&"SOURCE".equals(e.kind()))
-                    return journal.linkSource(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::resolve);
-                return registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
+                    registered=journal.linkSource(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::resolve);
+                registered=registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
                         ?journal.bindResponse(binding,e.receiptId(),cn.jia.agent.service.usage.NativeResponseOrigin::resolve):registered;
+                if(registered.recoveryPk()!=0)recovery.signal(binding,e.receiptId(),registered.recoveryPk());
+                return registered;
             });
             return response(result.work()==null?result:settlement.apply(result.work())); // original fence transaction has committed
         } catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}

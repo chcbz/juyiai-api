@@ -42,7 +42,11 @@ class UsageCaptureJournalTransactionTest {
         assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->tx.execute(s->settlement.apply(work)));
         costs.record(work.observation()); // simulated stop before saving ACK
         assertEquals(State.PENDING,tx.execute(s->journal.readReceipt(b,"r1")).state());
-        var recovered=tx.execute(s->journal.bindResponse(b,"r1",adapter)).work();assertEquals(work,recovered);
+        long pk=tx.execute(s->journal.bindResponse(b,"r1",adapter)).recoveryPk();assertTrue(pk>0);
+        assertEquals(State.NOT_FOUND,tx.execute(s->journal.recover("other","c",pk,"r1",null,adapter)).state());
+        assertEquals(State.NOT_FOUND,tx.execute(s->journal.recover("t","other",pk,"r1",null,adapter)).state());
+        assertEquals(0,tx.execute(s->journal.recover("t","c",pk,"bad",null,adapter)).recoveryPk());
+        var recovered=tx.execute(s->journal.recover("t","c",pk,"r1",null,adapter)).work();assertEquals(work,recovered);
         var ack=settlement.apply(recovered);assertEquals(State.DURABLE,ack.state());
         var ledger=new tools.jackson.databind.ObjectMapper().readTree(ack.ackJson()).get("ledger");assertEquals("1",ledger.get("revision").asText());assertTrue(ledger.get("costYuan").isNull());assertEquals("PENDING_USAGE",ledger.get("status").asText());
         assertEquals(ack,tx.execute(s->journal.readReceipt(b,"r1")));assertEquals(ack,settlement.apply(work));
@@ -65,7 +69,8 @@ class UsageCaptureJournalTransactionTest {
         var plan=sub("plan","PLAN",h,"1",null,h);tx.execute(s->journal.register(b,plan));assertTrue(json.readTree(tx.execute(s->journal.readRecord(b,h)).ackJson()).get("ledgerRevision").isNull());
         String srcId="9".repeat(64);var src=sub("src","SOURCE",srcId,"1",null,sample);tx.execute(s->journal.register(b,src));
         assertEquals(State.DURABLE,tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->Link.WAITING)).state());assertEquals(State.PENDING,tx.execute(s->journal.readRecord(b,srcId)).state());
-        tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->{assertTrue(lookup.apply(h).associated());return Link.ASSOCIATED;}));
+        assertEquals(pk,tx.execute(s->journal.recover("t","c",pk,"src",(raw,lookup)->Link.WAITING,null)).recoveryPk());
+        assertEquals(0,tx.execute(s->journal.recover("t","c",pk,"src",(ignored,lookup)->{assertTrue(lookup.apply(h).associated());return Link.ASSOCIATED;},null)).recoveryPk());
         assertEquals(State.DURABLE,tx.execute(s->journal.readRecord(b,srcId)).state());tx.execute(s->journal.linkSource(b,"src",(ignored,lookup)->{throw new AssertionError("already associated");}));
         tx.execute(s->journal.register(b,third));var mismatch=tx.execute(s->journal.bindResponse(b,"r3",(raw,previous,lookup)->new Origin(sample,false,126,new Facts(null,null,null,"disjoint",java.util.Map.of("INPUT","100001")))));
         assertEquals(State.CONFLICT,settlement.apply(mismatch.work()).state());assertEquals(State.CONFLICT,tx.execute(s->journal.readRecord(b,sample)).state());

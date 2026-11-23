@@ -41,17 +41,25 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
     private LinkedEvidence dependency(long pk,String id){
         var first=db.evidence(pk,id,key(BigInteger.ONE));return first==null?null:new LinkedEvidence(db.head(pk,id)!=null,first.evidenceJson());
     }
+    public Result recover(String tenant,String client,long pk,String receipt,SourceLinks links,ResponseOrigin origin){
+        var r=db.recovery(tenant,client,pk,receipt);if(r==null)return status(State.NOT_FOUND);
+        var b=new Binding(r.tenantId(),r.clientId(),r.ownerJiacn(),r.agentId(),r.taskId(),r.executionId(),r.runId(),r.captureId());
+        return switch(r.kind()){case "SOURCE" -> linkSource(b,receipt,links);case "RESPONSE" -> bindResponse(b,receipt,origin);default -> status(State.NOT_FOUND);};
+    }
+    private static Result waiting(Result r,long pk){return new Result(r.state(),r.ackJson(),r.work(),pk);}
     public Result linkSource(Binding b,String receiptId,SourceLinks adapter){
         var binding=key(b);var members=b.taskId()==null?List.<String>of():db.lockMembers(binding);
         var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);if(c.conflictReason()!=null)return status(State.CONFLICT);
         long pk=c.id();var r=db.receipt(pk,receiptId);var result=stored(r);if(result.state()!=State.DURABLE)return result;
         var e=db.evidence(pk,r.recordId(),r.revisionKey());if(!"SOURCE".equals(e.kind()))throw new IllegalStateException("Not a SOURCE receipt");
         var current=db.head(pk,r.recordId());var n=new BigInteger(e.sourceRevision());
-        if(current==null?!BigInteger.ONE.equals(n):!new BigInteger(current.sourceRevision()).add(BigInteger.ONE).equals(n))return result;
+        var head=current==null?BigInteger.ZERO:new BigInteger(current.sourceRevision());
+        if(n.compareTo(head)<=0)return result;
+        if(!head.add(BigInteger.ONE).equals(n))return waiting(result,pk);
         var relation=adapter.resolve(e.evidenceJson(),id->dependency(pk,id));
         if(relation==Link.CONFLICT)return conflict(pk,members,"SOURCE_LINEAGE");
         if(relation==Link.ASSOCIATED){publishHead(pk,e.recordId(),r.revisionKey(),null);change(pk,members,null);}
-        return result; // durable receipt does not assert association, cost or coverage
+        return relation==Link.WAITING?waiting(result,pk):result; // durable receipt does not assert association, cost or coverage
     }
     /** Source ownership is decided before the separate ledger transaction, never by ledger owner/task alone. */
     public Result bindResponse(Binding b,String receiptId,ResponseOrigin adapter){
@@ -59,6 +67,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         var c=db.lockCapture(binding);if(!matches(b,c))return status(State.NOT_FOUND);
         long pk=c.id();if(c.conflictReason()!=null)return status(State.CONFLICT);
         var receipt=db.receipt(pk,receiptId);var result=stored(receipt);if(result.state()!=State.PENDING)return result;
+        result=waiting(result,pk);
         var response=db.evidence(pk,receipt.recordId(),receipt.revisionKey());
         if(response==null||!"RESPONSE".equals(response.kind()))throw new IllegalStateException("Missing pending response");
         // A future revision may arrive first; do not let a gap reserve a provider identity.
@@ -87,7 +96,7 @@ public class UsageCaptureJournalImpl implements UsageCaptureJournal {
         var costBinding=new UsageCostService.Binding(new EconomyScope(b.tenantId(),b.clientId()),b.ownerJiacn(),b.taskId(),"NATIVE_RESPONSE_USAGE",origin.attemptId());
         // Runtime's current HTTP adapter has no attested actual billing identity or price. Retain all measured evidence independently.
         var observation=new UsageCostService.Observation(costBinding,receiptId,expected,response.evidenceJson(),null,null,origin.observedAt());
-        return new Result(State.PENDING,null,new Work(b,receipt.requestSha256(),observation,origin.facts()));
+        return new Result(State.PENDING,null,new Work(b,receipt.requestSha256(),observation,origin.facts()),pk);
     }
     private Result rejectCas(long pk,String receipt){if(db.rejectCas(pk,receipt)!=1)throw new IllegalStateException("CAS state changed");return status(State.CONFLICT);}
     @Transactional(propagation=Propagation.REQUIRES_NEW,rollbackFor=Exception.class)

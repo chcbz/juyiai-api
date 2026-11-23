@@ -70,6 +70,13 @@ public interface EconomyUsageCaptureMapper {
     int publishHead(@Param("pk") long pk,@Param("id") String id,@Param("key") String key,@Param("attempt") String attempt);
     @Select("SELECT revision FROM economy_usage_attempt WHERE tenant_id=#{tenant} AND client_id=#{client} AND attempt_id=#{attempt} FOR UPDATE")
     Long ledgerRevision(@Param("tenant") String tenant,@Param("client") String client,@Param("attempt") String attempt);
+    record Recovery(String tenantId,String clientId,String ownerJiacn,String agentId,String taskId,String executionId,String runId,String captureId,String kind) {}
+    @Select("""
+        SELECT c.tenant_id,c.client_id,c.owner_jiacn,c.agent_id,c.task_id,c.execution_id,c.run_id,c.capture_id,e.kind
+        FROM economy_usage_capture c JOIN economy_usage_capture_receipt r ON r.capture_pk=c.id
+        JOIN economy_usage_capture_record e ON e.capture_pk=r.capture_pk AND e.record_id=r.record_id AND e.revision_key=r.revision_key
+        WHERE c.id=#{pk} AND c.tenant_id=#{tenant} AND c.client_id=#{client} AND r.receipt_id=#{receipt}
+        """) Recovery recovery(@Param("tenant") String tenant,@Param("client") String client,@Param("pk") long pk,@Param("receipt") String receipt);
     record Origin(String tenantId,String clientId,String sourceAttemptId,long capturePk,String recordId) {}
     @Insert("""
         INSERT INTO economy_usage_response_origin (tenant_id,client_id,source_attempt_id,capture_pk,record_id)
