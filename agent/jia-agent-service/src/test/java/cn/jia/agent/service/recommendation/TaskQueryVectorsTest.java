@@ -63,7 +63,7 @@ class TaskQueryVectorsTest {
             .when(roots).executeWithLockedTaskRootInOwnerScope(eq(OWNER.tenantId()),eq(OWNER.clientId()),eq(OWNER.ownerJiacn()),eq("task"),any());
         var batches=mock(cn.jia.economy.task.TaskQuoteBatches.class);
         var requirements=mock(cn.jia.agent.service.AgentTaskRequirementSnapshotService.class);var grants=mock(cn.jia.agent.service.AgentTaskExecutionGrantService.class);
-        var agents=mock(cn.jia.agent.service.AgentService.class);var materials=mock(RecommendationMaterials.class);var features=mock(QuoteFeaturePreparation.class);
+        var agents=mock(cn.jia.agent.service.AgentExternalServicePolicyService.class);var materials=mock(RecommendationMaterials.class);var features=mock(QuoteFeaturePreparation.class);
         var service=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials,features);
         var intent=new cn.jia.economy.task.TaskQuoteBatches.Intent("3",List.of("agent"));var original=new cn.jia.economy.task.TaskQuoteBatches.Result("task","3",11,List.of());
         when(batches.replay(any(),eq(intent))).thenReturn(original);assertSame(original,((TaskQuoteIntentService.Replay)service.begin(OWNER,"task","key",intent)).stored());

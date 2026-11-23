@@ -100,6 +100,16 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         return new AgentTaskTargetSummaryDTO(row.agentId(),row.displayName(),null,
                 scope.ownerJiacn().equals(row.ownerJiacn()),ready?row.status():"unavailable");
     }
+    public List<QuoteTarget> quoteTargets(AgentTaskExecutionGrantService.Scope scope,String task,List<String> ids,boolean locking){
+        if(locking && !org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
+        requireTask(scope,task);var ordered=new java.util.TreeSet<>(ids);var keys=List.copyOf(ordered);var byId=new java.util.HashMap<String,QuoteTarget>();
+        for(int i=0;i<keys.size();i+=128){var chunk=keys.subList(i,Math.min(i+128,keys.size()));
+            for(var row:policies.selected(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),chunk,locking)){
+                if(row.revision()==null)continue;
+                if(ordered.contains(row.agent()) && byId.put(row.agent(),new QuoteTarget(row.agent(),row.provider(),row.binding(),row.revision()))!=null)throw new IllegalStateException("Ambiguous quote target");
+            }}
+        return keys.stream().map(byId::get).filter(Objects::nonNull).toList();
+    }
     public AgentTaskTargetSummaryDTO assignedTarget(AgentTaskExecutionGrantService.Scope scope,String task) {
         requireTask(scope,task);
         var grant=grants.findActiveByTask(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task);

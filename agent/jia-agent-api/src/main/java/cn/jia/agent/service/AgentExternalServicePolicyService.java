@@ -10,5 +10,8 @@ public interface AgentExternalServicePolicyService {
     Candidates candidates(AgentTaskExecutionGrantService.Scope scope,String taskId,String afterAgentId,int pageSize);
     /** Internal projection for task-authorized recommendations; not a management permission or HTTP DTO. */
     List<cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO> recommendationCandidates(AgentTaskExecutionGrantService.Scope scope,String taskId);
+    record QuoteTarget(String agent,String provider,long binding,long externalPolicyRevision){}
+    /** Exact requested subset. For final revalidation the caller already holds the scoped task root. */
+    List<QuoteTarget> quoteTargets(AgentTaskExecutionGrantService.Scope scope,String taskId,List<String> ids,boolean locking);
     AgentTaskTargetSummaryDTO assignedTarget(AgentTaskExecutionGrantService.Scope scope,String taskId);
 }

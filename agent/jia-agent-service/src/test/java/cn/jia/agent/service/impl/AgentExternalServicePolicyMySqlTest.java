@@ -444,6 +444,9 @@ class AgentExternalServicePolicyMySqlTest {
     }
     @Test void recommendationProjectionDoesNotDiscloseAnotherScopeRuntimeOrDropAuthorizedIdentity() {
         policies.write(PROVIDER, B, "open", true, 0);
+        var picks=policies.quoteTargets(TASK_OWNER,"task-a",List.of(B,"absent"),false);assertEquals(List.of(B),picks.stream().map(cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget::agent).toList());
+        assertEquals(1,picks.getFirst().externalPolicyRevision());assertEquals(providerBinding,picks.getFirst().binding());
+        assertEquals(picks,new TransactionTemplate(transactions).execute(st->policies.quoteTargets(TASK_OWNER,"task-a",List.of(B),true)));
         jdbc.update("UPDATE agent_runtime SET name='display-ok' WHERE agent_id=?", B);
         assertEquals("display-ok",policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target().displayName());
         for (String mutation : List.of("tenant_id='1'", "client_id='CLIENT-A'", "owner_jiacn='PROVIDER'", "binding_id=binding_id+1")) {

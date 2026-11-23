@@ -1,9 +1,9 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.common.AgentTaskStoredLists;
-import cn.jia.agent.entity.AgentTaskAssigneeCandidateDTO;
+import cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget;
 import cn.jia.agent.hosting.HostingRentHttp.Actor;
-import cn.jia.agent.service.AgentService;
+import cn.jia.agent.service.AgentExternalServicePolicyService;
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
 import cn.jia.agent.service.AgentTaskRequirementSnapshotService;
@@ -21,13 +21,13 @@ final class TaskQuoteIntentService {
     sealed interface Start permits Replay,Fresh {}
     record Replay(TaskQuoteBatches.Result stored) implements Start {}
     record Fresh(TaskQuoteBatches.Key key,TaskQuoteBatches.Intent intent,long requirementRevision,
-                 TaskEstimateFeatures features,List<AgentTaskAssigneeCandidateDTO> candidates) implements Start {}
+                 TaskEstimateFeatures features,List<QuoteTarget> candidates,List<RecommendationMaterials.Observation> metadata) implements Start {}
     private record Read(TaskQuoteBatches.Result replay,AgentTaskRequirementSnapshotService.CurrentSnapshot requirement,
                         List<String> abilities,AgentTaskExecutionGrantService.InputCatalogue catalogue){}
     private final AgentTaskMutationTransaction roots;private final TaskQuoteBatches batches;private final AgentTaskRequirementSnapshotService requirements;
-    private final AgentTaskExecutionGrantService grants;private final AgentService agents;private final RecommendationMaterials materials;private final QuoteFeaturePreparation features;
+    private final AgentTaskExecutionGrantService grants;private final AgentExternalServicePolicyService agents;private final RecommendationMaterials materials;private final QuoteFeaturePreparation features;
     TaskQuoteIntentService(AgentTaskMutationTransaction roots,TaskQuoteBatches batches,AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,
-                           AgentService agents,RecommendationMaterials materials,QuoteFeaturePreparation features){this.roots=roots;this.batches=batches;this.requirements=requirements;this.grants=grants;this.agents=agents;this.materials=materials;this.features=features;}
+                           AgentExternalServicePolicyService agents,RecommendationMaterials materials,QuoteFeaturePreparation features){this.roots=roots;this.batches=batches;this.requirements=requirements;this.grants=grants;this.agents=agents;this.materials=materials;this.features=features;}
     Start begin(Actor actor,String task,String idempotencyKey,TaskQuoteBatches.Intent intent){
         var key=new TaskQuoteBatches.Key(new TaskBillingService.Task(actor.scope(),actor.ownerJiacn(),task),actor.actorId(),idempotencyKey);
         var scope=new AgentTaskExecutionGrantService.Scope(actor.tenantId(),actor.clientId(),actor.ownerJiacn());
@@ -37,11 +37,22 @@ final class TaskQuoteIntentService {
             return new Read(null,requirements.readCurrent(scope,task),AgentTaskStoredLists.read(root.getRequiredAbilities()),grants.snapshotTaskInputsWithinLockedTask(scope,task));
         });
         if(read.replay()!=null)return new Replay(read.replay());
-        var selected=authorized(task,intent.agentIds());var input=features.observe(read.requirement(),read.abilities(),read.catalogue(),materials.observe(actor,task));
-        return new Fresh(key,intent,input.requirementRevision(),features.prepare(actor,input),selected);
+        var selected=authorized(scope,task,intent.agentIds(),false);var meta=materials.observe(actor,task);var input=features.observe(read.requirement(),read.abilities(),read.catalogue(),meta);
+        return new Fresh(key,intent,input.requirementRevision(),features.prepare(actor,input),selected,List.copyOf(meta));
     }
-    List<AgentTaskAssigneeCandidateDTO> authorized(String task,List<String> ids){
-        var rows=new HashMap<String,AgentTaskAssigneeCandidateDTO>();for(var c:agents.listTaskAssigneeCandidates(task))rows.put(c.target().agentId(),c);
-        return ids.stream().map(id->{var row=rows.get(id);if(row==null)throw new CandidateNotAuthorized();return row;}).toList();
+    private List<QuoteTarget> authorized(AgentTaskExecutionGrantService.Scope scope,String task,List<String> ids,boolean locking){
+        var targets=agents.quoteTargets(scope,task,ids,locking);if(!ids.equals(targets.stream().map(QuoteTarget::agent).toList()))throw new CandidateNotAuthorized();return targets;
+    }
+    TaskQuoteBatches.Result finish(Actor actor,Fresh start,java.util.function.Function<String,List<TaskQuoteBatches.Item>> write){
+        var key=start.key();var id=key.task().taskId();var scope=new AgentTaskExecutionGrantService.Scope(actor.tenantId(),actor.clientId(),actor.ownerJiacn());
+        return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),id,root->batches.commit(key,start.intent(),batch->{
+            if(!"open".equals(root.getRewardStatus())||!start.intent().expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
+            var current=requirements.readCurrent(scope,id);var catalogue=grants.snapshotTaskInputsWithinLockedTask(scope,id);
+            if(current.requirementRevision()!=start.requirementRevision()||!current.sha256().equals(start.features().requirementSha256())||!catalogue.digest().equals(start.features().inputSnapshotSha256()))throw new Stale();
+            var meta=materials.observe(actor,id);if(!start.metadata().equals(meta))throw new Stale();
+            var observed=features.observe(current,AgentTaskStoredLists.read(root.getRequiredAbilities()),catalogue,meta);
+            if(!observed.text().sha256().equals(start.features().textSha256())||!start.candidates().equals(authorized(scope,id,start.intent().agentIds(),true)))throw new Stale();
+            return write.apply(batch);
+        }));
     }
 }
