@@ -14,7 +14,7 @@ import java.util.*;
 /** Folds strictly ordered, capture-scoped associated heads. Association already proves an acyclic rooted
  * source lineage and request -> response ownership. This verifies the exact CLOSED set, not just ancestry. */
 final class NativeCaptureCoverage {
-    record Policy(String configSha,String engine,String policy,String adapter,String basis) {}
+    record Policy(String configSha,String engine,String policy,String adapter,String basis,String channelNamespace) {}
     record Result(Coverage state,BigInteger observedTokens) {}
     private static final ObjectMapper JSON=new ObjectMapper();
     private static final class Tuples {
@@ -71,7 +71,7 @@ final class NativeCaptureCoverage {
         if(close!=null){count(close,"sourceCount",groups.size());if(!Objects.equals(planSha,close.get("planEvidenceSha256").asText())||!finals.finish().equals(close.get("sourcesSha256").asText())||!drained(close))incomplete=true;}
         for(var g:groups.values()){
             if(g.source==null||g.closed==null)waiting=true;
-            if(g.source!=null&&trusted!=null&&trusted.adapter().equals(g.source.get("adapterVersion").asText())&&"METERED_HTTP_RESPONSES_V1".equals(g.source.get("sourceKind").asText()))observed=observed.add(g.quantity);else incomplete=true;
+            if(g.source!=null&&trusted!=null&&trusted.adapter().equals(g.source.get("adapterVersion").asText())&&trusted.channelNamespace().equals(g.source.get("channelNamespace").asText())&&"METERED_HTTP_RESPONSES_V1".equals(g.source.get("sourceKind").asText()))observed=observed.add(g.quantity);else incomplete=true;
             if(g.closed==null)continue;
             count(g.closed,"requestCount",g.requests);count(g.closed,"responseCount",g.responses);
             // Positive sequence is part of record identity; n distinct sequences with maximum n are exactly [1,n].

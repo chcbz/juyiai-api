@@ -54,6 +54,8 @@ public final class NativeExecutionUsageCostController {
         try {
             var result=authentication.withNativeFence(principal,()->{
                 var binding=authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId);
+                if("PLAN".equals(e.kind())&&!authority.matchesPlan(binding,e.snapshotSha256()))
+                    return new UsageCaptureJournal.Result(UsageCaptureJournal.State.CONFLICT,null);
                 var registered=journal.register(binding,submission);
                 if(registered.state()==UsageCaptureJournal.State.DURABLE&&!"RESPONSE".equals(e.kind()))
                     registered=journal.linkMetadata(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::metadata);

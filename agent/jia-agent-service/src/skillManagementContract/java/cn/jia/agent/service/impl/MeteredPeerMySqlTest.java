@@ -68,6 +68,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         jdbc.update("INSERT INTO agent_task_execution_grant(grant_id,tenant_id,client_id,owner_jiacn,task_id,requirement_revision,assignment_revision,target_agent_id,executor_owner_jiacn,executor_binding_id,permitted_operations_json,permitted_tool_policy_ref,input_scope_json,source_business_action_id,idempotency_key,request_hash,policy_revision,grant_version,state,issued_by,created_at) VALUES('g','0','client','owner','task',1,1,?,'executor',77,'[]','policy','{}','action','key',REPEAT('a',64),'v',1,'REVOKED','owner',1)",AGENT);
         row("exec1","owner","task","CONVERSATION","RESULT_COMMITTED",6);
         jdbc.update("UPDATE agent_personal_workspace_execution SET target_agent_id=?,task_grant_id='g',task_grant_version=1,usage_mode='RESPONSE_V2',capture_protocol='METERED_CAPTURE_V2' WHERE execution_id='exec1'",AGENT);
+        skill("exec1","COMPLETE");
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
         for(var cl:List.of(AgentRuntimeMapper.class,AgentRuntimeV1InstallationMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentPersonaBindingMapper.class,EconomyUsageCostMapper.class,EconomyUsageCaptureMapper.class,ScheduledWorkMapper.class)) config.addMapper(cl);
         var factory=new MybatisSqlSessionFactoryBean();factory.setConfiguration(config);factory.setDataSource(ds);
@@ -87,7 +88,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var cost=transactional(new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class),json),UsageCostService.class,manager);
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);
         var recovery=new NativeCaptureRecovery(journal,settle,scope,schedules,manager);
-        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions),journal,settle,recovery);
+        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions,skills),journal,settle,recovery);
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
         var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
@@ -102,7 +103,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
-            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
+            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
                 var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}

@@ -52,7 +52,8 @@ class NativeExecutionUsageCostControllerTest {
         var principal=new AgentRuntimeAuthentication(new AgentRuntimeAuthentication.Scope("t","client","executor","agent","instance"));
         principal.setDetails(new AgentRuntimeAuthenticationService.Proof(principal.getPrincipal(),"installation","host",1,"digest",1,1));
         when(auth.withNativeFence(eq(principal),any())).thenAnswer(i->((Supplier<?>)i.getArgument(1)).get());
-        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions),journal,null,null);
+        var snapshots=mock(cn.jia.agent.dao.SkillExecutionDao.class);
+        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions,snapshots),journal,null,null);
         var json=new ObjectMapper();try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var m=json.readTree(in).get("cases").get(0).get("messages").get(0);var d=m.get("request").get("body").get("data");
             String exec=d.get("executionId").asText(),run=d.get("runId").asText(),receipt=d.get("receiptId").asText();
@@ -62,6 +63,13 @@ class NativeExecutionUsageCostControllerTest {
             when(journal.register(any(),any())).thenAnswer(i->{var b=i.getArgument(0,cn.jia.economy.usage.UsageCaptureJournal.Binding.class);assertEquals("original",b.ownerJiacn());assertEquals("original-task",b.taskId());return accepted;});
             when(journal.linkMetadata(any(),eq(receipt),any())).thenReturn(accepted);
             java.util.Map<String,Object> payload=json.convertValue(d,java.util.Map.class);
+            assertEquals(409,ctrl.submit(exec,run,new JsonRequest<>(1,receipt,payload),receipt,principal).getStatusCode().value());
+            ((java.util.Map<String,Object>)payload.get("observation")).put("snapshotSha256","a".repeat(64));
+            var evidence=new java.util.HashMap<>(payload);for(String k:java.util.List.of("expectedRevision","receiptId","evidenceSha256"))evidence.remove(k);
+            payload.put("evidenceSha256",cn.jia.agent.service.usage.NativeCaptureEvidence.digest(evidence));
+            when(snapshots.snapshotDigest("t","client","original",exec)).thenReturn("b".repeat(64));
+            assertEquals(409,ctrl.submit(exec,run,new JsonRequest<>(1,receipt,payload),receipt,principal).getStatusCode().value());verifyNoInteractions(journal);
+            when(snapshots.snapshotDigest("t","client","original",exec)).thenReturn("a".repeat(64));
             assertEquals(200,ctrl.submit(exec,run,new JsonRequest<>(1,receipt,payload),receipt,principal).getStatusCode().value());
             when(journal.readReceipt(any(),eq(receipt))).thenReturn(accepted);assertEquals(200,ctrl.receipt(exec,run,receipt,principal).getStatusCode().value());
             assertThrows(cn.jia.agent.service.PersonalWorkspaceExecutionService.Failure.class,()->ctrl.receipt(exec,"other",receipt,principal));

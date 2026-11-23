@@ -10,7 +10,7 @@ import java.util.*;
 /** Agent wire adapter, after original-run authorization, before any durable write.
  * A valid digest proves content identity only: source linkage, pricing and coverage remain unresolved. */
 public record NativeCaptureEvidence(String captureId,String recordId,String receiptId,String kind,String sourceRevision,
-        String expectedRevision,String previousEvidenceSha256,String evidenceSha256,String canonicalEvidence,String bindingSha256) {
+        String expectedRevision,String previousEvidenceSha256,String evidenceSha256,String canonicalEvidence,String bindingSha256,String snapshotSha256) {
     private static final String ID="[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", SHA="[a-f0-9]{64}", DEC="0|[1-9][0-9]*", POS="[1-9][0-9]*";
     private static final Set<String> COMMON=Set.of("schemaVersion","executionId","runId","captureId","receiptId","kind","recordId",
             "sourceRevision","previousEvidenceSha256","evidenceSha256","observedAt","expectedRevision","observation");
@@ -43,11 +43,15 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         String record=field(d,"recordId",SHA);check(record.equals(digest(List.of("USAGE_RECORD_V2",cap,kind,identity))));var evidence=new HashMap<>(d);
         for(String key:List.of("receiptId","expectedRevision","evidenceSha256"))evidence.remove(key);
         String sha=field(d,"evidenceSha256",SHA);check(sha.equals(digest(evidence)));
-        return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence),bindingDigest(kind,o,identity));
+        return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence),bindingDigest(kind,o,identity),"PLAN".equals(kind)?(String)o.get("snapshotSha256"):null);
     }
     // The old PLAN config hash fences an individual run. Optional dispatch facts are configuration-only;
     // they never prove complete coverage, an actual billing route, or entitlement to a tariff.
     static void planKeys(Map<?,?> plan){
+        // Historical records can be decoded. A fresh submission still needs an exact admitted snapshot.
+        if(plan.containsKey("snapshotSha256")){
+            field(plan,"snapshotSha256",SHA);var fields=new HashMap<>(plan);fields.remove("snapshotSha256");plan=fields;
+        }
         if(!plan.containsKey("dispatchGroup")){
             keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId");return;
         }

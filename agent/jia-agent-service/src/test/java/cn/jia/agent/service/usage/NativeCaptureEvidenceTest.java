@@ -99,9 +99,11 @@ class NativeCaptureEvidenceTest {
                     var d=message.get("request").get("body").get("data");cap=d.get("captureId").asText();String id=d.get("recordId").asText();
                     heads.put(id,new cn.jia.economy.usage.UsageCaptureProjection.Row(id,d.get("sourceRevision").asLong(),d.get("sourceRevision").asText(),d.get("evidenceSha256").asText(),d.toString()));
                 }
-                var policy=new NativeCaptureCoverage.Policy("50876c00dce84757e268800163453b94487a2c0684124c09a6becaccbc6f4919","codex-cli-0.167.0-fixture","MODEL_ONLY_FIXTURE_V1","FIXTURE_V1","FIXTURE_NON_OVERLAPPING_V1");
+                var policy=new NativeCaptureCoverage.Policy("50876c00dce84757e268800163453b94487a2c0684124c09a6becaccbc6f4919","codex-cli-0.167.0-fixture","MODEL_ONLY_FIXTURE_V1","FIXTURE_V1","FIXTURE_NON_OVERLAPPING_V1","fixture_gateway");
                 var fold=new NativeCaptureCoverage(cap,policy);heads.values().forEach(fold::accept);var result=fold.finish();
                 var expected=c.get("expectedAfterAllMessages");assertEquals(expected.get("coverageState").asText(),result.state().name());assertEquals(expected.get("observedPartialTokenTotal").asText(),result.observedTokens().toString());
+                var foreign=new NativeCaptureCoverage(cap,new NativeCaptureCoverage.Policy(policy.configSha(),policy.engine(),policy.policy(),policy.adapter(),policy.basis(),"other-channel"));
+                heads.values().forEach(foreign::accept);var rejected=foreign.finish();assertEquals("INCOMPLETE",rejected.state().name());assertEquals(0,rejected.observedTokens().signum());
                 var prod=new NativeCaptureCoverage(cap,null);heads.values().forEach(prod::accept);assertEquals("INCOMPLETE",prod.finish().state().name());
                 var pending=new NativeCaptureCoverage(cap,policy);var first=heads.firstEntry().getValue();pending.accept(new cn.jia.economy.usage.UsageCaptureProjection.Row(first.recordId(),first.revisions()+1,first.sourceRevision(),first.evidenceSha256(),first.evidenceJson()));
                 heads.tailMap(first.recordId(),false).values().forEach(pending::accept);assertEquals("WAITING_EVIDENCE",pending.finish().state().name());

@@ -16,6 +16,10 @@ public final class SkillExecutionDaoImpl implements SkillExecutionDao {
         this.mapper = Objects.requireNonNull(mapper);
     }
 
+    public String snapshotDigest(String tenant,String client,String owner,String execution) {
+        return mapper.snapshotDigest(tenant,client,owner,execution);
+    }
+
     public void insertReady(SkillExecutionEntity row) {
         Objects.requireNonNull(row);
         if (mapper.insertReady(row) != 1) throw new IllegalStateException("Skill attachment insert failed");
