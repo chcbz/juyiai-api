@@ -611,6 +611,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         recovery.executeScheduled(work);recovery.executeScheduled(work);assertTrue(sampleProjection.pending(TENANT,CLIENT,"").isEmpty());
         assertEquals(history+1,count("economy_task_cost_sample_revision"));assertEquals(money,count("economy_transaction"));
     }
+    @Test void acceptedTaskExcludesCurrentIncompleteCaptureButWaitsForARevisedProjection(){
+        confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        prepareSubmitted();locked(()->{var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("e").setRunId("r").setRequestHash("a".repeat(64));m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity("e","r"));return null;});
+        decide("accepted");deliverTerminal();int money=count("economy_transaction");
+        var decoder=textFixture(r->{throw new AssertionError("No operations may be extracted");});
+        // This side consumes the versioned Economy projection, not opaque Runtime JSON or its close reason text.
+        jdbc.update("INSERT INTO economy_usage_capture(tenant_id,client_id,owner_jiacn,task_id,agent_id,execution_id,run_id,capture_id,input_revision,projection_revision,coverage_state) SELECT ?,?,?,?,?,execution_id,run_id,capture_id,1,1,'INCOMPLETE' FROM economy_task_cost_sample_member",TENANT,CLIENT,OWNER,TASK,AGENT);
+        assertTrue(sampleProjection.refresh(BILLING_TASK,sid,decoder));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_id=? AND sample_state='EXCLUDED' AND reason_code='USAGE_INCOMPLETE' AND JSON_LENGTH(operation_refs)=0",Integer.class,sid));
+        jdbc.update("UPDATE economy_usage_capture SET input_revision=2");jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1");
+        assertTrue(sampleProjection.refresh(BILLING_TASK,sid,decoder));assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_id=? AND sample_state='EXCLUDED'",Integer.class,sid));assertEquals(money,count("economy_transaction"));
+    }
     @Test void concurrentQuoteIntentsReturnOneImmutableWinnerAndUnavailableReplayIgnoresNewInputs() throws Exception {
         var task=new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK);var key=new TaskQuoteBatches.Key(task,PAYER,"same-key");
         var input=new TaskQuoteBatches.Intent("4",List.of("z","a","z"));assertEquals(List.of("a","z"),input.agentIds());

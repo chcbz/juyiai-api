@@ -79,11 +79,15 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         when(accounts.findUniqueByExactJiacn("executor")).thenReturn(Optional.of(new AccountSecuritySnapshot(1,"executor",AccountState.ACTIVE,1)));
         var auth=transactional(new AgentRuntimeAuthenticationService(wire(new AgentRuntimeDaoImpl(),sql.getMapper(AgentRuntimeMapper.class)),installations,registry,identity,accounts,null,scope),AgentRuntimeAuthenticationService.class,manager);
         var session=tx.execute(st->auth.issue(installations.lock(INSTALL),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(INSTALL,"0","client",AGENT,"1","a".repeat(64),"host","rt"),1));assertNotNull(session);
-        var journal=transactional(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class),event->{}),UsageCaptureJournal.class,manager);
+        var beans=new DefaultListableBeanFactory();beans.registerSingleton("s",new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager));
+        var schedules=beans.getBeanProvider(ScheduleService.class);
+        var store=transactional(new UsageCaptureProjectionStore(sql.getMapper(EconomyUsageCaptureMapper.class)),UsageCaptureProjection.class,manager);
+        var projection=new NativeCaptureProjection(store,schedules,scope);
+        var journal=transactional(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class),event->projection.changed((UsageCaptureProjection.Key)event)),UsageCaptureJournal.class,manager);
         var cost=transactional(new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class),json),UsageCostService.class,manager);
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);
-        var beans=new DefaultListableBeanFactory();beans.registerSingleton("s",new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager));
-        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions),journal,settle,new NativeCaptureRecovery(journal,settle,scope,beans.getBeanProvider(ScheduleService.class),manager));
+        var recovery=new NativeCaptureRecovery(journal,settle,scope,schedules,manager);
+        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions),journal,settle,recovery);
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
         var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
@@ -104,6 +108,16 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
         }finally{server.stop(0);}
         assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
+        // Consume the real transactionally registered work keys, deliberately run coverage BEFORE association.
+        String pendingSql="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
+        var projectionKey=jdbc.queryForObject(pendingSql,String.class,projection.getName());
+        var work=new ScheduledInvocation("0",new ScheduleKey("client",projection.getName(),projectionKey,""),1);
+        projection.executeScheduled(work);
+        assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT coverage_state FROM economy_usage_capture",String.class));
+        var keys=jdbc.queryForList(pendingSql,String.class,recovery.getName());assertFalse(keys.isEmpty());
+        for(var key:keys) recovery.executeScheduled(new ScheduledInvocation("0",new ScheduleKey("client",recovery.getName(),key,""),1));
+        projection.executeScheduled(work);projection.executeScheduled(work);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture WHERE coverage_state='INCOMPLETE' AND projection_revision=input_revision",Integer.class));
         String path="/internal/agent/executions/exec1/runs/run-exec1/usage/receipts/"+cuts.get();
         var read=get(path).header("Authorization","AgentRuntime "+session.sessionToken()).header("X-Agent-Id",AGENT).header("X-Agent-Installation-Id",INSTALL).header("X-Agent-Host-Id","host").header("X-Agent-Runtime-Id","rt").header("X-Agent-Session-Generation","1");
         jdbc.update("UPDATE agent_task_execution_grant SET executor_owner_jiacn='foreign' WHERE grant_id='g'");assertEquals(404,mvc.perform(read).andReturn().getResponse().getStatus());

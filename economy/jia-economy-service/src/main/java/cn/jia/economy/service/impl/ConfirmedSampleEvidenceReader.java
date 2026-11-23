@@ -25,10 +25,12 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence {
             else if(!h.lifecycle().equals(h.outcome()))verdict=EXECUTION_SET_CONFLICT;
             else if(h.groupVersion()==null||h.executionConfig()==null||h.localRoute()==null||h.tools()==null||h.referenceRoute()==null||h.policy()==null)verdict=CONFIG_UNKNOWN;
             else {
-                boolean broken=false,mixed=false,missing=false,unknown=false;long after=0;
+                boolean broken=false,mixed=false,missing=false,closedIncomplete=false,unknown=false;long after=0;
                 while(true){var page=db.members(task,id,h.fact(),h.agent(),after);
                     for(var m:page){after=m.revision();count++;broken|=m.attached()==null;
                         boolean complete="COMPLETE".equals(m.coverage());missing|=!complete;
+                        // members() joins ONLY the current capture projection; a stale or missing close is not a verdict.
+                        closedIncomplete|="INCOMPLETE".equals(m.coverage());
                         if(m.groupVersion()==null){unknown|=complete;continue;}
                         mixed|=!h.groupVersion().equals(m.groupVersion())||!h.executionConfig().equals(m.executionConfig())
                             || !h.localRoute().equals(m.route())||!h.tools().equals(m.tools())||!h.policy().equals(m.policy());
@@ -37,7 +39,7 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence {
                 }
                 // Reference tariff version belongs to pricing, not the Runtime provider namespace.
                 verdict=broken||count!=h.memberCount()?EXECUTION_SET_CONFLICT:mixed?MIXED_EXECUTION_CONFIG:
-                        unknown?CONFIG_UNKNOWN:missing||count==0?USAGE_INCOMPLETE:MATCHED;
+                        unknown?CONFIG_UNKNOWN:closedIncomplete?CLOSED_USAGE_INCOMPLETE:missing||count==0?USAGE_INCOMPLETE:MATCHED;
             }
         }
         return new Assessment(id,h.evidenceRevision(),h.fact(),count,verdict);

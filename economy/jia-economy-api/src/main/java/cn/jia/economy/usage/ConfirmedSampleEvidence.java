@@ -6,7 +6,7 @@ import cn.jia.economy.task.TaskBillingService.Task;
  * not a READY label, an amount, proof of zero operations, or permission to charge. */
 public interface ConfirmedSampleEvidence {
     enum Verdict { ACTIVE, CANCELLED_OUTCOME, MEMBERSHIP_PENDING, EXECUTION_SET_CONFLICT, CONFIG_UNKNOWN,
-        MIXED_EXECUTION_CONFIG, USAGE_INCOMPLETE, MATCHED }
+        MIXED_EXECUTION_CONFIG, CLOSED_USAGE_INCOMPLETE, USAGE_INCOMPLETE, MATCHED }
     record Assessment(String sampleId,long evidenceRevision,String terminalFactId,long members,Verdict verdict) {}
     /** Already-associated head only; raw wire JSON is private to the trusted source adapter and not returned. */
     record Response(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
