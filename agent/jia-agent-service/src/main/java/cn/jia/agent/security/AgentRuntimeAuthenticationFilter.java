@@ -60,6 +60,7 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || "GET".equals(request.getMethod()) && path.equals("/ws/agent/channel")
                 || "POST".equals(request.getMethod()) && path.matches("/agent/runtime/v1/commands/" + id + "/acks")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/chat/dispatches/" + id + "/usage")
+                || receiptRead(request,path)
                 || "GET".equals(request.getMethod()) && path.equals("/internal/agent/executions/commands")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/executions/" + id
                 + "/runs/" + id + "/(?:inputs(?:/" + id + "/content)?|lease(?:/renew)?|failure|resume|usage|provider-usage|effects/" + id + "/(?:start|result)|result-commits/" + id
@@ -71,11 +72,16 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 + "/turns/" + id + "/(?:inspection|materials)/inputs/" + id + "/content");
     }
 
+    private static boolean receiptRead(HttpServletRequest request,String path){
+        String id="[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
+        return "GET".equals(request.getMethod()) && request.getQueryString()==null && path.matches("/internal/agent/executions/"+id+"/runs/"+id+"/usage/receipts/"+id);
+    }
     /** Evidence may arrive after the owned engine/channel stopped. This never admits
      * command discovery, package downloads, execution leases or result commits. */
     private static boolean isEvidenceDelivery(HttpServletRequest request) {
-        if (!"POST".equals(request.getMethod()) || request.getQueryString() != null) return false;
         String path = request.getRequestURI().substring(request.getContextPath().length());
+        if(receiptRead(request,path))return true;
+        if (!"POST".equals(request.getMethod()) || request.getQueryString() != null) return false;
         String id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
         return path.equals("/internal/agent/skill-management/results")
                 || path.matches("/internal/agent/chat/dispatches/" + id + "/usage")

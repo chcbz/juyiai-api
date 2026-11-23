@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS economy_usage_capture_receipt (
     receipt_id VARCHAR(100) NOT NULL,
     record_id CHAR(64) NOT NULL,
     revision_key CHAR(64) NOT NULL,
-    request_id VARCHAR(100) NOT NULL,
+    request_id LONGTEXT NOT NULL,
     request_sha256 CHAR(64) NOT NULL,
     expected_revision LONGTEXT DEFAULT NULL,
     processing_state VARCHAR(24) NOT NULL,
@@ -48,4 +48,23 @@ CREATE TABLE IF NOT EXISTS economy_usage_capture_receipt (
     KEY ix_capture_pending_receipt (processing_state,capture_pk,receipt_id),
     CONSTRAINT fk_usage_capture_receipt_record FOREIGN KEY (capture_pk,record_id,revision_key)
         REFERENCES economy_usage_capture_record(capture_pk,record_id,revision_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+
+-- Current lifecycle projection; source ingestion never creates a sample or membership.
+CREATE TABLE IF NOT EXISTS economy_task_cost_sample (
+    sample_id CHAR(64) NOT NULL, tenant_id VARCHAR(50) NOT NULL, client_id VARCHAR(50) NOT NULL,
+    owner_jiacn VARCHAR(100) NOT NULL, task_id VARCHAR(100) NOT NULL, quote_id VARCHAR(100) DEFAULT NULL,
+    benchmark_case_id VARCHAR(100) DEFAULT NULL, sample_definition_version VARCHAR(64) NOT NULL,
+    initial_requirement_sha256 CHAR(64) NOT NULL, initial_input_snapshot_sha256 CHAR(64) NOT NULL,
+    initial_feature_sha256 CHAR(64) NOT NULL, lifecycle_state VARCHAR(24) NOT NULL,
+    evidence_revision BIGINT NOT NULL, projection_revision BIGINT DEFAULT NULL, sample_state VARCHAR(24) NOT NULL,
+    PRIMARY KEY (sample_id),
+    UNIQUE KEY uk_sample_quote (tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version),
+    UNIQUE KEY uk_sample_benchmark (tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;
+CREATE TABLE IF NOT EXISTS economy_task_cost_sample_member (
+    sample_id CHAR(64) NOT NULL, execution_id VARCHAR(100) NOT NULL, run_id VARCHAR(100) NOT NULL, capture_id CHAR(64) NOT NULL,
+    PRIMARY KEY (sample_id,execution_id,run_id,capture_id),
+    KEY ix_sample_capture (capture_id,sample_id),
+    CONSTRAINT fk_sample_member FOREIGN KEY (sample_id) REFERENCES economy_task_cost_sample(sample_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

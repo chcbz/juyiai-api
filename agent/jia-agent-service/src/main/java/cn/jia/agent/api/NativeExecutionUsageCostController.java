@@ -3,6 +3,13 @@ package cn.jia.agent.api;
 import cn.jia.agent.security.AgentRuntimeAuthenticationService;
 import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.agent.service.usage.NativeExecutionUsageCostRecorder;
+import cn.jia.agent.service.usage.NativeCaptureAuthority;
+import cn.jia.agent.service.usage.NativeCaptureEvidence;
+import cn.jia.economy.usage.UsageCaptureJournal;
+import tools.jackson.databind.ObjectMapper;
+import java.util.Map;
+import java.util.List;
+import org.springframework.dao.DataAccessException;
 import cn.jia.core.entity.JsonRequest;
 import cn.jia.core.entity.JsonResult;
 import cn.jia.economy.usage.UsageCostConflict;
@@ -19,14 +26,43 @@ public final class NativeExecutionUsageCostController {
     public record Receipt(String executionId, String attemptId, String revision, String status, String costYuan) { }
     private final NativeExecutionUsageCostRecorder recorder;
     private final AgentRuntimeAuthenticationService authentication;
+    private static final ObjectMapper JSON=new ObjectMapper();
+    private final NativeCaptureAuthority authority;
+    private final UsageCaptureJournal journal;
     public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,
-            AgentRuntimeAuthenticationService authentication) {
+            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal) {
+        this.authority=authority;this.journal=journal;
         this.recorder = recorder; this.authentication = authentication;
     }
 
     @PostMapping(value="/{executionId}/runs/{runId}/usage", consumes="application/json", produces="application/json")
-    public ResponseEntity<JsonResult<Receipt>> record(@PathVariable String executionId, @PathVariable String runId,
-            @RequestBody JsonRequest<Request> protocolRequest, Authentication principal) {
+    public ResponseEntity<?> submit(@PathVariable String executionId,@PathVariable String runId,@RequestBody JsonRequest<Map<String,Object>> request,
+            @RequestHeader(value="Idempotency-Key",required=false) String key,Authentication principal) {
+        var data=request==null?null:request.data();
+        if(data!=null&&!data.containsKey("schemaVersion")&&(data.containsKey("captureId")||data.containsKey("sourceRevision")||data.containsKey("receiptId")))return error(400,"USAGE_CAPTURE_INVALID");
+        if(data==null||!data.containsKey("schemaVersion")) return record(executionId,runId,request==null?null:new JsonRequest<>(request.protocolVersion(),request.requestId(),JSON.convertValue(data,Request.class)),principal);
+        final NativeCaptureEvidence e;
+        try {e=NativeCaptureEvidence.parse(executionId,runId,key,data);} catch(IllegalArgumentException ex){
+            return error(400,"USAGE_CAPTURE_VERSION_UNSUPPORTED".equals(ex.getMessage())?ex.getMessage():"USAGE_CAPTURE_INVALID");
+        }
+        var submission=new UsageCaptureJournal.Submission(request.requestId(),NativeCaptureEvidence.digest(List.of(request.requestId(),data)),
+                e.receiptId(),e.kind(),e.recordId(),e.sourceRevision(),e.previousEvidenceSha256(),e.evidenceSha256(),e.expectedRevision(),e.canonicalEvidence());
+        try {
+            var result=authentication.withNativeFence(principal,()->journal.register(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),submission));
+            return response(result); // fence transaction has committed, including any conflict quarantine
+        } catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+    }
+    @GetMapping(value="/{executionId}/runs/{runId}/usage/receipts/{receiptId}",produces="application/json")
+    public ResponseEntity<?> receipt(@PathVariable String executionId,@PathVariable String runId,@PathVariable String receiptId,Authentication principal){
+        try{return response(authentication.withNativeFence(principal,()->journal.readReceipt(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),receiptId)));}
+        catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+    }
+    private static ResponseEntity<?> response(UsageCaptureJournal.Result result){return switch(result.state()){
+        case NOT_FOUND -> error(404,"USAGE_CAPTURE_NOT_FOUND");case PENDING -> error(409,"USAGE_ACK_PENDING");case CONFLICT -> error(409,"USAGE_CAPTURE_CONFLICT");
+        case DURABLE -> ResponseEntity.ok().header("Cache-Control","private, no-store").body(JsonResult.success(JSON.readTree(result.ackJson())));
+    };}
+    public ResponseEntity<JsonResult<Receipt>> record(String executionId, String runId,
+            JsonRequest<Request> protocolRequest, Authentication principal) {
         var body = protocolRequest == null ? null : protocolRequest.data();
         if (body == null || !java.util.Objects.equals(executionId,body.executionId()) || body.phase() == null || body.executionId() == null || !body.executionId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
                 || body.phase() == NativeExecutionUsageCostRecorder.Phase.STARTED && body.usageEvidence() != null && !body.usageEvidence().isNull()
