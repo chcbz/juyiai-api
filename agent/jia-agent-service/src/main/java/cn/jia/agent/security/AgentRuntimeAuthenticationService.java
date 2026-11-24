@@ -193,8 +193,7 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
             if (!tenantId.equals(scope.tenantId()) || !clientId.equals(scope.clientId())
                     || !agentId.equals(scope.agentId())) continue;
             try {
-                if (!hasChannel(candidate)) continue;
-                validateCurrent(candidate, true);
+                if (!current(binding)) continue;
             } catch (IllegalArgumentException stale) {
                 // Older boot entries are liveness hints, not authority. A valid current boot
                 // must not be starved by the previous one still awaiting socket close.
@@ -231,16 +230,21 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
             String ownerJiacn, String agentId, String runtimeInstanceId) {
         var scope = new AgentRuntimeAuthentication.Scope(tenantId, clientId, ownerJiacn, agentId, runtimeInstanceId);
         Binding binding = bindings.get(scope);
-        if (binding == null || !binding.sessionId().equals(sessionId) || !binding.connected().getAsBoolean()) return false;
-        validateCurrent(binding.proof(), true);
-        return bindings.get(scope) == binding && binding.connected().getAsBoolean();
+        return binding != null && binding.sessionId().equals(sessionId) && current(binding);
     }
 
     private boolean hasChannel(Proof proof) {
-        Binding binding = bindings.get(proof.scope());
-        return binding != null && binding.proof().equals(proof) && binding.connected().getAsBoolean()
-                && isCurrentBinding(binding.sessionId(), proof.scope().tenantId(), proof.scope().clientId(),
-                        proof.scope().ownerJiacn(), proof.scope().agentId(), proof.scope().runtimeInstanceId());
+        var binding = bindings.get(proof.scope());
+        return binding != null && binding.proof().equals(proof) && current(binding);
+    }
+
+    /** Validate this exact registry entry, not a fresh entry found by session ID. No proof cache:
+     * each observation checks persistence, then confirms the same channel survived the read. */
+    private boolean current(Binding binding) {
+        var scope = binding.proof().scope();
+        if (bindings.get(scope) != binding || !binding.connected().getAsBoolean()) return false;
+        validateCurrent(binding.proof(), true);
+        return binding.connected().getAsBoolean() && bindings.get(scope) == binding;
     }
 
     public void validateCurrent(Proof proof, boolean registered) {

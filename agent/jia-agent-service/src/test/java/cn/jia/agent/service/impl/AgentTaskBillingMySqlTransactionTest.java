@@ -1357,6 +1357,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var data=new ObjectMapper().readTree(res.body()).path("data");assertEquals("HYBRID",data.path("retrievalMode").asText());var rows=data.path("recommendations");assertEquals(108,rows.size());int matched=0;
             for(var row:rows)if(agent.equals(row.at("/agent/agentId").asText())){matched++;var evidence=row.path("evidence");assertTrue(evidence.isArray());assertEquals(visible?1:0,evidence.size());if(visible){assertEquals("INSTALLED_SKILL",evidence.get(0).path("kind").asText());assertEquals("合同审查",evidence.get(0).path("label").asText());}else assertEquals("UNKNOWN",row.path("recommendationLevel").asText());}assertEquals(1,matched);}
     }
+    // Attribute physical single-table SELECTs by normalized table name, never log SQL text or parameters.
+    private java.util.Map<String,Long> proofSelects(){
+        var counts=new java.util.TreeMap<String,Long>();
+        for(String table:List.of("agent_runtime_v1_installation","agent_runtime","agent_identity_registry","agent_persona_binding"))
+            counts.put(table,admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND LOCATE(?,DIGEST_TEXT)>0",Long.class,database," FROM `"+table+"` WHERE "));
+        return counts;
+    }
     private long paidInventorySelects(){return admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND DIGEST_TEXT LIKE '%economy_hosting_lease%' AND DIGEST_TEXT LIKE '%inventory_snapshot_json%'",Long.class,database);}
     // Test-owned mysqld only. Read counters from the admin schema outside each timed request group.
     // No statement text, task data, individual event history, credentials or parameters are logged.
@@ -1426,7 +1433,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
-                long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
+                var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1436,6 +1443,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                         for(var f:pending){var s=f.get(25,java.util.concurrent.TimeUnit.SECONDS);times.add(s.nanos());if(s.invalid())invalid++;if(s.degraded())degraded++;}
                     }
                 }
+                var physical=proofSelects();physical.replaceAll((k,v)->v-proofBefore.get(k));
+                System.out.printf("RECOMMEND_PROOF_SQL candidates=%d concurrency=%d n=%d counts=%s%n",expected.size(),concurrency,times.size(),physical);
+                if(expected.size()==108)assertTrue(physical.get("agent_runtime_v1_installation")>0,"missing persistent installation SQL observations");
                 long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");

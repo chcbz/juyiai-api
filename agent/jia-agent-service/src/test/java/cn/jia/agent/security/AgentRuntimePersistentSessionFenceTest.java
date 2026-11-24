@@ -364,6 +364,15 @@ class AgentRuntimePersistentSessionFenceTest {
         assertThrows(RuntimeException.class,()->auth.currentRegisteredProof("0","client",AGENT));
     }
 
+    @Test void eachRegisteredProofObservationRechecksPersistentRowsOnceAndSeesRevocation() {
+        var session=auth.issue(installation,request("host","boot"),1000);row.setStatus("online");
+        var proof=auth.verify(headers(session));auth.bind("socket",proof,()->true);
+        clearInvocations(installations,rows);
+        assertEquals(proof,auth.currentRegisteredProof("0","client",AGENT));
+        verify(installations,times(1)).findInScope("0","client",ID);verify(rows,times(1)).findInScope("0","client",AGENT);
+        installation.setStatus("REVOKED");assertThrows(IllegalArgumentException.class,()->auth.currentRegisteredProof("0","client",AGENT));
+        verify(installations,times(2)).findInScope("0","client",ID);verify(rows,times(2)).findInScope("0","client",AGENT);
+    }
     @Test void sameSocketRefreshDuringPersistentValidationDoesNotFenceHttpAuthentication() {
         var session = auth.issue(installation, request("host", "boot"), 1000); row.setStatus("online");
         var proof = auth.verify(headers(session));
