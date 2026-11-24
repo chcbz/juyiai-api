@@ -4,6 +4,8 @@ import cn.jia.economy.mapper.ConfirmedSampleMapper;
 import cn.jia.economy.pricing.TaskEstimateFeatures;
 import cn.jia.economy.task.TaskBillingService.Task;
 import cn.jia.economy.task.TaskHistoryCatalog;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -18,10 +20,15 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json){this(db,json,false);}
     private final boolean compact;
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,boolean benchmarks){this(db,json,benchmarks,false);}
+    private final ObservationRegistry observations;
+    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,boolean benchmarks,boolean compact){
+        this(db,json,benchmarks,compact,java.util.Optional.empty());
+    }
     @org.springframework.beans.factory.annotation.Autowired
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,
             @org.springframework.beans.factory.annotation.Value("${jia.economy.measured-benchmark-use:false}") boolean benchmarks,
-            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact){
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact,java.util.Optional<ObservationRegistry> registry){
+        this.observations=registry.orElse(ObservationRegistry.NOOP);
         this.db=db;this.json=json;this.benchmarks=benchmarks;this.compact=compact;
     }
     @Transactional(propagation=Propagation.NEVER)
@@ -59,16 +66,22 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     }
     // Only unusable derived data falls back. Never suppress database faults or canonical-source failures.
     private List<Entry> projectedPage(Task query,Group group,String after){
-        var rows=db.compactHistory(query,group.digest(),after,PAGE);var result=new java.util.ArrayList<Entry>(rows.size());
-        for(var row:rows){
-            if(!Integer.valueOf(1).equals(row.sourceValid())||row.metadata()==null)return null;
-            try{
-                var meta=json.readValue(row.metadata(),EconomyHistoryFeatureBytes.Metadata.class);
-                var f=EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());
-                if(!Group.of(group.execution(),f).equals(group))return null;
-                result.add(new Entry(new Revision(row.id(),row.revision()),row.taskId(),f));
-            }catch(IllegalArgumentException|tools.jackson.core.JacksonException invalid){return null;}
-        }return result;
+        var span=Observation.start("cyf.task.quote.history.projection.page",observations);
+        String outcome="error";
+        try{
+            var rows=db.compactHistory(query,group.digest(),after,PAGE);var result=new java.util.ArrayList<Entry>(rows.size());
+            for(var row:rows){
+                if(row.metadata()==null){outcome="missing";return null;}
+                if(!Integer.valueOf(1).equals(row.sourceValid())){outcome="source_mismatch";return null;}
+                try{
+                    var meta=json.readValue(row.metadata(),EconomyHistoryFeatureBytes.Metadata.class);
+                    var f=EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());
+                    if(!Group.of(group.execution(),f).equals(group)){outcome="group_mismatch";return null;}
+                    result.add(new Entry(new Revision(row.id(),row.revision()),row.taskId(),f));
+                }catch(IllegalArgumentException|tools.jackson.core.JacksonException invalid){outcome="invalid_features";return null;}
+            }
+            outcome=rows.isEmpty()?"empty":"hit";return result;
+        }finally{span.lowCardinalityKeyValue("outcome",outcome).stop();}
     }
     private Entry entry(Group group,ConfirmedSampleMapper.HistoryRow r){
             if(r.featuresJson()==null)throw new IllegalStateException("Unresolvable history quote features");

@@ -794,7 +794,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             if(method.getName().equals("history"))miss[0]++;
             try{return method.invoke(original,args);}catch(java.lang.reflect.InvocationTargetException e){throw e.getCause();}
         }));
-        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(counted,json,false,true),cn.jia.economy.task.TaskHistoryCatalog.class);
+        var registry=io.micrometer.observation.ObservationRegistry.create();
+        var events=new java.util.concurrent.ConcurrentHashMap<String,Integer>();
+        registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+            public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+            public void onStop(io.micrometer.observation.Observation.Context c){
+                var labels=new java.util.HashMap<String,String>();c.getLowCardinalityKeyValues().forEach(k->labels.put(k.getKey(),k.getValue()));
+                assertEquals(java.util.Set.of("outcome"),labels.keySet());assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());
+                String k=c.getName()+":"+labels.get("outcome");events.merge(k,1,Integer::sum);
+            }
+        });
+        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(counted,json,false,true,java.util.Optional.of(registry)),cn.jia.economy.task.TaskHistoryCatalog.class);
         java.util.function.Function<String,List<cn.jia.economy.task.TaskHistoryCatalog.Entry>> entries=after->projection.page(reader,group,after);
         java.util.function.Function<String,List<String>> page=after->entries.apply(after).stream().map(e->e.source().sampleId()).toList();
         for(int run=0;run<4;run++){long t=System.nanoTime();String after="";var seen=new java.util.ArrayList<String>();while(true){var chunk=page.apply(after);if(chunk.isEmpty())break;seen.addAll(chunk);after=chunk.getLast();}long ns=System.nanoTime()-t;assertEquals(ids,seen);
@@ -802,7 +812,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var scal=TaskNeighborSearch.trainingScales(List.of(query));var params=new TaskNeighborSearch.Parameters(scal,1,1,1,1,1,0.1,0.2,3,1,1,1);
         var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(groupSha,1,"0".repeat(64));
         cn.jia.economy.pricing.TaskReferencePricing reference=(scope,v,routes,kinds)->fixtureReference();
-        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(projection,reference);
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(projection,reference,java.util.Optional.of(registry));
         var originalEngine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,reference);
         var control=originalEngine.estimate(reader,group.execution(),query,pin,params,Map.of());assertEquals(3,control.contributions().size());assertEquals(25,control.wen());
         long payload=jdbc.queryForObject("SELECT SUM(OCTET_LENGTH(feature_meta)+OCTET_LENGTH(vector_bytes)) FROM economy_history_feature_projection",Long.class);
@@ -860,6 +870,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_history_feature_projection SET vector_bytes=? WHERE sample_id=?",vector,sid);
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=2 WHERE sample_id=?",sid);assertFalse(page.apply(ids.get(at-1)).contains(sid));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=1,quote_id='missing' WHERE sample_id=?",sid);assertThrows(IllegalStateException.class,()->page.apply(ids.get(at-1)));assertThrows(IllegalStateException.class,()->engine.estimate(reader,group.execution(),query,pin,params,Map.of()));
+        String metric="cyf.task.quote.history.projection.page:";
+        assertEquals(4,events.get(metric+"invalid_features"));assertEquals(2,events.get(metric+"missing"));
+        assertTrue(events.get(metric+"hit")>100);assertTrue(events.get(metric+"empty")>0);
+        assertEquals(shared?4:1,events.get(metric+"source_mismatch"));assertEquals(shared?2:1,events.get("cyf.task.quote.estimate:error"));
+        assertTrue(events.get("cyf.task.quote.estimate:ok")>=60);
+        assertEquals(java.util.Set.of(metric+"invalid_features",metric+"missing",metric+"hit",metric+"empty",metric+"source_mismatch","cyf.task.quote.estimate:error","cyf.task.quote.estimate:ok"),events.keySet());
     }
     private void applyHistoryFeatures(){new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());}
     private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared,boolean dense){
