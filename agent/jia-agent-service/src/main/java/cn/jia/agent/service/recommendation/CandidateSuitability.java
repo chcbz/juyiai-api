@@ -26,7 +26,7 @@ final class CandidateSuitability {
                 &&(medium==null||medium.valid(l,v))&&(high==null||high.valid(l,v))
                 &&(medium==null||high==null||(!l||high.lexical>=medium.lexical)&&(!v||high.vector>=medium.vector));}
     }
-    record Artifact(String schema,String ranking,String queryTemplate,String evidenceTemplate,String partition,Identity embedding,
+    record Artifact(String schema,String ranking,String queryTemplate,String evidenceTemplate,String physicalIndex,String partition,Identity embedding,
                     String calibrationSha256,String holdoutSha256,String evaluationSha256,List<Cell> cells){}
     private final Artifact artifact;private final String ranking;
     private static boolean digest(String s){return s!=null&&s.matches("[a-f0-9]{64}");}
@@ -37,7 +37,7 @@ final class CandidateSuitability {
             var bytes=Files.readAllBytes(Path.of(file));if(!digest(pin)||!HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)).equals(pin))throw new IllegalArgumentException();
             var x=new ObjectMapper().readValue(bytes,Artifact.class);
             if(!VERSION.equals(x.schema)||!CandidateRankFusion.VERSION.equals(x.ranking)||!TaskRetrievalText.VERSION.equals(x.queryTemplate)
-                ||!CapabilityDocuments.TEMPLATE.equals(x.evidenceTemplate)||!digest(x.partition)||x.embedding==null||x.embedding.providerConfigVersion()==null||x.embedding.model()==null||x.embedding.dimensions()<1
+                ||!CapabilityDocuments.TEMPLATE.equals(x.evidenceTemplate)||!CapabilityIndexWriter.GENERATION.equals(x.physicalIndex)||!digest(x.partition)||x.embedding==null||x.embedding.providerConfigVersion()==null||x.embedding.model()==null||x.embedding.dimensions()<1
                 ||!digest(x.calibrationSha256)||!digest(x.holdoutSha256)||x.calibrationSha256.equals(x.holdoutSha256)||!digest(x.evaluationSha256)||x.cells.isEmpty()
                 ||x.cells.stream().anyMatch(c->!c.valid()))throw new IllegalArgumentException();
             for(int i=0;i<x.cells.size();i++){var c=x.cells.get(i);for(var d:x.cells.subList(0,i))if(c.mode.equals(d.mode)&&c.support.equals(d.support)&&c.requirements.equals(d.requirements)&&c.materials.equals(d.materials)&&c.minCandidates<=d.maxCandidates&&d.minCandidates<=c.maxCandidates)throw new IllegalArgumentException();}
@@ -55,7 +55,7 @@ final class CandidateSuitability {
         if(artifact==null||doc==null||citations.isEmpty()||context.truncated||!artifact.partition.equals(doc.partition())||!artifact.embedding.equals(doc.embedding()))return "UNKNOWN";
         // A match on just one of several explicit requirements is not positive evidence for the entire task.
         if(!context.requirements.isEmpty()&&!citations.stream().map(Evidence::label).map(TaskRetrievalText::normalized).collect(java.util.stream.Collectors.toSet()).containsAll(context.requirements))return "UNKNOWN";
-        var l=row.lexical();var v=row.vector();if(l==null&&v==null)return "UNKNOWN";
+        var l=row.lexical();var v=row.vector();if(l==null&&v==null||l!=null&&!artifact.physicalIndex.equals(l.physicalIndex())||v!=null&&!artifact.physicalIndex.equals(v.physicalIndex()))return "UNKNOWN";
         String support=l==null?"VECTOR":v==null?"LEXICAL":l.evidenceKey().equals(v.evidenceKey())?"BOTH_SAME":"BOTH_DISTINCT";
         for(var c:artifact.cells)if(c.mode.equals(mode)&&c.support.equals(support)&&c.requirements==!context.requirements.isEmpty()&&c.materials==context.materials&&c.minCandidates<=context.candidates&&context.candidates<=c.maxCandidates){
             if(c.high!=null&&c.high.meets(row))return "HIGH";if(c.medium!=null&&c.medium.meets(row))return "MEDIUM";}

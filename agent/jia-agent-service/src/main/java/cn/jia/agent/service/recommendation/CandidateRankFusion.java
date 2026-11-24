@@ -13,7 +13,7 @@ final class CandidateRankFusion {
     private CandidateRankFusion() { }
     static final String VERSION = "candidate-rrf-k60-v1";
     private static final int K = 60;
-    record Hit(String agentId, String evidenceKey, double score) { }
+    record Hit(String agentId, String evidenceKey, double score,String physicalIndex) { Hit(String agentId,String evidenceKey,double score){this(agentId,evidenceKey,score,null);} }
     record Ranked(String agentId, double score, Hit lexical, Hit vector) { }
     private record RouteRank(Hit hit, int rank) { }
 

@@ -47,7 +47,7 @@ class AssigneeRecommendationServiceTest {
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory;
     CandidateSuitability calibration(List<CandidateSuitability.Cell> rules,String forcedPin)throws Exception{
         var partition=CapabilityDocuments.observe(actor,row,List.of(),gen).getFirst().doc().partition();
-        var a=new CandidateSuitability.Artifact(CandidateSuitability.VERSION,CandidateRankFusion.VERSION,TaskRetrievalText.VERSION,CapabilityDocuments.TEMPLATE,partition,gen,"a".repeat(64),"b".repeat(64),"c".repeat(64),rules);
+        var a=new CandidateSuitability.Artifact(CandidateSuitability.VERSION,CandidateRankFusion.VERSION,TaskRetrievalText.VERSION,CapabilityDocuments.TEMPLATE,CapabilityIndexWriter.GENERATION,partition,gen,"a".repeat(64),"b".repeat(64),"c".repeat(64),rules);
         byte[] bytes=new tools.jackson.databind.ObjectMapper().writeValueAsBytes(a);var file=java.nio.file.Files.write(directory.resolve("test-calibration.json"),bytes);
         return new CandidateSuitability(file.toString(),forcedPin==null?HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)):forcedPin);
     }
@@ -56,16 +56,16 @@ class AssigneeRecommendationServiceTest {
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row,other));when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of(),"b",List.of()));
         var cut=new CandidateSuitability.Floors(1d,1.6d);var high=new CandidateSuitability.Cell("HYBRID","BOTH_SAME",false,false,2,2,null,cut);
         var config=calibration(List.of(high),null);var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,config);
-        when(search.retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class))).thenAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var h=new CandidateRankFusion.Hit("b",docs.stream().filter(d->d.agentId().equals("b")).findFirst().orElseThrow().evidenceKey(),1.7);
+        when(search.retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class))).thenAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var h=new CandidateRankFusion.Hit("b",docs.stream().filter(d->d.agentId().equals("b")).findFirst().orElseThrow().evidenceKey(),1.7,CapabilityIndexWriter.GENERATION);
             boolean hybrid=i.getArgument(3)!=null;return new CapabilitySearch.Result(hybrid?"HYBRID":"LEXICAL_ONLY",CandidateRankFusion.fuse(Set.of("a","b"),List.of(h),hybrid?List.of(h):List.of()),hybrid?List.of():List.of("QUERY_VECTOR_UNAVAILABLE"));});
         var good=active.recommend(actor,"task",new Request("7"));assertEquals("READY",good.state());assertEquals(List.of("b","a"),good.recommendations().stream().map(r->r.agent().agentId()).toList());assertEquals("HIGH",good.recommendations().getFirst().recommendationLevel());assertNotEquals(CandidateRankFusion.VERSION,good.rankingVersion());
         doReturn(Mono.error(new TaskFeatureEncoder.Unavailable())).when(vectors).encode(eq(actor),any());var degraded=active.recommend(actor,"task",new Request("7"));assertEquals("DEGRADED",degraded.state());assertTrue(degraded.recommendations().stream().allMatch(r->r.recommendationLevel().equals("UNKNOWN")));
     }
     @Test void lexicalCalibrationRequiresExactEvidenceScopeAndVerifiedArtifact()throws Exception{
         var c=new CandidateSuitability.Cell("LEXICAL_ONLY","LEXICAL",true,false,1,3,new CandidateSuitability.Floors(1d,null),null);
-        var doc=CapabilityDocuments.observe(actor,row,List.of(),gen).getFirst().doc();var hit=CandidateRankFusion.fuse(Set.of("a"),List.of(new CandidateRankFusion.Hit("a",doc.evidenceKey(),1)),List.of()).getFirst();
+        var doc=CapabilityDocuments.observe(actor,row,List.of(),gen).getFirst().doc();var hit=CandidateRankFusion.fuse(Set.of("a"),List.of(new CandidateRankFusion.Hit("a",doc.evidenceKey(),1,CapabilityIndexWriter.GENERATION)),List.of()).getFirst();
         var ev=List.of(new Evidence("ability:0","DECLARED_ABILITY","写作","",true));var ctx=new CandidateSuitability.Context(false,Set.of("写作"),false,1);var policy=calibration(List.of(c),null);
-        assertEquals("MEDIUM",policy.level("LEXICAL_ONLY",hit,ctx,ev,doc));for(var other:List.of(new CandidateSuitability.Context(false,Set.of("写作","排版"),false,1),new CandidateSuitability.Context(true,Set.of("写作"),false,1),new CandidateSuitability.Context(false,Set.of("写作"),false,4)))assertEquals("UNKNOWN",policy.level("LEXICAL_ONLY",hit,other,ev,doc));
+        assertEquals("MEDIUM",policy.level("LEXICAL_ONLY",hit,ctx,ev,doc));var stale=CandidateRankFusion.fuse(Set.of("a"),List.of(new CandidateRankFusion.Hit("a",doc.evidenceKey(),5,"different-index")),List.of()).getFirst();assertEquals("UNKNOWN",policy.level("LEXICAL_ONLY",stale,ctx,ev,doc));for(var other:List.of(new CandidateSuitability.Context(false,Set.of("写作","排版"),false,1),new CandidateSuitability.Context(true,Set.of("写作"),false,1),new CandidateSuitability.Context(false,Set.of("写作"),false,4)))assertEquals("UNKNOWN",policy.level("LEXICAL_ONLY",hit,other,ev,doc));
         var foreign=CapabilityDocuments.declared("other","client","owner","a",List.of("写作"),gen).getFirst().doc();assertEquals("UNKNOWN",policy.level("LEXICAL_ONLY",hit,ctx,ev,foreign));
         var drift=CapabilityDocuments.declared("0","client","owner","a",List.of("写作"),new TaskFeatureEncoder.Identity("changed","test",1)).getFirst().doc();assertEquals("UNKNOWN",policy.level("LEXICAL_ONLY",hit,ctx,ev,drift));
         for(var invalid:List.of(calibration(List.of(c),"d".repeat(64)),calibration(List.of(c,c),null)))assertEquals("UNKNOWN",invalid.level("LEXICAL_ONLY",hit,ctx,ev,doc));

@@ -128,7 +128,7 @@ final class CapabilitySearch {
                 var doc = docs.get(h.id());
                 if (doc == null || h.score() == null || !Double.isFinite(h.score()) || !seen.add(doc.agentId()))
                     throw new IOException("invalid grouped search result");
-                hits.add(new CandidateRankFusion.Hit(doc.agentId(), doc.evidenceKey(), h.score()));
+                hits.add(new CandidateRankFusion.Hit(doc.agentId(), doc.evidenceKey(), h.score(),h.index()));
             }
         }
     }
