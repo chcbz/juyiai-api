@@ -789,6 +789,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String features="SELECT JSON_EXTRACT(snapshot_json,'$.preparation.features') FROM economy_task_quote_resolved WHERE quote_id=?";assertNull(jdbc.queryForObject(features,String.class,id));
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
+        var catalog=new EconomySchemaInitializer(jdbc);
+        var failure=assertThrows(IllegalStateException.class,catalog::afterPropertiesSet);
+        assertEquals("ECO-V0 trigger trg_economy_quote_preparation_no_delete is incompatible",failure.getMessage());
         assertEquals(jdbc.queryForObject(features,String.class,fixture.offer().quoteId()),jdbc.queryForObject(features,String.class,id));
         // A single matching token in a nested object is not proof that the canonical replacement is top-level.
         String misplaced=ref.replace("\"preparation\":\""+sha+"\"","\"preparation\" : \""+sha+"\",\"decoy\":{\"preparation\":\""+sha+"\"}");assertNotEquals(ref,misplaced);
