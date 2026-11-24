@@ -15,7 +15,7 @@ import static org.mockito.ArgumentMatchers.*;
  * is not a claim that the production Chat ACL adapter has been exercised by this slice. */
 final class NativeCancellationFixture {
     private NativeCancellationFixture() { }
-    static SkillExecutionService create(JdbcTemplate jdbc,PersonalWorkspaceExecutionDao executions,SkillExecutionDao skills,
+    static PersonalWorkspaceExecutionServiceImpl create(JdbcTemplate jdbc,PersonalWorkspaceExecutionDao executions,SkillExecutionDao skills,
             ApplicationEventPublisher events,String tenant,String client,String owner,String task,String agent,
             AgentTaskMutationTransaction suppliedRoots) {
         jdbc.execute("CREATE TABLE IF NOT EXISTS native_cancel_conversation_fixture (id BIGINT PRIMARY KEY)");

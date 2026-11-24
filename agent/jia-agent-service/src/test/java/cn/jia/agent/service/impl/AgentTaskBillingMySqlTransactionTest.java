@@ -1331,11 +1331,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
-                roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->{var target=actualAuthority.requireGrantTarget(TENANT,CLIENT,OWNER,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()));
-                    var pending=admission.pending(SCOPE,id,agent);assertEquals(frozen.intent().output(),pending);assertEquals(binding,target.bindingId());
-                    assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->admission.admit(SCOPE,id,target,"wrong",true,Map.of()));
-                    admission.admit(SCOPE,id,target,"history-first",true,pending.commandOutputs());assertNull(admission.pending(SCOPE,id,agent));return null;});
-                assertEquals("history-first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(posts+1,count("economy_transaction"));
+                var service=NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(recommendationSql.getMapper(SkillExecutionMapper.class)),mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,id,agent,roots);
+                service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
+                var nativeActions=proxy(service,SkillExecutionService.class);var ownerScope=new PersonalWorkspaceExecutionService.OwnerScope(TENANT,CLIENT,OWNER);
+                var scope=new SkillExecutionService.TaskScope("42",1,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()),Long.parseLong(receipt.path("assignmentRevision").asText()));
+                var pending=admission.pending(SCOPE,id,agent);assertEquals(frozen.intent().output(),pending);
+                var snapshot=new java.util.LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());snapshot.put("taskGrant",Map.of("id",scope.taskGrantId(),"version",scope.taskGrantVersion(),"assignmentRevision",scope.assignmentRevision()));snapshot.put("scope",scope.wire().asMap());snapshot.put("targetAgentId",agent);snapshot.put("actionEventId","history-first");snapshot.put("instruction","fixture answer");snapshot.put("parameters",Map.of());snapshot.put("inputs",List.of());snapshot.put("sourceSnapshotDigest",jdbc.queryForObject("SELECT SHA2('[]',256)",String.class));snapshot.put("providerBinding",null);snapshot.put("costInfo",Map.of("mode","UNKNOWN"));
+                int executions=count("agent_personal_workspace_execution"),members=count("agent_task_execution_member");
+                snapshot.put("outputs",Map.of("mimeTypes",List.of("text/plain"),"multiple",true,"artifactsRequired",true));
+                var wrong=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
+                assertEquals(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT,assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->nativeActions.create(ownerScope,wrong)).getReason());
+                assertEquals(pending,admission.pending(SCOPE,id,agent));assertEquals(executions,count("agent_personal_workspace_execution"));assertEquals(members,count("agent_task_execution_member"));
+                snapshot.put("outputs",pending.commandOutputs());var right=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
+                var created=nativeActions.create(ownerScope,right);assertEquals("QUEUED",created.state());assertEquals(created,nativeActions.create(ownerScope,right));
+                assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertNull(admission.pending(SCOPE,id,agent));
+                assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
+                assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
             }return null;
         };
     }
