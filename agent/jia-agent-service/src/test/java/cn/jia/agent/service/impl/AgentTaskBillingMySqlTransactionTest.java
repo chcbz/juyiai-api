@@ -649,7 +649,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var price=new MeasuredNeighborEstimate.Estimate(p.estimate().contributions(),new BigDecimal("0.50"),BigDecimal.ONE,50L);
         var second=new TaskBillingService.MeasuredPreparation(p.features(),group,p.estimatorVersion(),p.calibrationVersion(),p.qualityStatus(),price);
         var writes=new java.util.ArrayList<TaskBillingService.MeasuredWrite>();
-        for(int i=0;i<40;i++)writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),"multi-"+i,"mixed"),i%2==0?p:second));
+        for(int i=0;i<40;i++)writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),"multi-"+i,"mixed"),i%2==0?p:second,i==0?null:String.format("%064x",i)));
         writes.add(writes.getFirst()); // database unique binding fails after at least one successful INSERT
         assertThrows(org.springframework.dao.DuplicateKeyException.class,()->locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes)));
         assertEquals(before,count("economy_task_quote"));writes.removeLast();
@@ -659,8 +659,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,q.quoteId());
             var tree=json.readTree(raw);assertEquals(json.readTree(json.writeValueAsString(expected.prepared())),tree.path("preparation"));
             assertEquals(json.readTree(json.writeValueAsString(expected.binding())),tree.path("binding"));
+            if(i==0)assertFalse(tree.has("initialIntentSha256"));else assertEquals(expected.initialIntentSha256(),tree.path("initialIntentSha256").asText());
         }
         assertEquals(before+40,count("economy_task_quote"));assertEquals(0,count("economy_transaction"));
+        var selected=writes.get(1);String target=selected.binding().agentId();assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
+        locked(()->billing.reserve(BILLING_TASK,receipts.get(1).quoteId(),selected.binding(),PAYER));
+        assertEquals(selected.initialIntentSha256(),locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
+        assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,writes.get(2).binding().agentId())));
+        assertNull(locked(()->billing.heldInitialIntent(new TaskBillingService.Task(BILLING_TASK.scope(),OWNER+"-other",TASK),target)));
+        locked(()->billing.release(BILLING_TASK,true));assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
     }
     @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
         var fixture=measuredOffer();var offer=fixture.offer();var features=fixture.features();var binding=fixture.binding();var inputs=binding.inputSnapshotDigest();
@@ -1256,7 +1263,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(agents.quoteTargets(eq(SCOPE),eq(id),eq(List.of(AGENT)),anyBoolean())).thenReturn(targets);
         var source=mock(cn.jia.agent.service.recommendation.ProspectiveTaskExecution.class);
         var subject=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(newTask,"0",1,requirement.sha256(),inputs.digest());
-        var proofs=Map.of(AGENT,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms));
+        var proofs=Map.of(AGENT,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms,"f".repeat(64)));
         when(source.observe(subject,targets)).thenReturn(proofs);when(source.current(subject,targets,proofs)).thenReturn(true);
         var calls=new java.util.concurrent.atomic.AtomicInteger();var encoder=new cn.jia.agent.service.TaskFeatureEncoder(){
             public Identity identity(){return new Identity("cfg","fixture",1024);}
@@ -1281,6 +1288,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 else {assertNotEquals(firstId,item.path("quoteId").asText());hot.add(elapsed);}
             }
         }
+        assertEquals("f".repeat(64),jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.initialIntentSha256')) FROM economy_task_quote WHERE quote_id=?",String.class,firstId));
         assertEquals(1,calls.get());verify(source,times(31)).observe(subject,targets);verify(source,times(31)).current(subject,targets,proofs);
         assertEquals(batchCount+31,count("economy_task_quote_batch"));assertEquals(fixed+31,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
@@ -1419,7 +1427,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var targets=List.of(target,new AgentExternalServicePolicyService.QuoteTarget(ids.get(1),OWNER,binding+1,target.externalPolicyRevision()));
         var missing=source.observe(inputs,targets);assertTrue(missing.isEmpty());assertTrue(locked(()->source.current(inputs,targets,missing)));
         var nextTicket=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);assertTrue(service.recordMeasurement(nextTicket,agent,m));
-        var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms)),ready);
+        var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms,frozen.sha256())),ready);
         assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
         verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
         assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));

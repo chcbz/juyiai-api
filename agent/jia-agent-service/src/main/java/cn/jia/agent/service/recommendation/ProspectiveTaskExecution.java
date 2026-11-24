@@ -10,7 +10,9 @@ import java.util.Objects;
 /** Internal pre-dispatch authority. Never derive terms from a heartbeat, past PLAN, handle or browser metadata. */
 public interface ProspectiveTaskExecution {
     record Inputs(Task task,String taskVersion,long requirementRevision,String requirementSha,String inputSha){}
-    record Evidence(String revision,TaskBudgetEstimator.Terms terms){public Evidence{
+    record Evidence(String revision,TaskBudgetEstimator.Terms terms,String initialIntentSha256){
+        public Evidence(String revision,TaskBudgetEstimator.Terms terms){this(revision,terms,null);}
+        public Evidence{
         if(revision==null||revision.isBlank())throw new IllegalArgumentException("Missing execution configuration revision");Objects.requireNonNull(terms);
     }}
     /** Local prepared facts only. Missing entry means no authoritative configuration for this target and exact inputs. */

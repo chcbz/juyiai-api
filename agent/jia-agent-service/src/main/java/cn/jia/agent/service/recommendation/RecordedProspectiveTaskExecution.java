@@ -31,7 +31,7 @@ public final class RecordedProspectiveTaskExecution implements ProspectiveTaskEx
             if(terms==null)return;
             expected.add(new PreparedRuntimeEpochFence.Epoch(t.agent(),t.provider(),t.binding(),m.fence(),m.profile()));
             // The reservation permits exactly one persisted measurement per binding and ticket; a new probe always rotates it.
-            available.put(t.agent(),new Evidence(r.ticket(),terms));
+            available.put(t.agent(),new Evidence(r.ticket(),terms,r.decision().sha256()));
         });
         available.keySet().retainAll(epochs.matching(scope.tenantId(),scope.clientId(),expected,locking));return Map.copyOf(available);
     }

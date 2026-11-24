@@ -50,6 +50,17 @@ public interface EconomyTaskBillingMapper {
             """)
     int insertQuotes(@Param("rows") java.util.List<EconomyTaskQuoteEntity> rows);
 
+    // The caller cannot nominate a quote id. Read the charge winner, not the most recent quote or configuration.
+    @Select("""
+        SELECT JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256')) FROM economy_task_charge c
+        JOIN economy_task_quote q ON q.quote_id=c.quote_id AND BINARY q.tenant_id=BINARY c.tenant_id AND BINARY q.client_id=BINARY c.client_id
+          AND BINARY q.owner_jiacn=BINARY c.owner_jiacn AND BINARY q.task_id=BINARY c.task_id AND BINARY q.payer_user_id=BINARY c.payer_user_id
+        WHERE c.tenant_id=#{tenant} AND c.client_id=#{client} AND c.owner_jiacn=#{owner} AND c.task_id=#{task} AND c.state='HELD'
+          AND BINARY c.tenant_id=BINARY #{tenant} AND BINARY c.client_id=BINARY #{client} AND BINARY c.owner_jiacn=BINARY #{owner} AND BINARY c.task_id=BINARY #{task}
+          AND JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.schema'))='MEASURED_TASK_QUOTE_V1'
+          AND BINARY JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.binding.agentId'))=BINARY #{agent}
+        """) String heldInitialIntent(@Param("tenant") String tenant,@Param("client") String client,@Param("owner") String owner,@Param("task") String task,@Param("agent") String agent);
+
     // Full features/configuration and repricing proof remain on the immutable quote; the sample references it.
     @Insert("""
         INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,

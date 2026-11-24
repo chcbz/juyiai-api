@@ -51,7 +51,7 @@ public final class IndependentTaskQuotes {
             prepared.forEach((agent,outcome)->{
                 if (outcome instanceof TaskBudgetEstimator.Available ready) {
                     var binding = new TaskBillingService.Binding(fresh.requirementRevision(),f.requirementSha256(),f.inputSnapshotSha256(),agent,batch);
-                    writes.add(new TaskBillingService.MeasuredWrite(binding,ready.preparation()));
+                    writes.add(new TaskBillingService.MeasuredWrite(binding,ready.preparation(),terms.get(agent).initialIntentSha256()));
                 }
             });
             var stored = (writes.isEmpty() ? List.<TaskBillingService.StoredQuote>of() : billing.storeMeasuredBatch(task,actor.actorId(),writes)).iterator();

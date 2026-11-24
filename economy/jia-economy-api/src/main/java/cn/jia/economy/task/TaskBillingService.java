@@ -49,7 +49,13 @@ public interface TaskBillingService {
     }
     /** Called once by the winning quote-batch writer, only after version revalidation. Never reserves funds. */
     Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared);
-    record MeasuredWrite(Binding binding, MeasuredPreparation prepared) {}
+    /** A private pointer to the Agent-owned initial decision, not a price input, permission, or runtime observation. */
+    record MeasuredWrite(Binding binding, MeasuredPreparation prepared,String initialIntentSha256) {
+        public MeasuredWrite(Binding binding,MeasuredPreparation prepared){this(binding,prepared,null);}
+        public MeasuredWrite{if(initialIntentSha256!=null&&!initialIntentSha256.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid initial intent commitment");}
+    }
+    /** Inside the caller's authorized task transaction: only the winning held charge's original intent for this target. */
+    String heldInitialIntent(Task task,String agentId);
     record StoredQuote(String quoteId, long amountWen) {}
     /** Persist in input order in the existing transaction. Each receipt names a separate immutable quote. */
     java.util.List<StoredQuote> storeMeasuredBatch(Task task, String payerUserId, java.util.List<MeasuredWrite> writes);

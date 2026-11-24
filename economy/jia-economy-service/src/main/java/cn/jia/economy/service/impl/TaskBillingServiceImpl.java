@@ -101,6 +101,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     // Only locally encoded, typed preparation may be embedded as JSON. Never accept raw JSON from the caller.
     private record FrozenPreparation(String featureSha, String groupSha, String json) {}
     private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, String historyGroupSha256,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) String initialIntentSha256,
             @com.fasterxml.jackson.annotation.JsonRawValue String preparation) {}
 
     private FrozenPreparation freeze(MeasuredPreparation p) {
@@ -115,8 +116,12 @@ public class TaskBillingServiceImpl implements TaskBillingService {
                 || !binding.inputSnapshotDigest().equals(p.features().inputSnapshotSha256()))
             throw new TaskBillingException(QUOTE_BINDING_CHANGED);
         var frozen = cache.computeIfAbsent(p, this::freeze);
-        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, frozen.featureSha(), frozen.groupSha(), frozen.json());
+        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, frozen.featureSha(), frozen.groupSha(), write.initialIntentSha256(), frozen.json());
         return quoteRow(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payer, p.estimate().wen(), encode(snapshot));
+    }
+
+    @Override public String heldInitialIntent(Task task,String agentId){
+        return mapper.heldInitialIntent(task.scope().tenantId(),task.scope().clientId(),task.ownerJiacn(),task.taskId(),agentId);
     }
 
     @Override public Quote storeMeasured(Task task, Binding binding, String payer, MeasuredPreparation p) {
