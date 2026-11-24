@@ -24,10 +24,21 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,boolean benchmarks,boolean compact){
         this(db,json,benchmarks,compact,java.util.Optional.empty());
     }
+    // Only a pure structural fact about exact source bytes; never store entries, eligibility, or money.
+    private record Cursor(Task task,String group,String after) {}
+    private final boolean memoizeInlineShape;
+    private final java.util.Map<Cursor,String> inlineShapes=java.util.Collections.synchronizedMap(new java.util.LinkedHashMap<>(64,0.75f,true){
+        @Override protected boolean removeEldestEntry(java.util.Map.Entry<Cursor,String> eldest){return size()>64;}
+    });
+    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,boolean benchmarks,boolean compact,java.util.Optional<ObservationRegistry> registry){
+        this(db,json,benchmarks,compact,registry,false);
+    }
     @org.springframework.beans.factory.annotation.Autowired
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,
             @org.springframework.beans.factory.annotation.Value("${jia.economy.measured-benchmark-use:false}") boolean benchmarks,
-            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact,java.util.Optional<ObservationRegistry> registry){
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact,java.util.Optional<ObservationRegistry> registry,
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-inline-shape-memo:false}") boolean memoizeInlineShape){
+        this.memoizeInlineShape=memoizeInlineShape;
         this.observations=registry.orElse(ObservationRegistry.NOOP);
         this.db=db;this.json=json;this.benchmarks=benchmarks;this.compact=compact;
     }
@@ -69,7 +80,9 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
         var span=Observation.start("cyf.task.quote.history.projection.page",observations);
         String outcome="error";
         try{
-            var rows=db.compactHistory(query,group.digest(),after,PAGE);var result=new java.util.ArrayList<Entry>(rows.size());
+            String digest=group.digest();var cursor=memoizeInlineShape?new Cursor(query,digest,after):null;
+            String known=cursor==null?"":inlineShapes.getOrDefault(cursor,"");
+            var rows=db.compactHistory(query,digest,after,PAGE,known);var result=new java.util.ArrayList<Entry>(rows.size());
             for(var row:rows){
                 if(row.metadata()==null){outcome="missing";return null;}
                 if(!Integer.valueOf(1).equals(row.sourceValid())){outcome="source_mismatch";return null;}
@@ -79,6 +92,10 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
                     if(!Group.of(group.execution(),f).equals(group)){outcome="group_mismatch";return null;}
                     result.add(new Entry(new Revision(row.id(),row.revision()),row.taskId(),f));
                 }catch(IllegalArgumentException|tools.jackson.core.JacksonException invalid){outcome="invalid_features";return null;}
+            }
+            if(cursor!=null){
+                String learned=rows.stream().map(ConfirmedSampleMapper.CompactRow::inlineSha).filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.joining(","));
+                if(!learned.equals(known)){if(learned.isEmpty())inlineShapes.remove(cursor);else inlineShapes.put(cursor,learned);}
             }
             outcome=rows.isEmpty()?"empty":"hit";return result;
         }finally{span.lowCardinalityKeyValue("outcome",outcome).stop();}

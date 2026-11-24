@@ -71,16 +71,18 @@ public interface ConfirmedSampleMapper {
           #{source.resolvedSha},#{source.recommendation},#{source.preparation},#{meta},#{vector})
         """) void saveFeature(@Param("id") String id,@Param("rev") long revision,@Param("source") FeatureSource source,
                     @Param("meta") String meta,@Param("vector") byte[] vector);
-    record CompactRow(String id,long revision,String taskId,String featureSha,String metadata,byte[] vector,Integer sourceValid){
+    record CompactRow(String id,long revision,String taskId,String featureSha,String metadata,byte[] vector,Integer sourceValid,String inlineSha){
         @Override public String toString(){return "CompactRow[private]";}
     }
     // Start at eligible samples, not projection rows. A missing or stale projection must not shorten a keyset page.
     @Select("""
         SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,x.feature_meta,x.vector_bytes,
           SHA2(q.snapshot_json,256)=x.envelope_sha AND ((x.preparation_sha IS NULL AND x.resolved_sha=x.envelope_sha
-          AND JSON_CONTAINS_PATH(q.snapshot_json,'one','$.preparation.features'))
+          AND CASE WHEN FIND_IN_SET(BINARY x.envelope_sha,#{knownInline})>0 THEN TRUE
+                   ELSE JSON_CONTAINS_PATH(q.snapshot_json,'one','$.preparation.features') END)
           OR (x.preparation_sha IS NOT NULL AND q.snapshot_json->>'$.preparation'=x.preparation_sha
-          AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256)))
+          AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256))),
+          IF(x.preparation_sha IS NULL,x.envelope_sha,NULL)
         FROM economy_task_cost_sample s LEFT JOIN economy_history_feature_projection x ON x.sample_id=s.sample_id
           AND x.sample_revision=s.projection_revision AND x.quote_id=s.quote_id
         LEFT JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn
@@ -89,7 +91,7 @@ public interface ConfirmedSampleMapper {
           AND p.task_id=q.task_id AND p.payer_user_id=q.payer_user_id AND p.recommendation_id=x.recommendation_id
           AND p.preparation_sha=x.preparation_sha WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
-    List<CompactRow> compactHistory(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
+    List<CompactRow> compactHistory(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit,@Param("knownInline") String knownInline);
     @Select("""
         SELECT r.operation_refs FROM economy_task_cost_sample s JOIN economy_task_cost_sample_revision r
         ON r.sample_id=s.sample_id AND r.sample_revision=s.projection_revision AND r.sample_state='READY' WHERE

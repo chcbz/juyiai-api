@@ -792,8 +792,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private String compactStatementDigest;
     private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query,long build){
         var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        var memoHits=new java.util.concurrent.atomic.AtomicLong();
         int[] miss={0};var mapperClass=cn.jia.economy.mapper.ConfirmedSampleMapper.class;
         var counted=mapperClass.cast(java.lang.reflect.Proxy.newProxyInstance(mapperClass.getClassLoader(),new Class<?>[]{mapperClass},(proxy,method,args)->{
+            if(method.getName().equals("compactHistory") && !((String)args[4]).isEmpty())memoHits.incrementAndGet();
             if(method.getName().equals("history"))miss[0]++;
             try{return method.invoke(original,args);}catch(java.lang.reflect.InvocationTargetException e){throw e.getCause();}
         }));
@@ -810,7 +812,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 String k=c.getName()+":"+labels.get("outcome");events.merge(k,1,Integer::sum);
             }
         });
-        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(timedMapper,json,false,true,java.util.Optional.of(registry)),cn.jia.economy.task.TaskHistoryCatalog.class);
+        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(timedMapper,json,false,true,java.util.Optional.of(registry),true),cn.jia.economy.task.TaskHistoryCatalog.class);
         java.util.function.Function<String,List<cn.jia.economy.task.TaskHistoryCatalog.Entry>> entries=after->projection.page(reader,group,after);
         java.util.function.Function<String,List<String>> page=after->entries.apply(after).stream().map(e->e.source().sampleId()).toList();
         var beforeSql=recShapes();assertEquals(64,page.apply("").size());var matches=new java.util.ArrayList<String>();
@@ -853,6 +855,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String qid=jdbc.queryForObject("SELECT quote_id FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
         jdbc.update("UPDATE economy_task_quote SET snapshot_json=CONCAT(snapshot_json,' ') WHERE quote_id=?",qid);
         assertEquals(control,engine.estimate(reader,group.execution(),query,pin,params,Map.of()));assertEquals(1,miss[0]);jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",quote,qid);
+        assertEquals(!shared,memoHits.get()>0);
+        if(!shared){
+            assertEquals(sid,entries.apply(cursor).getFirst().source().sampleId()); // exact page has now remembered the inline shape
+            // Same quote ID, changed authoritative bytes and matching but wrong derived classification. Old classification cannot apply.
+            String oldSha=jdbc.queryForObject("SELECT envelope_sha FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
+            jdbc.update("UPDATE economy_task_quote SET snapshot_json=JSON_SET(snapshot_json,'$.preparation',?) WHERE quote_id=?","e".repeat(64),qid);
+            String newSha=jdbc.queryForObject("SELECT SHA2(snapshot_json,256) FROM economy_task_quote WHERE quote_id=?",String.class,qid);
+            jdbc.update("UPDATE economy_history_feature_projection SET envelope_sha=?,resolved_sha=? WHERE sample_id=?",newSha,newSha,sid);
+            assertThrows(IllegalStateException.class,()->entries.apply(cursor));assertThrows(IllegalStateException.class,()->engine.estimate(reader,group.execution(),query,pin,params,Map.of()));
+            jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",quote,qid);
+            jdbc.update("UPDATE economy_history_feature_projection SET envelope_sha=?,resolved_sha=? WHERE sample_id=?",oldSha,oldSha,sid);
+        }
         if(shared){String rec=jdbc.queryForObject("SELECT recommendation_id FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
             jdbc.update("UPDATE economy_history_feature_projection SET recommendation_id='wrong-binding' WHERE sample_id=?",sid);assertEquals(sid,entries.apply(cursor).getFirst().source().sampleId());
             jdbc.update("UPDATE economy_history_feature_projection SET recommendation_id=? WHERE sample_id=?",rec,sid);}
@@ -882,7 +896,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String metric="cyf.task.quote.history.projection.page:";
         assertEquals(4,events.get(metric+"invalid_features"));assertEquals(2,events.get(metric+"missing"));
         assertTrue(events.get(metric+"hit")>100);assertTrue(events.get(metric+"empty")>0);
-        assertEquals(shared?4:1,events.get(metric+"source_mismatch"));assertEquals(shared?2:1,events.get("cyf.task.quote.estimate:error"));
+        assertEquals(shared?4:3,events.get(metric+"source_mismatch"));assertEquals(2,events.get("cyf.task.quote.estimate:error"));
         assertTrue(events.get("cyf.task.quote.estimate:ok")>=60);
         assertEquals(java.util.Set.of(metric+"invalid_features",metric+"missing",metric+"hit",metric+"empty",metric+"source_mismatch","cyf.task.quote.estimate:error","cyf.task.quote.estimate:ok"),events.keySet());
     }
