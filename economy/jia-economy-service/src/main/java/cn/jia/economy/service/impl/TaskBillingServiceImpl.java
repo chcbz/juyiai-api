@@ -39,6 +39,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.Optional;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 
 import static cn.jia.economy.task.TaskBillingException.Reason.*;
 
@@ -60,10 +63,16 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     }
 
     private final boolean sharedPreparationWrites;
+    private final ObservationRegistry observations;
+    public TaskBillingServiceImpl(EconomyTaskBillingMapper mapper, EconomyLedgerMapper ledger,
+            EconomyPostingService posting,ObjectMapper json,TaskPricingService pricing,boolean sharedPreparationWrites) {
+        this(mapper,ledger,posting,json,pricing,sharedPreparationWrites,Optional.empty());
+    }
     @org.springframework.beans.factory.annotation.Autowired
     public TaskBillingServiceImpl(EconomyTaskBillingMapper mapper, EconomyLedgerMapper ledger,
             EconomyPostingService posting, ObjectMapper json, TaskPricingService pricing,
-            @org.springframework.beans.factory.annotation.Value("${jia.economy.task-quotes.shared-preparation-writes:false}") boolean sharedPreparationWrites) {
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.task-quotes.shared-preparation-writes:false}") boolean sharedPreparationWrites, Optional<ObservationRegistry> registry) {
+        this.observations=registry.orElse(ObservationRegistry.NOOP);
         this.sharedPreparationWrites=sharedPreparationWrites;
         this.mapper = mapper;
         this.ledger = ledger;
@@ -133,6 +142,9 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     }
 
     @Override public Quote storeMeasured(Task task, Binding binding, String payer, MeasuredPreparation p) {
+        return observedWrite(()->storeSingleRow(task,binding,payer,p));
+    }
+    private Quote storeSingleRow(Task task,Binding binding,String payer,MeasuredPreparation p) {
         var frozen = freeze(p);
         var row = measuredRow(task, Objects.requireNonNull(payer), new MeasuredWrite(binding,p), frozen, frozen.json());
         mapper.insertQuote(row);
@@ -143,6 +155,16 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     private static final int CHUNK_ROWS = 32, CHUNK_SNAPSHOT_BYTES = 1024 * 1024;
     @Override public List<StoredQuote> storeMeasuredBatch(Task task, String payer, List<MeasuredWrite> writes) {
         Objects.requireNonNull(payer);
+        if(writes.isEmpty()) return List.of();
+        return observedWrite(()->storeRows(task,payer,writes));
+    }
+    // Statements including snapshot serialization; the caller's enclosing transaction can still roll back.
+    private <T> T observedWrite(java.util.function.Supplier<T> write) {
+        var span=Observation.start("cyf.task.quote.persist",observations);String outcome="error";
+        try {var result=write.get();outcome="written";return result;}
+        finally {span.lowCardinalityKeyValue("outcome",outcome).stop();}
+    }
+    private List<StoredQuote> storeRows(Task task,String payer,List<MeasuredWrite> writes) {
         var cache = new java.util.IdentityHashMap<MeasuredPreparation,FrozenPreparation>();
         // Task and payer are fixed by this call. Never group by amount, agent, or feature hash.
         // Exact text equality (including numeric representation) precedes digest addressing in the DB.

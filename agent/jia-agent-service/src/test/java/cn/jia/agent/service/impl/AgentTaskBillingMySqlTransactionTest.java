@@ -147,6 +147,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.service.usage.ConfirmedSampleRecovery recovery;
     private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
 
+    private final io.micrometer.observation.ObservationRegistry quoteWrites=io.micrometer.observation.ObservationRegistry.create();
     @BeforeEach
     void setUp(org.junit.jupiter.api.TestInfo info) throws Exception {
         // Owned ephemeral MySQL only; never connect to a configured/production database.
@@ -223,7 +224,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                         Map.of(ModelTokenPrice.Category.INPUT, new BigDecimal("0.50")), null, Map.of())));
         batches=proxy(new cn.jia.economy.service.impl.TaskQuoteBatchStore(sql.getMapper(EconomyTaskBillingMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskQuoteBatches.class);
         var posting=new EconomyPostingServiceImpl(ledger,manager,walletGate);
-        billing=proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class),ledger,posting,new ObjectMapper(),pricing,true),TaskBillingService.class);
+        billing=proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class),ledger,posting,new ObjectMapper(),pricing,true,java.util.Optional.of(quoteWrites)),TaskBillingService.class);
         inlineBilling=proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class),ledger,posting,new ObjectMapper(),pricing),TaskBillingService.class);
         var identities = mock(AgentIdentityService.class);
         when(identities.resolveAgentIdInScope(TENANT, CLIENT, OWNER, AGENT)).thenReturn(AGENT);
@@ -960,10 +961,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var second=new TaskBillingService.MeasuredPreparation(p.features(),group,p.estimatorVersion(),p.calibrationVersion(),p.qualityStatus(),price);
         var writes=new java.util.ArrayList<TaskBillingService.MeasuredWrite>();
         for(int i=0;i<40;i++)writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),"multi-"+i,"mixed"),i%2==0?p:second,i==0?null:String.format("%064x",i)));
+        var observed=new java.util.ArrayList<String>();
+        quoteWrites.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+            public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+            public void onStop(io.micrometer.observation.Observation.Context c){
+                assertEquals("cyf.task.quote.persist",c.getName());var tags=new java.util.HashMap<String,String>();
+                c.getLowCardinalityKeyValues().forEach(k->tags.put(k.getKey(),k.getValue()));assertEquals(java.util.Set.of("outcome"),tags.keySet());
+                assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());observed.add(tags.get("outcome"));
+            }
+        });
+        assertTrue(locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,List.of())).isEmpty());assertTrue(observed.isEmpty());
         writes.add(writes.getFirst()); // database unique binding fails after at least one successful INSERT
         assertThrows(org.springframework.dao.DuplicateKeyException.class,()->locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes)));
         assertEquals(before,count("economy_task_quote"));assertEquals(0,count("economy_task_quote_preparation"));writes.removeLast();
         var receipts=locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes));assertEquals(40,receipts.size());
+        assertEquals(List.of("error","written"),observed); // one span per attempted write, not per chunk/candidate
         var json=new ObjectMapper();for(int i=0;i<40;i++){
             var q=receipts.get(i);assertEquals(i%2==0?25L:50L,q.amountWen());var expected=writes.get(i);
             var raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,q.quoteId());
