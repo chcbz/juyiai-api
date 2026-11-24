@@ -1827,6 +1827,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             import fs from 'node:fs';import assert from 'node:assert/strict';
             import {fromAgentWire} from './agent-message-wire.mjs';import {normalizeInboundMessage} from './agent-client.mjs';
             import {PersistentChatInbox,buildChatDispatchAck} from './chat-runtime.mjs';
+            // Fixed labels/monotonic durations only; never record the wire frame or credentials.
+            const mark=name=>fs.appendFileSync(process.env.TMPDIR+'/phase.log',name+':'+Math.round(performance.now())+' ');
+            mark('modules');
             const m=normalizeInboundMessage(fromAgentWire(fs.readFileSync(0,'utf8')));
             assert.equal(m.durable,true);assert.equal(m.route,'CHAT');
             const profile={profileId:'owned',agentId:m.targetAgentId};const opts={rootDir:process.env.TMPDIR,profile};
@@ -1842,8 +1845,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             // Fixture at the model boundary, not at the action-final or dispatch boundary.
             const {runFastChat}=await import('./agent-client.mjs');const item=restored.claim(first.key);assert.ok(item);
             const {measureCodexAppServerBinary}=await import('./app-server-adapter.mjs');const {skillDigest}=await import('./skill-executor.mjs');
-            const schema=measureCodexAppServerBinary({codexBin:process.env.CYF_CODEX_BIN,codexHome:process.env.TMPDIR});
-            let chatPhase;
+            mark('inbox');const schema=measureCodexAppServerBinary({codexBin:process.env.CYF_CODEX_BIN,codexHome:process.env.TMPDIR});
+            mark('measured');let chatPhase;
             const frames=[];let turns=0;const result=await runFastChat({...profile,chatEngine:'app-server',chatSandbox:'read-only',chatToolPolicy:'read-only-constrained'},m,{
               chatWorkdir:process.env.TMPDIR,adapter:{readback:{initialize:{},schema},
                 startOrResumeThread:async(prior,settings)=>{assert.equal(turns,0);assert.ok(settings.developerInstructions.length>0);assert.equal(settings.config.network,false);
@@ -1853,11 +1856,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                   turns++;onAccepted({threadId,turnId:'quote-turn'});return {threadId,turnId:'quote-turn',content:JSON.stringify(outcome),finishReason:'completed'};}},
               controls:{markRunning:()=>{},isCancelled:()=>false,markFinalPrepared:v=>restored.markFinalPrepared(item,v),markFinalPublication:v=>restored.markFinalPublication(item,v)},
               sendProtocolFn:(type,payload)=>{frames.push(payload);return true;}});
-            assert.equal(turns,1);assert.equal(result.serverPersistence,'unconfirmed');assert.equal(frames.length,1);
+            mark('chat');assert.equal(turns,1);assert.equal(result.serverPersistence,'unconfirmed');assert.equal(frames.length,1);
             fs.writeFileSync(process.env.TMPDIR+'/final.json',JSON.stringify(frames[0]));
-            const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId,chatPhase}));
+            const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId,chatPhase}));mark('saved');
             """);pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString(),"CYF_CODEX_BIN",System.getProperty("cyf.ownedPickupCodex")));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(codec.writeValueAsBytes(frame));}assertTrue(proc.waitFor(20,TimeUnit.SECONDS));assertEquals(0,proc.exitValue());}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
+            var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(codec.writeValueAsBytes(frame));}boolean ended=proc.waitFor(20,TimeUnit.SECONDS);
+                Path phases=temp.resolve("phase.log");String timings=Files.exists(phases)?Files.readString(phases):"no module checkpoint";
+                System.out.println("QUOTED_DISCUSSION_PHASE_MS "+timings);assertTrue(ended,"discussion child deadline; "+timings);assertEquals(0,proc.exitValue());}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
             var file=temp.resolve("receipt.json");assertTrue(Files.size(file)<2048);var receipt=codec.readTree(Files.readAllBytes(file));var ack=receipt.path("ack");
             quotedChatPhase=codec.convertValue(receipt.path("chatPhase"),Map.class);
             assertEquals(outgoing.turn().getContextDigest(),receipt.path("context").asText());assertEquals(row.getTurnId(),receipt.path("turn").asText());assertEquals(row.getDispatchId(),ack.path("dispatchId").asText());assertEquals(row.getEventId(),ack.path("messageId").asText());
