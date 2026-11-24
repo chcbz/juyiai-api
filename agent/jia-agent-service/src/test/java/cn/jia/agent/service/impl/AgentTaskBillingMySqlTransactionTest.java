@@ -1165,7 +1165,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private void explainRecPage(String cursor)throws Exception{
         var cfg=recommendationSql.getConfiguration();var stmt=cfg.getMappedStatement(AgentExternalServicePolicyMapper.class.getName()+".candidates");
         var params=java.util.Map.of("tenant",TENANT,"client",CLIENT,"owner",OWNER,"after",cursor,"limit",101);var bound=stmt.getBoundSql(params);
-        var digest=jdbc.queryForObject("SELECT STATEMENT_DIGEST(?)",String.class,bound.getSql());
+        // The MySQL digest parser does not accept an unbound PREPARE template. Observe the
+        // real mapper in a quiescent, single-reader window instead of interpolating SQL literals.
+        var before=recShapes();var rows=recommendationSql.getMapper(AgentExternalServicePolicyMapper.class).candidates(TENANT,CLIENT,OWNER,cursor,101);
+        assertEquals(cursor.isEmpty()?101:8,rows.size());var matched=new java.util.ArrayList<String>();
+        recShapes().forEach((key,now)->{var old=before.getOrDefault(key,new Shape(0,0,0,0));
+            if(now.calls()-old.calls()==1 && now.sent()-old.sent()==rows.size())matched.add(key);
+        });assertEquals(1,matched.size(),"one actual page statement should match this isolated observation");var digest=matched.getFirst();
         try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement("EXPLAIN FORMAT=JSON "+bound.getSql())){
             cfg.newParameterHandler(stmt,params,bound).setParameters(ps);try(var r=ps.executeQuery()){assertTrue(r.next());reportPlan(digest,cursor.isEmpty()?"first":"next",new ObjectMapper().readTree(r.getString(1)));}
         }
