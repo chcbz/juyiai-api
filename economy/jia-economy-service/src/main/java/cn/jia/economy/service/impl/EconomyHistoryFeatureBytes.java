@@ -1,8 +1,6 @@
 package cn.jia.economy.service.impl;
 
 import cn.jia.economy.pricing.TaskEstimateFeatures;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
 
 /** Economy-private read representation. Never grants sample eligibility or replaces the confirmed quote. */
@@ -38,9 +36,7 @@ public final class EconomyHistoryFeatureBytes {
                 || bytes == null || bytes.length != 1024 * Float.BYTES) {
             throw new IllegalArgumentException("Invalid historical feature projection dimensions");
         }
-        ByteBuffer in = ByteBuffer.wrap(bytes);
-        var values = new ArrayList<Float>(meta.embeddingIdentity().dimensions());
-        while (in.hasRemaining()) values.add(in.getFloat());
+        var values=TaskEstimateFeatures.vectorFromBytes(bytes);
         var result = new TaskEstimateFeatures(meta.featureVersion(), meta.templateVersion(), meta.requirementSha256(),
                 meta.inputSnapshotSha256(), meta.textSha256(), meta.embeddingIdentity(), values, meta.files(), meta.requestedDeliverables());
         if (!result.digest().equals(expectedDigest)) throw new IllegalArgumentException("Historical feature commitment mismatch");

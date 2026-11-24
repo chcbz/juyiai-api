@@ -37,7 +37,7 @@ public final class TaskNeighborSearch {
     private static double range(DoubleSummaryStatistics s){return s.getCount()==0?0:s.getMax()-s.getMin();}
     private static double scaled(double a,double b,double scale){return a==b?0:scale==0?Double.POSITIVE_INFINITY:Math.abs(a-b)/scale;}
     private static double cosine(TaskEstimateFeatures a,TaskEstimateFeatures b){
-        double aa=0,bb=0,ab=0;for(int i=0;i<a.vector().size();i++){double x=a.vector().get(i),y=b.vector().get(i);aa+=x*x;bb+=y*y;ab+=x*y;}
+        double aa=0,bb=0,ab=0;for(int i=0;i<a.vector().size();i++){double x=a.component(i),y=b.component(i);aa+=x*x;bb+=y*y;ab+=x*y;}
         return 1-Math.clamp(ab/(Math.sqrt(aa)*Math.sqrt(bb)),-1d,1d);
     }
     private static final Comparator<Hit> ORDER=Comparator.comparingDouble(Hit::distance).thenComparing(Hit::id);

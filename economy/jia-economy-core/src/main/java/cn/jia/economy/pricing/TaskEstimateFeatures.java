@@ -12,13 +12,30 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
     public record Identity(String providerConfigVersion,String model,int dimensions){}
     public record File(String purpose,String contentMimeType,long byteLength,int version){}
     public TaskEstimateFeatures {
-        vector=List.copyOf(vector);files=List.copyOf(files);
+        if(!(vector instanceof PackedVector))vector=List.copyOf(vector);
+        files=List.copyOf(files);
         if(!VERSION.equals(featureVersion)||embeddingIdentity.dimensions()!=1024||vector.size()!=embeddingIdentity.dimensions())throw new IllegalArgumentException("Unexpected task feature identity");
-        boolean nonzero=false;for(float f:vector){if(!Float.isFinite(f))throw new IllegalArgumentException("Invalid task vector");nonzero|=f!=0;}
+        boolean nonzero=false;for(int i=0;i<vector.size();i++){float f=component(vector,i);if(!Float.isFinite(f))throw new IllegalArgumentException("Invalid task vector");nonzero|=f!=0;}
         if(!nonzero)throw new IllegalArgumentException("Undefined cosine");
     }
+    /** Immutable list view of an owned V1 byte block; keep the JSON/list contract at the boundary. */
+    private static final class PackedVector extends AbstractList<Float> implements RandomAccess {
+        private final byte[] bytes;
+        private final java.nio.ByteBuffer view;
+        private PackedVector(byte[] source){bytes=source.clone();view=java.nio.ByteBuffer.wrap(bytes);}
+        @Override public int size(){return bytes.length/Float.BYTES;}
+        @Override public Float get(int index){return value(index);}
+        private float value(int index){return view.getFloat(Objects.checkIndex(index,size())*Float.BYTES);}
+    }
+    public static List<Float> vectorFromBytes(byte[] bytes){
+        if(bytes==null || bytes.length!=1024*Float.BYTES)throw new IllegalArgumentException("Invalid feature vector length");
+        return new PackedVector(bytes);
+    }
+    private static float component(List<Float> values,int index){return values instanceof PackedVector packed?packed.value(index):values.get(index);}
+    float component(int index){return component(vector,index);}
     /** Detached canonical bytes; never expose mutable storage from this immutable feature. */
     public byte[] vectorBytes(){
+        if(vector instanceof PackedVector packed)return packed.bytes.clone();
         var bytes=java.nio.ByteBuffer.allocate(vector.size()*Float.BYTES);
         for(float v:vector)bytes.putFloat(v);
         return bytes.array();
@@ -27,7 +44,7 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
     public String digest(){try{
         var hash=MessageDigest.getInstance("SHA-256");try(var out=new DataOutputStream(new DigestOutputStream(OutputStream.nullOutputStream(),hash))){
             for(String v:List.of(featureVersion,templateVersion,requirementSha256,inputSnapshotSha256,textSha256,embeddingIdentity.providerConfigVersion(),embeddingIdentity.model()))field(out,v);
-            out.writeInt(embeddingIdentity.dimensions());out.write(vectorBytes());
+            out.writeInt(embeddingIdentity.dimensions());out.write(vector instanceof PackedVector packed?packed.bytes:vectorBytes());
             out.writeInt(files.size());for(var f:files){field(out,f.purpose());field(out,f.contentMimeType());out.writeLong(f.byteLength());out.writeInt(f.version());}
             out.writeBoolean(requestedDeliverables!=null);if(requestedDeliverables!=null)out.writeInt(requestedDeliverables);
         }return HexFormat.of().formatHex(hash.digest());
