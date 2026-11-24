@@ -658,21 +658,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test void scopedQuotePreparationReadsExactBytesAndRejectsForeignOrDamagedReferences() throws Exception {
         var fixture=measuredOffer();String inline=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,fixture.offer().quoteId());
         assertEquals(inline,jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,fixture.offer().quoteId()));
-        int split=inline.indexOf("\"preparation\":{");assertTrue(split>0);int start=split+14;
-        String preparation=inline.substring(start,inline.length()-1);assertTrue(preparation.startsWith("{"));
+        String preparation=new ObjectMapper().writeValueAsString(fixture.preparation());
+        assertTrue(inline.contains("\"preparation\":"+preparation));
         String sha=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(preparation.getBytes(StandardCharsets.UTF_8)));
-        String ref=inline.substring(0,start)+"\""+sha+"\"}";String id="tq_m1_scopeprobe";
+        String ref=inline.replace("\"preparation\":"+preparation,"\"preparation\":\""+sha+"\"");String id="tq_m1_scopeprobe";
         jdbc.update("INSERT INTO economy_task_quote(quote_id,binding_sha256,tenant_id,client_id,owner_jiacn,task_id,payer_user_id,amount_wen,snapshot_json,created_at) SELECT ?,?,tenant_id,client_id,owner_jiacn,task_id,payer_user_id,amount_wen,?,created_at FROM economy_task_quote WHERE quote_id=?",id,"7".repeat(64),ref,fixture.offer().quoteId());
         var scope=List.of(TENANT,CLIENT,OWNER,TASK,PAYER,fixture.binding().recommendationId());
         String insert="INSERT INTO economy_task_quote_preparation(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,recommendation_id,preparation_sha,preparation_json) VALUES(?,?,?,?,?,?,?,?)";
         String query="SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?";
         for(int i=0;i<scope.size();i++){var args=new java.util.ArrayList<String>(scope);args.set(i,args.get(i)+"-wrong");args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());}
-        assertNull(jdbc.queryForObject(query,String.class,id));
+        assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
         // Test-only corruption; the resolver must not return an unchecked object.
         jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND payer_user_id=? AND recommendation_id=? AND preparation_sha=?",args.subList(0,7).toArray());
-        assertNull(jdbc.queryForObject(query,String.class,id));
+        assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");
@@ -715,10 +715,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private void confirmMeasured(){
         var prepared=measuredOffer();
         if(conflictOnDiscussionRetry){ // Fixture only: exercise full confirmation/history/calibration before enabling the compact writer.
-            String raw=prepared.offer().snapshotJson();int start=raw.indexOf("\"preparation\":{")+14;
-            String body=raw.substring(start,raw.length()-1);String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,body);
+            String raw=prepared.offer().snapshotJson();String body=new ObjectMapper().writeValueAsString(prepared.preparation());
+            String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,body);
             jdbc.update("INSERT INTO economy_task_quote_preparation VALUES(?,?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,PAYER,prepared.binding().recommendationId(),sha,body);
-            jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",raw.substring(0,start)+"\""+sha+"\"}",prepared.offer().quoteId());
+            jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",raw.replace("\"preparation\":"+body,"\"preparation\":\""+sha+"\""),prepared.offer().quoteId());
         }
         assignment.assignForDeliberation(SCOPE,TASK,"assign-1",AGENT,0,1,
                 new AgentTaskExecutionGrantService.Payment(PAYER,prepared.offer().quoteId(),prepared.binding().recommendationId()));
