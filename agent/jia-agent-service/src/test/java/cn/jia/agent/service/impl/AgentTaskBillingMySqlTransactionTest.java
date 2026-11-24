@@ -712,7 +712,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
             assertEquals(prior,jdbc.queryForList(oldRows));
         }
-        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);return;}
+        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);if(dense)profileFeatureRead(reader,group,ids,shared);return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
         assertEquals(1,matches.size());var pageDigest=matches.getFirst();var cfg=recommendationSql.getConfiguration();
@@ -746,6 +746,24 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         // A READY sample still exists. Lost or wrongly scoped source quote must not silently shorten its page.
         jdbc.update("UPDATE economy_task_cost_sample SET quote_id='missing' WHERE sample_id=?",ids.get(80));
         assertThrows(IllegalStateException.class,()->historyCatalog.page(reader,group,ids.get(63)));
+    }
+    // Isolated synthetic fixture only. No application instrumentation or feature payload logging.
+    private void profileFeatureRead(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared){
+        var mapper=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        var json=new ObjectMapper();String groupSha=group.digest();
+        for(int run=0;run<4;run++){
+            long fetch=0,decode=0,verify=0,chars=0;int pos=0,pages=0;String after="";
+            while(true){long t=System.nanoTime();var page=mapper.history(reader,groupSha,after,64);fetch+=System.nanoTime()-t;pages++;
+                if(page.isEmpty())break;
+                for(var row:page){assertEquals(ids.get(pos++),row.id());chars+=row.featuresJson().length();
+                    t=System.nanoTime();var feature=json.readValue(row.featuresJson(),TaskEstimateFeatures.class);decode+=System.nanoTime()-t;
+                    t=System.nanoTime();String sha=feature.digest();var inferred=cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),feature);verify+=System.nanoTime()-t;
+                    assertEquals(row.featureSha(),sha);assertEquals(group,inferred);
+                }after=page.getLast().id();
+            }
+            assertEquals(ids.size(),pos);assertEquals((ids.size()+63)/64+1,pages);
+            System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_READ shared=%s run=%d rows=%d pages=%d chars=%d mapperFetchMs=%.3f jsonDecodeMs=%.3f featureVerifyMs=%.3f%n",shared,run,pos,pages,chars,fetch/1e6,decode/1e6,verify/1e6);
+        }
     }
     private void applyHistoryFeatures(){new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());}
     private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared,boolean dense){
