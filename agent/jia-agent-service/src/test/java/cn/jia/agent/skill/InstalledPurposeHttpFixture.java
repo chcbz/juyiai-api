@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /** Isolated recommendation read fixture: database represents a completed installation, not a simulated purchase.
- * The channel liveness predicate, runtime catalog and feature availability are test inputs; proof revalidation uses production SQL. */
+ * Chat owns the real transient registry, native proof revalidation uses production SQL. No external WS: socket/subscription liveness, catalog declarations and feature availability are fixture inputs. */
 public final class InstalledPurposeHttpFixture {
     private static final String HASH="a".repeat(64);
     public final SkillManagementService skills;
@@ -26,7 +26,7 @@ public final class InstalledPurposeHttpFixture {
     private final JdbcTemplate db;
     private final String tenant,client,owner;
     private final AgentRuntimeAuthenticationService auth;
-    private final SkillCapabilityLookup catalog=mock(SkillCapabilityLookup.class);
+    private final cn.jia.chat.handler.SkillExecutionSessionRegistry catalog=new cn.jia.chat.handler.SkillExecutionSessionRegistry();
     public InstalledPurposeHttpFixture(JdbcTemplate db,PlatformTransactionManager tx,String tenant,String client,String owner,AgentRuntimeAuthenticationService auth) throws Exception {
         this.db=db;this.tenant=tenant;this.client=client;this.owner=owner;this.auth=auth;
         for(String ddl:List.of("agent-runtime-session-fence-v1","agent-runtime-v1-schema","economy-v0-skill-marketplace","economy-v0-skill-application","economy-skill-management-sm-c1"))
@@ -57,7 +57,9 @@ public final class InstalledPurposeHttpFixture {
         auth.bind("fixture-session-"+generation+agent,proof,()->true);
         var fence=new AgentManagedSessionLookup.SessionFence(rt,"host","instance",generation);
         var fact=new SkillCapabilityLookup.RuntimeSkill("rec-skill","1.0.0",HASH,null,null,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE,null,null,null,install,"rec-version","INSTRUCTION","1",true,1L);
-        when(catalog.lookup(new SkillCapabilityLookup.Scope(tenant,client,owner,agent),fence)).thenReturn(new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,"session",fence,new SkillCapabilityLookup.Catalog("1",List.of(fact))));
+        String socket="fixture-session-"+generation+agent;
+        catalog.register(socket,new SkillCapabilityLookup.Scope(tenant,client,owner,agent),fence,new SkillCapabilityLookup.Catalog("1",List.of(fact)),
+                ()->auth.isCurrentBinding(socket,tenant,client,owner,agent,"instance"));
     }
     /** Synthetic settled rows exercise the read contract only; no money operations or historical pricing samples. */
     public void retained(String agent) throws Exception {

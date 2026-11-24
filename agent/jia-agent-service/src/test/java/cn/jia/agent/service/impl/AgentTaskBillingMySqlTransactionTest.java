@@ -1366,6 +1366,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var counts=new java.util.TreeMap<String,Long>();
         for(String table:List.of("agent_runtime_v1_installation","agent_runtime","agent_identity_registry","agent_persona_binding"))
             counts.put(table,admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND LOCATE(?,DIGEST_TEXT)>0",Long.class,database," FROM `"+table+"` WHERE "));
+        counts.put("installationPoint",admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT * FROM `agent_runtime_v1_installation` WHERE %'",Long.class,database));
         return counts;
     }
     private long paidInventorySelects(){return admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND DIGEST_TEXT LIKE '%economy_hosting_lease%' AND DIGEST_TEXT LIKE '%inventory_snapshot_json%'",Long.class,database);}
@@ -1449,7 +1450,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 var physical=proofSelects();physical.replaceAll((k,v)->v-proofBefore.get(k));
                 System.out.printf("RECOMMEND_PROOF_SQL candidates=%d concurrency=%d n=%d counts=%s%n",expected.size(),concurrency,times.size(),physical);
-                if(expected.size()==108)assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation").longValue(),"one installation batch for each observation");
+                if(expected.size()==108){assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation")-physical.get("installationPoint"),"one installation batch for each observation");assertTrue(physical.get("installationPoint")>0,"real Chat directory must consult the native current-binding predicate");}
                 long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");
