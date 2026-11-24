@@ -40,14 +40,17 @@ public final class AssigneeRecommendationService {
         var time = System.currentTimeMillis();
         CapabilitySearch.Result found;
         boolean truncated;
-        if(observed.isEmpty()) { truncated=false; found = new CapabilitySearch.Result("NOT_NEEDED",List.of(),List.of()); }
+        var docs=observed.values().stream().flatMap(c->c.citations().values().stream()).map(CapabilityDocuments.Citation::doc).toList();
+        if(docs.isEmpty()) {
+            truncated=false;
+            found=new CapabilitySearch.Result("NOT_NEEDED",CandidateRankFusion.fuse(observed.keySet(),List.of(),List.of()),List.of());
+        }
         else {
             var text = TaskRetrievalText.from(task,inputs); truncated=text.truncated();
             TaskFeatureEncoder.Vector v=null; String vectorFailure=null;
             try { v=vectors.encode(actor,text).block(); }
             catch(TaskFeatureEncoder.Unavailable e) { vectorFailure="QUERY_VECTOR_UNAVAILABLE"; }
             catch(TaskFeatureEncoder.InvalidResult e) { vectorFailure="QUERY_VECTOR_INVALID"; }
-            var docs=observed.values().stream().flatMap(c->c.citations().values().stream()).map(CapabilityDocuments.Citation::doc).toList();
             var retrieval=search.retrieve(observed.keySet(),docs,text.text(),v);
             if(vectorFailure!=null && !retrieval.reasons().contains(vectorFailure)) {
                 var reasons=new LinkedHashSet<>(retrieval.reasons()); reasons.remove("QUERY_VECTOR_UNAVAILABLE"); reasons.add(vectorFailure);
@@ -120,7 +123,7 @@ public final class AssigneeRecommendationService {
                     "online".equalsIgnoreCase(c.agent.status()) ? List.of() : List.of("当前可能需要等待承办人就绪。")));
         }
         rows.sort(Comparator.comparing((Recommendation r)->!suitable(r)).thenComparing(r->!r.agent().boundToMe())); // stable within each group
-        String state=switch(found.mode()){case "NOT_NEEDED"->"NO_CANDIDATES";case "HYBRID"->rows.stream().anyMatch(AssigneeRecommendationService::suitable)?"READY":"NO_MATCH";default->"DEGRADED";};
+        String state=switch(found.mode()){case "NOT_NEEDED"->rows.isEmpty()?"NO_CANDIDATES":"NO_MATCH";case "HYBRID"->rows.stream().anyMatch(AssigneeRecommendationService::suitable)?"READY":"NO_MATCH";default->"DEGRADED";};
         return new Result(task,version,time,state,List.copyOf(rows),true,found.mode(),suitability.rankingVersion(),found.reasons());
     }
 }

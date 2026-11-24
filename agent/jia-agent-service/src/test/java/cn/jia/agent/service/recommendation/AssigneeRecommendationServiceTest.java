@@ -118,6 +118,16 @@ class AssigneeRecommendationServiceTest {
         assertEquals("NO_CANDIDATES",r.state()); assertEquals("NOT_NEEDED",r.retrievalMode()); assertTrue(r.recommendations().isEmpty());
         verifyNoInteractions(search,vectors,skills,materials); verify(agents,times(2)).listTaskAssigneeCandidates("task");
     }
+    @Test void emptyAuthorizedEvidenceSkipsEmbeddingAndSearchButKeepsManualCandidate(){
+        var empty=new AgentTaskAssigneeCandidateDTO(row.target(),List.of(),"owner");
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(empty));var r=recommend();
+        assertEquals("NO_MATCH",r.state());assertEquals("NOT_NEEDED",r.retrievalMode());assertTrue(r.degradedReasons().isEmpty());
+        assertEquals(1,r.recommendations().size());var item=r.recommendations().getFirst();assertEquals("a",item.agent().agentId());
+        assertEquals("UNKNOWN",item.recommendationLevel());assertTrue(item.evidence().isEmpty());assertTrue(r.candidateSetComplete());
+        verifyNoInteractions(search);verify(vectors,never()).encode(any(),any());verify(materials).verifyUnchanged(actor,"task",List.of());
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(empty),List.of(row));
+        assertEquals(409,assertThrows(Failure.class,this::recommend).status());verifyNoInteractions(search);verify(vectors,never()).encode(any(),any());
+    }
     @Test void vectorFailureKeepsLexicalEvidenceWithoutRetry(){
         doReturn(Mono.error(new TaskFeatureEncoder.InvalidResult())).when(vectors).encode(eq(actor),any()); var r=recommend();
         assertEquals("DEGRADED",r.state()); assertEquals("LEXICAL_ONLY",r.retrievalMode()); assertEquals(List.of("QUERY_VECTOR_INVALID"),r.degradedReasons());
