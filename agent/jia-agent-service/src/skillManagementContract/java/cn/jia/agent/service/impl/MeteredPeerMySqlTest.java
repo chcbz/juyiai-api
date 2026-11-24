@@ -83,12 +83,17 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         verifyPeer(temp,measured,retry,successor,false);
     }
     private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion) throws Exception {
-        verifyPeer(temp,measured,retry,successor,discussion,false);
+        verifyPeer(temp,measured,retry,successor,discussion,DiscussionPeer.NONE);
     }
     @Test void originalDiscussionLostResponseAfterCommitReadsSameRevision(@TempDir Path temp) throws Exception {
-        verifyPeer(temp,null,false,false,false,true);
+        verifyPeer(temp,null,false,false,false,DiscussionPeer.ORIGINAL);
     }
-    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion,boolean chat) throws Exception {
+    enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT }
+    @Test void rotationBetweenCommitAndReadbackCannotInheritDiscussion(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null,false,false,false,DiscussionPeer.ROTATE_AFTER_COMMIT);
+    }
+    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion,DiscussionPeer peerMode) throws Exception {
+        boolean chat=peerMode!=DiscussionPeer.NONE,rotate=peerMode==DiscussionPeer.ROTATE_AFTER_COMMIT;
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -161,22 +166,37 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             verifyAcceptedSample(scenario,sql,manager,retry||discussion);return;
         }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var rotated=new AtomicReference<cn.jia.agent.entity.AgentRuntimeV1SessionResponse>();var originalBody=new AtomicReference<byte[]>();
         server.createContext("/",exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
             byte[] input=exchange.getRequestBody().readAllBytes();if(input.length>0)req.content(input);
             var response=mvc.perform(req).andReturn().getResponse();String kind=input.length==0?"GET":json.readTree(input).path("data").path("kind").asText();trace.add(kind);
-            assertEquals(200,response.getStatus(),kind+":"+response.getContentAsString());
-            if("RESPONSE".equals(kind)&&cuts.compareAndSet(null,exchange.getRequestHeaders().getFirst("X-Request-Id"))){assertEquals(1,count("economy_usage_revision"));return;}
+            assertEquals(rotated.get()==null?200:401,response.getStatus(),kind+":"+response.getContentAsString());
+            if("RESPONSE".equals(kind)&&cuts.compareAndSet(null,exchange.getRequestHeaders().getFirst("X-Request-Id"))){
+                assertEquals(1,count("economy_usage_revision"));
+                if(rotate){originalBody.set(input);rotated.set(tx.execute(st->auth.issue(installations.lock(INSTALL),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(INSTALL,"0","client",AGENT,"1","a".repeat(64),"host","rt"),2)));assertEquals(2,rotated.get().sessionGeneration());}
+                return;
+            }
             if("GET".equals(kind))assertTrue(exchange.getRequestURI().getPath().endsWith("/receipts/"+cuts.get()));
             for(var h:response.getHeaderNames())exchange.getResponseHeaders().put(h,response.getHeaders(h));byte[] bytes=response.getContentAsByteArray();exchange.sendResponseHeaders(response.getStatus(),bytes.length);exchange.getResponseBody().write(bytes);
         }catch(Throwable t){error.compareAndSet(null,t);}});server.start();
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
-            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
+            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
-                var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());assertEquals("1",report.path("revision").asText());
+                var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(rotate?4:successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());if(rotate)assertEquals(1,report.path("pending").asInt());else assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
         }finally{server.stop(0);}
+        if(rotate){
+            assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","RESPONSE"),trace);
+            var data=json.readTree(originalBody.get()).path("data");String id=cuts.get();assertEquals(id,data.path("receiptId").asText());
+            String url="/internal/agent/chat/dispatches/"+payload.get("dispatchId")+"/turns/"+payload.get("turnId")+"/contexts/"+payload.get("contextHash").toString().substring(7)+"/captures/"+data.path("captureId").asText()+"/usage";
+            for(var req:List.of(get(url+"/receipts/"+id),get(url+"/records/"+data.path("recordId").asText()),post(url).contentType("application/json").header("Idempotency-Key",id).content(originalBody.get()))){
+                req.header("Authorization","AgentRuntime "+rotated.get().sessionToken()).header("X-Agent-Id",AGENT).header("X-Agent-Installation-Id",INSTALL).header("X-Agent-Host-Id","host").header("X-Agent-Runtime-Id","rt").header("X-Agent-Session-Generation","2").header("X-Request-Id",id);
+                var refusal=mvc.perform(req).andReturn().getResponse();assertEquals(404,refusal.getStatus());assertEquals("CHAT_USAGE_DISPATCH_NOT_FOUND",json.readTree(refusal.getContentAsByteArray()).path("code").asText());
+            }
+            assertEquals(5,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_revision"));assertEquals(1,count("economy_usage_attempt"));return;
+        }
         assertEquals(chat?List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL"):successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
         // Consume the real transactionally registered work keys, deliberately run coverage BEFORE association.
         String pendingSql="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
