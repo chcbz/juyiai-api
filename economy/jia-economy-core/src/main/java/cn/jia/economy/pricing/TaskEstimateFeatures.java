@@ -17,11 +17,17 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
         boolean nonzero=false;for(float f:vector){if(!Float.isFinite(f))throw new IllegalArgumentException("Invalid task vector");nonzero|=f!=0;}
         if(!nonzero)throw new IllegalArgumentException("Undefined cosine");
     }
+    /** Detached canonical bytes; never expose mutable storage from this immutable feature. */
+    public byte[] vectorBytes(){
+        var bytes=java.nio.ByteBuffer.allocate(vector.size()*Float.BYTES);
+        for(float v:vector)bytes.putFloat(v);
+        return bytes.array();
+    }
     /** V1 binary commitment: length-prefixed UTF-8, fixed big-endian integers and IEEE754 float32. No private text or filenames. */
     public String digest(){try{
         var hash=MessageDigest.getInstance("SHA-256");try(var out=new DataOutputStream(new DigestOutputStream(OutputStream.nullOutputStream(),hash))){
             for(String v:List.of(featureVersion,templateVersion,requirementSha256,inputSnapshotSha256,textSha256,embeddingIdentity.providerConfigVersion(),embeddingIdentity.model()))field(out,v);
-            out.writeInt(embeddingIdentity.dimensions());for(float v:vector)out.writeFloat(v);
+            out.writeInt(embeddingIdentity.dimensions());out.write(vectorBytes());
             out.writeInt(files.size());for(var f:files){field(out,f.purpose());field(out,f.contentMimeType());out.writeLong(f.byteLength());out.writeInt(f.version());}
             out.writeBoolean(requestedDeliverables!=null);if(requestedDeliverables!=null)out.writeInt(requestedDeliverables);
         }return HexFormat.of().formatHex(hash.digest());

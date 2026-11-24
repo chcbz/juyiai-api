@@ -29,9 +29,7 @@ public final class EconomyHistoryFeatureBytes {
 
     /** Network byte order and IEEE754 float32, matching the original feature commitment. */
     public static byte[] vector(TaskEstimateFeatures source) {
-        ByteBuffer out = ByteBuffer.allocate(source.vector().size() * Float.BYTES);
-        source.vector().forEach(out::putFloat);
-        return out.array();
+        return source.vectorBytes();
     }
 
     /** Caller must separately verify the source binding and the compatibility group. */
