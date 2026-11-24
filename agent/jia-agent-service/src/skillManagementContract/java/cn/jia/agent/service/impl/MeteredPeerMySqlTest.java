@@ -88,12 +88,38 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     @Test void originalDiscussionLostResponseAfterCommitReadsSameRevision(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,false,false,DiscussionPeer.ORIGINAL);
     }
-    enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT }
+    enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT, WEB_CUTOVER }
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="ownedCutoverController",matches=".+")
+    void pendingDiscussionSurvivesWebFailureAndPeerRestart(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null,false,false,false,DiscussionPeer.WEB_CUTOVER);
+    }
+    private Map<Path,String> retainedBytes(Path state) throws Exception {
+        var result=new TreeMap<Path,String>();var hash=java.security.MessageDigest.getInstance("SHA-256");
+        try(var files=Files.walk(state)){for(var f:files.filter(Files::isRegularFile).toList())result.put(state.relativize(f),HexFormat.of().formatHex(hash.digest(Files.readAllBytes(f))));}
+        return result;
+    }
+    private void webCutoverWindow(Path temp,String receipt) throws Exception {
+        var state=temp.resolve("cutover-inbox");var bytes=retainedBytes(state);
+        var originals=bytes.keySet().stream().filter(p->p.getParent()!=null && p.getParent().getFileName().toString().startsWith("usage-capture-") && p.getFileName().toString().startsWith("response-")).toList();assertEquals(1,originals.size());
+        assertEquals(receipt,json.readTree(Files.readAllBytes(state.resolve(originals.getFirst()))).path("receiptId").asText());
+        var acks=bytes.keySet().stream().filter(p->p.getParent()!=null && p.getParent().getFileName().toString().startsWith("usage-acks-")).toList();
+        assertEquals(4,acks.size());assertTrue(acks.stream().noneMatch(p->p.getFileName().toString().startsWith("response-")));
+        assertEquals(5,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_revision"));
+        Path tests=Path.of(System.getProperty("ownedCutoverController"),"ops/ci/aliyun-flow/tests");
+        var web=new ProcessBuilder("python3","-B","-m","unittest","-v","test_web_native_local.NativeWebTransactionTest.test_fixed_cutover_artifact_recovers_to_verified_loopback_bytes").directory(tests.toFile());
+        web.environment().put("TMPDIR",temp.toString());web.environment().put("NO_PROXY","127.0.0.1");web.environment().put("no_proxy","127.0.0.1");
+        web.environment().put("CYF_CUTOVER_WEB_PACKAGE",Objects.requireNonNull(System.getProperty("ownedCutoverWebPackage")));
+        var log=temp.resolve("web-transaction.log");var child=web.redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try{assertTrue(child.waitFor(90,TimeUnit.SECONDS));String report=Files.readString(log);assertEquals(0,child.exitValue(),report);
+            assertTrue(report.contains("Ran 1 test") && report.contains("CYF_WEB_LOCAL_INSTALL=PASS") && !report.contains("skipped"),report);
+        }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
+        assertEquals(bytes,retainedBytes(state));assertEquals(5,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_revision"));
+    }
     @Test void rotationBetweenCommitAndReadbackCannotInheritDiscussion(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,false,false,DiscussionPeer.ROTATE_AFTER_COMMIT);
     }
     private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion,DiscussionPeer peerMode) throws Exception {
-        boolean chat=peerMode!=DiscussionPeer.NONE,rotate=peerMode==DiscussionPeer.ROTATE_AFTER_COMMIT;
+        boolean cutover=peerMode==DiscussionPeer.WEB_CUTOVER,chat=peerMode!=DiscussionPeer.NONE,rotate=peerMode==DiscussionPeer.ROTATE_AFTER_COMMIT;
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -174,19 +200,26 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             if("RESPONSE".equals(kind)&&cuts.compareAndSet(null,exchange.getRequestHeaders().getFirst("X-Request-Id"))){
                 assertEquals(1,count("economy_usage_revision"));
                 if(rotate){originalBody.set(input);rotated.set(tx.execute(st->auth.issue(installations.lock(INSTALL),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(INSTALL,"0","client",AGENT,"1","a".repeat(64),"host","rt"),2)));assertEquals(2,rotated.get().sessionGeneration());}
-                if(!rotate)return; // Other lost-response cases drop the actual socket.
-                exchange.getResponseHeaders().set("X-Fixture-Drop-Committed","yes");
+                if(cutover){originalBody.set(input);exchange.getResponseHeaders().set("X-Fixture-Stop-After-Commit","yes");}
+                else if(rotate)exchange.getResponseHeaders().set("X-Fixture-Drop-Committed","yes");
+                else return; // Original lost-response cases drop the actual socket.
+            }
+            else if(cutover && "RESPONSE".equals(kind)){
+                assertEquals(cuts.get(),exchange.getRequestHeaders().getFirst("Idempotency-Key"));assertArrayEquals(originalBody.get(),input);
             }
             if("GET".equals(kind))assertTrue(exchange.getRequestURI().getPath().endsWith("/receipts/"+cuts.get()));
             for(var h:response.getHeaderNames())exchange.getResponseHeaders().put(h,response.getHeaders(h));byte[] bytes=response.getContentAsByteArray();exchange.sendResponseHeaders(response.getStatus(),bytes.length);exchange.getResponseBody().write(bytes);
         }catch(Throwable t){error.compareAndSet(null,t);}});server.start();
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
+            for(String phase:cutover?List.of("stop","resume"):List.of("")){
             var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
-            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
-                assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
+            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("cutover",phase,"rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
+                assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());if(phase.equals("stop")){assertEquals(75,child.exitValue());assertNotNull(cuts.get());webCutoverWindow(temp,cuts.get());continue;}
+                assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
                 var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(rotate?4:successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());if(rotate)assertEquals(1,report.path("pending").asInt());else assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
+            }
         }finally{server.stop(0);}
         if(rotate){
             assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","RESPONSE"),trace);
@@ -198,7 +231,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             }
             assertEquals(5,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_revision"));assertEquals(1,count("economy_usage_attempt"));return;
         }
-        assertEquals(chat?List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL"):successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
+        assertEquals(cutover?List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","RESPONSE","SOURCE_FINAL","CAPTURE_FINAL"):chat?List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL"):successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
         // Consume the real transactionally registered work keys, deliberately run coverage BEFORE association.
         String pendingSql="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
         var projectionKey=jdbc.queryForObject(pendingSql,String.class,projection.getName());
