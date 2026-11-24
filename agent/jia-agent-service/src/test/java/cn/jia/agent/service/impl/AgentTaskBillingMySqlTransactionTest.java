@@ -1360,7 +1360,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(receipt.path("grantVersion").asLong(), discussion.grantVersion());
                 assertEquals(receipt.path("assignmentRevision").asLong(), discussion.assignmentRevision());
                 assertNull(relaySource.claimNext(SCOPE, "second-chat-fixture", claimTime));
-                var chat = bindQuotedDiscussion(discussion, req,actualAuthority);
+                var chat = bindQuotedDiscussion(discussion, req,actualAuthority,authority.identities());
                 // Execution action is still supplied by this fixture, not the typed discussion dispatcher.
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
                 prepareNativeExecutionSchema();
@@ -1392,7 +1392,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                                   WorkspaceConversationAccessService access) {}
 
     /** Real Chat binding and ACL against the same committed assignment. No synthetic conversation ID. */
-    private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService actualAuthority) throws Exception {
+    private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService actualAuthority,AgentIdentityService identities) throws Exception {
         Path chat = Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql");
         createTable(chat, "chat_conversation", false);
         createTable(chat, "agent_task_thread", false);
@@ -1416,7 +1416,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.taskId(), view.taskId()); assertEquals(List.of(intent.targetAgentId()), view.targetAgentIds());
         assertThrows(IllegalStateException.class, () -> access.requireAccessible(
                 new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,"other-owner"), discussion.conversationId()));
-        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx,actualAuthority);
+        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx,actualAuthority,identities);
         return new BoundBountyChat(discussion, access);
     }
 
@@ -1424,7 +1424,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
      * are fixtures here, not a claim of executing the discussion or accepting its eventual answer. */
     private void verifyBootstrapRequest(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,
             ChatBountyConversationService discussions, cn.jia.chat.dao.ChatConversationDao conversations,
-            ChatBountyConversationService.Discussion bound, TransactionTemplate tx,TaskAssigneeAuthorityService actualAuthority) throws Exception {
+            ChatBountyConversationService.Discussion bound, TransactionTemplate tx,TaskAssigneeAuthorityService actualAuthority,AgentIdentityService identities) throws Exception {
         createTable(Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql"), "chat_message", false);
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-native-execution-v6.sql"),new org.springframework.core.io.ClassPathResource("db/chat-typed-deliberation-schema-v1.sql")).execute(jdbc.getDataSource());
         var dao = new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class));
@@ -1440,10 +1440,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 actualAuthority, assignment, roots);
         deliberation.setDispatchAuthority(dispatch);
         deliberation.setContextHistory(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
-        var context = mock(ChatTypedDeliberationContextService.class);
-        var locator = new ChatTypedDeliberationContextService.Scope(TENANT,OWNER,CLIENT,bound.conversationId(),bound.generation());
-        when(context.resolve(locator,intent.taskId(),intent.targetAgentId(),List.of())).thenReturn(
-                new ChatTypedDeliberationContextService.Context(Map.of(),"[]",List.of(),Map.of()));
+        quoteWorkspace(); // Real empty task-linked input catalog for this new task.
+        var context=quotedActionContext(intent,requirements,actualAuthority,identities,dispatch);
         var typed = new ChatTypedDiscussionAdmissionService(roots,new cn.jia.chat.deliberation.ChatBountyBindingStore(jdbc),
                 conversations,new JuyitingConversationScopeService(new BuiltinHallAgentSupport(agents),agents),deliberation,dao,context,
                 new ChatTypedDeliberationService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc)), mock(ChatActionFinalService.class));
@@ -1491,6 +1489,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
 
     }
 
+    /** Real task policy, grant and action compiler. Only current device observations and
+     * the enabled native-file capability are controlled inputs, not prebuilt action facts. */
+    private ChatTypedDeliberationContextService quotedActionContext(AgentTaskBountyBootstrapClaimDTO intent,
+            AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService authority,
+            AgentIdentityService identities,ChatDispatchAuthorityService dispatch){
+        String agent=intent.targetAgentId(),session="quote-chat-session";
+        var sessions=new cn.jia.chat.handler.TypedDeliberationSessionRegistry();
+        sessions.register(session,TENANT,OWNER,CLIENT,agent,Map.of("schemaVersion",5,"state","READY","carrier","CHAT_MESSAGE_FINAL_SIDECAR_V5",
+                "referenceModes",List.of("NONE","AVAILABLE"),"outcomeKinds",List.of("ANSWER","CLARIFY","ACTION_REQUEST","REVISION_REQUEST","SUBMISSION_REQUEST"),
+                "engine","CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA","strictNoToolsVerified",false,"toolPolicy","read-only-constrained",
+                "nativeExecution",Map.of("schemaVersion",1,"executionProtocolVersion",6,"toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",List.of("text/plain"))));
+        var auth=mock(cn.jia.agent.security.AgentRuntimeAuthenticationService.class);
+        var proof=new cn.jia.agent.security.AgentRuntimeAuthenticationService.Proof(new cn.jia.agent.security.AgentRuntimeAuthentication.Scope(TENANT,CLIENT,OWNER,agent,"boot"),"installation","host",1,"fixture",1,1);
+        when(auth.currentRegisteredProof(TENANT,CLIENT,agent)).thenReturn(proof);
+        var policies=new TaskSkillPolicyServiceImpl(withMapper(new AgentTaskMetaDaoImpl(),AgentTaskMetaMapper.class),
+                new AgentTaskExecutionGrantDaoImpl(recommendationSql.getMapper(AgentTaskExecutionGrantMapper.class)),identities,requirements,auth);
+        policies.setAssigneeAuthority(authority);
+        var scope=new SkillCapabilityLookup.Scope(TENANT,CLIENT,OWNER,agent);
+        var fence=new AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
+        var caps=new ChatActionCapabilityService(key->{assertEquals(scope,key);return new InstalledSkillDescriptorLookup.Snapshot(List.of());},
+                (key,observed)->{assertEquals(scope,key);assertEquals(fence,observed);return new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,session,fence,new SkillCapabilityLookup.Catalog("1",List.of()));},policies);
+        var nativeFiles=mock(PersonalWorkspaceExecutionService.class);
+        when(nativeFiles.nativeLocalFileCapabilities()).thenReturn(new PersonalWorkspaceExecutionService.ExecutionCapabilities(List.of("text/plain"),List.of(),true));
+        caps.setNativeExecutions(nativeFiles);caps.setNativeSessions(sessions);
+        var context=new ChatTypedDeliberationContextService(jdbc,sessions,()->cn.jia.chat.config.ChatTypedDeliberationReadiness.Readiness.READY,caps,true);
+        context.setDispatchAuthority(dispatch);return context;
+    }
+
     /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for
      * network transport here; device selection and authentication are separate tests. No model call. */
     private void verifyDiscussionInbox(TransactionTemplate tx,ChatDeliberationOutboxService outbox,
@@ -1506,6 +1532,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             const m=normalizeInboundMessage(fromAgentWire(fs.readFileSync(0,'utf8')));
             assert.equal(m.durable,true);assert.equal(m.route,'CHAT');
             const profile={profileId:'owned',agentId:m.targetAgentId};const opts={rootDir:process.env.TMPDIR,profile};
+            const {resolveActionChatRequest,validateActionOutcome}=await import('./juyiting-action-outcome.mjs');
+            const facts=resolveActionChatRequest(profile,m);assert.equal(facts?.schemaVersion,6);
+            assert.equal(facts.availableActions.length,1);const descriptor=facts.availableActions[0];assert.equal(descriptor.operation,'EXECUTE_NATIVE');assert.equal(descriptor.skill,null);
+            const action={actionId:descriptor.actionId,instruction:'Answer the task',sourceRefIds:[],parameters:{outputMode:'ANSWER'}};
+            const outcome={schemaVersion:5,kind:'ACTION_REQUEST',text:'Proceed',clarification:null,action,revision:null,deliverable:false,deliveryRelation:null};
+            assert.deepEqual(validateActionOutcome(outcome,facts),outcome);
+            assert.throws(()=>validateActionOutcome({...outcome,action:{...action,actionId:'not-advertised'}},facts),/ACTION_NOT_ADVERTISED/);
             const inbox=new PersistentChatInbox(opts);inbox.initialize();const first=await inbox.accept(m);assert.equal(first.accepted,true);
             const restored=new PersistentChatInbox(opts);assert.equal(restored.initialize().pending,1);assert.equal((await restored.accept(m)).duplicate,true);
             const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId}));
