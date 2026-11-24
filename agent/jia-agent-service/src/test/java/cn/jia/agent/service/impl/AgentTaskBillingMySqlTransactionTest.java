@@ -770,7 +770,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(new TaskBillingService.Task(query.scope(),"other","offer"),needle,terms));
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
         locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
-        verifyHistoryQuoteHttp(query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms);
+        var pointRecordedQuote=verifyHistoryQuoteHttp(query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms);
         var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
@@ -812,6 +812,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         int history=count("economy_task_cost_sample_revision"),money=count("economy_transaction");
         recovery.executeScheduled(work);recovery.executeScheduled(work);assertTrue(sampleProjection.pending(TENANT,CLIENT,"").isEmpty());
         assertEquals(history+1,count("economy_task_cost_sample_revision"));assertEquals(money,count("economy_transaction"));
+        pointRecordedQuote.call(); // An already published price is not recomputed from the now-ineligible training row.
     }
     @Test void acceptedTaskExcludesCurrentIncompleteCaptureButWaitsForARevisedProjection(){
         confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
@@ -1255,21 +1256,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.api.IndependentTaskQuoteController independentQuoteController;
     private cn.jia.agent.api.TaskInitialActionController initialSelectionController;
     /** The archived sample, cutoff, candidate and terms are deliberately synthetic. Test real HTTP/SQL/commit/replay, not accuracy. */
-    private void verifyHistoryQuoteHttp(TaskBillingService.Task newTask,cn.jia.economy.task.TaskBudgetEstimator estimator,
+    private java.util.concurrent.Callable<Void> verifyHistoryQuoteHttp(TaskBillingService.Task newTask,cn.jia.economy.task.TaskBudgetEstimator estimator,
                                         cn.jia.economy.task.TaskBudgetEstimator.Terms terms) throws Exception {
         String id=newTask.taskId();jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",id,OWNER,TENANT,CLIENT);
-        for(String file:List.of("agent-task-requirement-snapshot-v1.sql","agent-task-current-requirement-v1.sql"))
-            new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(file))).execute(jdbc.getDataSource());
-        var req=new AgentTaskRequirementSnapshotServiceImpl(jdbc,roots);
+        var authority=quoteAndRecommendationAuthority();var req=authority.req();String agent="agt_00000000000000000000000000000002";
+        jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-point",agent,TENANT,CLIENT);
+        long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
+        jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         var requirement=roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->req.captureOnCreate(SCOPE,id,"Fixture title","Fixture description"));
         var inputs=roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,id));
-        var agents=mock(cn.jia.agent.service.AgentExternalServicePolicyService.class);
-        var targets=List.of(new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(AGENT,OWNER,1,0));
-        when(agents.quoteTargets(eq(SCOPE),eq(id),eq(List.of(AGENT)),anyBoolean())).thenReturn(targets);
+        // Only the additional 108-member performance roster is synthetic; the selected candidate uses real policy/identity reads.
+        var agents=mock(AgentExternalServicePolicyService.class);when(agents.quoteTargets(eq(SCOPE),eq(id),eq(List.of(agent)),anyBoolean())).thenAnswer(i->authority.policies().quoteTargets(SCOPE,id,List.of(agent),i.getArgument(3)));
+        var targets=authority.policies().quoteTargets(SCOPE,id,List.of(agent),false);assertEquals(1,targets.size());assertEquals(binding,targets.getFirst().binding());
+        for(String f:List.of("agent-task-native-preparation-v1.sql","agent-task-native-initial-admission-v1.sql","agent-task-native-selection-receipt-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
+        var decisions=new NativeTaskPreparationService(jdbc,roots,req,assignment,authority.policies(),new ObjectMapper());decisions.setSelectionEvents(mock(org.springframework.context.ApplicationEventPublisher.class));
+        initialSelectionController=new cn.jia.agent.api.TaskInitialActionController(decisions);
         var source=mock(cn.jia.agent.service.recommendation.ProspectiveTaskExecution.class);
         var subject=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(newTask,"0",1,requirement.sha256(),inputs.digest());
-        var proofs=Map.of(AGENT,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms,"f".repeat(64)));
-        when(source.observe(subject,targets)).thenReturn(proofs);when(source.current(subject,targets,proofs)).thenReturn(true);
         var calls=new java.util.concurrent.atomic.AtomicInteger();var encoder=new cn.jia.agent.service.TaskFeatureEncoder(){
             public Identity identity(){return new Identity("cfg","fixture",1024);}
             public Vector encode(String text){calls.incrementAndGet();float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);}
@@ -1278,27 +1281,63 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
                 mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
-        var hot=new java.util.ArrayList<Long>();String firstId=null;long cold=0,replay=0;
-        String token=httpToken();try(var client=HttpClient.newHttpClient()){
+        var hot=new java.util.ArrayList<Long>();String firstId=null,firstBatch=null;long cold=0,replay=0;
+        String token=httpToken();var mapper=new ObjectMapper();
+        var selection=URI.create(origin+"/agent/tasks/"+id+"/initial-actions/"+agent);
+        try(var client=HttpClient.newHttpClient()){
+            var get=HttpRequest.newBuilder(selection).header("Authorization","Bearer "+token).header("X-Request-Id","select-history");
+            var current=client.send(get.GET().build(),HttpResponse.BodyHandlers.ofString());assertEquals(200,current.statusCode(),current.body());
+            String version=mapper.readTree(current.body()).at("/data/selectionVersion").asText();
+            var put=get.header("Content-Type","application/json").header("Idempotency-Key","history-choice").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","select-history","data",Map.of("selectionVersion",version,"choice","LOCAL_ANSWER"))))).build();
+            var chosen=client.send(put,HttpResponse.BodyHandlers.ofString());assertEquals(200,chosen.statusCode(),chosen.body());assertEquals("LOCAL_ANSWER",mapper.readTree(chosen.body()).at("/data/choice").asText());
+        }
+        var frozen=decisions.find(new NativeTaskPreparation.Binding(SCOPE,id,0,1,requirement.sha256(),inputs.digest(),targets.getFirst()));assertNotNull(frozen);
+        var proofs=Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms,frozen.sha256()));
+        when(source.observe(subject,targets)).thenReturn(proofs);when(source.current(subject,targets,proofs)).thenReturn(true);
+        try(var client=HttpClient.newHttpClient()){
             for(int i=0;i<32;i++){
                 String key=i==31?"fixture-0":"fixture-"+i;
                 var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/quotes")).header("Content-Type","application/json")
                     .header("X-Request-Id","quote-http").header("Authorization","Bearer "+token).header("Idempotency-Key",key)
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+AGENT+"\"]}}" )).build();
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}" )).build();
                 long t=System.nanoTime();var response=client.send(request,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
                 assertEquals(200,response.statusCode(),response.body());var envelope=new ObjectMapper().readTree(response.body());assertEquals("E0",envelope.path("code").asText());
                 var item=envelope.at("/data/quotes/0");assertEquals("AVAILABLE",item.path("state").asText());assertEquals("65",item.at("/amount/amountMinor").asText());
-                if(i==0){firstId=item.path("quoteId").asText();assertFalse(firstId.isBlank());cold=elapsed;}
+                if(i==0){firstId=item.path("quoteId").asText();firstBatch=item.path("recommendationId").asText();assertEquals(agent,item.path("agentId").asText());assertFalse(firstId.isBlank());cold=elapsed;}
                 else if(i==31){assertEquals(firstId,item.path("quoteId").asText());replay=elapsed;}
                 else {assertNotEquals(firstId,item.path("quoteId").asText());hot.add(elapsed);}
             }
         }
-        assertEquals("f".repeat(64),jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.initialIntentSha256')) FROM economy_task_quote WHERE quote_id=?",String.class,firstId));
+        assertEquals(frozen.sha256(),jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.initialIntentSha256')) FROM economy_task_quote WHERE quote_id=?",String.class,firstId));
         assertEquals(1,calls.get());verify(source,times(31)).observe(subject,targets);verify(source,times(31)).current(subject,targets,proofs);
         assertEquals(batchCount+31,count("economy_task_quote_batch"));assertEquals(fixed+31,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
         if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile);
+        String fixedQuote=firstId,batchId=firstBatch;
+        return ()->{
+            ReflectionTestUtils.setField(assignment,"requirementSnapshots",req);ReflectionTestUtils.setField(operationReads,"requirements",req);
+            var actualAuthority=new TaskAssigneeAuthorityServiceImpl(new AgentExternalServicePolicyDaoImpl(recommendationSql.getMapper(AgentExternalServicePolicyMapper.class)),authority.identities(),new AgentTaskExecutionGrantDaoImpl(recommendationSql.getMapper(AgentTaskExecutionGrantMapper.class)));
+            assignment.setAssigneeAuthority(actualAuthority);ReflectionTestUtils.setField(assignment,"identities",authority.identities());
+            ReflectionTestUtils.setField(ReflectionTestUtils.getField(assignment,"legacyAssignments"),"identityService",authority.identities());
+            assignment.setDeliberationRuntime(e->e.equals(new TaskDeliberationRuntimeLookup.Scope(TENANT,CLIENT,OWNER,agent)));
+            int posts=count("economy_transaction"),grants=count("agent_task_execution_grant");long balance=wallet(independent);
+            try(var client=HttpClient.newHttpClient()){
+                class Point{tools.jackson.databind.JsonNode post(String batch,int expected)throws Exception{
+                    var body=Map.of("targetAgentId",agent,"expectedTaskVersion",subject.taskVersion(),"requirementRevision",Long.toString(subject.requirementRevision()),"quoteId",fixedQuote,"recommendationId",batch);
+                    var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/point-and-deliberate")).header("Authorization","Bearer "+token).header("X-Request-Id","hold").header("Idempotency-Key","history-point").header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","hold","data",body)))).build();
+                    var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(expected,response.statusCode(),response.body());return mapper.readTree(response.body()).path("data");
+                }}var point=new Point();point.post("different-batch",409);assertEquals(balance,wallet(independent));assertEquals(grants,count("agent_task_execution_grant"));
+                var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
+                assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
+                var admission=new QuotedInitialActionAdmission(billing,decisions);
+                roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->{var target=actualAuthority.requireGrantTarget(TENANT,CLIENT,OWNER,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()));
+                    var pending=admission.pending(SCOPE,id,agent);assertEquals(frozen.intent().output(),pending);assertEquals(binding,target.bindingId());
+                    assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->admission.admit(SCOPE,id,target,"wrong",true,Map.of()));
+                    admission.admit(SCOPE,id,target,"history-first",true,pending.commandOutputs());assertNull(admission.pending(SCOPE,id,agent));return null;});
+                assertEquals("history-first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(posts+1,count("economy_transaction"));
+            }return null;
+        };
     }
 
     /** Test-scoped attribution only; no application counters, raw SQL/inputs, or per-row log lines. */
