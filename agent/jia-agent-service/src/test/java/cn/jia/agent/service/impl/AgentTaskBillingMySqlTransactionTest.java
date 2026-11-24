@@ -1143,11 +1143,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var links=new PersonalWorkspaceTaskLinkDaoImpl(sql.getMapper(PersonalWorkspaceTaskFileLinkMapper.class));
         return new WorkspaceRows(files,links);
     }
-    private void attachQuoteFile(int i) {
+    private void attachQuoteFile(int i) { attachQuoteFile(TASK,i); }
+    private void attachQuoteFile(String task,int i) {
         String id="file-"+i;
         jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,?,'UPLOAD',?,'DOCUMENT','ACTIVE',1,1,1,?,?)",id,OWNER,id,TENANT,CLIENT);
         jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,1,?,'text/plain',7,?,'private:v',1,?,?)",id,OWNER,id,"b".repeat(64),TENANT,CLIENT);
-        jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",id,OWNER,TASK,id,TENANT,CLIENT);
+        jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",id,OWNER,task,id,TENANT,CLIENT);
     }
     @Test void quoteCatalogueMeasuresRealLockedInputsAndRejectsConcurrentTrash() throws Exception {
         var workspace=quoteWorkspace();var links=workspace.links();var files=workspace.files();var profile=new QuoteProfile();
@@ -1292,24 +1293,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
     void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
         var authority=quoteAndRecommendationAuthority();var agents=authority.agents();var req=authority.req();
-        // Only installed skills, attached materials and runtime readiness are fixture boundaries. Roster and abilities use production SQL.
+        // Only installed skills and runtime readiness are fixture boundaries. Roster and abilities use production SQL.
         var skills=mock(cn.jia.agent.skill.SkillManagementService.class);when(skills.recommendationSkills(any(),anyList())).thenAnswer(call->{var rows=call.<List<AgentTaskAssigneeCandidateDTO>>getArgument(1);return rows.stream().collect(java.util.stream.Collectors.toMap(r->r.target().agentId(),r->List.of()));});
-        var materials=mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class);
+        var workspace=quoteWorkspace();var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
+        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
         try(var es=new cn.jia.agent.service.recommendation.RecommendationHttpTestWiring(agents,skills,materials,roots)){
             recommendationController=es.controller;startHttp();var expected=new java.util.LinkedHashSet<String>();
             for(int n:List.of(1,108)){
                 String task="rec-http-"+n;jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",task,OWNER,TENANT,CLIENT);
                 roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,task,r->req.captureOnCreate(SCOPE,task,"合同审查 "+n,"核对合同条款"));
+                attachQuoteFile(task,n);
                 for(int i=expected.size();i<n;i++){
                     String id="agt_"+String.format(java.util.Locale.ROOT,"%032x",i+1),ability="合同审查 "+i;
                     jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES (?,?,?,1,1,?,?)",OWNER,"rec"+i,id,TENANT,CLIENT);
                     long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,id);
                     jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'rec-http-fixture',1,1)",id,CLIENT,OWNER,TENANT,binding);
-                    jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability)));
-                    es.index(TENANT,CLIENT,OWNER,id,ability);expected.add(id);
+                    jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability,"合同条款核对 "+i)));
+                    es.index(TENANT,CLIENT,OWNER,id,List.of(ability,"合同条款核对 "+i));expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
-                es.refresh();measureRecommendationHttp(task,expected,es.encodes);
+                es.refresh();assertEquals(2L*n,es.documentCount());measureRecommendationHttp(task,expected,es.encodes);
+                if(n==1){String agent=expected.iterator().next();
+                    assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
+                    String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"rec-withdrawn\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
+                    try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var rows=new ObjectMapper().readTree(res.body()).at("/data/recommendations");assertEquals(1,rows.size());var row=rows.get(0);assertEquals(agent,row.at("/agent/agentId").asText());assertTrue(row.path("evidence").isArray());assertEquals(0,row.path("evidence").size());assertEquals("UNKNOWN",row.path("recommendationLevel").asText());}
+                    assertEquals(2L,es.documentCount());assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities=? WHERE tenant_id=? AND client_id=? AND agent_id=?",new ObjectMapper().writeValueAsString(List.of("合同审查 0","合同条款核对 0")),TENANT,CLIENT,agent));
+                }
+                org.mockito.Mockito.verifyNoInteractions(storage,writes);
                 if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
