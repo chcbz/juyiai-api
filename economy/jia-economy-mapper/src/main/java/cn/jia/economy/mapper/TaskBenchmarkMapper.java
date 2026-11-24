@@ -7,8 +7,8 @@ import org.apache.ibatis.annotations.Param;
 
 public interface TaskBenchmarkMapper {
     String SCOPE="tenant_id=#{t.scope.tenantId} AND client_id=#{t.scope.clientId} AND owner_jiacn=#{t.ownerJiacn} AND task_id=#{t.taskId}";
-    // No approval writer in application code. Serialize enrollment/retirement of the exact authority row.
-    @Select("SELECT manifest_json FROM economy_task_benchmark_case WHERE "+SCOPE+" AND benchmark_case_id=#{id} AND retired=FALSE AND manifest_sha=#{sha} FOR UPDATE")
+    // No approval writer in application code. Caller serializes enrollment on its task root; fence retirement of the exact authority row.
+    @Select("SELECT manifest_json FROM economy_task_benchmark_case WHERE "+SCOPE+" AND benchmark_case_id=#{id} AND retired=FALSE AND manifest_sha=#{sha} FOR SHARE")
     String approved(@Param("t") Task task,@Param("id") String id,@Param("sha") String sha);
     @Select("SELECT sample_id FROM economy_task_cost_sample WHERE "+SCOPE+" AND benchmark_case_id=#{id} AND quote_id IS NULL AND sample_definition_version='TASK_LIFECYCLE_V1' FOR UPDATE")
     String existing(@Param("t") Task task,@Param("id") String id);
