@@ -148,7 +148,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.economy.usage.ConfirmedSampleProjection sampleProjection;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp(org.junit.jupiter.api.TestInfo info) throws Exception {
         // Owned ephemeral MySQL only; never connect to a configured/production database.
         database = "cyf_agentbill_" + Long.toUnsignedString(System.nanoTime(), 36);
         admin.execute("CREATE DATABASE `" + database + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
@@ -156,7 +156,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc = new JdbcTemplate(source);
         independent = new JdbcTemplate(source(database));
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
+        if(!info.getTestMethod().orElseThrow().getName().startsWith("denseHistory"))applyHistoryFeatures();
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/agent-task-execution-members-v1.sql")).execute(source);
         // Read unchanged production definitions; no parallel hand-written table schema.
         String schema = Files.readString(DDL.resolve("schema.sql"));
@@ -705,6 +706,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
+        if(dense){
+            String oldRows="SELECT quote_id,SHA2(snapshot_json,256) AS snapshot_sha,SHA2(CAST(JSON_EXTRACT(snapshot_json,'$.preparation.features') AS CHAR),256) AS features_sha FROM economy_task_quote_resolved ORDER BY quote_id";
+            var prior=jdbc.queryForList(oldRows);assertEquals(2*n+1,prior.size());assertTrue(prior.stream().allMatch(r->r.get("snapshot_sha")!=null && r.get("features_sha")!=null));
+            long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
+            assertEquals(prior,jdbc.queryForList(oldRows));
+        }
         // Compare every authenticated feature value, not just the three selected winners, with the full envelope reader.
         assertEquals((long)2*n,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote_resolved q JOIN economy_task_quote_history_features h USING(quote_id,tenant_id,client_id,owner_jiacn,task_id) WHERE q.task_id LIKE 'history-%' AND h.features_json IS NOT NULL AND BINARY CAST(h.features_json AS CHAR)=BINARY CAST(JSON_EXTRACT(q.snapshot_json,'$.preparation.features') AS CHAR)",Long.class));
         if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);return;}
@@ -742,6 +749,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_cost_sample SET quote_id='missing' WHERE sample_id=?",ids.get(80));
         assertThrows(IllegalStateException.class,()->historyCatalog.page(reader,group,ids.get(63)));
     }
+    private void applyHistoryFeatures(){new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());}
     private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared,boolean dense){
         // Synthetic READY projection of one measured frame per task. Identical vectors force stable tie selection across the entire group.
         String ops="""
@@ -838,7 +846,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         if(conflictOnDiscussionRetry){ // Fixture only: exercise full confirmation/history/calibration before enabling the compact writer.
             String raw=prepared.offer().snapshotJson();String body=new ObjectMapper().writeValueAsString(prepared.preparation());
             String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,body);
-            jdbc.update("INSERT INTO economy_task_quote_preparation VALUES(?,?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,PAYER,prepared.binding().recommendationId(),sha,body);
+            jdbc.update("INSERT INTO economy_task_quote_preparation(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,recommendation_id,preparation_sha,preparation_json) VALUES(?,?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,PAYER,prepared.binding().recommendationId(),sha,body);
             jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",raw.replace("\"preparation\":"+body,"\"preparation\":\""+sha+"\""),prepared.offer().quoteId());
         }
         assignment.assignForDeliberation(SCOPE,TASK,"assign-1",AGENT,0,1,

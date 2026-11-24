@@ -8,9 +8,9 @@ ALTER TABLE economy_task_quote ADD COLUMN preparation_locator VARCHAR(64) CHARAC
  AND JSON_TYPE(snapshot_json->'$.preparation')='STRING' AND CHAR_LENGTH(snapshot_json->>'$.preparation')=64
  AND CHAR_LENGTH(snapshot_json)-CHAR_LENGTH(REPLACE(snapshot_json,CONCAT('"preparation":"',snapshot_json->>'$.preparation','"'),''))=80
  AND JSON_TYPE(JSON_EXTRACT(REPLACE(snapshot_json,CONCAT('"preparation":"',snapshot_json->>'$.preparation','"'),'"preparation":null'),'$.preparation'))='NULL'
- THEN snapshot_json->>'$.preparation' END END) STORED INVISIBLE;
+ THEN snapshot_json->>'$.preparation' END END) STORED;
 ALTER TABLE economy_task_quote_preparation ADD COLUMN evidence_bytes_valid BOOLEAN GENERATED ALWAYS AS
- (CASE WHEN JSON_VALID(preparation_json) THEN BINARY preparation_sha=BINARY SHA2(preparation_json,256) AND JSON_TYPE(preparation_json)='OBJECT' ELSE FALSE END) STORED INVISIBLE;
+ (CASE WHEN JSON_VALID(preparation_json) THEN BINARY preparation_sha=BINARY SHA2(preparation_json,256) AND JSON_TYPE(preparation_json)='OBJECT' ELSE FALSE END) STORED;
 
 -- Common scoped resolution for historical features and exact byte-for-byte quote replay. No target chooses the source.
 CREATE OR REPLACE SQL SECURITY INVOKER VIEW economy_task_quote_sources AS
