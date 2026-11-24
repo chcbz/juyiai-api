@@ -35,7 +35,7 @@ export function collect(scopes, rows, subjectKey) {
     task.set=set; task.count=count; task.end=end; task.revisions.add(revision); captures.add(row.capture_id);
     const origin={...Object.fromEntries(fence.map(k=>[k,row[k]])),session_generation:serial(row.session_generation)};
     // A subject on one original installation cannot attest two live generations at cutover.
-    const deviceKey=JSON.stringify(tuple(origin,['tenant_id','client_id','target_agent_id','installation_id']));
+    const deviceKey=origin.installation_id;
     const device=devices.get(deviceKey) || {origin, manifest:{subjectKey:subjectKey({tenantId:row.tenant_id,clientId:row.client_id,canonicalAgentId:row.target_agent_id}),captureIds:[]}};
     check(JSON.stringify(device.origin)===JSON.stringify(origin),'CONFLICTING_ORIGINAL_SESSION');
     device.manifest.captureIds.push(row.capture_id);devices.set(deviceKey,device);
@@ -48,14 +48,14 @@ export function collect(scopes, rows, subjectKey) {
 }
 if (process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const [runtime,scopes,before,after,...extra]=process.argv.slice(2);
-    check(runtime && scopes && before && !extra.length,'USAGE_RUNTIME_SCOPES_BEFORE_OPTIONAL_AFTER');
+    const [runtime,scopes,before,after,pinned,...extra]=process.argv.slice(2);
+    check(runtime && scopes && before && !extra.length && (!after || (pinned && sha.test(pinned))),'USAGE_RUNTIME_SCOPES_BEFORE_OPTIONAL_AFTER_AND_PIN');
     const {runtimeSubjectKey}=await import(pathToFileURL(resolve(runtime,'conf/cyf-agent-runtime-v1/lib/manifest.mjs')));
     const load=async p=>JSON.parse(await readFile(p,'utf8'));
     const scopeList=await load(scopes), prior=collect(scopeList,await load(before),runtimeSubjectKey);
     if (after) {
       const current=collect(scopeList,await load(after),runtimeSubjectKey);
-      check(prior.snapshotSha256===current.snapshotSha256,'INVENTORY_CHANGED');
+      check(pinned===prior.snapshotSha256 && pinned===current.snapshotSha256,'INVENTORY_CHANGED');
       console.log(JSON.stringify({inventoryUnchanged:true,tasks:prior.tasks,sources:prior.sources,snapshotSha256:prior.snapshotSha256}));
     } else console.log(JSON.stringify(prior));
   } catch (e) { console.error(/^[A-Z_]+$/.test(e.message)?e.message:'INVENTORY_UNREADABLE');process.exitCode=2; }

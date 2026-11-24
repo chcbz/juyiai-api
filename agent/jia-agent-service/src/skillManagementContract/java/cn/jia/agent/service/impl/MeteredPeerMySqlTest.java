@@ -94,10 +94,28 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     @Test void registeredSecondDiscussionMissingFromDeviceCannotDrain(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,false,false,DiscussionPeer.MISSING_SOURCE);
     }
+    @Test void fixedMultiTaskRosterSeparatesOriginalInstallationsAndRejectsRepinnedInputs(@TempDir Path temp)throws Exception {
+        var members=new TaskDiscussionMembershipService(executions);var origins=new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc);
+        seedSentDiscussion(discussionPayload(),members,origins);seedSentDiscussion(discussionPayload("b","task2"),members,origins);
+        var third=discussionPayload("c","task2");String install2="rti_"+"2".repeat(32);seedSentDiscussion(third,members,origins,install2,"other-host","other-runtime");
+        Path scopes=temp.resolve("scopes.json"),before=temp.resolve("before.json"),after=temp.resolve("after.json");
+        Files.write(scopes,json.writeValueAsBytes(List.of("task","task2").stream().map(t->Map.of("tenant_id","0","client_id","client","owner_jiacn","owner","task_id",t)).toList()));
+        Files.write(before,json.writeValueAsBytes(inventory()));rosterCommand(temp,scopes,before,null,2); // Missing whole task.
+        var all=new ArrayList<>(inventory());all.addAll(inventory("task2"));Files.write(before,json.writeValueAsBytes(all));
+        var plan=rosterCommand(temp,scopes,before,null,0);assertEquals(2,plan.required("tasks").asInt());assertEquals(3,plan.required("sources").asInt());var devices=plan.required("devices");assertEquals(2,devices.size());
+        assertEquals(INSTALL,devices.get(0).at("/origin/installation_id").asText());assertEquals(2,devices.get(0).at("/manifest/captureIds").size());assertEquals(install2,devices.get(1).at("/origin/installation_id").asText());
+        assertEquals(NativeCaptureEvidence.captureIdentity((String)third.get("turnId"),(String)third.get("dispatchId")),devices.get(1).at("/manifest/captureIds/0").asText());assertEquals(devices.get(0).at("/manifest/subjectKey"),devices.get(1).at("/manifest/subjectKey"));
+        Files.writeString(temp.resolve("prior.sha"),plan.required("snapshotSha256").asText());Files.write(after,json.writeValueAsBytes(all.reversed()));rosterCommand(temp,scopes,before,after,0);
+        seedSentDiscussion(discussionPayload("d","task2"),members,origins);all=new ArrayList<>(inventory());all.addAll(inventory("task2"));Files.write(after,json.writeValueAsBytes(all));rosterCommand(temp,scopes,before,after,2);
+        Files.copy(after,before,StandardCopyOption.REPLACE_EXISTING);rosterCommand(temp,scopes,before,after,2); // Both files agree but not with the first inspection.
+    }
     enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT, WEB_CUTOVER, LIVE_DRAIN, MISSING_SOURCE }
     private List<Map<String,Object>> inventory() throws Exception {
+        return inventory("task");
+    }
+    private List<Map<String,Object>> inventory(String task)throws Exception {
         var query=Files.readString(Path.of("../../ops/schema/discussion-source-inventory.sql"));
-        return jdbc.queryForList(query,"0","client","owner","task");
+        return jdbc.queryForList(query,"0","client","owner",task);
     }
     // Fixed, sealed single-source fixture. Compare each revision, not a queue size or count of POSTs.
     private Map<String,String> originalRevisions(Path state) throws Exception {
@@ -298,7 +316,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             var scopeFile=temp.resolve("scopes.json");var before=temp.resolve("before.json");var after=temp.resolve("after.json");
             var first=frozen.getFirst();var scopeFields=List.of("tenant_id","client_id","owner_jiacn","task_id");var scopeRow=new HashMap<String,Object>();for(String k:scopeFields)scopeRow.put(k,first.get(k));
             Files.write(scopeFile,json.writeValueAsBytes(List.of(scopeRow)));Files.write(before,json.writeValueAsBytes(frozen));
-            var plan=rosterCommand(temp,scopeFile,before,null,0);assertEquals(ids.stream().sorted().toList(),json.convertValue(plan.at("/devices/0/manifest/captureIds"),List.class));
+            var plan=rosterCommand(temp,scopeFile,before,null,0);Files.writeString(temp.resolve("prior.sha"),plan.required("snapshotSha256").asText());assertEquals(ids.stream().sorted().toList(),json.convertValue(plan.at("/devices/0/manifest/captureIds"),List.class));
             Files.write(after,json.writeValueAsBytes(inventory().reversed()));assertTrue(rosterCommand(temp,scopeFile,before,after,0).required("inventoryUnchanged").asBoolean());
             // An additional unmetered legacy member must invalidate the scope, not disappear from it.
             tx.executeWithoutResult(st->{new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","legacy-turn","legacy-run","e".repeat(64),false);});
@@ -347,10 +365,11 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     }
     // Test boundary: committed original dispatch, not admission, model execution, or business finality.
     Map<String,Object> discussionPayload() throws Exception {return discussionPayload(false);}
-    @SuppressWarnings("unchecked") Map<String,Object> discussionPayload(boolean second) throws Exception {
+    Map<String,Object> discussionPayload(boolean second)throws Exception{return discussionPayload(second?"b":"","task");}
+    @SuppressWarnings("unchecked") Map<String,Object> discussionPayload(String suffix,String task) throws Exception {
         String template=Files.readString(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge/contracts/api-hosted-wire-v1.json"));
-        if(second){var original=json.readTree(template);for(String field:List.of("requestId","turnId","dispatchId","contextSnapshotId","messageId")){String id=original.required(field).asText();template=template.replace(id,id+"b");}}
-        Map<String,Object> wire=json.readValue(template.replace("hosted-agent-contract",AGENT).replace("client-contract","client").replace("tenant-contract","0").replace("owner-contract","owner").replace("task-contract-17","task"),Map.class);
+        if(!suffix.isEmpty()){var original=json.readTree(template);for(String field:List.of("requestId","turnId","dispatchId","contextSnapshotId","messageId")){String id=original.required(field).asText();template=template.replace(id,id+suffix);}}
+        Map<String,Object> wire=json.readValue(template.replace("hosted-agent-contract",AGENT).replace("client-contract","client").replace("tenant-contract","0").replace("owner-contract","owner").replace("task-contract-17",task),Map.class);
         wire.put("route","CHAT");var facts=(Map<String,Object>)wire.get("factsManifest");facts.put("participantAgentIds",List.of(AGENT));
         ((Map<String,Object>)facts.get("task")).put("assignedAgentIds",List.of(AGENT));facts.put("contextDelivery",Map.of("mode","BOOTSTRAP"));
         facts.put("taskUsageCapture",Map.of("protocol","METERED_CAPTURE_V2","captureId",NativeCaptureEvidence.captureIdentity((String)wire.get("turnId"),(String)wire.get("dispatchId"))));
@@ -358,11 +377,14 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var snap=(Map<String,Object>)wire.get("contextSnapshot");snap.put("facts",facts);snap.put("contextHash",hash);return wire;
     }
     private tools.jackson.databind.JsonNode rosterCommand(Path temp,Path scopes,Path before,Path after,int expected)throws Exception{
-        var args=new ArrayList<>(List.of("node",Path.of("../../ops/schema/discussion_source_roster.mjs").toAbsolutePath().toString(),System.getProperty("ownedMeteredRuntime"),scopes.toString(),before.toString()));if(after!=null)args.add(after.toString());
+        var args=new ArrayList<>(List.of("node",Path.of("../../ops/schema/discussion_source_roster.mjs").toAbsolutePath().toString(),System.getProperty("ownedMeteredRuntime"),scopes.toString(),before.toString()));if(after!=null){args.add(after.toString());args.add(Files.readString(temp.resolve("prior.sha")));}
         var proc=new ProcessBuilder(args).redirectError(temp.resolve("inventory.err").toFile()).start();try{assertTrue(proc.waitFor(10,TimeUnit.SECONDS));assertEquals(expected,proc.exitValue(),Files.readString(temp.resolve("inventory.err")));byte[] out=proc.getInputStream().readAllBytes();if(expected!=0){assertEquals(0,out.length);return null;}return json.readTree(out);}finally{proc.destroyForcibly();}
     }
     void seedOriginalOrigin(Map<String,Object> w){new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc).observe((String)w.get("messageId"),(String)w.get("contextHash"),INSTALL,"host","rt",1);}
     void seedSentDiscussion(Map<String,Object> w,TaskDiscussionMembershipService members,cn.jia.chat.deliberation.ChatTaskDispatchOriginStore origins){
+        seedSentDiscussion(w,members,origins,INSTALL,"host","rt");
+    }
+    void seedSentDiscussion(Map<String,Object> w,TaskDiscussionMembershipService members,cn.jia.chat.deliberation.ChatTaskDispatchOriginStore origins,String installation,String host,String runtime){
         var ds=Objects.requireNonNull(jdbc.getDataSource());new ResourceDatabasePopulator(new ClassPathResource("db/chat-deliberation-schema.sql"),new ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(ds);
         String turn=(String)w.get("turnId"),run=(String)w.get("dispatchId"),req=(String)w.get("requestId"),ctx=(String)w.get("contextHash"),snap=(String)w.get("contextSnapshotId"),event=(String)w.get("messageId");
         String digest=NativeCaptureEvidence.digest(List.of("fixture-admission",req,turn,run));
@@ -371,7 +393,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             jdbc.update("INSERT INTO chat_turn(turn_id,tenant_id,owner_jiacn,client_id,request_id,request_revision,conversation_id,conversation_generation,target_agent_id,snapshot_id,context_digest,dispatch_id,route,state,created_at,updated_at) VALUES(?,'0','owner','client',?,7,'42',3,?,?,?,?,'CHAT','RUNNING',1,1)",turn,req,AGENT,snap,ctx,run);
             var original=new LinkedHashMap<>(w);original.remove("contextSnapshot");
             jdbc.update("INSERT INTO chat_dispatch_outbox(event_id,tenant_id,owner_jiacn,client_id,turn_id,dispatch_id,event_type,task_grant_id,task_grant_version,status,payload_json,created_at,updated_at) VALUES(?,'0','owner','client',?,?,'DISPATCH','g',1,'SENT',?,1,1)",event,turn,run,json.writeValueAsString(original));
-            origins.observe(event,ctx,INSTALL,"host","rt",1);assertEquals(NativeCaptureEvidence.captureIdentity(turn,run),members.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task",turn,run,digest,true));
+            origins.observe(event,ctx,installation,host,runtime,1);assertEquals(NativeCaptureEvidence.captureIdentity(turn,run),members.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),(String)w.get("taskId"),turn,run,digest,true));
         });assertEquals(0,count("agent_personal_workspace_execution"));
     }
     // The test supplies only the upstream quote estimate and acceptance decision. Wallet, membership,
