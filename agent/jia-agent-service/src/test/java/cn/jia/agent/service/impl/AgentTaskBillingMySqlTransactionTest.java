@@ -1130,6 +1130,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability)));
                     es.index(TENANT,CLIENT,OWNER,id,ability);expected.add(id);
                 }
+                if(n==108){explainRecPage("");explainRecPage(expected.stream().skip(99).findFirst().orElseThrow());}
                 es.refresh();measureRecommendationHttp(task,expected,es.encodes);
                 if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
@@ -1152,6 +1153,33 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     // No statement text, task data, individual event history, credentials or parameters are logged.
     private record RecSql(long statements,long examined,long sent,long statementPicos,long roots,long waits,long waitMillis){
         RecSql minus(RecSql old){return new RecSql(statements-old.statements,examined-old.examined,sent-old.sent,statementPicos-old.statementPicos,roots-old.roots,waits-old.waits,waitMillis-old.waitMillis);}
+    }
+    private record Shape(long calls,long examined,long sent,long picos){}
+    private java.util.Map<String,Shape> recShapes(){
+        var result=new java.util.TreeMap<String,Shape>();
+        admin.query("SELECT DIGEST,COUNT_STAR,SUM_ROWS_EXAMINED,SUM_ROWS_SENT,SUM_TIMER_WAIT FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND DIGEST IS NOT NULL",(org.springframework.jdbc.core.RowCallbackHandler)rs->{result.put(rs.getString(1),new Shape(rs.getLong(2),rs.getLong(3),rs.getLong(4),rs.getLong(5)));},database);
+        return result;
+    }
+    // Link performance_schema's server-generated digest to the actual mapper query. Prepared parameters
+    // are the same synthetic scope/cursor as the measured fixture; nothing from EXPLAIN is logged except access metadata.
+    private void explainRecPage(String cursor)throws Exception{
+        var cfg=recommendationSql.getConfiguration();var stmt=cfg.getMappedStatement(AgentExternalServicePolicyMapper.class.getName()+".candidates");
+        var params=java.util.Map.of("tenant",TENANT,"client",CLIENT,"owner",OWNER,"after",cursor,"limit",101);var bound=stmt.getBoundSql(params);
+        var digest=jdbc.queryForObject("SELECT STATEMENT_DIGEST(?)",String.class,bound.getSql());
+        try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement("EXPLAIN FORMAT=JSON "+bound.getSql())){
+            cfg.newParameterHandler(stmt,params,bound).setParameters(ps);try(var r=ps.executeQuery()){assertTrue(r.next());reportPlan(digest,cursor.isEmpty()?"first":"next",new ObjectMapper().readTree(r.getString(1)));}
+        }
+    }
+    private void reportPlan(String digest,String page,tools.jackson.databind.JsonNode node){
+        if(node.isObject()&&node.has("table_name")&&node.has("access_type"))System.out.printf("RECOMMEND_SQL_PLAN digest=%s page=%s table=%s access=%s key=%s estimatedRowsPerScan=%s%n",digest,page,node.path("table_name").asText(),node.path("access_type").asText(),node.path("key").asText("none"),node.path("rows_examined_per_scan").asText("unknown"));
+        for(var child:node)reportPlan(digest,page,child);
+    }
+    private void reportShapes(int size,java.util.Map<String,Shape> before){
+        var ranked=new java.util.ArrayList<java.util.Map.Entry<String,Shape>>();recShapes().forEach((key,now)->{
+            var old=before.getOrDefault(key,new Shape(0,0,0,0));if(now.calls()>old.calls())ranked.add(java.util.Map.entry(key,new Shape(now.calls()-old.calls(),now.examined()-old.examined(),now.sent()-old.sent(),now.picos()-old.picos())));
+        });
+        ranked.sort(java.util.Comparator.<java.util.Map.Entry<String,Shape>>comparingLong(e->e.getValue().examined()).reversed().thenComparing(java.util.Map.Entry::getKey));
+        for(var e:ranked){var s=e.getValue();System.out.printf(java.util.Locale.ROOT,"RECOMMEND_SQL_DIGEST candidates=%d digest=%s calls=%d examined=%d sent=%d selectMs=%.3f%n",size,e.getKey(),s.calls(),s.examined(),s.sent(),s.picos()/1e9);}
     }
     private RecSql readRecSql(){
         assertEquals(1,admin.queryForObject("SELECT @@performance_schema",Integer.class));
@@ -1183,7 +1211,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
-                var sqlBefore=readRecSql();
+                var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1194,7 +1222,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     }
                 }
                 times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
-                var delta=readRecSql().minus(sqlBefore);
+                var delta=readRecSql().minus(sqlBefore);if(shapes!=null)reportShapes(expected.size(),shapes);
                 System.out.printf(java.util.Locale.ROOT,"RECOMMEND_MYSQL candidates=%d concurrency=%d n=%d selects=%d rowsExamined=%d rowsSent=%d sumSelectMs=%.3f matchingRootLocks=%d rowWaits=%d sumRowWaitMs=%d%n",expected.size(),concurrency,times.size(),delta.statements(),delta.examined(),delta.sent(),delta.statementPicos()/1e9,delta.roots(),delta.waits(),delta.waitMillis());
                 assertTrue(delta.statements()>0 && delta.examined()>0 && delta.sent()>0 && delta.statementPicos()>0,"missing statement observations");assertTrue(delta.waits()>=0 && delta.waitMillis()>=0);
                 assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
