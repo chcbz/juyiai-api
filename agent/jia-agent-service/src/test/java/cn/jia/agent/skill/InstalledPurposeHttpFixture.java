@@ -59,7 +59,9 @@ public final class InstalledPurposeHttpFixture {
         var fact=new SkillCapabilityLookup.RuntimeSkill("rec-skill","1.0.0",HASH,null,null,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE,null,null,null,install,"rec-version","INSTRUCTION","1",true,1L);
         String socket="fixture-session-"+generation+agent;
         catalog.registerObserved(socket,new SkillCapabilityLookup.Scope(tenant,client,owner,agent),fence,new SkillCapabilityLookup.Catalog("1",List.of(fact)),
-                receipt,channel->(channel!=null&&channel.matches(socket,tenant,client,owner,agent,"instance")) || auth.isCurrentBinding(socket,tenant,client,owner,agent,"instance"));
+                ()->auth.isCurrentBinding(socket,tenant,client,owner,agent,"instance"),
+                observation->observation instanceof AgentRuntimeAuthenticationService.RecommendationChannel channel && channel.issued(receipt)
+                        && channel.matches(socket,tenant,client,owner,agent,"instance"));
     }
     /** Synthetic settled rows exercise the read contract only; no money operations or historical pricing samples. */
     public void retained(String agent) throws Exception {

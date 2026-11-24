@@ -170,6 +170,7 @@ class AgentWebSocketSkillExecutionRegistrationTest {
         when(f.auth.isCurrentBinding(any(),any(),any(),any(),any(),any())).thenReturn(true);
         var wrong=mock(AgentRuntimeAuthenticationService.RecommendationChannel.class);
         assertEquals(State.FENCED,registry.forRecommendation(scope,fence,wrong).state());
+        assertEquals(State.FENCED,registry.forRecommendation(scope,fence,new cn.jia.agent.service.RecommendationCatalogLookup.Observation() {}).state());
         String unhealthy=wire(f,SkillExecutionFixtures.catalog()).replace("\"durableStateHealthy\":true","\"durableStateHealthy\":false");
         f.handler.handleTextMessage(f.session,new TextMessage(unhealthy));
         assertEquals(State.DISCONNECTED,registry.forRecommendation(scope,fence,channel).state());

@@ -1018,7 +1018,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
                             proof.scope().clientId(), proof.scope().ownerJiacn(), proof.scope().agentId()),
                     new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),
                             proof.hostId(), proof.scope().runtimeInstanceId(), proof.sessionGeneration()),
-                    skillExecution, runtimeReceipt, observation -> typedDeliberationSessionCurrent(session, result.getAgentId(), observation));
+                    skillExecution, () -> typedDeliberationSessionCurrent(session,result.getAgentId()),
+                    observation -> observation instanceof cn.jia.agent.security.AgentRuntimeAuthenticationService.RecommendationChannel channel
+                            && channel.issued(runtimeReceipt) && typedDeliberationSessionCurrent(session,result.getAgentId(),channel));
             if(skillManagement!=null&&skillExecution!=null) {
                 try {skillManagement.capabilitiesChanged(proof);}
                 catch(RuntimeException unavailable) {log.warn("Skill catalog confirmation deferred: {}",unavailable.getClass().getSimpleName());}
@@ -1553,8 +1555,8 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
         String runtime = sessionRuntimeInstanceId(session);
         if (runtime == null) return false;
         try {
-            if (observation != null && observation.matches(session.getId(),sessionTenantId(session),sessionClientId(session),
-                    sessionJiacn(session),agentId,runtime)) return true;
+            if (observation != null) return observation.matches(session.getId(),sessionTenantId(session),sessionClientId(session),
+                    sessionJiacn(session),agentId,runtime);
             return runtimeAuthentication.isCurrentBinding(session.getId(), sessionTenantId(session),
                     sessionClientId(session), sessionJiacn(session), agentId, runtime);
         } catch (RuntimeException unavailable) { return false; }

@@ -216,7 +216,7 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
 
     /** Synchronous evidence for a recommendation directory read only. It is neither a grant
      * nor a proof that a durable write may proceed. Never carries across observations or threads. */
-    public final class RecommendationChannel {
+    public final class RecommendationChannel implements cn.jia.agent.service.RecommendationCatalogLookup.Observation {
         private final Thread reader = Thread.currentThread();
         private Binding observed;
         private RecommendationChannel(Binding observed) { this.observed = observed; }
