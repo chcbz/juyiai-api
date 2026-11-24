@@ -33,8 +33,11 @@ public final class AssigneeRecommendationService {
     public Result recommend(Actor actor, String taskId, Request request) {
         if(request==null || request.expectedTaskVersion()==null || request.expectedTaskVersion().isBlank()) throw new Failure(400,"BAD_REQUEST");
         var task = transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,
-                root->task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion()));
-        admission.requireOpen();
+                root->{
+                    // The root reader has established owner visibility. Paused admission needs no requirement snapshot.
+                    admission.requireOpen();
+                    return task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
+                });
         var observed = observe(actor, taskId);
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();

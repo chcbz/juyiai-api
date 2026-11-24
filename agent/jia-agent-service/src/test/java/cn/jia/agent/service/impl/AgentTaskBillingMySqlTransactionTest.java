@@ -1380,6 +1380,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     /** Independent listeners and admission services; SQL, signing authority and external test observations are shared. */
     private final class AssignmentNode implements AutoCloseable {
         final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
+        cn.jia.agent.api.AssigneeRecommendationController recommendation;
         String base;
         void start(String name,boolean paused) throws Exception {start(name,paused,null);}
         void start(String name,boolean paused,cn.jia.agent.api.IndependentTaskQuoteController quote) throws Exception {
@@ -1391,10 +1392,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
             var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
             app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);if(quote!=null)f.registerSingleton("quotes",quote);
+                if(recommendation!=null)f.registerSingleton("recommendation",recommendation);
                 f.registerSingleton("point",new AgentTaskDeliberationOperationController(operationReads,service));
                 f.registerSingleton("cancel",new AgentTaskCancellationController(cancellation));});
             app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
             if(quote!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(ReflectionTestUtils.getField(quote,"quotes"),"intents"),"admission",app.getBean(TaskAssigneeAdmission.class));
+            if(recommendation!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(recommendation,"recommendations"),"admission",app.getBean(TaskAssigneeAdmission.class));
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
         public void close() throws Exception {try {if(base!=null)server.stop();}finally{try{server.destroy();}finally{app.close();}}}
@@ -1415,6 +1418,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
     }
 
+    @Test void recommendationStoppedInstancesCheckVisibilityButNeverReadOrRankTaskInputs() throws Exception {
+        signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
+        jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('other-rec','foreign-owner',?,?)",TENANT,CLIENT);
+        try(var a=new AssignmentNode();var b=new AssignmentNode();var client=HttpClient.newHttpClient()){
+            var first=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.beforeRetrieval(roots);
+            var second=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.beforeRetrieval(roots);
+            a.recommendation=first.controller();b.recommendation=second.controller();a.start("a",true);b.start("b",true);assertNotEquals(a.base,b.base);
+            for(var node:List.of(a,b))for(var task:List.of(TASK,"other-rec","missing-rec"))for(var version:List.of("0","999")){
+                String id="recommend-stop";String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId",id,"data",Map.of("expectedTaskVersion",version)));
+                var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+token).header("Content-Type","application/json").header("X-Request-Id",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                var res=client.send(req,HttpResponse.BodyHandlers.ofString());boolean visible=task.equals(TASK);assertEquals(visible?503:404,res.statusCode(),res.body());var env=json.readTree(res.body());
+                assertEquals(visible?"TASK_ASSIGNEE_ADMISSION_PAUSED":"RECOMMENDATION_NOT_FOUND",env.path("code").asText());assertEquals(id,env.path("requestId").asText());assertTrue(env.at("/data/recommendations").isMissingNode());
+                String cache=String.join(",",res.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);
+            }
+            first.verifyUntouched().run();second.verifyUntouched().run();assertAssignmentAbsent();
+        }
+    }
     @Test void pointAssignmentStoppedNodesReplayReadAndCancelOriginalGrant() throws Exception {
         prepareCancellation();signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
         String point="/point-and-deliberate", paused="TASK_ASSIGNEE_ADMISSION_PAUSED";

@@ -41,6 +41,15 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
             controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10)),new CapabilitySearch(clients),roots,new CandidateSuitability("","")));
         }catch(Exception|Error failure){try{client.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
+    /** Real root reader; probes must remain untouched for every stopped or invisible request. */
+    public record BeforeRetrieval(AssigneeRecommendationController controller,Runnable verifyUntouched) {}
+    public static BeforeRetrieval beforeRetrieval(AgentTaskRootObservation roots){
+        var agents=org.mockito.Mockito.mock(AgentService.class);var skills=org.mockito.Mockito.mock(SkillManagementService.class);
+        var materials=org.mockito.Mockito.mock(RecommendationMaterials.class);var vectors=org.mockito.Mockito.mock(TaskQueryVectors.class);
+        var search=org.mockito.Mockito.mock(CapabilitySearch.class);
+        var service=new AssigneeRecommendationService(agents,skills,materials,vectors,search,roots,new CandidateSuitability("",""));
+        return new BeforeRetrieval(new AssigneeRecommendationController(service),()->org.mockito.Mockito.verifyNoInteractions(agents,skills,materials,vectors,search));
+    }
     private TaskFeatureEncoder.Vector vector(){float[] v=new float[1024];v[0]=1;return new TaskFeatureEncoder.Vector(id,v);}
     public void index(String tenant,String clientId,String owner,String agent,List<String> abilities)throws Exception {
         var docs=CapabilityDocuments.declared(tenant,clientId,owner,agent,abilities,id);assertEquals(abilities.size(),docs.size());for(var citation:docs)writer.publishVector(citation.doc(),vector());
