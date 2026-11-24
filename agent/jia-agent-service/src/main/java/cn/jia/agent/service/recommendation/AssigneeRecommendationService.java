@@ -15,13 +15,15 @@ import static cn.jia.agent.entity.AssigneeRecommendation.*;
 @Service
 public final class AssigneeRecommendationService {
     private final AgentService agents;
+    private final CandidateSuitability suitability;
     private final SkillManagementService skills;
     private final RecommendationMaterials materials;
     private final TaskQueryVectors vectors;
     private final CapabilitySearch search;
     private final AgentTaskMutationTransaction transactions;
     AssigneeRecommendationService(AgentService agents, SkillManagementService skills, RecommendationMaterials materials,
-                                 TaskQueryVectors vectors, CapabilitySearch search, AgentTaskMutationTransaction transactions) {
+                                 TaskQueryVectors vectors, CapabilitySearch search, AgentTaskMutationTransaction transactions, CandidateSuitability suitability) {
+        this.suitability=suitability;
         this.agents=agents; this.skills=skills; this.materials=materials; this.vectors=vectors;
         this.search=search; this.transactions=transactions;
     }
@@ -32,9 +34,10 @@ public final class AssigneeRecommendationService {
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();
         CapabilitySearch.Result found;
-        if(observed.isEmpty()) found = new CapabilitySearch.Result("NOT_NEEDED",List.of(),List.of());
+        boolean truncated;
+        if(observed.isEmpty()) { truncated=false; found = new CapabilitySearch.Result("NOT_NEEDED",List.of(),List.of()); }
         else {
-            var text = TaskRetrievalText.from(task,inputs);
+            var text = TaskRetrievalText.from(task,inputs); truncated=text.truncated();
             TaskFeatureEncoder.Vector v=null; String vectorFailure=null;
             try { v=vectors.encode(actor,text).block(); }
             catch(TaskFeatureEncoder.Unavailable e) { vectorFailure="QUERY_VECTOR_UNAVAILABLE"; }
@@ -47,6 +50,8 @@ public final class AssigneeRecommendationService {
             }
             found=retrieval;
         }
+        var required=new HashSet<String>();if(task.getRequiredAbilities()!=null)for(String r:task.getRequiredAbilities())if(r!=null&&!r.isBlank())required.add(TaskRetrievalText.normalized(r));
+        var context=new CandidateSuitability.Context(truncated,Set.copyOf(required),!inputs.isEmpty(),observed.size());
         return transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
             var current=task(taskId,request.expectedTaskVersion());
             if(!Objects.equals(task.getTitle(),current.getTitle()) || !Objects.equals(task.getDescription(),current.getDescription())
@@ -55,7 +60,7 @@ public final class AssigneeRecommendationService {
             if(!observed.keySet().equals(after.keySet())) throw stale();
             for(var id:observed.keySet()) if(!observed.get(id).sameFacts(after.get(id))) throw stale();
             if(!after.isEmpty()) materials.verifyUnchanged(actor,taskId,inputs);
-            return project(taskId,request.expectedTaskVersion(),time,found,after);
+            return project(taskId,request.expectedTaskVersion(),time,found,after,context);
         });
     }
     private AgentTaskDTO task(String id,String version) {
@@ -90,23 +95,23 @@ public final class AssigneeRecommendationService {
         }
         return observed;
     }
-    private static Result project(String task,String version,long time,CapabilitySearch.Result found,Map<String,CandidateFacts> facts) {
+    private Result project(String task,String version,long time,CapabilitySearch.Result found,Map<String,CandidateFacts> facts,CandidateSuitability.Context context) {
         var rows=new ArrayList<Recommendation>();
         for(var hit:found.rows()) {
-            var c=facts.get(hit.agentId()); var evidence=new LinkedHashMap<String,Evidence>();
+            var c=facts.get(hit.agentId()); var evidence=new LinkedHashMap<String,Evidence>(); CapabilityDocuments.Doc doc=null;
             for(var h:Arrays.asList(hit.lexical(),hit.vector())) if(h!=null){
                 var ref=c.citations.get(h.evidenceKey()); if(ref==null) throw stale();
-                boolean ability=ref.displayRef().startsWith("ability:");
+                doc=ref.doc();boolean ability=ref.displayRef().startsWith("ability:");
                 evidence.putIfAbsent(ref.displayRef(),new Evidence(ref.displayRef(),ability?"DECLARED_ABILITY":"INSTALLED_SKILL",
                         ref.doc().text().lines().findFirst().orElseThrow(),ability?"已登记本领，不代表执行准入。":ref.doc().text(),true));
             }
-            // No calibrated thresholds yet. A retrieval hit is a citation, not a capability verdict.
-            String reason=evidence.isEmpty()?"当前没有可用于判断匹配度的检索依据。":"检索到相关能力声明，匹配等级尚未校准。";
-            rows.add(new Recommendation(c.agent,"UNKNOWN",reason,List.copyOf(evidence.values()),
+            String level=suitability.level(found.mode(),hit,context,evidence.values(),doc);
+            String reason=level.equals("UNKNOWN")?(evidence.isEmpty()?"当前没有可用于判断匹配度的检索依据。":"现有依据不足以确定匹配等级。") : "按已校准的检索标准，所列公开能力依据与本事项匹配。";
+            rows.add(new Recommendation(c.agent,level,reason,List.copyOf(evidence.values()),
                     "online".equalsIgnoreCase(c.agent.status()) ? List.of() : List.of("当前可能需要等待承办人就绪。")));
         }
-        rows.sort(Comparator.comparing((Recommendation r)->!r.agent().boundToMe())); // stable within each group
-        String state=switch(found.mode()){case "NOT_NEEDED"->"NO_CANDIDATES";case "HYBRID"->"NO_MATCH";default->"DEGRADED";};
-        return new Result(task,version,time,state,List.copyOf(rows),true,found.mode(),CandidateRankFusion.VERSION,found.reasons());
+        rows.sort(Comparator.comparing((Recommendation r)->r.recommendationLevel().equals("UNKNOWN")).thenComparing(r->!r.agent().boundToMe())); // stable within each group
+        String state=switch(found.mode()){case "NOT_NEEDED"->"NO_CANDIDATES";case "HYBRID"->rows.stream().anyMatch(r->!r.recommendationLevel().equals("UNKNOWN"))?"READY":"NO_MATCH";default->"DEGRADED";};
+        return new Result(task,version,time,state,List.copyOf(rows),true,found.mode(),suitability.rankingVersion(),found.reasons());
     }
 }
