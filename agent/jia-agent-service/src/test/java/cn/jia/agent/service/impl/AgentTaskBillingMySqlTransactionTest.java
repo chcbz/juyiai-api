@@ -179,7 +179,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var global = new GlobalConfig(); global.setIdentifierGenerator(new DefaultIdentifierGenerator());
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
-        for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class))config.addMapper(m);
+        for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class);
         var sql = new SqlSessionTemplate(factory.getObject()); recommendationSql=sql;
@@ -1274,7 +1274,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private SqlSessionTemplate recommendationSql;
     private cn.jia.agent.api.AssigneeRecommendationController recommendationController;
     private <T> T withMapper(T dao,Class<?> mapper){ReflectionTestUtils.setField(dao,"baseMapper",recommendationSql.getMapper(mapper));return dao;}
-    private record Authority(AgentServiceImpl agents,AgentExternalServicePolicyService policies,AgentTaskRequirementSnapshotServiceImpl req) {}
+    private record Authority(AgentServiceImpl agents,AgentExternalServicePolicyService policies,AgentTaskRequirementSnapshotServiceImpl req,AgentRuntimeDao runtimes,AgentIdentityService identities) {}
     private Authority quoteAndRecommendationAuthority() throws Exception {
         var ds=jdbc.getDataSource();String schema=Files.readString(DDL.resolve("schema.sql"));int start=schema.indexOf("CREATE TABLE IF NOT EXISTS agent_runtime (");assertTrue(start>=0);jdbc.execute(schema.substring(start,schema.indexOf(";\n",start)));
         var identityDdl=Files.readString(DDL.resolve("agent-identity-schema.sql"));int boundary=identityDdl.indexOf("-- A02 uses a temporary assertion procedure");assertTrue(boundary>0);
@@ -1288,12 +1288,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var policies=proxy(new AgentExternalServicePolicyServiceImpl(new AgentExternalServicePolicyDaoImpl(recommendationSql.getMapper(AgentExternalServicePolicyMapper.class)),identities,meta,new AgentTaskExecutionGrantDaoImpl(recommendationSql.getMapper(AgentTaskExecutionGrantMapper.class)),runtimes),AgentExternalServicePolicyService.class);
         var agents=new AgentServiceImpl(runtimes,identities,null,bindings,meta,null,null,null,null,null,null,null,null,null,null,roots,null,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
         var req=new AgentTaskRequirementSnapshotServiceImpl(jdbc,roots);agents.setRequirementSnapshots(req);agents.setExternalServicePolicies(policies);
-        return new Authority(agents,policies,req);
+        return new Authority(agents,policies,req,runtimes,identities);
     }
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
     void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
         var authority=quoteAndRecommendationAuthority();var agents=authority.agents();var req=authority.req();
-        var installed=new cn.jia.agent.skill.InstalledPurposeHttpFixture(jdbc,manager,TENANT,CLIENT,OWNER);
+        var accounts=mock(cn.jia.user.security.AccountSecurityService.class);
+        when(accounts.findUniqueByExactJiacn(OWNER)).thenReturn(java.util.Optional.of(new cn.jia.user.security.AccountSecuritySnapshot(1,OWNER,cn.jia.user.security.AccountState.ACTIVE,1)));
+        var gate=new cn.jia.agent.config.AgentTaskEventsGate(new cn.jia.agent.config.AgentTaskEventsProperties(true,List.of(new cn.jia.agent.config.AgentTaskEventsProperties.AllowedScope(TENANT,CLIENT))));
+        var auth=new cn.jia.agent.security.AgentRuntimeAuthenticationService(authority.runtimes(),withMapper(new AgentRuntimeV1InstallationDaoImpl(),AgentRuntimeV1InstallationMapper.class),withMapper(new AgentIdentityRegistryDaoImpl(),AgentIdentityRegistryMapper.class),authority.identities(),accounts,gate,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
+        var installed=new cn.jia.agent.skill.InstalledPurposeHttpFixture(jdbc,manager,TENANT,CLIENT,OWNER,auth);
         var skills=installed.skills;
         var workspace=quoteWorkspace();var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
         var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
@@ -1313,7 +1317,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'rec-http-fixture',1,1)",id,CLIENT,OWNER,TENANT,binding);
                     var abilities=i==1?List.<String>of():List.of(ability,"合同条款核对 "+i);
                     jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(abilities));
-                    es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
+                    es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);if(i==1)installed.retained(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
                 es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es.encodes);
@@ -1327,6 +1331,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 org.mockito.Mockito.verifyNoInteractions(storage,writes);
                 if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
                     String onlySkill=expected.stream().skip(1).findFirst().orElseThrow();assertInstalledHttp(task,onlySkill,true);
+                    assertEquals(1,jdbc.update("UPDATE agent_runtime SET runtime_session_generation=2 WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,onlySkill));assertInstalledHttp(task,onlySkill,false);
+                    installed.registerSession(onlySkill,2L);assertInstalledHttp(task,onlySkill,true);
                     installed.withdraw();assertInstalledHttp(task,onlySkill,false);assertEquals(228L,es.documentCount());
                     assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
