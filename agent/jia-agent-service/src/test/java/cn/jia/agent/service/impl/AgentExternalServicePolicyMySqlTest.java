@@ -442,6 +442,19 @@ class AgentExternalServicePolicyMySqlTest {
         jdbc.update("UPDATE agent_identity_alias SET audit_reason=' bad ' WHERE alias_value='legacy-c'");
         assertThrows(RuntimeException.class,()->identities.activeBindingsForCandidates("0","client-a","provider",ids));
     }
+    @Test void pickerLookupCannotExposeCaseFoldedRuntimeAcrossFixtureCollations() {
+        policies.write(PROVIDER,B,"on",true,0);
+        // Independent, disposable MySQL schema; no application schema migration.
+        for(String collation:List.of("utf8mb4_0900_ai_ci","utf8mb4_0900_bin","utf8mb4_general_ci","utf8mb4_bin")){
+            jdbc.execute("ALTER TABLE agent_runtime MODIFY agent_id VARCHAR(100) CHARACTER SET utf8mb4 COLLATE "+collation+" NOT NULL");
+            jdbc.update("UPDATE agent_runtime SET name='current' WHERE BINARY agent_id=BINARY ?",B);
+            assertEquals("current",policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target().displayName(),collation);
+            new TransactionTemplate(transactions).executeWithoutResult(tx->{
+                assertEquals(1,jdbc.update("UPDATE agent_runtime SET agent_id=?,name='hidden' WHERE BINARY agent_id=BINARY ?",B.toUpperCase(java.util.Locale.ROOT),B));
+                var row=policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target();assertEquals(B,row.displayName(),collation);assertEquals("unavailable",row.availability());tx.setRollbackOnly();
+            });
+        }
+    }
     @Test void recommendationProjectionDoesNotDiscloseAnotherScopeRuntimeOrDropAuthorizedIdentity() {
         policies.write(PROVIDER, B, "open", true, 0);
         var picks=policies.quoteTargets(TASK_OWNER,"task-a",List.of(B,"absent"),false);assertEquals(List.of(B),picks.stream().map(cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget::agent).toList());
