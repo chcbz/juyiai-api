@@ -68,7 +68,13 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     @Test void missingRetryPreventsWholeTaskSampleEvenWithCompleteFirstRun(@TempDir Path temp) throws Exception {
         verifyPeer(temp,json.readTree(new ClassPathResource("metered-local-artifact-fixture.json").getContentAsString(StandardCharsets.UTF_8)),true);
     }
+    @Test void successorEpochLostResponseStillHasOneOriginalMySqlLedgerRevision(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null,false,true);
+    }
     private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry) throws Exception {
+        verifyPeer(temp,measured,retry,false);
+    }
+    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor) throws Exception {
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -139,12 +145,12 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
-            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
+            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
-                var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());assertEquals("1",report.path("revision").asText());
+                var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
         }finally{server.stop(0);}
-        assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
+        assertEquals(successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
         // Consume the real transactionally registered work keys, deliberately run coverage BEFORE association.
         String pendingSql="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
         var projectionKey=jdbc.queryForObject(pendingSql,String.class,projection.getName());
@@ -159,7 +165,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var read=get(path).header("Authorization","AgentRuntime "+session.sessionToken()).header("X-Agent-Id",AGENT).header("X-Agent-Installation-Id",INSTALL).header("X-Agent-Host-Id","host").header("X-Agent-Runtime-Id","rt").header("X-Agent-Session-Generation","1");
         jdbc.update("UPDATE agent_task_execution_grant SET executor_owner_jiacn='foreign' WHERE grant_id='g'");assertEquals(404,mvc.perform(read).andReturn().getResponse().getStatus());
         jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",INSTALL);assertEquals(401,mvc.perform(read).andReturn().getResponse().getStatus());
-        assertEquals(7,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_attempt"));assertEquals(1,count("economy_usage_revision"));
+        assertEquals(successor?9:7,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_attempt"));assertEquals(1,count("economy_usage_revision"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision WHERE status='PENDING_USAGE' AND cost_yuan IS NULL AND revision=1",Integer.class));
     }
     // The test supplies only the upstream quote estimate and acceptance decision. Wallet, membership,
