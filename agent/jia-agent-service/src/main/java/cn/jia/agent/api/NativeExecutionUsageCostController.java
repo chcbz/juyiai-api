@@ -4,12 +4,8 @@ import cn.jia.agent.security.AgentRuntimeAuthenticationService;
 import cn.jia.agent.service.PersonalWorkspaceExecutionService;
 import cn.jia.agent.service.usage.NativeExecutionUsageCostRecorder;
 import cn.jia.agent.service.usage.NativeCaptureAuthority;
-import cn.jia.agent.service.usage.NativeCaptureEvidence;
-import cn.jia.economy.usage.UsageCaptureJournal;
 import tools.jackson.databind.ObjectMapper;
 import java.util.Map;
-import java.util.List;
-import org.springframework.dao.DataAccessException;
 import cn.jia.core.entity.JsonRequest;
 import cn.jia.core.entity.JsonResult;
 import cn.jia.economy.usage.UsageCostConflict;
@@ -28,14 +24,10 @@ public final class NativeExecutionUsageCostController {
     private final AgentRuntimeAuthenticationService authentication;
     private static final ObjectMapper JSON=new ObjectMapper();
     private final NativeCaptureAuthority authority;
-    private final UsageCaptureJournal journal;
-    private final cn.jia.agent.service.usage.NativeCaptureRecovery recovery;
-    private final UsageCaptureJournal.Settlement settlement;
-    public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,
-            AgentRuntimeAuthenticationService authentication,NativeCaptureAuthority authority,UsageCaptureJournal journal,UsageCaptureJournal.Settlement settlement,cn.jia.agent.service.usage.NativeCaptureRecovery recovery) {
-        this.recovery=recovery;
-        this.settlement=settlement;
-        this.authority=authority;this.journal=journal;
+    private final RuntimeCaptureHttp capture;
+    public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,AgentRuntimeAuthenticationService authentication,
+            NativeCaptureAuthority authority,RuntimeCaptureHttp capture) {
+        this.authority=authority;this.capture=capture;
         this.recorder = recorder; this.authentication = authentication;
     }
 
@@ -45,42 +37,19 @@ public final class NativeExecutionUsageCostController {
         var data=request==null?null:request.data();
         if(data!=null&&!data.containsKey("schemaVersion")&&(data.containsKey("captureId")||data.containsKey("sourceRevision")||data.containsKey("receiptId")))return error(400,"USAGE_CAPTURE_INVALID");
         if(data==null||!data.containsKey("schemaVersion")) return record(executionId,runId,request==null?null:new JsonRequest<>(request.protocolVersion(),request.requestId(),JSON.convertValue(data,Request.class)),principal);
-        final NativeCaptureEvidence e;
-        try {e=NativeCaptureEvidence.parse(executionId,runId,key,data);} catch(IllegalArgumentException ex){
-            return error(400,"USAGE_CAPTURE_VERSION_UNSUPPORTED".equals(ex.getMessage())?ex.getMessage():"USAGE_CAPTURE_INVALID");
-        }
-        var submission=new UsageCaptureJournal.Submission(request.requestId(),NativeCaptureEvidence.digest(List.of(request.requestId(),data)),
-                e.receiptId(),e.kind(),e.recordId(),e.sourceRevision(),e.previousEvidenceSha256(),e.evidenceSha256(),e.expectedRevision(),e.canonicalEvidence(),e.bindingSha256());
-        try {
-            var result=authentication.withNativeFence(principal,()->{
-                var binding=authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId);
-                if("PLAN".equals(e.kind())&&!authority.matchesPlan(binding,e.snapshotSha256()))
-                    return new UsageCaptureJournal.Result(UsageCaptureJournal.State.CONFLICT,null);
-                var registered=journal.register(binding,submission);
-                if(registered.state()==UsageCaptureJournal.State.DURABLE&&!"RESPONSE".equals(e.kind()))
-                    registered=journal.linkMetadata(binding,e.receiptId(),cn.jia.agent.service.usage.NativeSourceLineage::metadata);
-                registered=registered.state()==UsageCaptureJournal.State.PENDING&&"RESPONSE".equals(e.kind())
-                        ?journal.bindResponse(binding,e.receiptId(),cn.jia.agent.service.usage.NativeResponseOrigin::resolve):registered;
-                if(registered.recoveryPk()!=0)recovery.signal(binding,e.receiptId(),registered.recoveryPk());
-                return registered;
-            });
-            return response(result.work()==null?result:settlement.apply(result.work())); // original fence transaction has committed
-        } catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+        return capture.submit(executionId,runId,request,key,fence(principal,executionId,runId),(binding,snapshot,obs)->authority.matchesPlan(binding,snapshot));
+    }
+    private RuntimeCaptureHttp.Fence fence(Authentication principal,String execution,String run){
+        return op->authentication.withNativeFence(principal,()->op.apply(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),execution,run)));
     }
     @GetMapping(value="/{executionId}/runs/{runId}/usage/receipts/{receiptId}",produces="application/json")
     public ResponseEntity<?> receipt(@PathVariable String executionId,@PathVariable String runId,@PathVariable String receiptId,Authentication principal){
-        try{return response(authentication.withNativeFence(principal,()->journal.readReceipt(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),receiptId)));}
-        catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+        return capture.receipt(fence(principal,executionId,runId),receiptId);
     }
     @GetMapping(value="/{executionId}/runs/{runId}/usage/records/{recordId}",produces="application/json")
     public ResponseEntity<?> current(@PathVariable String executionId,@PathVariable String runId,@PathVariable String recordId,Authentication principal){
-        try{return response(authentication.withNativeFence(principal,()->journal.readRecord(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),executionId,runId),recordId)));}
-        catch(DataAccessException unavailable){return error(503,"USAGE_CAPTURE_STORE_UNAVAILABLE");}
+        return capture.current(fence(principal,executionId,runId),recordId);
     }
-    private static ResponseEntity<?> response(UsageCaptureJournal.Result result){return switch(result.state()){
-        case NOT_FOUND -> error(404,"USAGE_CAPTURE_NOT_FOUND");case PENDING -> error(409,"USAGE_ACK_PENDING");case CONFLICT -> error(409,"USAGE_CAPTURE_CONFLICT");
-        case DURABLE -> ResponseEntity.ok().header("Cache-Control","private, no-store").body(JsonResult.success(JSON.readTree(result.ackJson())));
-    };}
     public ResponseEntity<JsonResult<Receipt>> record(String executionId, String runId,
             JsonRequest<Request> protocolRequest, Authentication principal) {
         var body = protocolRequest == null ? null : protocolRequest.data();

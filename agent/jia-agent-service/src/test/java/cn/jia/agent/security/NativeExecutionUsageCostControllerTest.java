@@ -26,6 +26,16 @@ class NativeExecutionUsageCostControllerTest {
         for(String method : new String[]{"GET","PUT","DELETE"})
             assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest(method,PATH)));
     }
+    @Test void discussionCaptureMethodsUseOnlyExactNativeEvidenceRoutes(){
+        String base="/internal/agent/chat/dispatches/run/turns/turn/contexts/"+"a".repeat(64)+"/captures/"+"b".repeat(64)+"/usage";
+        for(String suffix:java.util.List.of("","/receipts/saved","/records/"+"c".repeat(64))){
+            var req=new MockHttpServletRequest(suffix.isEmpty()?"POST":"GET",base+suffix);
+            assertTrue(AgentRuntimeAuthenticationFilter.selectsRuntimeCredentialLane(req));assertTrue(AgentRuntimeAuthenticationFilter.allowed(req));
+            req.setQueryString("other=subject");assertFalse(AgentRuntimeAuthenticationFilter.allowed(req));
+            assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest(suffix.isEmpty()?"GET":"POST",base+suffix)));
+        }
+        assertFalse(AgentRuntimeAuthenticationFilter.allowed(new MockHttpServletRequest("GET",base+"/records/not-a-record")));
+    }
     @Test void responseAcknowledgesEvidenceWithTrustedScopeAndDecimalRevisionNotTaskCompletion() {
         var recorder=mock(NativeExecutionUsageCostRecorder.class);
         var auth=mock(AgentRuntimeAuthenticationService.class);
@@ -38,7 +48,7 @@ class NativeExecutionUsageCostControllerTest {
             return new UsageCostService.Receipt("b".repeat(64),2,TokenUsageCost.Status.PENDING_USAGE,null,false);
         });
         var body=new NativeExecutionUsageCostController.Request("exec",NativeExecutionUsageCostRecorder.Phase.TERMINAL,"requested-only",new ObjectMapper().readTree("{\"status\":\"UNVERIFIED\"}"));
-        var controller=new NativeExecutionUsageCostController(recorder,auth,null,null,null,null);
+        var controller=new NativeExecutionUsageCostController(recorder,auth,null,null);
         var response=controller.record("exec","run",new JsonRequest<>(1,"fixture",body),principal);
         assertEquals(200,response.getStatusCode().value());
         var receipt=response.getBody().getData();
@@ -53,7 +63,7 @@ class NativeExecutionUsageCostControllerTest {
         principal.setDetails(new AgentRuntimeAuthenticationService.Proof(principal.getPrincipal(),"installation","host",1,"digest",1,1));
         when(auth.withNativeFence(eq(principal),any())).thenAnswer(i->((Supplier<?>)i.getArgument(1)).get());
         var snapshots=mock(cn.jia.agent.dao.SkillExecutionDao.class);
-        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions,snapshots),journal,null,null);
+        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions,snapshots),new cn.jia.agent.api.RuntimeCaptureHttp(journal,null,null));
         var json=new ObjectMapper();try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var m=json.readTree(in).get("cases").get(0).get("messages").get(0);var d=m.get("request").get("body").get("data");
             String exec=d.get("executionId").asText(),run=d.get("runId").asText(),receipt=d.get("receiptId").asText();
@@ -82,7 +92,7 @@ class NativeExecutionUsageCostControllerTest {
     }
     @Test void startedEvidenceCannotClaimUsageAndMissingPhaseCannotGuessSemantics() {
         var recorder=mock(NativeExecutionUsageCostRecorder.class);
-        var controller=new NativeExecutionUsageCostController(recorder,mock(AgentRuntimeAuthenticationService.class),null,null,null,null);
+        var controller=new NativeExecutionUsageCostController(recorder,mock(AgentRuntimeAuthenticationService.class),null,null);
         for (var phase : new NativeExecutionUsageCostRecorder.Phase[]{null, NativeExecutionUsageCostRecorder.Phase.STARTED}) {
             var body=new NativeExecutionUsageCostController.Request("exec",phase,"requested-only",new ObjectMapper().readTree("{}"));
             assertThrows(IllegalArgumentException.class, () -> controller.record("exec","run",new JsonRequest<>(1,"fixture",body),null));

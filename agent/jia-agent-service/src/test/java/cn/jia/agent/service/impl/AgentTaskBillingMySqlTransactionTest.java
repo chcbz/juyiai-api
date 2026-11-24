@@ -183,6 +183,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
         for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
+        config.addMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
@@ -626,7 +627,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE WHERE manifest_sha=?",sha);
             jdbc.update("UPDATE economy_task_benchmark_case SET retired=FALSE WHERE manifest_sha=?",sha);
         }else if(scenario.equals("usage")){
-            cfg.addMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
             var projection=proxy(new cn.jia.economy.service.impl.UsageCaptureProjectionStore(recommendationSql.getMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class)),cn.jia.economy.usage.UsageCaptureProjection.class);
             jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");
             long pk=jdbc.queryForObject("SELECT id FROM economy_usage_capture WHERE execution_id='bench-exec64'",Long.class);
@@ -1513,6 +1513,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var origins=new ChatTaskDispatchOriginService(relay,store);origins.beforeSend(claimed,hash,host);
                 assertThrows(ChatDeliberationException.class,resolve::get); // beforeSend is not a delivered dispatch
                 relay.setDispatchAuthority(dispatch);assertTrue(relay.acknowledgeHostedDispatch(TENANT,OWNER,CLIENT,target,run,frozen.getEventId(),now));
+                verifyChatCaptureHttp(access,turn,run,hash,expected);
                 var binding=resolve.get();assertEquals(expected,binding.captureId());assertEquals(intent.taskId(),binding.taskId());
                 assertThrows(ChatDeliberationException.class,()->access.withCapture(null,turn,run,hash,"0".repeat(64),b->b));
                 assertThrows(ChatDeliberationException.class,()->access.withCapture(null,turn,run,"sha256:"+"0".repeat(64),expected,b->b));
@@ -1629,6 +1630,38 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         context.setDispatchAuthority(dispatch);return new QuotedActionContext(context,caps,sessions,installed,live,policies);
     }
 
+    // Original admission and ACK share the test's rollback-only transaction. This is NOT a post-commit network loss test.
+    private void verifyChatCaptureHttp(cn.jia.chat.service.usage.ChatDiscussionCaptureAccess access,String turn,String run,String hash,String cap){
+        try {
+            var mapper=recommendationSql.getMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
+            var journal=proxy(new cn.jia.economy.service.impl.UsageCaptureJournalImpl(mapper,event->{}),cn.jia.economy.usage.UsageCaptureJournal.class);
+            var controller=new cn.jia.chat.api.ChatDiscussionCaptureController(access,new cn.jia.agent.api.RuntimeCaptureHttp(journal,null,null));
+            var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller)
+                    .setControllerAdvice(new cn.jia.core.config.ApiEnvelopeAdvice(),new cn.jia.core.config.ApiRequestEnvelopeAdvice())
+                    .addFilters(new cn.jia.core.filter.RequestIdFilter()).build();
+            String ctx=hash.substring(7),path="/internal/agent/chat/dispatches/"+run+"/turns/"+turn+"/contexts/"+ctx+"/captures/"+cap+"/usage";
+            var codec=new ObjectMapper();var digest=(java.util.function.Function<Object,String>)cn.jia.agent.service.usage.NativeCaptureEvidence::digest;
+            var obs=new LinkedHashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","snapshotSha256",ctx,"executionConfigSha256","f".repeat(64),"engineVersion","fixture","rootSourceId","discussion"));
+            String record=digest.apply(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));String ack=null;
+            for(String policy:List.of("TEXT_MODEL_ONLY_V1","CHAT_SOURCE_UNVERIFIED_V1","CHAT_SOURCE_UNVERIFIED_V1")){
+                obs.put("coveragePolicyVersion",policy);var e=new LinkedHashMap<String,Object>();
+                e.put("schemaVersion",2);e.put("executionId",turn);e.put("runId",run);e.put("captureId",cap);e.put("kind","PLAN");e.put("recordId",record);
+                e.put("sourceRevision","1");e.put("previousEvidenceSha256",null);e.put("observedAt",1);e.put("observation",obs);
+                String sha=digest.apply(e),id=digest.apply(java.util.Arrays.asList("USAGE_RECEIPT_V2",sha,null));e.put("evidenceSha256",sha);e.put("receiptId",id);e.put("expectedRevision",null);
+                var post=org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(path).header("Idempotency-Key",id).header("X-Request-Id",id)
+                        .contentType("application/json").content(codec.writeValueAsBytes(Map.of("protocolVersion",1,"requestId",id,"data",e)));
+                var reply=mvc.perform(post).andReturn().getResponse();
+                if(policy.equals("TEXT_MODEL_ONLY_V1")){assertEquals(409,reply.getStatus());assertEquals(0,count("economy_usage_capture_receipt"));continue;}
+                assertEquals(200,reply.getStatus(),reply.getContentAsString());String saved=codec.readTree(reply.getContentAsByteArray()).path("data").toString();
+                if(ack!=null)assertEquals(ack,saved);ack=saved;assertEquals(1,count("economy_usage_capture_receipt"));
+                for(String item:List.of("receipts/"+id,"records/"+record)){
+                    var read=mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get(path+"/"+item).header("X-Request-Id",id)).andReturn().getResponse();
+                    assertEquals(200,read.getStatus());var data=codec.readTree(read.getContentAsByteArray()).path("data");assertEquals(sha,data.path("evidenceSha256").asText());
+                    if(item.startsWith("receipts"))assertEquals(ack,data.toString());
+                }
+            }
+        } catch(Exception ex){throw new AssertionError(ex);}
+    }
     // Runs outside the database transaction. This probe has no provider, API receiver, or wallet writer.
     private void verifyEnrolledDiscussionFrame(byte[] frame) throws Exception {
         var temp=Files.createTempDirectory("quoted-enrolled-chat-");
