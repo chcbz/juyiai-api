@@ -1381,7 +1381,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private final class AssignmentNode implements AutoCloseable {
         final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
         String base;
-        void start(String name,boolean paused) throws Exception {
+        void start(String name,boolean paused) throws Exception {start(name,paused,null);}
+        void start(String name,boolean paused,cn.jia.agent.api.IndependentTaskQuoteController quote) throws Exception {
             Path dir=Files.createDirectory(httpDirectory.resolve(name));server.setBaseDir(dir.toString());server.setPort(0);
             server.getConnector().setProperty("address","127.0.0.1");
             var context=server.addContext("",Files.createDirectory(dir.resolve("webroot")).toString());context.setParentClassLoader(getClass().getClassLoader());
@@ -1389,10 +1390,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             app.register(HttpApp.class,TaskAssigneeAdmission.class);
             var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
             var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
-            app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);
+            app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);if(quote!=null)f.registerSingleton("quotes",quote);
                 f.registerSingleton("point",new AgentTaskDeliberationOperationController(operationReads,service));
                 f.registerSingleton("cancel",new AgentTaskCancellationController(cancellation));});
             app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
+            if(quote!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(ReflectionTestUtils.getField(quote,"quotes"),"intents"),"admission",app.getBean(TaskAssigneeAdmission.class));
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
         public void close() throws Exception {try {if(base!=null)server.stop();}finally{try{server.destroy();}finally{app.close();}}}
@@ -1542,8 +1544,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             public Vector encode(String text){calls.incrementAndGet();float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);}
         };
         var profile=new QuoteProfile();boolean diagnostic=Boolean.getBoolean("cyf.measuredBatchQuoteLoad");
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
+        java.util.function.Supplier<cn.jia.agent.api.IndependentTaskQuoteController> quoteNode=()->cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
                 mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
+        if(diagnostic)independentQuoteController=quoteNode.get(); // Preserve single-listener timing for the load diagnostic.
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var hot=new java.util.ArrayList<Long>();String firstId=null,firstBatch=null;long cold=0,replay=0;
         String token=httpToken();var mapper=new ObjectMapper();
@@ -1561,11 +1564,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var privateKeys=List.of(java.util.UUID.randomUUID().toString(),java.util.UUID.randomUUID().toString());
         var window=QuoteWireWindow.paid(id,agent,group.digest(),book.sha256(),privateKeys);
         TaskQuoteBatches.Result observedFirst=null,observedOther=null;
-        try(var client=HttpClient.newHttpClient()){
+        try(var client=HttpClient.newHttpClient();var open=diagnostic?null:new AssignmentNode()){
+            if(open!=null)open.start("quote-open",false,quoteNode.get());String quoteOrigin=open==null?origin:open.base;
             for(int i=0;i<32;i++){
                 String key=i==31?privateKeys.get(0):i<2?privateKeys.get(i):"fixture-"+i;
                 String rawBody="{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}";
-                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/quotes")).header("Content-Type","application/json")
+                var request=HttpRequest.newBuilder(URI.create(quoteOrigin+"/agent/tasks/"+id+"/quotes")).header("Content-Type","application/json")
                     .header("X-Request-Id","quote-http").header("Authorization","Bearer "+token).header("Idempotency-Key",key)
                     .POST(HttpRequest.BodyPublishers.ofString(rawBody )).build();
                 long sent=window==null?0:window.elapsed();long t=System.nanoTime();var response=client.send(request,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
@@ -1577,6 +1581,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 else if(i==31){assertEquals(firstId,item.path("quoteId").asText());replay=elapsed;}
                 else {assertNotEquals(firstId,item.path("quoteId").asText());hot.add(elapsed);}
             }
+        }
+        if(!diagnostic){
+            long balance=wallet(independent);int charges=count("economy_task_charge");var original=observedFirst;
+            String foreign=id+"-foreign";jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",foreign,"other-owner",TENANT,CLIENT);
+            try(var a=new AssignmentNode();var b=new AssignmentNode();var client=HttpClient.newHttpClient()){
+                a.start("quote-stopped-a",true,quoteNode.get());b.start("quote-stopped-b",true,quoteNode.get());assertNotEquals(a.base,b.base);
+                class Wire {void post(AssignmentNode node,String task,String key,String version,int status,String code)throws Exception{
+                    var data=Map.of("expectedTaskVersion",version,"agentIds",List.of(agent));String rid="quote-cutover";
+                    var request=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+task+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id",rid).POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId",rid,"data",data)))).build();
+                    var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());var env=mapper.readTree(response.body());assertEquals(code,env.path("code").asText());assertEquals(rid,env.path("requestId").asText());String cache=String.join(",",response.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);
+                    if(status==200)assertEquals(original,mapper.treeToValue(env.path("data"),TaskQuoteBatches.Result.class));
+                }}var wire=new Wire();for(var node:List.of(a,b)){
+                    wire.post(node,foreign,privateKeys.getFirst(),"0",404,"QUOTE_NOT_FOUND");wire.post(node,id,"fresh-stopped","0",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+                    wire.post(node,id,privateKeys.getFirst(),"1",409,"QUOTE_IDEMPOTENCY_CONFLICT");wire.post(node,id,privateKeys.getFirst(),"0",200,"E0");
+                }
+            }
+            assertEquals(balance,wallet(independent));assertEquals(charges,count("economy_task_charge"));
         }
         assertEquals(frozen.sha256(),jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.initialIntentSha256')) FROM economy_task_quote WHERE quote_id=?",String.class,firstId));
         assertEquals(1,calls.get());verify(source,times(31)).observe(subject,targets);verify(source,times(31)).current(subject,targets,proofs);
