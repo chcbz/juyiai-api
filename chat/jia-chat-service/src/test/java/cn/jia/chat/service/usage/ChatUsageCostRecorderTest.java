@@ -100,6 +100,29 @@ class ChatUsageCostRecorderTest {
         }
         verifyNoInteractions(costs);
     }
+    @Test void taskSourceRequiresPositiveSingletonMembershipBeforeCheckingDeviceOrigin() {
+        var origins = mock(ChatTaskDispatchOriginStore.class);
+        var authority = new ChatUsageDispatchAuthority(dispatches, turns, origins);
+        var fence = new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("install", "host", "boot", 1);
+        var device = new AuthenticatedRuntimeOperation.Device(scope, fence);
+        dispatch.setEventId("event");
+        var json = new ObjectMapper();
+        for (Object ids : List.of("missing", "agent", List.of(), List.of("other"), List.of("agent", "other"), List.of("x", "y"))) {
+            var data = json.readTree(payload("\"task\"", "bounty")).deepCopy();
+            if (!"missing".equals(ids)) ((tools.jackson.databind.node.ObjectNode)data).putObject("factsManifest").set("participantAgentIds", json.valueToTree(ids));
+            dispatch.setPayloadJson(data.toString());
+            assertFalse(authority.matchesTaskSource(device, "turn", "dispatch", "context"));
+        }
+        verifyNoInteractions(origins);
+        when(origins.matches("event", "context", "install", "host", "boot", 1)).thenReturn(true);
+        var valid = (tools.jackson.databind.node.ObjectNode)json.readTree(payload("\"task\"", "bounty"));
+        valid.putObject("factsManifest").putArray("participantAgentIds").add("agent");
+        dispatch.setPayloadJson(valid.toString());
+        assertTrue(authority.matchesTaskSource(device, "turn", "dispatch", "context"));
+        valid.put("conversationScopeType", "private");dispatch.setPayloadJson(valid.toString());
+        assertFalse(authority.matchesTaskSource(device, "turn", "dispatch", "context"));
+        verifyNoInteractions(costs);
+    }
     @Test void absentOrAmbiguousDispatchCannotCreateAnAttempt() {
         when(dispatches.findDispatch("0", "client", "dispatch")).thenReturn(List.of());
         assertThrows(ChatDeliberationException.class, () -> recorder.record(scope, "dispatch", terminal()));

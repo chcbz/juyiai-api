@@ -14,7 +14,7 @@ public final class ChatUsageDispatchAuthority {
     private final ChatDispatchAuthorityMapper dispatches;private final ChatDeliberationDao turns;
     private static final ObjectMapper JSON=new ObjectMapper();
     public ChatUsageDispatchAuthority(ChatDispatchAuthorityMapper dispatches,ChatDeliberationDao turns,ChatTaskDispatchOriginStore origins){this.origins=origins;this.dispatches=dispatches;this.turns=turns;}
-    record Original(ChatDispatchOutboxEntity dispatch,ChatTurnEntity turn,String taskId,boolean multiMember) { }
+    record Original(ChatDispatchOutboxEntity dispatch,ChatTurnEntity turn,String taskId,boolean singleBountyExecutor) { }
     Original original(AuthenticatedRuntimeOperation.Scope scope,String dispatchId){
         var rows = dispatches.findDispatch(scope.tenantId(), scope.clientId(), dispatchId);
         if (rows == null || rows.size() != 1) throw denied();
@@ -42,12 +42,16 @@ public final class ChatUsageDispatchAuthority {
         } else if (taskId == null || dispatch.getTaskGrantId() == null || dispatch.getTaskGrantVersion() == null
                 || !dispatches.hasOriginalUsageExecutor(scope.tenantId(), scope.clientId(), dispatch.getOwnerJiacn(),
                     taskId, dispatch.getTaskGrantId(), scope.agentId(), scope.ownerJiacn())) throw denied();
-        return new Original(dispatch,turn,taskId,multiMember);
+        // Absence of multi-member evidence is not evidence of a single executor.
+        boolean singleBountyExecutor = "bounty".equals(payload.get("conversationScopeType"))
+                && payload.get("factsManifest") instanceof Map<?, ?> facts
+                && List.of(scope.agentId()).equals(facts.get("participantAgentIds"));
+        return new Original(dispatch, turn, taskId, singleBountyExecutor);
     }
     /** Point-in-time dispatch-origin observation only. No capture enrollment, receipt or fee is implied. */
     public boolean matchesTaskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash){
         var original=original(device.subject(),dispatchId);var dispatch=original.dispatch();var fence=device.fence();
-        return original.taskId()!=null && !original.multiMember() && dispatch.getTaskGrantId()!=null && dispatch.getTaskGrantVersion()!=null
+        return original.taskId()!=null && original.singleBountyExecutor() && dispatch.getTaskGrantId()!=null && dispatch.getTaskGrantVersion()!=null
                 && Objects.equals(dispatch.getTurnId(),turnId) && origins.matches(dispatch.getEventId(),contextHash,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
     }
     private static ChatDeliberationException denied() {
