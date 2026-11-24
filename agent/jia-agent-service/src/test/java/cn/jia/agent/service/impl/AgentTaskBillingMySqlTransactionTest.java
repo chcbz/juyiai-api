@@ -946,8 +946,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var roster=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRoster("budget-evaluation-roster-v1","1".repeat(64),"2".repeat(64),"3".repeat(64),book.sha256(),rows));pointObjects.put(roster.sha256(),roster.json());
         var errors=study.scoreObserved(BILLING_TASK.scope(),OWNER,roster.sha256(),pointObjects::get);assertEquals(3,errors.candidateRequests());assertEquals(1,errors.missingTruthRequests());assertEquals(2,errors.pairedRequests());
         var metric=errors.uniqueTaskErrors();assertEquals(1,metric.positiveQuoted());assertEquals(1,metric.underestimates());
-        var ratio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(new BigDecimal("0.40"),new BigDecimal("0.65"));assertEquals(0,ratio.compareTo(metric.wape()));assertEquals(0,ratio.compareTo(metric.p90Relative()));
+        var pointErrorRatio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(new BigDecimal("0.40"),new BigDecimal("0.65"));assertEquals(0,pointErrorRatio.compareTo(metric.wape()));assertEquals(0,pointErrorRatio.compareTo(metric.p90Relative()));
         assertThrows(IllegalArgumentException.class,()->study.scoreObserved(BILLING_TASK.scope(),"foreign",roster.sha256(),pointObjects::get));
+        var noTruth=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRoster("budget-evaluation-roster-v1","1".repeat(64),"2".repeat(64),"3".repeat(64),book.sha256(),List.of(
+                new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRow("unmeasured",TASK,AGENT,forecast.sha256(),"USAGE_INCOMPLETE",null))));
+        pointObjects.put(noTruth.sha256(),noTruth.json());var missingErrors=study.scoreObserved(BILLING_TASK.scope(),OWNER,noTruth.sha256(),pointObjects::get);
+        assertEquals(1,missingErrors.pricedRequests());assertEquals(0,missingErrors.pairedRequests());assertNull(missingErrors.uniqueTaskErrors().wape());assertNull(missingErrors.uniqueTaskErrors().p90Relative());
+        var zero=cn.jia.economy.pricing.TaskEstimateEvaluation.pairedErrors(List.of(new cn.jia.economy.pricing.TaskEstimateEvaluation.Prediction(TASK,BigDecimal.ZERO,25L)));
+        assertEquals(1,zero.zeroQuoted());assertEquals(0,new BigDecimal("0.25").compareTo(zero.zeroAbsoluteYuanSum()));assertNull(zero.wape());assertNull(zero.p90Relative());
         assertEquals(point.point(),independentPoint.point());assertEquals(65,new ObjectMapper().readTree(independentPoint.source().json()).path("operations").size());
         assertThrows(IllegalArgumentException.class,()->study.outcomePoint(query,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder));
         assertNull(sampleEvidence.measureOutcome(query,before.quoteId(),AGENT,group.digest(),before.featureSha(),fixtureDecoder));
