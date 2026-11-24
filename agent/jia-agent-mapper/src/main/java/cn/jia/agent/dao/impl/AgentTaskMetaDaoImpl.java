@@ -110,6 +110,12 @@ public class AgentTaskMetaDaoImpl extends BaseDaoImpl<AgentTaskMetaMapper, Agent
         return baseMapper.findExactByTaskScopeForUpdate(tenantId, clientId, taskId);
     }
 
+    @Override public AgentTaskMetaEntity findByTaskIdForShareInOwnerScope(String tenantId,String clientId,String ownerJiacn,String taskId) {
+        requireExactOwnerScope(tenantId,clientId,ownerJiacn);
+        requireExactId(taskId,"taskId",100);
+        return baseMapper.findExactByOwnerTaskScopeForShare(tenantId,clientId,ownerJiacn,taskId);
+    }
+
     @Override
     public AgentTaskMetaEntity findByTaskIdForUpdateInOwnerScope(
             String tenantId, String clientId, String ownerJiacn, String taskId) {

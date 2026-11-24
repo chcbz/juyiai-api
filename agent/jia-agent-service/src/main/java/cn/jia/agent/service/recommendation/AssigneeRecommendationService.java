@@ -3,7 +3,7 @@ package cn.jia.agent.service.recommendation;
 import cn.jia.agent.entity.AgentTaskDTO;
 import cn.jia.agent.hosting.HostingRentHttp.Actor;
 import cn.jia.agent.service.AgentService;
-import cn.jia.agent.service.AgentTaskMutationTransaction;
+import cn.jia.agent.service.AgentTaskRootObservation;
 import cn.jia.agent.service.TaskFeatureEncoder;
 import cn.jia.agent.skill.SkillManagementService;
 import org.springframework.stereotype.Service;
@@ -20,16 +20,17 @@ public final class AssigneeRecommendationService {
     private final RecommendationMaterials materials;
     private final TaskQueryVectors vectors;
     private final CapabilitySearch search;
-    private final AgentTaskMutationTransaction transactions;
+    private final AgentTaskRootObservation transactions;
     AssigneeRecommendationService(AgentService agents, SkillManagementService skills, RecommendationMaterials materials,
-                                 TaskQueryVectors vectors, CapabilitySearch search, AgentTaskMutationTransaction transactions, CandidateSuitability suitability) {
+                                 TaskQueryVectors vectors, CapabilitySearch search, AgentTaskRootObservation transactions, CandidateSuitability suitability) {
         this.suitability=suitability;
         this.agents=agents; this.skills=skills; this.materials=materials; this.vectors=vectors;
         this.search=search; this.transactions=transactions;
     }
     public Result recommend(Actor actor, String taskId, Request request) {
         if(request==null || request.expectedTaskVersion()==null || request.expectedTaskVersion().isBlank()) throw new Failure(400,"BAD_REQUEST");
-        var task = task(agents.getTaskRecommendationInput(taskId), request.expectedTaskVersion());
+        var task = transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,
+                root->task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion()));
         var observed = observe(actor, taskId);
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();
@@ -52,7 +53,7 @@ public final class AssigneeRecommendationService {
         }
         var required=new HashSet<String>();if(task.getRequiredAbilities()!=null)for(String r:task.getRequiredAbilities())if(r!=null&&!r.isBlank())required.add(TaskRetrievalText.normalized(r));
         var context=new CandidateSuitability.Context(truncated,Set.copyOf(required),!inputs.isEmpty(),observed.size());
-        var verified=transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
+        var verified=transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
             var current=task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
             if(!Objects.equals(task.getTitle(),current.getTitle()) || !Objects.equals(task.getDescription(),current.getDescription())
                     || !Objects.equals(task.getRequiredAbilities(),current.getRequiredAbilities())) throw stale();

@@ -96,7 +96,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private JdbcTemplate jdbc, independent;
     private String database;
     private DataSourceTransactionManager manager;
-    private AgentTaskMutationTransaction roots;
+    private AgentTaskMutationTransactionImpl roots;
     private TaskBillingService billing;
     private cn.jia.economy.task.TaskQuoteBatches batches;
     private AgentTaskExecutionGrantServiceImpl assignment;
@@ -1306,6 +1306,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             for(int n:List.of(1,108)){
                 String task="rec-http-"+n;jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",task,OWNER,TENANT,CLIENT);
                 roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,task,r->req.captureOnCreate(SCOPE,task,"合同审查 "+n,"核对合同条款"));
+                if(n==1)assertSharedRecommendationRoot(task);
                 attachQuoteFile(task,n);String file="file-"+n;
                 jdbc.update("UPDATE agent_personal_workspace_file_version SET original_filename=? WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND file_id=? AND version=1","pinned-v1-"+n,TENANT,CLIENT,OWNER,file);
                 jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,2,'unselected-v2','text/plain',8,?,'private:v2',2,?,?)",file,OWNER,"c".repeat(64),TENANT,CLIENT);
@@ -1370,6 +1371,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     /** Called only inside the isolated loopback HTTP/MySQL/ES fixture. The initial query vector uses
      * the fixture encoder; cold refers to the API vector cache, not a real provider or cold OS. */
+    private void assertSharedRecommendationRoot(String task)throws Exception {
+        var arrived=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
+        try(var pool=java.util.concurrent.Executors.newFixedThreadPool(2)){
+            var reader=pool.submit(()->roots.observe(TENANT,CLIENT,OWNER,task,root->{arrived.countDown();
+                try{assertTrue(release.await(8,java.util.concurrent.TimeUnit.SECONDS));}catch(InterruptedException e){throw new AssertionError(e);}
+                return root.getTaskId();}));
+            try {assertTrue(arrived.await(5,java.util.concurrent.TimeUnit.SECONDS));
+                assertEquals(task,pool.submit(()->roots.observe(TENANT,CLIENT,OWNER,task,r->r.getTaskId())).get(4,java.util.concurrent.TimeUnit.SECONDS));
+                try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement("SELECT task_id FROM agent_task_meta WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? FOR UPDATE NOWAIT")){
+                    conn.setAutoCommit(false);ps.setString(1,TENANT);ps.setString(2,CLIENT);ps.setString(3,OWNER);ps.setString(4,task);
+                    assertEquals(3572,assertThrows(java.sql.SQLException.class,ps::executeQuery).getErrorCode());conn.rollback();}
+            }finally{release.countDown();}
+            assertEquals(task,reader.get(5,java.util.concurrent.TimeUnit.SECONDS));
+        }
+        assertEquals(task,roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,task,r->r.getTaskId()));
+    }
     private void checkRecError(String task,int status,String code)throws Exception {
         String id="rec-error";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend"))
                 .header("Authorization","Bearer "+httpToken()).header("X-Request-Id",id).header("Content-Type","application/json")
@@ -1430,6 +1447,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         ranked.sort(java.util.Comparator.<java.util.Map.Entry<String,Shape>>comparingLong(e->e.getValue().examined()).reversed().thenComparing(java.util.Map.Entry::getKey));
         for(var e:ranked){var s=e.getValue();System.out.printf(java.util.Locale.ROOT,"RECOMMEND_SQL_DIGEST candidates=%d digest=%s calls=%d examined=%d sent=%d selectMs=%.3f%n",size,e.getKey(),s.calls(),s.examined(),s.sent(),s.picos()/1e9);}
     }
+    private long sharedTaskRootSelects(){
+        return admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %`agent_task_meta`%FOR SHARE%'",Long.class,database);
+    }
     private RecSql readRecSql(){
         assertEquals(1,admin.queryForObject("SELECT @@performance_schema",Integer.class));
         var values=admin.queryForObject("""
@@ -1460,7 +1480,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
-                var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
+                long sharedBefore=sharedTaskRootSelects();var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1477,8 +1497,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");
                 times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
+                long shared=sharedTaskRootSelects()-sharedBefore;assertEquals(2L*times.size(),shared,"independent shared root observations before and after retrieval");
                 var delta=readRecSql().minus(sqlBefore);if(shapes!=null)reportShapes(expected.size(),shapes);
                 System.out.printf(java.util.Locale.ROOT,"RECOMMEND_MYSQL candidates=%d concurrency=%d n=%d selects=%d rowsExamined=%d rowsSent=%d sumSelectMs=%.3f matchingRootLocks=%d rowWaits=%d sumRowWaitMs=%d%n",expected.size(),concurrency,times.size(),delta.statements(),delta.examined(),delta.sent(),delta.statementPicos()/1e9,delta.roots(),delta.waits(),delta.waitMillis());
+                assertEquals(0,delta.roots(),"pure recommendation reads must not take exclusive task locks");
                 assertTrue(delta.statements()>0 && delta.examined()>0 && delta.sent()>0 && delta.statementPicos()>0,"missing statement observations");assertTrue(delta.waits()>=0 && delta.waitMillis()>=0);
                 assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
             }

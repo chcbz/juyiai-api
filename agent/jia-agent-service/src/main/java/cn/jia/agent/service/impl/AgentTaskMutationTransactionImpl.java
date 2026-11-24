@@ -11,7 +11,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
-public class AgentTaskMutationTransactionImpl implements AgentTaskMutationTransaction {
+public class AgentTaskMutationTransactionImpl implements AgentTaskMutationTransaction, cn.jia.agent.service.AgentTaskRootObservation {
     private final AgentTaskMetaDao taskMetaDao;
     private final TransactionTemplate requiredTransaction;
 
@@ -42,6 +42,14 @@ public class AgentTaskMutationTransactionImpl implements AgentTaskMutationTransa
         }
         return requiredTransaction.execute(status ->
                 mutation.apply(lockAndValidateRoot(tenantId, clientId, taskId)));
+    }
+
+    @Override public <T> T observe(String tenantId,String clientId,String ownerJiacn,String taskId,
+            java.util.function.Function<AgentTaskMetaEntity,T> read) {
+        requireExactOwnerScope(tenantId,clientId,ownerJiacn,taskId);
+        java.util.Objects.requireNonNull(read);
+        return requiredTransaction.execute(status -> read.apply(validateRoot(taskMetaDao.findByTaskIdForShareInOwnerScope(
+                tenantId,clientId,ownerJiacn,taskId),tenantId,clientId,ownerJiacn,taskId)));
     }
 
     @Override

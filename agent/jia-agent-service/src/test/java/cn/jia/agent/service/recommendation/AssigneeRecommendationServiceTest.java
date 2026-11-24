@@ -18,7 +18,7 @@ class AssigneeRecommendationServiceTest {
     final RecommendationMaterials materials = mock();
     final TaskQueryVectors vectors = mock();
     final CapabilitySearch search = mock();
-    final AgentTaskMutationTransaction tx = mock();
+    final AgentTaskRootObservation tx = mock();
     final AssigneeRecommendationService service = new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,new CandidateSuitability("",""));
     final TaskFeatureEncoder.Identity gen = new TaskFeatureEncoder.Identity("test","test",1);
     final AgentTaskDTO task = new AgentTaskDTO();
@@ -30,7 +30,6 @@ class AssigneeRecommendationServiceTest {
     }
     @BeforeEach void setup() {
         task.setTaskVersion("7"); task.setTitle("写说明"); task.setStatus("open");
-        when(agents.getTaskRecommendationInput("task")).thenReturn(task);
         when(agents.getTaskRecommendationInputWithinLockedTask(eq("task"),same(lockedRoot))).thenAnswer(i->{assertTrue(locked);return task;});
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row));
         when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of()));
@@ -42,8 +41,8 @@ class AssigneeRecommendationServiceTest {
             boolean lexical=i.getArgument(3)==null;
             return new CapabilitySearch.Result(lexical?"LEXICAL_ONLY":"HYBRID",CandidateRankFusion.fuse(Set.of("a"),List.of(h),List.of()),lexical?List.of("QUERY_VECTOR_UNAVAILABLE"):List.of());
         });
-        when(tx.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->{
-            locked=true; try{return i.<AgentTaskMutationTransaction.LockedTaskMutation<?>>getArgument(4).apply(lockedRoot);} finally{locked=false;}
+        when(tx.observe(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->{
+            locked=true; try{return i.<java.util.function.Function<AgentTaskMetaEntity,?>>getArgument(4).apply(lockedRoot);} finally{locked=false;}
         });
     }
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory;

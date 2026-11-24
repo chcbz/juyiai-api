@@ -18,7 +18,7 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
     private final TaskFeatureEncoder.Identity id = new TaskFeatureEncoder.Identity("rec-http-fixture","text-embedding-3-small",1024);
     public final AtomicInteger encodes=new AtomicInteger();
     public final AssigneeRecommendationController controller;
-    public RecommendationHttpTestWiring(AgentService agents,SkillManagementService skills,RecommendationMaterials materials,AgentTaskMutationTransaction roots)throws Exception {
+    public RecommendationHttpTestWiring(AgentService agents,SkillManagementService skills,RecommendationMaterials materials,AgentTaskRootObservation roots)throws Exception {
         int port=Integer.parseInt(System.getProperty("cyf.capabilityEsPort"));String cluster=System.getProperty("cyf.capabilityEsCluster");
         assertTrue(port>=1024 && port<=65535 && port!=9200 && port!=9300);assertTrue(cluster.matches("cyf-rb-fixture-[a-f0-9]{32}"));
         client=ElasticsearchClient.of(b->b.host("http://127.0.0.1:"+port).useCompression(false));
