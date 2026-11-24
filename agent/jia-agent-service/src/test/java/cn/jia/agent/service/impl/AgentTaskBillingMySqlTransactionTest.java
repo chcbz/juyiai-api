@@ -708,7 +708,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
         if(dense){
             String oldRows="SELECT quote_id,SHA2(snapshot_json,256) AS snapshot_sha,SHA2(CAST(JSON_EXTRACT(snapshot_json,'$.preparation.features') AS CHAR),256) AS features_sha FROM economy_task_quote_resolved ORDER BY quote_id";
-            var prior=jdbc.queryForList(oldRows);assertEquals(2*n+1,prior.size());assertTrue(prior.stream().allMatch(r->r.get("snapshot_sha")!=null && r.get("features_sha")!=null));
+            var prior=jdbc.queryForList(oldRows);assertEquals(2*n+2,prior.size());assertTrue(prior.stream().allMatch(r->r.get("snapshot_sha")!=null));assertEquals(List.of(quoteId),prior.stream().filter(r->r.get("features_sha")==null).map(r->r.get("quote_id")).toList());
             long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
             assertEquals(prior,jdbc.queryForList(oldRows));
         }
