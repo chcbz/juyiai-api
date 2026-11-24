@@ -51,6 +51,7 @@ dependencies {
     testImplementation project(':oauth:jia-oauth-api')
     testImplementation project(':oauth:jia-oauth-resource')
     testImplementation project(':chat:jia-chat-service')
+    testImplementation project(':chat:jia-chat-mapper') // Real scoped bounty conversation in the quoted-assignment MySQL fixture.
     testImplementation 'org.springframework:spring-websocket' // Signed-selection transport peer, never a production Agent dependency
     testImplementation 'org.springframework.security:spring-security-oauth2-resource-server'
     testImplementation 'org.springframework.security:spring-security-oauth2-jose'

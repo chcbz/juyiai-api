@@ -183,6 +183,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         factory.setConfiguration(config); factory.setGlobalConfig(global);
         for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        config.addMapper(cn.jia.chat.mapper.ChatConversationMapper.class);
+        config.addMapper(cn.jia.chat.mapper.AgentTaskThreadMapper.class);
         config.addMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class);
         var sql = new SqlSessionTemplate(factory.getObject()); recommendationSql=sql;
         var meta = new AgentTaskMetaDaoImpl();
@@ -1354,14 +1356,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(receipt.path("grantVersion").asLong(), discussion.grantVersion());
                 assertEquals(receipt.path("assignmentRevision").asLong(), discussion.assignmentRevision());
                 assertNull(relaySource.claimNext(SCOPE, "second-chat-fixture", claimTime));
-                // Below this boundary the existing execution fixture does not represent a Chat admission.
+                var chat = bindQuotedDiscussion(discussion, req);
+                // Execution action is still supplied by this fixture, not the typed discussion dispatcher.
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
                 prepareNativeExecutionSchema();
                 new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-skill-application.sql"),new org.springframework.core.io.ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(jdbc.getDataSource());
                 var service=NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(recommendationSql.getMapper(SkillExecutionMapper.class)),mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,id,agent,roots);
                 ReflectionTestUtils.setField(service,"conversationExecutionEnabled",true);if(System.getProperty("cyf.ownedPickupCodex")!=null)ReflectionTestUtils.setField(service,"meteredCaptureEnabled",true);service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
                 var nativeActions=proxy(service,SkillExecutionService.class);var ownerScope=new PersonalWorkspaceExecutionService.OwnerScope(TENANT,CLIENT,OWNER);
-                var scope=new SkillExecutionService.TaskScope("42",1,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()),Long.parseLong(receipt.path("assignmentRevision").asText()));
+                service.setTaskExecutionDependencies(chat.access(),mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
+                var scope=new SkillExecutionService.TaskScope(chat.discussion().conversationId(),chat.discussion().generation(),id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()),Long.parseLong(receipt.path("assignmentRevision").asText()));
                 var pending=frozen.intent().output();java.util.function.Supplier<String> consumed=()->independent.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256());assertNull(consumed.get());
                 var snapshot=new java.util.LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());snapshot.put("taskGrant",Map.of("id",scope.taskGrantId(),"version",scope.taskGrantVersion(),"assignmentRevision",scope.assignmentRevision()));snapshot.put("scope",scope.wire().asMap());snapshot.put("targetAgentId",agent);snapshot.put("actionEventId","history-first");snapshot.put("instruction","fixture answer");snapshot.put("parameters",Map.of());snapshot.put("inputs",List.of());snapshot.put("sourceSnapshotDigest",jdbc.queryForObject("SELECT SHA2('[]',256)",String.class));snapshot.put("providerBinding",null);snapshot.put("costInfo",Map.of("mode","UNKNOWN"));
                 int executions=count("agent_personal_workspace_execution"),members=count("agent_task_execution_member");
@@ -1380,6 +1384,37 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     /** Same committed execution: authenticated MVC filter, controller, service, MySQL lease. Socket liveness is a fixture. */
+    private record BoundBountyChat(ChatBountyConversationService.Discussion discussion,
+                                  WorkspaceConversationAccessService access) {}
+
+    /** Real Chat binding and ACL against the same committed assignment. No synthetic conversation ID. */
+    private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements) throws Exception {
+        Path chat = Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql");
+        createTable(chat, "chat_conversation", false);
+        createTable(chat, "agent_task_thread", false);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-deliberation-schema.sql")).execute(jdbc.getDataSource());
+        var conversations = new cn.jia.chat.dao.impl.ChatConversationDaoImpl();
+        ReflectionTestUtils.setField(conversations, "baseMapper", recommendationSql.getMapper(cn.jia.chat.mapper.ChatConversationMapper.class));
+        var threads = new cn.jia.chat.dao.impl.AgentTaskThreadDaoImpl(recommendationSql.getMapper(cn.jia.chat.mapper.AgentTaskThreadMapper.class));
+        var access = new cn.jia.chat.service.impl.WorkspaceConversationAccessServiceImpl(conversations, threads);
+        var bindings = new ChatBountyConversationService(new cn.jia.chat.deliberation.ChatBountyBindingStore(jdbc), conversations, assignment);
+        var requirement = requirements.read(SCOPE, intent.taskId(), intent.requirementRevision());
+        assertNotNull(requirement);
+        var tx = new TransactionTemplate(manager);
+        java.util.function.Supplier<ChatBountyConversationService.Discussion> bind = () -> tx.execute(status ->
+                bindings.ensure(SCOPE, intent.taskId(), intent.grantId(), intent.grantVersion(), intent.assignmentRevision(),
+                        intent.targetAgentId(), intent.permittedOperation(), requirement.title()));
+        var discussion = bind.get(); assertTrue(discussion.newlyCreated());
+        var replay = bind.get(); assertFalse(replay.newlyCreated());
+        assertEquals(discussion.conversationId(), replay.conversationId()); assertEquals(discussion.generation(), replay.generation());
+        assertEquals(1, count("chat_bounty_binding")); assertEquals(1, count("chat_conversation"));
+        var view = access.requireAccessible(new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,OWNER), discussion.conversationId());
+        assertEquals(intent.taskId(), view.taskId()); assertEquals(List.of(intent.targetAgentId()), view.targetAgentIds());
+        assertThrows(IllegalStateException.class, () -> access.requireAccessible(
+                new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,"other-owner"), discussion.conversationId()));
+        return new BoundBountyChat(discussion, access);
+    }
+
     private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
         for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
         String agent=created.targetAgentId(),install="rti_"+"2".repeat(32),host="pickup-host",boot="pickup-boot";
