@@ -1249,6 +1249,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     private void pointHttp(int expected) throws Exception { httpPost("/point-and-deliberate", pointBody(), "assign-http", true, expected); }
     private cn.jia.agent.api.IndependentTaskQuoteController independentQuoteController;
+    private cn.jia.agent.api.TaskInitialActionController initialSelectionController;
     /** The archived sample, cutoff, candidate and terms are deliberately synthetic. Test real HTTP/SQL/commit/replay, not accuracy. */
     private void verifyHistoryQuoteHttp(TaskBillingService.Task newTask,cn.jia.economy.task.TaskBudgetEstimator estimator,
                                         cn.jia.economy.task.TaskBudgetEstimator.Terms terms) throws Exception {
@@ -1374,7 +1375,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
-        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-expiry-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-initial-admission-v1.sql"))).execute(jdbc.getDataSource());
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-expiry-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-initial-admission-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-selection-receipt-v1.sql"))).execute(jdbc.getDataSource());
         var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
         var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
         var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
@@ -1388,10 +1389,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var view=service.view(SCOPE,TASK,agent);assertNull(view.choice());verifyNoInteractions(events);
         var choice=TaskInitialActionSelection.Choice.LOCAL_TEXT_FILE;
         assertThrows(TaskInitialActionSelection.Missing.class,()->service.view(SCOPE,TASK,"unknown"));
-        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,"0".repeat(64),choice));
-        var selected=service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice);assertEquals("LOCAL_TEXT_FILE",selected.choice());
-        assertEquals(selected,service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice));
-        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,view.selectionVersion(),TaskInitialActionSelection.Choice.LOCAL_ANSWER));
+        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,"0".repeat(64),choice,PAYER,"select"));
+        var selected=service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice,PAYER,"select");assertEquals("LOCAL_TEXT_FILE",selected.choice());
+        assertEquals(selected,service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice,PAYER,"select"));
+        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,view.selectionVersion(),TaskInitialActionSelection.Choice.LOCAL_ANSWER,PAYER,"new-choice"));
         verify(events).publishEvent(new TaskInitialActionSelection.Selected(SCOPE,TASK,req.taskVersion(),agent));verifyNoMoreInteractions(events);
         var frozen=service.freeze(intent);assertEquals(frozen,service.freeze(intent));assertEquals(frozen,service.find(bindingKey));
         assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),bindingKey,new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ANSWER,List.of()))));
@@ -1446,6 +1447,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertNull(jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
         locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());return null;});
         locked(()->{admit.admit(SCOPE,TASK,granted,"followup",false,Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
+        initialSelectionController=new cn.jia.agent.api.TaskInitialActionController(service);
         verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
         assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
 
@@ -1457,6 +1459,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
         assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
+        verifySignedSelectionReplay(ids.get(1));
+    }
+    private void verifySignedSelectionReplay(String agent)throws Exception{
+        var uri=URI.create(origin+"/agent/tasks/"+TASK+"/initial-actions/"+agent);var token=httpToken();var mapper=new ObjectMapper();
+        try(var client=HttpClient.newHttpClient()){
+            class Call{tools.jackson.databind.JsonNode run(String key,String choice,String version,int expected,String code)throws Exception{
+                var b=HttpRequest.newBuilder(uri).header("Authorization","Bearer "+token).header("X-Request-Id","selection");if(choice!=null){
+                    if(key!=null)b.header("Idempotency-Key",key);var data=Map.of("choice",choice,"selectionVersion",version);
+                    b.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
+                var r=client.send(b.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());return env.path("data");
+            }}var call=new Call();var empty=call.run(null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt");
+            call.run(null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");var saved=call.run("one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());
+            jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
+            assertEquals(saved,call.run("one","LOCAL_ANSWER",stamp,200,"E0"));call.run("one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");
+            call.run("new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");assertEquals(before+1,count("agent_task_native_selection_receipt"));
+        }
     }
     // Use an actual signed quote request with two authorized candidates and one current native receipt.
     // The test injector retires that real epoch after estimation, before the quote transaction rechecks it.
@@ -1888,6 +1906,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         httpContext.addBeanFactoryPostProcessor(factory -> {
             factory.registerSingleton("jwtDecoder", decoder);
             if(recommendationController!=null)factory.registerSingleton("recommendationController",recommendationController);
+            if(initialSelectionController!=null)factory.registerSingleton("initialSelectionController",initialSelectionController);
             if(independentQuoteController!=null)factory.registerSingleton("independentQuoteController",independentQuoteController);
             factory.registerSingleton("walletController", new cn.jia.economy.api.EconomyWalletController(walletGate, walletReads));
             factory.registerSingleton("assignmentController", new AgentTaskDeliberationOperationController(operationReads, assignment));

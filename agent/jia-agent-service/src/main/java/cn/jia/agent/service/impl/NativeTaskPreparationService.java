@@ -116,11 +116,18 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     private org.springframework.context.ApplicationEventPublisher events;
     @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}
     private static Output output(Choice c){return switch(c){case LOCAL_ANSWER->new Output(Mode.ANSWER,List.of());case LOCAL_TEXT_FILE->new Output(Mode.ARTIFACTS,List.of("text/plain"));};}
-    public View view(AgentTaskExecutionGrantService.Scope scope,String task,String agent){return selection(scope,task,agent,null,null);}
-    public View choose(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice){return selection(scope,task,agent,Objects.requireNonNull(version),Objects.requireNonNull(choice));}
-    private View selection(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice){
+    public View view(AgentTaskExecutionGrantService.Scope scope,String task,String agent){return selection(scope,task,agent,null,null,null,null);}
+    public View choose(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key){return selection(scope,task,agent,Objects.requireNonNull(version),Objects.requireNonNull(choice),Objects.requireNonNull(principal),Objects.requireNonNull(key));}
+    private View selection(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key){
         return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
             var targets=candidates.quoteTargets(scope,task,List.of(agent),choice!=null);if(targets.size()!=1||!agent.equals(targets.getFirst().agent()))throw new Missing();
+            String op=null,input=null;
+            if(choice!=null){
+                op=hash(json.writeValueAsString(List.of("initial-action-selection-v1",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),principal,task,agent,key)));
+                input=hash(json.writeValueAsString(List.of(version,choice.name())));
+                var saved=db.query("SELECT input_sha,task_version,selection_version,selected_choice FROM agent_task_native_selection_receipt WHERE operation_sha=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)},op);
+                if(!saved.isEmpty()){var r=saved.getFirst();if(!input.equals(r[0]))throw new KeyConflict();return new View(r[1],agent,r[2],r[3]);}
+            }
             if(!"open".equals(root.getRewardStatus()))throw new Changed();var req=requirements.readCurrentWithinLockedTask(scope,task,root);
             var b=new Binding(scope,task,root.getTaskVersion(),req.requirementRevision(),req.sha256(),grants.snapshotTaskInputsWithinLockedTask(scope,task).digest(),targets.getFirst());
             String stamp=key(b);if(choice!=null&&!stamp.equals(version))throw new Changed();var prior=find(b);
@@ -129,6 +136,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
                 if(prior==null){prior=insert(decision);events.publishEvent(new Selected(scope,task,b.taskVersion(),agent));}
             }
             String selected=null;if(prior!=null){selected="OTHER_FIXED";for(var c:Choice.values())if(output(c).equals(prior.intent().output()))selected=c.name();}
+            if(choice!=null)db.update("INSERT INTO agent_task_native_selection_receipt(operation_sha,input_sha,task_version,selection_version,selected_choice) VALUES(?,?,?,?,?)",op,input,b.taskVersion(),stamp,selected);
             return new View(Long.toString(b.taskVersion()),agent,stamp,selected);
         });
     }
