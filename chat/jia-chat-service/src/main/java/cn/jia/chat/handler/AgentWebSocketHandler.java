@@ -93,7 +93,7 @@ import java.util.function.Supplier;
 @Slf4j
 @Component
 public class AgentWebSocketHandler extends TextWebSocketHandler
-        implements AgentEventPublisher, AgentRawCommandDispatcher,
+        implements cn.jia.agent.service.NativeTaskConfigurationProbe, AgentEventPublisher, AgentRawCommandDispatcher,
         NativeBountyExecutionSessionLookup, NativeProviderCredentialBindingLookup, ControlledImageExecutionSessionLookup,
         ControlledImageFollowupAuthorityService.RuntimeDeclarationLookup {
     private static final String CHANNEL = "agent";
@@ -345,6 +345,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             if(envelope.data().containsKey("runtimeInstanceId")&&!sessionProof(session).scope().runtimeInstanceId().equals(envelope.data().get("runtimeInstanceId")))
                 throw new IllegalArgumentException("Runtime proof mismatch");
             if("agent.register".equals(envelope.messageType()))cn.jia.agent.skill.SkillManagementCodec.validateEmbeddedDeclaration(message.getPayload());
+            if("runtime.task.configuration.measured".equals(envelope.messageType())){
+                if(message.getPayloadLength()<=16384){runtimeAuthentication.validateCurrent(sessionProof(session),false);taskProbes.receive(session,envelope);}return;
+            }
             incomingWire.set(envelope);
             var business=cn.jia.agent.common.AgentMessageWire.business(envelope);
             if ("chat.message.delta".equals(envelope.messageType()) && hasDurableTurnBinding(business)) {
@@ -489,6 +492,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
         if (replyPreviews != null) replyPreviews.closeSession(session.getId());
         if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
         sessions.remove(session.getId());
+        taskProbes.closed(session);
         nativeWorkNotificationSessions.remove(session.getId());
         sessionAgentIds.remove(session.getId());
         successfullyRegisteredAgentIds.remove(session.getId());
@@ -3006,6 +3010,19 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             if (matchesNativeSkill(session,tenant,client,agent,fence)) count++;
         }
         return count==1;
+    }
+    private final NativeTaskProbeChannel taskProbes=new NativeTaskProbeChannel();
+    @Override public java.util.concurrent.CompletionStage<Measurement> measure(cn.jia.agent.service.NativeTaskPreparation.Frozen frozen,
+            cn.jia.agent.service.AgentManagedSessionLookup.SessionFence fence){
+        if(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive() || frozen==null || fence==null)
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        var b=frozen.intent().binding();return taskProbes.send(frozen,fence,()->{
+            WebSocketSession only=null;
+            for(var socket:sessions.values())if(b.target().provider().equals(sessionJiacn(socket)) && matchesNativeSkill(socket,b.scope().tenantId(),b.scope().clientId(),b.target().agent(),fence)){
+                if(only!=null)return null;only=socket;
+            }
+            return only;
+        },objectMapper);
     }
     private boolean matchesNativeSkill(WebSocketSession session,String tenant,String client,String agent,
             cn.jia.agent.service.AgentManagedSessionLookup.SessionFence fence) {

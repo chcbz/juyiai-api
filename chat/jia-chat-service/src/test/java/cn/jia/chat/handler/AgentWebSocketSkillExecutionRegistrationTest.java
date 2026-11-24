@@ -42,6 +42,40 @@ class AgentWebSocketSkillExecutionRegistrationTest {
         }finally{release.countDown();pool.shutdownNow();}
     }
 
+    private cn.jia.agent.service.NativeTaskPreparation.Frozen prepared(String provider){
+        var binding=new cn.jia.agent.service.NativeTaskPreparation.Binding(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(TENANT,CLIENT,"task-owner"),
+            "private-task",1,1,"b".repeat(64),"c".repeat(64),new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(AGENT,provider,1,1));
+        return new cn.jia.agent.service.NativeTaskPreparation.Frozen("a".repeat(64),new cn.jia.agent.service.NativeTaskPreparation.Intent("TASK_NATIVE_LOCAL_FILES_V1",binding,
+            new cn.jia.agent.service.NativeTaskPreparation.Output(cn.jia.agent.service.NativeTaskPreparation.Mode.ARTIFACTS,List.of("text/plain"))));
+    }
+    @Test void preparedProbeNeverDispatchesInTransactionOrAcrossProviders()throws Exception{
+        var f=fixture();f.handler.afterConnectionEstablished(f.session);
+        assertNull(f.handler.measure(prepared(OWNER),fence).toCompletableFuture().join());register(f,null);
+        assertNull(f.handler.measure(prepared("other"),fence).toCompletableFuture().join());
+        org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(true);
+        try{assertNull(f.handler.measure(prepared(OWNER),fence).toCompletableFuture().join());}
+        finally{org.springframework.transaction.support.TransactionSynchronizationManager.setActualTransactionActive(false);}
+        assertTrue(f.frames.stream().noneMatch(frame->frame.contains("runtime.task.configuration.probe")));
+    }
+    @Test void preparedProbeUsesFixedRuntimeCodecAndRejectsUncorrelatedOrExtendedMeasurements()throws Exception{
+        String root=System.getProperty("ownedMeteredRuntime");org.junit.jupiter.api.Assumptions.assumeTrue(root!=null);
+        var f=fixture();f.handler.afterConnectionEstablished(f.session);register(f,null);
+        var future=f.handler.measure(prepared(OWNER),fence).toCompletableFuture();String wire=f.frames.getLast();
+        assertFalse(wire.contains("private-task"));assertTrue(wire.contains("runtime.task.configuration.probe"));
+        var process=new ProcessBuilder("node","--input-type=module","-e","""
+            import {fromAgentWire,toAgentWire} from './agent-message-wire.mjs';import fs from 'node:fs';
+            const {messageId,requestId,tenantId,clientId,agentId,installationId,hostId,runtimeInstanceId,sessionGeneration,intentSha256,outputs}=fromAgentWire(fs.readFileSync(0,'utf8'));
+            if(outputs.dataSchema!==null || outputs.mimeTypes[0]!=='text/plain')throw Error('output mismatch');
+            const measurement={version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'1'.repeat(64),routeSha256:'2'.repeat(64),toolConfigSha256:'3'.repeat(64),capturePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
+            console.log(JSON.stringify(toAgentWire({messageType:'runtime.task.configuration.measured',messageId:'result',requestId,correlationId:messageId,agentId,sourceAgentId:agentId,tenantId,clientId,installationId,hostId,runtimeInstanceId,sessionGeneration,intentSha256,measurement})));
+            """).directory(java.nio.file.Path.of(root,"conf/codex-bridge").toFile()).redirectErrorStream(true).start();
+        try{try(var out=process.getOutputStream()){out.write(wire.getBytes(java.nio.charset.StandardCharsets.UTF_8));}
+            assertTrue(process.waitFor(3,java.util.concurrent.TimeUnit.SECONDS));String reply=new String(process.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8).trim();assertEquals(0,process.exitValue(),reply);
+            for(String bad:List.of(reply.replace("a".repeat(64),"b".repeat(64)),reply.replace("NATIVE_DISPATCH_GROUP_V1","OTHER"),reply.replace("executionConfigSha256","price"))){
+                f.handler.handleTextMessage(f.session,new TextMessage(bad));assertFalse(future.isDone());}
+            f.handler.handleTextMessage(f.session,new TextMessage(reply));assertEquals("2".repeat(64),future.join().routeSha256());
+        }finally{process.destroyForcibly();}
+    }
     Fixture fixture() throws Exception {
         var f = new Fixture(false); f.handler.setSkillExecutionSessions(registry);
         when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))

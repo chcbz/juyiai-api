@@ -768,6 +768,7 @@ def runtimeCapabilityRegressionSourceSet = sourceSets.create('runtimeCapabilityR
 configurations.named(runtimeCapabilityRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
 configurations.named(runtimeCapabilityRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
 tasks.register('runtimeCapabilityRegression', Test) {
+    if (providers.gradleProperty('ownedMeteredRuntime').isPresent()) systemProperty 'ownedMeteredRuntime', providers.gradleProperty('ownedMeteredRuntime').get()
     dependsOn tasks.named(runtimeCapabilityRegressionSourceSet.classesTaskName)
     testClassesDirs = runtimeCapabilityRegressionSourceSet.output.classesDirs
     classpath = runtimeCapabilityRegressionSourceSet.runtimeClasspath
