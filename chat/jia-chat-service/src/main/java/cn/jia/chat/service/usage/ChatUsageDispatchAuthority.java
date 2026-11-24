@@ -10,9 +10,10 @@ import java.util.*;
 /** Original dispatch ownership for cost observations, never authorization to run a task. */
 @Service
 public final class ChatUsageDispatchAuthority {
+    private final ChatTaskDispatchOriginStore origins;
     private final ChatDispatchAuthorityMapper dispatches;private final ChatDeliberationDao turns;
     private static final ObjectMapper JSON=new ObjectMapper();
-    public ChatUsageDispatchAuthority(ChatDispatchAuthorityMapper dispatches,ChatDeliberationDao turns){this.dispatches=dispatches;this.turns=turns;}
+    public ChatUsageDispatchAuthority(ChatDispatchAuthorityMapper dispatches,ChatDeliberationDao turns,ChatTaskDispatchOriginStore origins){this.origins=origins;this.dispatches=dispatches;this.turns=turns;}
     record Original(ChatDispatchOutboxEntity dispatch,ChatTurnEntity turn,String taskId,boolean multiMember) { }
     Original original(AuthenticatedRuntimeOperation.Scope scope,String dispatchId){
         var rows = dispatches.findDispatch(scope.tenantId(), scope.clientId(), dispatchId);
@@ -44,7 +45,7 @@ public final class ChatUsageDispatchAuthority {
         return new Original(dispatch,turn,taskId,multiMember);
     }
     /** Point-in-time dispatch-origin observation only. No capture enrollment, receipt or fee is implied. */
-    public boolean matchesTaskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash,ChatTaskDispatchOriginStore origins){
+    public boolean matchesTaskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash){
         var original=original(device.subject(),dispatchId);var dispatch=original.dispatch();
         return original.taskId()!=null && !original.multiMember() && dispatch.getTaskGrantId()!=null && dispatch.getTaskGrantVersion()!=null
                 && Objects.equals(dispatch.getTurnId(),turnId) && origins.matches(dispatch.getEventId(),contextHash,device.fence());

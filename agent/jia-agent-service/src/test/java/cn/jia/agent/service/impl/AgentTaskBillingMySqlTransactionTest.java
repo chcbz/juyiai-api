@@ -1619,19 +1619,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var host=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
         assertThrows(InjectedFailure.class,()->tx.executeWithoutResult(st->{origins.beforeSend(claim,context,host);throw new InjectedFailure();}));
         assertEquals(0,count("chat_task_dispatch_origin"));
-        var mapper=recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class);
-        var authority=new cn.jia.chat.service.usage.ChatUsageDispatchAuthority(mapper,new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class)));
-        var store=new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc);var turn=mapper.findDispatch(TENANT,CLIENT,row.getDispatchId()).getFirst();
-        var target=new ObjectMapper().readTree(turn.getPayloadJson()).path("targetAgentId").asText();
+        var authority=new cn.jia.chat.service.usage.ChatUsageDispatchAuthority(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class),
+                new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class)),new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc));
+        var target=new ObjectMapper().readTree(row.getPayloadJson()).path("targetAgentId").asText();
         var subject=new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,OWNER,target);var device=new AuthenticatedRuntimeOperation.Device(subject,host);
-        java.util.function.BooleanSupplier matches=()->authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),context,store);
+        java.util.function.BooleanSupplier matches=()->authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),context);
         assertFalse(matches.getAsBoolean());
         tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
-        assertTrue(matches.getAsBoolean());assertFalse(authority.matchesTaskSource(device,"other-turn",row.getDispatchId(),context,store));
-        assertFalse(authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),"sha256:"+"0".repeat(64),store));
+        assertTrue(matches.getAsBoolean());assertFalse(authority.matchesTaskSource(device,"other-turn",row.getDispatchId(),context));
+        assertFalse(authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),"sha256:"+"0".repeat(64)));
         var changed=new AuthenticatedRuntimeOperation.Device(subject,new AgentManagedSessionLookup.SessionFence("installation","host","boot",2));
-        assertFalse(authority.matchesTaskSource(changed,row.getTurnId(),row.getDispatchId(),context,store));
-        assertThrows(ChatDeliberationException.class,()->authority.matchesTaskSource(new AuthenticatedRuntimeOperation.Device(new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,"different-owner",target),host),row.getTurnId(),row.getDispatchId(),context,store));
+        assertFalse(authority.matchesTaskSource(changed,row.getTurnId(),row.getDispatchId(),context));
+        assertThrows(ChatDeliberationException.class,()->authority.matchesTaskSource(new AuthenticatedRuntimeOperation.Device(new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,"different-owner",target),host),row.getTurnId(),row.getDispatchId(),context));
         assertEquals(1,count("chat_task_dispatch_origin"));assertEquals(0,independent.queryForObject("SELECT mixed_origin FROM chat_task_dispatch_origin",Integer.class));
         assertTrue(tx.execute(st->relay.retry(claim,"TEST_LOST_SEND",now)).booleanValue());
         assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(st->origins.beforeSend(claim,context,host)));
