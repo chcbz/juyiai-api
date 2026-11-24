@@ -32,12 +32,18 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         (rs,i)->decode(b,rs.getString(1),rs.getString(2)),scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),key(b));return rows.isEmpty()?null:rows.getFirst();}
 
     @Override public Map<String,Frozen> currentForProbes(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> ids){
-        return select(scope,task,expectedVersion,ids,null);
+        return select(scope,task,expectedVersion,ids,null,null);
     }
     @Override public Comparison reserveComparisons(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> ids){
-        String ticket=UUID.randomUUID().toString();return new Comparison(ticket,select(scope,task,expectedVersion,ids,ticket));
+        String ticket=UUID.randomUUID().toString();return new Comparison(ticket,select(scope,task,expectedVersion,ids,ticket,null));
     }
-    private Map<String,Frozen> select(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> ids,String ticket){
+    @Override public Comparison reserveDue(Binding anchor,Set<Binding> expected){
+        String ticket=UUID.randomUUID().toString();
+        var ids=expected.stream().filter(b->b.scope().equals(anchor.scope())&&b.task().equals(anchor.task())&&b.taskVersion()==anchor.taskVersion()).map(b->b.target().agent()).distinct().sorted().toList();
+        return new Comparison(ticket,select(anchor.scope(),anchor.task(),anchor.taskVersion(),ids,ticket,expected));
+    }
+    private static final String DUE=" AND (probe_valid_until IS NULL OR probe_valid_until<=UTC_TIMESTAMP(6))";
+    private Map<String,Frozen> select(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> ids,String ticket,Set<Binding> expected){
         if(ids.isEmpty())return Map.of();
         return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
             if(!"open".equals(root.getRewardStatus())||root.getTaskVersion()!=expectedVersion)return Map.of();
@@ -48,11 +54,12 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
                 var keys=new LinkedHashMap<String,Binding>();
                 for(var target:targets.subList(i,Math.min(i+128,targets.size()))){
                     var binding=new Binding(scope,task,expectedVersion,req.requirementRevision(),req.sha256(),input,target);
-                    keys.put(key(binding),binding);
+                    if(expected==null||expected.contains(binding))keys.put(key(binding),binding);
                 }
+                if(keys.isEmpty())continue;
                 var args=new ArrayList<Object>(List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));args.addAll(keys.keySet());
                 db.query("SELECT binding_sha,intent_sha,intent_json FROM "+TABLE+" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("
-                    +String.join(",",Collections.nCopies(keys.size(),"?"))+")",(org.springframework.jdbc.core.RowCallbackHandler)rs->{
+                    +String.join(",",Collections.nCopies(keys.size(),"?"))+")"+(expected==null?"":DUE),(org.springframework.jdbc.core.RowCallbackHandler)rs->{
                         var binding=keys.get(rs.getString(1));var frozen=decode(binding,rs.getString(2),rs.getString(3));
                         found.put(binding.target().agent(),frozen);
                     },args.toArray());
@@ -61,7 +68,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
                     if(!matched.isEmpty()){
                         var params=new ArrayList<Object>(List.of(ticket,probeLifetimeSeconds,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));params.addAll(matched);
                         int changed=db.update("UPDATE "+TABLE+" SET probe_ticket=?,probe_valid_until=TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)),measurement_sha=NULL,measurement_json=NULL WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("
-                            +String.join(",",Collections.nCopies(matched.size(),"?"))+")",params.toArray());
+                            +String.join(",",Collections.nCopies(matched.size(),"?"))+")"+(expected==null?"":DUE),params.toArray());
                         if(changed!=matched.size())throw new IllegalStateException("Preparation changed while reserving comparison");
                     }
                 }
@@ -82,6 +89,10 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         return found!=null&&found.equals(new Recorded(ticket,decision,measurement));
     }
     @Override public Map<Binding,Recorded> recorded(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking){
+        return readBatch(scope,task,bindings,locking).current();
+    }
+    @Override public ReadBatch readBatch(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking){
+        var due=new HashSet<Binding>();
         if(locking&&!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
         var keys=new TreeMap<String,Binding>();for(var binding:bindings){
             if(!scope.equals(binding.scope())||!task.equals(binding.task()))throw new IllegalArgumentException("Mixed task scope");
@@ -92,13 +103,13 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
             var args=new ArrayList<Object>(List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));args.addAll(chunk);
             db.query("SELECT binding_sha,intent_sha,intent_json,probe_ticket,measurement_sha,measurement_json,(probe_valid_until>UTC_TIMESTAMP(6)) FROM "+TABLE
                 +" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("+String.join(",",Collections.nCopies(chunk.size(),"?"))+") ORDER BY binding_sha"+(locking?" FOR SHARE":""),
-                (org.springframework.jdbc.core.RowCallbackHandler)rs->{if(!rs.getBoolean(7)||rs.getString(5)==null)return;
+                (org.springframework.jdbc.core.RowCallbackHandler)rs->{if(!rs.getBoolean(7)){if(!locking)due.add(keys.get(rs.getString(1)));return;}if(rs.getString(5)==null)return;
                     var binding=keys.get(rs.getString(1));var decision=decode(binding,rs.getString(2),rs.getString(3));String body=rs.getString(6);
                     if(body==null||!hash(body).equals(rs.getString(5)))throw new IllegalStateException("Changed task measurement");
                     var m=json.readValue(body,NativeTaskConfigurationProbe.Measurement.class);
                     if(!decision.sha256().equals(m.intentSha256())||rs.getString(4)==null)throw new IllegalStateException("Unbound task measurement");
                     result.put(binding,new Recorded(rs.getString(4),decision,m));},args.toArray());
-        }return Map.copyOf(result);
+        }return new ReadBatch(result,due);
     }
     /** The caller owns the task root, authorized grant and execution transaction. No current quote/probe read here. */
     void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,boolean localOnly,Map<String,Object> outputs){
@@ -142,7 +153,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
             String stamp=key(b);if(choice!=null&&!stamp.equals(version))throw new Changed();var prior=find(b);
             if(choice!=null){var decision=new Intent("TASK_NATIVE_LOCAL_FILES_V1",b,output(choice));
                 if(prior!=null&&!prior.intent().equals(decision))throw new Changed();
-                if(prior==null){prior=insert(decision);events.publishEvent(new Selected(scope,task,b.taskVersion(),agent));}
+                if(prior==null){prior=insert(decision);events.publishEvent(new Selected(b));}
             }
             String selected=null;if(prior!=null){selected="OTHER_FIXED";for(var c:Choice.values())if(output(c).equals(prior.intent().output()))selected=c.name();}
             if(choice!=null)db.update("INSERT INTO agent_task_native_selection_receipt(operation_sha,input_sha,task_version,selection_version,selected_choice) VALUES(?,?,?,?,?)",op,input,b.taskVersion(),stamp,selected);

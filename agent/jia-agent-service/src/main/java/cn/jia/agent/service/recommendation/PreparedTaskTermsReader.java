@@ -22,7 +22,13 @@ public class PreparedTaskTermsReader {
     /** Only explicitly chosen candidates. No socket send under the task root; authentication proof never leaves Agent. */
     @Transactional(propagation=Propagation.NEVER)
     public Map<String,Observation> refresh(AgentTaskExecutionGrantService.Scope scope,String task,long version,List<String> candidates){
-        var reservation=decisions.reserveComparisons(scope,task,version,candidates);var selected=reservation.decisions();if(selected.isEmpty())return Map.of();
+        return compare(scope,task,decisions.reserveComparisons(scope,task,version,candidates));
+    }
+    @Transactional(propagation=Propagation.NEVER)
+    public Map<String,Observation> refreshDue(Set<NativeTaskPreparation.Binding> bindings){
+        if(bindings.isEmpty())return Map.of();var b=bindings.iterator().next();return compare(b.scope(),b.task(),decisions.reserveDue(b,bindings));
+    }
+    private Map<String,Observation> compare(AgentTaskExecutionGrantService.Scope scope,String task,NativeTaskPreparation.Comparison reservation){var selected=reservation.decisions();if(selected.isEmpty())return Map.of();
         var channel=transport.getIfAvailable();if(channel==null)return Map.of();
         var current=sessions.currentRegisteredProofs(scope.tenantId(),scope.clientId(),selected.keySet());
         var result=new HashMap<String,CompletionStage<Observation>>();

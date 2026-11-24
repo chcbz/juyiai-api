@@ -33,6 +33,9 @@ public interface NativeTaskPreparation {
     record Recorded(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement) {}
     /** Authorized exact bindings only. Uses database time; no task or runtime network lookup. */
     Map<Binding,Recorded> recorded(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking);
+    record ReadBatch(Map<Binding,Recorded> current,Set<Binding> due){public ReadBatch{current=Map.copyOf(current);due=Set.copyOf(due);}}
+    ReadBatch readBatch(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking);
+    Comparison reserveDue(Binding anchor,Set<Binding> expected);
     boolean lockMeasurement(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement);
     Map<String,Frozen> currentForProbes(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> agentIds);
 }

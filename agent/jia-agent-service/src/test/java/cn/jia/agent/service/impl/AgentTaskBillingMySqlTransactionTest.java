@@ -1393,13 +1393,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var selected=service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice,PAYER,"select");assertEquals("LOCAL_TEXT_FILE",selected.choice());
         assertEquals(selected,service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice,PAYER,"select"));
         assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,view.selectionVersion(),TaskInitialActionSelection.Choice.LOCAL_ANSWER,PAYER,"new-choice"));
-        verify(events).publishEvent(new TaskInitialActionSelection.Selected(SCOPE,TASK,req.taskVersion(),agent));verifyNoMoreInteractions(events);
+        verify(events).publishEvent(new TaskInitialActionSelection.Selected(bindingKey));verifyNoMoreInteractions(events);
         var frozen=service.freeze(intent);assertEquals(frozen,service.freeze(intent));assertEquals(frozen,service.find(bindingKey));
         assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),bindingKey,new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ANSWER,List.of()))));
         var wrong=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,new AgentExternalServicePolicyService.QuoteTarget(agent,target.provider(),target.binding()+1,target.externalPolicyRevision()));
         var ids=List.of(agent,"agt_00000000000000000000000000000002",agent);
         assertEquals(Map.of(agent,frozen),service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids));
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion()+1,ids).isEmpty());
+        assertEquals(Set.of(bindingKey),service.readBatch(SCOPE,TASK,List.of(bindingKey,wrong),false).due());
+        assertTrue(service.reserveDue(wrong,Set.of(wrong)).decisions().isEmpty());
+        try(var pool=Executors.newFixedThreadPool(2)){
+            var first=pool.submit(()->service.reserveDue(bindingKey,Set.of(bindingKey)));var second=pool.submit(()->service.reserveDue(bindingKey,Set.of(bindingKey)));
+            assertEquals(1,first.get(5,TimeUnit.SECONDS).decisions().size()+second.get(5,TimeUnit.SECONDS).decisions().size());}
+        assertTrue(service.readBatch(SCOPE,TASK,List.of(bindingKey),false).due().isEmpty());
         var slow=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);var fresh=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);
         var measured=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),new AgentManagedSessionLookup.SessionFence("install","host","boot",2),"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64)));
         assertFalse(service.recordMeasurement(slow,agent,measured));assertTrue(service.recordMeasurement(fresh,agent,measured));
@@ -1432,11 +1438,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var routes=new cn.jia.economy.service.impl.PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(manifest)));
         var terms=routes.resolve(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),config);assertNotNull(terms);
         var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);
-        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,routes);
+        var scheduler=mock(cn.jia.agent.service.recommendation.SelectedTaskComparison.class);
+        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,routes,scheduler);
         var inputs=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),Long.toString(req.taskVersion()),req.requirementRevision(),req.sha256(),input);
         var targets=List.of(target,new AgentExternalServicePolicyService.QuoteTarget(ids.get(1),OWNER,binding+1,target.externalPolicyRevision()));
         var missing=source.observe(inputs,targets);assertTrue(missing.isEmpty());assertTrue(locked(()->source.current(inputs,targets,missing)));
-        var nextTicket=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);assertTrue(service.recordMeasurement(nextTicket,agent,m));
+        verify(scheduler).request(Set.of(bindingKey));verifyNoMoreInteractions(scheduler);
+        var nextTicket=service.reserveDue(bindingKey,Set.of(bindingKey));assertTrue(service.recordMeasurement(nextTicket,agent,m));
+        assertTrue(service.reserveDue(bindingKey,Set.of(bindingKey)).decisions().isEmpty());
         var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms,frozen.sha256())),ready);
         assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
         var held=mock(TaskBillingService.class);when(held.heldInitialIntent(inputs.task(),agent)).thenReturn(frozen.sha256());
