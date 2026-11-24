@@ -469,6 +469,7 @@ def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegress
         include 'cn/jia/agent/service/impl/AgentCommandTransportRealTransactionTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskFormalDeliveryDecisionServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
         include 'cn/jia/agent/hosting/HostingRentRenewalMySqlTest.java'
         include 'cn/jia/agent/hosting/HostingRentReprovisionTransactionTest.java'
         include 'cn/jia/agent/service/AgentPersonaProvisioningServiceTest.java'
@@ -1105,6 +1106,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/agent/security/PlatformKnowledgeUsageControllerTest.java'
         include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
         include 'cn/jia/economy/config/TaskPricingTestFixture.java'
     }
