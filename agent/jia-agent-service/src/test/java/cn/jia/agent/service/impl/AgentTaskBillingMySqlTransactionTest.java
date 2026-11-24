@@ -1482,14 +1482,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var frozen=decisions.find(new NativeTaskPreparation.Binding(SCOPE,id,0,1,requirement.sha256(),inputs.digest(),targets.getFirst()));assertNotNull(frozen);
         var proofs=Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms,frozen.sha256()));
         when(source.observe(subject,targets)).thenReturn(proofs);when(source.current(subject,targets,proofs)).thenReturn(true);
+        var window=QuoteWireWindow.paid(id,agent,group.digest(),book.sha256());
         TaskQuoteBatches.Result observedFirst=null,observedOther=null;
         try(var client=HttpClient.newHttpClient()){
             for(int i=0;i<32;i++){
                 String key=i==31?"fixture-0":"fixture-"+i;
+                String rawBody="{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}";
                 var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/quotes")).header("Content-Type","application/json")
                     .header("X-Request-Id","quote-http").header("Authorization","Bearer "+token).header("Idempotency-Key",key)
-                    .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}" )).build();
-                long t=System.nanoTime();var response=client.send(request,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
+                    .POST(HttpRequest.BodyPublishers.ofString(rawBody )).build();
+                long sent=window==null?0:window.elapsed();long t=System.nanoTime();var response=client.send(request,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
+                if(window!=null&&i<2){window.received(request,rawBody,sent,window.elapsed(),response);if(i==1)window.seal();}
                 assertEquals(200,response.statusCode(),response.body());var envelope=new ObjectMapper().readTree(response.body());assertEquals("E0",envelope.path("code").asText());
                 if(i==0||i==1){var data=mapper.treeToValue(envelope.path("data"),TaskQuoteBatches.Result.class);if(i==0)observedFirst=data;else observedOther=data;}
                 var item=envelope.at("/data/quotes/0");assertEquals("AVAILABLE",item.path("state").asText());assertEquals("65",item.at("/amount/amountMinor").asText());
@@ -1507,6 +1510,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest("fixture-0"));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
         var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
         var forecast=study.publishedOffer(key,intent,observedFirst,agent,"history-http",group,book,batches,quotes);
+        if(window!=null){var second=study.publishedOffer(new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest("fixture-1")),intent,observedOther,agent,"history-http",group,book,batches,quotes);
+            for(var entry:Map.of("fixture-0",forecast,"fixture-1",second,"reference",book).entrySet())Files.writeString(window.directory.resolve(entry.getKey()+".json"),entry.getValue().json(),java.nio.file.StandardOpenOption.CREATE_NEW);}
         var other=observedOther;assertThrows(IllegalArgumentException.class,()->study.publishedOffer(key,intent,other,agent,"history-http",group,book,batches,quotes));
         assertThrows(IllegalArgumentException.class,()->study.publishedOffer(key,intent,null,agent,"history-http",group,book,batches,quotes));
         var objects=Map.of(book.sha256(),book.json(),forecast.sha256(),forecast.json());
@@ -1535,6 +1540,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
                 var absent=assertThrows(cn.jia.economy.service.impl.FrozenCalibrationStudy.MissingOutcome.class,()->study.outcomePoint(newTask,group,forecast.sha256(),objects::get,quotes,sampleEvidence,textFixture(r->{throw new AssertionError("Active task has no terminal cost");})));
                 assertEquals("ACTIVE",absent.getMessage());
+                if(window!=null){var selected=jdbc.queryForObject("SELECT quote_id FROM economy_task_charge WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",String.class,TENANT,CLIENT,OWNER,id);
+                    assertEquals(fixedQuote,selected);Files.writeString(window.directory.resolve("as-of.json"),mapper.writeValueAsString(Map.of("taskId",id,"agentId",agent,"selectedQuoteId",selected,"lifecycle",absent.getMessage(),"rosterSha256",window.rosterSha)),java.nio.file.StandardOpenOption.CREATE_NEW);}
+
                 // The point-and-deliberate boundary yields a discussion, not an execution step.
                 var relaySource = new AgentTaskBountyBootstrapOutboxServiceImpl(outbox, new ObjectMapper(), manager,
                         req, new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT, CLIENT));
@@ -2325,21 +2333,26 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         boolean sealed;
         static QuoteWireWindow open(String agent) throws Exception {
             String dir=System.getProperty("cyf.quoteWireFixture");
-            return dir==null ? null : new QuoteWireWindow(Path.of(dir), agent);
+            return dir==null ? null : new QuoteWireWindow(Path.of(dir),TASK,agent,List.of("denied","same-intent","fresh-intent"),
+                    k->"d77-"+k,digest("fixture:cfg:fixture:1024;no-dispatch-config"),digest("fixture:no-price-book"));
+        }
+        static QuoteWireWindow paid(String task,String agent,String config,String reference) throws Exception {
+            String dir=System.getProperty("cyf.quoteWireFixture");return dir==null?null:new QuoteWireWindow(Path.of(dir).resolveSibling("owned-priced-wire"),task,agent,
+                    List.of("fixture-0","fixture-1"),k->"quote-http",config,reference);
         }
         private static String digest(String value) throws Exception {
             return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         }
-        private QuoteWireWindow(Path dir,String agent) throws Exception {
+        private QuoteWireWindow(Path dir,String task,String agent,List<String> keys,java.util.function.Function<String,String> requestId,String config,String book) throws Exception {
             Files.createDirectories(dir.getParent()); directory=Files.createDirectory(dir);
             var requests=new java.util.ArrayList<Map<String,Object>>();
-            for(String key:List.of("denied","same-intent","fresh-intent")) {
+            for(String key:keys) {
                 attempts.put(key,new java.util.ArrayList<>());
-                requests.add(Map.of("intentRef",key,"taskId",TASK,"taskVersion","0","agentIds",List.of(key.equals("denied")?"not-visible":agent),
-                        "requestId","d77-"+key,"idempotencyKeySha256",digest(key)));
+                requests.add(Map.of("intentRef",key,"taskId",task,"taskVersion","0","agentIds",List.of(key.equals("denied")?"not-visible":agent),
+                        "requestId",requestId.apply(key),"idempotencyKeySha256",digest(key)));
             }
-            var roster=json.writeValueAsString(Map.of("format","budget-roster-v1","configurationSha256",digest("fixture:cfg:fixture:1024;no-dispatch-config"),
-                    "referenceSha256",digest("fixture:no-price-book"),"cutoffAtMs",CUTOFF_MS,"requests",requests));
+            var roster=json.writeValueAsString(Map.of("format","budget-roster-v1","configurationSha256",config,
+                    "referenceSha256",book,"cutoffAtMs",CUTOFF_MS,"requests",requests));
             Files.writeString(directory.resolve("roster.json"),roster,java.nio.file.StandardOpenOption.CREATE_NEW);
             rosterSha=digest(roster);
             System.out.println("OWNED_QUOTE_WIRE_ROSTER_SHA256="+rosterSha);
