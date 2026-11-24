@@ -9,6 +9,24 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Synthetic reference snapshots, not benchmark samples or provider prices. */
 class MeasuredTaskRepricingTest {
+    @Test void holdoutIntervalsResampleWholeFamiliesWithoutReplacingAbstentionsOrZeroTruth(){
+        var held=TaskEstimateEvaluation.Split.HOLDOUT;
+        var manifest=List.of(new TaskEstimateEvaluation.Case("a","x",1,2,held),new TaskEstimateEvaluation.Case("b","x",1,2,held),
+                new TaskEstimateEvaluation.Case("c","y",1,2,held));
+        var rows=List.of(new TaskEstimateEvaluation.Prediction("a",BigDecimal.ONE,100L),new TaskEstimateEvaluation.Prediction("b",BigDecimal.ONE,null),
+                new TaskEstimateEvaluation.Prediction("c",BigDecimal.ZERO,1L));
+        var result=TaskEstimateUncertainty.estimate(manifest,rows,17);
+        assertEquals(result,TaskEstimateUncertainty.estimate(manifest.reversed(),rows.reversed(),17));
+        var half=new TaskEstimateEvaluation.Ratio(BigDecimal.ONE,BigDecimal.valueOf(2));
+        assertEquals(0,half.compareTo(result.coverage().low()));assertEquals(0,new TaskEstimateEvaluation.Ratio(BigDecimal.ONE,BigDecimal.ONE).compareTo(result.coverage().high()));
+        assertTrue(result.wape().defined()>0 && result.wape().defined()<result.draws());assertNull(result.wape().low());assertNull(result.p90Relative().high());
+        var complete=List.of(rows.getFirst(),new TaskEstimateEvaluation.Prediction("b",BigDecimal.ONE,100L),
+                new TaskEstimateEvaluation.Prediction("c",BigDecimal.ONE,0L));
+        var bounded=TaskEstimateUncertainty.estimate(manifest,complete,17);
+        for(var band:List.of(bounded.wape(),bounded.p90Relative(),bounded.underestimateRate())){assertEquals(bounded.draws(),band.defined());
+            assertEquals(0,band.low().numerator().signum());assertEquals(0,band.high().numerator().compareTo(band.high().denominator()));}
+        var one=TaskEstimateUncertainty.estimate(manifest.subList(0,2),rows.subList(0,2),17);assertEquals(0,one.draws());assertNull(one.coverage().high());
+    }
     private final TokenRate tokens=new TokenRate("disjoint-v1",new ModelTokenPrice("route","model","tier","v1","synthetic",Map.of(INPUT,BigDecimal.ONE),100L,Map.of(INPUT,BigDecimal.TEN)));
     private final TaskQuoteCalculator.ToolKey image=new TaskQuoteCalculator.ToolKey("gateway","image","frame");
     private final UnitRate frames=new UnitRate(image,new TaskQuoteCalculator.ToolPrice("v1","synthetic",new BigDecimal("0.015")));
@@ -75,6 +93,8 @@ class MeasuredTaskRepricingTest {
         var outside=new TaskEstimateCalibration.Trial("excluded",1,1,1,1,1,0.1,0.2,1,1,0.01,1);
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var grid=List.of(outside,fits);
         var good=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate);
+        var detailed=TaskEstimateCalibration.evaluateWithIntervals("group",book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate,17);
+        assertEquals(good,detailed.points());assertEquals(1,detailed.uncertainty().families());assertNull(detailed.uncertainty().wape().high());
         assertTrue(good.meetsPointCriteria());assertEquals("supported",good.winner().trial());
         var drift=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,10)),grid,gate);
         assertEquals(good.winner(),drift.winner());assertFalse(drift.meetsPointCriteria());assertEquals(1,drift.holdout().underestimates());

@@ -32,6 +32,16 @@ public final class TaskEstimateCalibration {
     private static final Comparator<Fit> ORDER=Comparator.<Fit>comparingLong(f->f.calibration().quoted()).reversed()
             .thenComparing(f->f.calibration().wape()).thenComparing(f->f.calibration().p90Relative()).thenComparing(Fit::trial);
     public static Report evaluate(String group,MeasuredTaskRepricing.Reference reference,List<Sample> cases,List<Trial> trials,Gate gate){
+        return evaluateOnce(group,reference,cases,trials,gate).report();
+    }
+    public record EvaluationReport(Report points, TaskEstimateUncertainty.Report uncertainty) { }
+    private record Scored(Report report,List<Case> manifest,List<Prediction> holdout) { }
+    /** Fixed seed belongs to the preregistered evaluation. Never use the interval to choose another trial. */
+    public static EvaluationReport evaluateWithIntervals(String group,MeasuredTaskRepricing.Reference reference,List<Sample> cases,List<Trial> trials,Gate gate,long seed){
+        var r=evaluateOnce(group,reference,cases,trials,gate);
+        return new EvaluationReport(r.report(),TaskEstimateUncertainty.estimate(r.manifest(),r.holdout(),seed));
+    }
+    private static Scored evaluateOnce(String group,MeasuredTaskRepricing.Reference reference,List<Sample> cases,List<Trial> trials,Gate gate){
         var manifest=cases.stream().map(Sample::split).toList();TaskEstimateEvaluation.checkSplit(manifest);
         var generation=cases.getFirst().features();var train=new TreeMap<String,Sample>();var ids=new HashSet<String>();
         for(var s:cases){var f=s.features();if(!group.equals(s.group())||!ids.add(s.id())||!generation.featureVersion().equals(f.featureVersion())
@@ -40,13 +50,14 @@ public final class TaskEstimateCalibration {
         var scales=TaskNeighborSearch.trainingScales(train.values().stream().map(Sample::features).toList());
         var trialIds=new HashSet<String>();Fit winner=null;
         for(var candidate:trials){if(candidate.id()==null||candidate.id().isBlank()||!trialIds.add(candidate.id()))throw new IllegalArgumentException("Unstable trial identity");
-            var p=candidate.fit(scales);var scores=assess(Split.CALIBRATE,cases,manifest,train,p,reference);
+            var p=candidate.fit(scales);var scores=TaskEstimateEvaluation.score(manifest,predict(Split.CALIBRATE,cases,train,p,reference),Split.CALIBRATE);
             if(gate.passes(scores)){var fit=new Fit(candidate.id(),p,scores);if(winner==null||ORDER.compare(fit,winner)<0)winner=fit;}}
         // Freeze the winner before scoring holdout. No second choice if it misses the error or coverage gate.
-        var held=assess(Split.HOLDOUT,cases,manifest,train,winner==null?null:winner.parameters(),reference);
-        return new Report(group,reference.version(),winner,held,winner!=null&&gate.passes(held));
+        var predictions=predict(Split.HOLDOUT,cases,train,winner==null?null:winner.parameters(),reference);
+        var held=TaskEstimateEvaluation.score(manifest,predictions);
+        return new Scored(new Report(group,reference.version(),winner,held,winner!=null&&gate.passes(held)),manifest,predictions);
     }
-    private static Scores assess(Split partition,List<Sample> cases,List<Case> manifest,SortedMap<String,Sample> train,
+    private static List<Prediction> predict(Split partition,List<Sample> cases,SortedMap<String,Sample> train,
                                  TaskNeighborSearch.Parameters p,MeasuredTaskRepricing.Reference reference){
         var predictions=new ArrayList<Prediction>();
         for(var row:cases){if(row.split().split()!=partition)continue;
@@ -57,6 +68,6 @@ public final class TaskEstimateCalibration {
                 if(!hits.isEmpty()){var neighbors=hits.stream().map(h->new MeasuredNeighborEstimate.Neighbor(h.id(),Long.toString(h.revision()),h.weight(),train.get(h.id()).facts())).toList();
                     predicted=MeasuredNeighborEstimate.aggregate(reference,neighbors).wen();}}
             predictions.add(new Prediction(row.split().task(),truth,predicted));}
-        return TaskEstimateEvaluation.score(manifest,predictions,partition);
+        return predictions;
     }
 }
