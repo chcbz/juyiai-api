@@ -48,6 +48,29 @@ public interface ConfirmedSampleMapper {
         AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
     List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
+    record FeatureSource(String quoteId,String rawSha,String resolvedSha,String recommendation,String preparation,String featureSha,String features){
+        @Override public String toString(){return "FeatureSource[private]";}
+    }
+    // One consistent source read before the short projection transaction; no raw vector from clients or another task.
+    @Select("""
+        SELECT q.quote_id,SHA2(q.snapshot_json,256),SHA2(r.snapshot_json,256),q.snapshot_json->>'$.binding.recommendationId',
+          IF(JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.preparation'))='STRING',q.snapshot_json->>'$.preparation',NULL),
+          s.initial_feature_sha256,JSON_EXTRACT(r.snapshot_json,'$.preparation.features')
+        FROM economy_task_cost_sample s JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+          AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id
+        JOIN economy_task_quote_resolved r ON r.id=q.id WHERE s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId}
+          AND s.owner_jiacn=#{t.ownerJiacn} AND s.task_id=#{t.taskId} AND s.sample_id=#{id} AND s.evidence_revision=#{rev}
+          AND s.lifecycle_state='ACCEPTED' AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.benchmark_case_id IS NULL
+        """) FeatureSource featureSource(@Param("t") Task task,@Param("id") String id,@Param("rev") long revision);
+    // These mutations run only after project() won the scoped revision CAS and holds the sample row lock.
+    @org.apache.ibatis.annotations.Delete("DELETE FROM economy_history_feature_projection WHERE sample_id=#{id}")
+    void forgetFeature(@Param("id") String id);
+    @Insert("""
+        INSERT INTO economy_history_feature_projection(sample_id,sample_revision,quote_id,envelope_sha,resolved_sha,
+          recommendation_id,preparation_sha,feature_meta,vector_bytes) VALUES(#{id},#{rev},#{source.quoteId},#{source.rawSha},
+          #{source.resolvedSha},#{source.recommendation},#{source.preparation},#{meta},#{vector})
+        """) void saveFeature(@Param("id") String id,@Param("rev") long revision,@Param("source") FeatureSource source,
+                    @Param("meta") String meta,@Param("vector") byte[] vector);
     record CompactRow(String id,long revision,String taskId,String featureSha,String metadata,byte[] vector,Integer sourceValid){
         @Override public String toString(){return "CompactRow[private]";}
     }

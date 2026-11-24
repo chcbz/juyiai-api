@@ -13,8 +13,26 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class ConfirmedSampleProjectionService implements ConfirmedSampleProjection {
     private final ConfirmedSampleEvidence evidence;private final ConfirmedSampleMapper db;private final ObjectMapper json;private final TransactionTemplate tx;
+    private final boolean compact;
     public ConfirmedSampleProjectionService(ConfirmedSampleEvidence evidence,ConfirmedSampleMapper db,ObjectMapper json,PlatformTransactionManager manager){
+        this(evidence,db,json,manager,false);
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    public ConfirmedSampleProjectionService(ConfirmedSampleEvidence evidence,ConfirmedSampleMapper db,ObjectMapper json,PlatformTransactionManager manager,
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact){
+        this.compact=compact;
         this.evidence=evidence;this.db=db;this.json=json;this.tx=new TransactionTemplate(manager);
+    }
+    private record PreparedFeature(ConfirmedSampleMapper.FeatureSource source,String meta,byte[] vector){
+        @Override public String toString(){return "PreparedFeature[private]";}
+    }
+    private PreparedFeature prepareFeature(Task task,String id,long revision){
+        var row=db.featureSource(task,id,revision);if(row==null || row.resolvedSha()==null || row.features()==null)return null;
+        try{var features=json.readValue(row.features(),cn.jia.economy.pricing.TaskEstimateFeatures.class);
+        var meta=EconomyHistoryFeatureBytes.metadata(features);
+        if(!features.digest().equals(row.featureSha()))return null; // never seal data not committed by the sample
+        return new PreparedFeature(row,json.writeValueAsString(meta),EconomyHistoryFeatureBytes.vector(features));
+        }catch(IllegalArgumentException|tools.jackson.core.JacksonException unusable){return null;}
     }
     public java.util.List<Pending> pending(String tenant,String client,String after){return db.pending(tenant,client,after,PAGE_SIZE);}
     @Transactional(propagation=Propagation.NEVER)
@@ -33,8 +51,11 @@ public class ConfirmedSampleProjectionService implements ConfirmedSampleProjecti
         if("READY".equals(state) && (a.members()==0 || measured.operations().isEmpty()))throw new IllegalStateException("Missing whole-task measurements");
         // No copied response bodies, vector, mutable current price or wallet observation in the revision.
         var refs=json.writeValueAsString(measured.operations().stream().map(o->ProjectedTaskOperation.from(o,json)).toList());
+        var feature=compact && "READY".equals(state)?prepareFeature(task,id,a.evidenceRevision()):null;
         return Boolean.TRUE.equals(tx.execute(st->{if(db.project(task,id,a.evidenceRevision(),state)!=1)return false;
             db.append(id,a.evidenceRevision(),a.terminalFactId(),state,
-                    a.verdict()==ConfirmedSampleEvidence.Verdict.CLOSED_USAGE_INCOMPLETE?"USAGE_INCOMPLETE":a.verdict().name(),a.members(),refs);return true;}));
+                    a.verdict()==ConfirmedSampleEvidence.Verdict.CLOSED_USAGE_INCOMPLETE?"USAGE_INCOMPLETE":a.verdict().name(),a.members(),refs);
+            if(compact){db.forgetFeature(id);if(feature!=null)db.saveFeature(id,a.evidenceRevision(),feature.source(),feature.meta(),feature.vector());}
+            return true;}));
     }
 }
