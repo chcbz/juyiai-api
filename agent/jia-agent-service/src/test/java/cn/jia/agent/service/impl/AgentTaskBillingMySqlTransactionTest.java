@@ -1086,15 +1086,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1, count("economy_transaction"));
     }
 
-    private void prepareCancellation() throws Exception {
-        // All cancellation inventories and writes use the production mapper, not fake existence results.
-        createTable(DDL.resolve("schema.sql"), "agent_runtime", true);
-        createTable(DDL.resolve("schema.sql"), "agent_command_delivery", true);
-        createTable(DDL.resolve("schema.sql"), "agent_outbox_event", true);
-        for (String file : List.of("agent-task-funding-v0.sql", "agent-selected-output-finalization-v1.sql",
-                "agent-task-provider-cost-consent-v1.sql")) {
-            new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(file))).execute(jdbc.getDataSource());
-        }
+    private void prepareNativeExecutionSchema() {
         // Inventory reads need the production execution/lease columns, not a full Runtime schema upgrade.
         // Its standalone initializer also validates columns owned by a later native-protocol initializer.
         for (String file : List.of("agent-personal-workspace-v1_11-executions.sql",
@@ -1109,6 +1101,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     .execute(jdbc.getDataSource());
         }
         new cn.jia.agent.config.ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
+    }
+
+    private void prepareCancellation() throws Exception {
+        // All cancellation inventories and writes use the production mapper, not fake existence results.
+        createTable(DDL.resolve("schema.sql"), "agent_runtime", true);
+        createTable(DDL.resolve("schema.sql"), "agent_command_delivery", true);
+        createTable(DDL.resolve("schema.sql"), "agent_outbox_event", true);
+        for (String file : List.of("agent-task-funding-v0.sql", "agent-selected-output-finalization-v1.sql",
+                "agent-task-provider-cost-consent-v1.sql")) {
+            new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(file))).execute(jdbc.getDataSource());
+        }
+        prepareNativeExecutionSchema();
         // Legacy Chat base-table DDL lives in the existing mapper fixture; it is read-only in this suite.
         createTable(Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql"), "chat_conversation", false);
         new ResourceDatabasePopulator(new FileSystemResource(Path.of(
@@ -1331,20 +1335,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
+                prepareNativeExecutionSchema();
+                new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-skill-application.sql"),new org.springframework.core.io.ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(jdbc.getDataSource());
                 var service=NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(recommendationSql.getMapper(SkillExecutionMapper.class)),mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,id,agent,roots);
-                service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
+                ReflectionTestUtils.setField(service,"conversationExecutionEnabled",true);service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
                 var nativeActions=proxy(service,SkillExecutionService.class);var ownerScope=new PersonalWorkspaceExecutionService.OwnerScope(TENANT,CLIENT,OWNER);
                 var scope=new SkillExecutionService.TaskScope("42",1,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()),Long.parseLong(receipt.path("assignmentRevision").asText()));
-                var pending=admission.pending(SCOPE,id,agent);assertEquals(frozen.intent().output(),pending);
+                var pending=frozen.intent().output();java.util.function.Supplier<String> consumed=()->independent.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256());assertNull(consumed.get());
                 var snapshot=new java.util.LinkedHashMap<String,Object>();snapshot.put("schemaVersion",1);snapshot.put("executionProtocolVersion",6);snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());snapshot.put("taskGrant",Map.of("id",scope.taskGrantId(),"version",scope.taskGrantVersion(),"assignmentRevision",scope.assignmentRevision()));snapshot.put("scope",scope.wire().asMap());snapshot.put("targetAgentId",agent);snapshot.put("actionEventId","history-first");snapshot.put("instruction","fixture answer");snapshot.put("parameters",Map.of());snapshot.put("inputs",List.of());snapshot.put("sourceSnapshotDigest",jdbc.queryForObject("SELECT SHA2('[]',256)",String.class));snapshot.put("providerBinding",null);snapshot.put("costInfo",Map.of("mode","UNKNOWN"));
                 int executions=count("agent_personal_workspace_execution"),members=count("agent_task_execution_member");
                 snapshot.put("outputs",Map.of("mimeTypes",List.of("text/plain"),"multiple",true,"artifactsRequired",true));
                 var wrong=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
                 assertEquals(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT,assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->nativeActions.create(ownerScope,wrong)).getReason());
-                assertEquals(pending,admission.pending(SCOPE,id,agent));assertEquals(executions,count("agent_personal_workspace_execution"));assertEquals(members,count("agent_task_execution_member"));
+                assertNull(consumed.get());assertEquals(executions,count("agent_personal_workspace_execution"));assertEquals(members,count("agent_task_execution_member"));
                 snapshot.put("outputs",pending.commandOutputs());var right=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
                 var created=nativeActions.create(ownerScope,right);assertEquals("QUEUED",created.state());assertEquals(created,nativeActions.create(ownerScope,right));
-                assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertNull(admission.pending(SCOPE,id,agent));
+                assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertEquals(created.executionId(),consumed.get());
                 assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
             }return null;
