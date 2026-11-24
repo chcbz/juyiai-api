@@ -24,6 +24,10 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
         return h;
     }
     private Assessment assess(Task task,String id,ConfirmedSampleMapper.Header h){
+        return assess(task,id,h,null);
+    }
+    // For a retrospective outcome, actual dispatch may differ; each member's own capture policy must still cover all operations.
+    private Assessment assess(Task task,String id,ConfirmedSampleMapper.Header h,Decoder outcome){
         var verdict=ACTIVE;long count=0;
         if("CANCELLED".equals(h.lifecycle()))verdict=CANCELLED_OUTCOME;
         else if("ACCEPTED".equals(h.lifecycle())){
@@ -38,6 +42,11 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
                         // members() joins ONLY the current capture projection; a stale or missing close is not a verdict.
                         closedIncomplete|="INCOMPLETE".equals(m.coverage());
                         if(m.groupVersion()==null){unknown|=complete;continue;}
+                        if(outcome!=null){
+                            unknown|=m.executionConfig()==null||m.route()==null||m.tools()==null||m.policy()==null;
+                            if(m.policy()!=null)missing|=!outcome.coversAllOperations(m.groupVersion(),m.policy());
+                            continue;
+                        }
                         mixed|=!h.groupVersion().equals(m.groupVersion())||!h.executionConfig().equals(m.executionConfig())
                             || !h.localRoute().equals(m.route())||!h.tools().equals(m.tools())||!h.policy().equals(m.policy());
                     }
@@ -53,6 +62,13 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measure(Task task,String id,Decoder decoder){
         return measureHeader(task,id,decoder,confirmedHeader(task,id));
+    }
+    @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public Measured measureOutcome(Task task,String quoteId,String agent,String groupSha,String featureSha,Decoder decoder){
+        java.util.Objects.requireNonNull(decoder);
+        var id=db.outcomeSample(task,quoteId,groupSha,featureSha);if(id==null)return null;
+        var h=confirmedHeader(task,id);if(h==null||!h.agent().equals(agent))return null;
+        var a=assess(task,id,h,decoder);return extract(task,h,a,decoder);
     }
     @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measureReviewed(Task task,String caseId,String sha,String fact,String review,Decoder decoder){
@@ -75,6 +91,10 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
         if(h==null)return null;
         var a=assess(task,id,h);if(a.verdict()!=MATCHED)return new Measured(a,java.util.List.of());
         if(!decoder.coversAllOperations(h.groupVersion(),h.policy()))return incomplete(a);
+        return extract(task,h,a,decoder);
+    }
+    private Measured extract(Task task,ConfirmedSampleMapper.Header h,Assessment a,Decoder decoder){
+        if(a.verdict()!=MATCHED)return new Measured(a,java.util.List.of());
         var lines=new java.util.ArrayList<Operation>();long revision=0,seen=0;String after="";
         while(true){var page=db.responses(task,h.fact(),h.agent(),revision,after);
             for(var r:page){if(r.memberRevision()!=revision)seen++;revision=r.memberRevision();

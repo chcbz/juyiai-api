@@ -938,10 +938,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertNull(historyCatalog.quantities(query,group,selected));
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
+        var independentPoint=study.outcomePoint(BILLING_TASK,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder);
+        assertEquals(point.point(),independentPoint.point());assertEquals(65,new ObjectMapper().readTree(independentPoint.source().json()).path("operations").size());
+        assertThrows(IllegalArgumentException.class,()->study.outcomePoint(query,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder));
+        assertNull(sampleEvidence.measureOutcome(query,before.quoteId(),AGENT,group.digest(),before.featureSha(),fixtureDecoder));
         assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='EXCLUDED' AND reason_code='MIXED_EXECUTION_CONFIG'",Integer.class));assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'");
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");
         assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
+        assertEquals("USAGE_INCOMPLETE",assertThrows(MeasuredTaskRepricing.Unavailable.class,()->study.outcomePoint(BILLING_TASK,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder)).getMessage());
         assertEquals(sid,sampleProjection.pending(TENANT,null,"").getFirst().sampleId());
         assertTrue(sampleProjection.pending(TENANT,"other","").isEmpty());assertTrue(sampleProjection.pending(TENANT,CLIENT,sid).isEmpty());
         assertFalse(sampleProjection.refreshPending(TENANT,"other",sid,fixtureDecoder));

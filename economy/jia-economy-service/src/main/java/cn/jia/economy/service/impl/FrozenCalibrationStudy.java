@@ -101,6 +101,27 @@ public final class FrozenCalibrationStudy {
         var actual=MeasuredTaskRepricing.reprice(book,sample.facts());
         return new ConfirmedPoint(new TaskEstimateEvaluation.Prediction(original.taskId(),actual.yuan(),offer.wen()),frozen);
     }
+    /** Independent of READY/history selection. Scope and original offer bind the outcome, not its realized path. */
+    public ConfirmedPoint outcomePoint(Task original,TaskHistoryCatalog.Group group,String forecastSha,Function<String,String> objects,
+            cn.jia.economy.mapper.EconomyTaskBillingMapper quotes,cn.jia.economy.usage.ConfirmedSampleEvidence evidence,
+            cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder decoder){
+        var offer=read(objects,forecastSha,OfferedHoldout.class);
+        if(!original.equals(offer.original())||!group.digest().equals(offer.groupSha()))throw new IllegalArgumentException("Wrong outcome scope");
+        var quote=quotes.findQuote(original.scope().tenantId(),original.scope().clientId(),original.ownerJiacn(),original.taskId(),offer.quoteId());
+        if(quote==null||quote.getAmountWen()!=offer.wen())throw new IllegalArgumentException("Wrong outcome quote");
+        var book=reference(read(objects,offer.referenceSha(),Book.class));
+        if(!book.version().equals(group.execution().routeVersion()))throw new IllegalArgumentException("Wrong reference version");
+        verifyQuoteRates(quote.getSnapshotJson(),book);
+        var measured=evidence.measureOutcome(original,offer.quoteId(),offer.agentId(),offer.groupSha(),offer.featureSha(),decoder);
+        if(measured==null)throw new IllegalArgumentException("Unbound outcome");
+        if(measured.assessment().verdict()!=cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.MATCHED)
+            throw new MeasuredTaskRepricing.Unavailable(measured.assessment().verdict().name());
+        var actual=MeasuredTaskRepricing.reprice(book,measured.operations().stream().map(op->op.fact()).toList());
+        var artifact=freeze(Map.of("schema","confirmed-holdout-outcome-v1","forecastSha256",forecastSha,"assessment",measured.assessment(),
+                "operations",measured.operations().stream().map(op->ProjectedTaskOperation.from(op,json)).toList()));
+        return new ConfirmedPoint(new TaskEstimateEvaluation.Prediction(original.taskId(),actual.yuan(),offer.wen()),
+                new TaskCalibrationObservations.Frozen(artifact.sha256(),artifact.json()));
+    }
     private MeasuredTaskRepricing.Reference reference(Book book){
         var rates=new HashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
         for(var r:book.rates()){

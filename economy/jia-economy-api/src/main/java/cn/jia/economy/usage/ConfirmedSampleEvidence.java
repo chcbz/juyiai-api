@@ -19,5 +19,7 @@ public interface ConfirmedSampleEvidence {
     }
     /** One repeatable read covers selection AND operation extraction. No partial costs on incomplete evidence. */
     Measured measure(Task task,String sampleId,Decoder decoder);
+    /** Offline evaluation only. Not eligibility for training, charging or catalog admission. */
+    Measured measureOutcome(Task task,String quoteId,String agent,String groupSha,String featureSha,Decoder decoder);
     Assessment inspect(Task task,String sampleId);
 }

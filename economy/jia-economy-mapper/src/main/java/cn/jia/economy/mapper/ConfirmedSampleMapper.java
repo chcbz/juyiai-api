@@ -77,6 +77,11 @@ public interface ConfirmedSampleMapper {
     @Select("SELECT g.generation FROM economy_task_benchmark_use_grant g WHERE "+GRANT_SCOPE+" AND g.sample_id=#{id} FOR SHARE")
     Long lockGrant(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("id") String id);
     @Select("SELECT p.evidence_revision "+EXACT+" FOR SHARE") Long lockBenchmark(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("id") String id,@Param("revision") long revision);
+    @Select("""
+        SELECT sample_id FROM economy_task_cost_sample WHERE tenant_id=#{t.scope.tenantId} AND client_id=#{t.scope.clientId}
+          AND owner_jiacn=#{t.ownerJiacn} AND task_id=#{t.taskId} AND quote_id=#{quote} AND initial_feature_sha256=#{feature}
+          AND history_group_sha256=#{grp} AND benchmark_case_id IS NULL AND sample_definition_version='TASK_LIFECYCLE_V1'
+        """) String outcomeSample(@Param("t") Task task,@Param("quote") String quote,@Param("grp") String group,@Param("feature") String feature);
     record Header(String lifecycle,long evidenceRevision,String fact,String outcome,Boolean verified,Long memberCount,
                   String agent,String groupVersion,String executionConfig,String localRoute,String referenceRoute,String tools,String policy) {}
     @Select("""
