@@ -1332,12 +1332,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/point-and-deliberate")).header("Authorization","Bearer "+token).header("X-Request-Id","hold").header("Idempotency-Key","history-point").header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","hold","data",body)))).build();
                     var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(expected,response.statusCode(),response.body());return mapper.readTree(response.body()).path("data");
                 }}var point=new Point();point.post("different-batch",409);assertEquals(balance,wallet(independent));assertEquals(grants,count("agent_task_execution_grant"));
+                // The signed quote was trained on another task in this very partition. Its fixture
+                // uses its own immutable requirement reader. Claim it first in actual FIFO order.
+                long claimTime = System.currentTimeMillis();
+                var previousDiscussion = bootstrap.claimNext(SCOPE, "history-fixture", claimTime);
+                assertNotNull(previousDiscussion); assertEquals(TASK, previousDiscussion.taskId());
+                assertNotEquals(id, previousDiscussion.taskId());
                 var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
                 // The point-and-deliberate boundary yields a discussion, not an execution step.
                 var relaySource = new AgentTaskBountyBootstrapOutboxServiceImpl(outbox, new ObjectMapper(), manager,
                         req, new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT, CLIENT));
-                long claimTime = System.currentTimeMillis();
+
                 var discussion = relaySource.claimNextAvailable("quote-chat-fixture", claimTime);
                 assertNotNull(discussion);
                 assertEquals("DELIBERATE", discussion.permittedOperation());
