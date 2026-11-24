@@ -113,8 +113,12 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         return count==1;
     }
     @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) {
-        String t=execution.getTenantId(),c=execution.getClientId(),o=execution.getOwnerJiacn(),id=execution.getTaskId();
-        String leaf=cn.jia.economy.usage.TaskMembershipDigest.member(t,c,o,id,execution.getExecutionId(),execution.getRunId(),captureId,execution.getRequestHash());
+        appendMember(new MemberIdentity(execution.getTenantId(),execution.getClientId(),execution.getOwnerJiacn(),execution.getTaskId(),
+                execution.getExecutionId(),execution.getRunId(),execution.getRequestHash()),captureId);
+    }
+    @Override public void appendMember(MemberIdentity execution,String captureId) {
+        String t=execution.tenantId(),c=execution.clientId(),o=execution.ownerJiacn(),id=execution.taskId();
+        String leaf=cn.jia.economy.usage.TaskMembershipDigest.member(t,c,o,id,execution.executionId(),execution.runId(),captureId,execution.requestHash());
         executions.ensureMemberSet(t,c,o,id);executions.registerTaskMember(execution,captureId);
         if(executions.advanceMemberSet(execution,leaf)!=1) throw new IllegalStateException("Task execution set closed or stale");
     }

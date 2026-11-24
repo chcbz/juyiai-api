@@ -46,6 +46,9 @@ public interface PersonalWorkspaceExecutionDao extends TaskExecutionClosureDao {
     /** True only when the follow-up-v3 execution protocol column is present in the current catalog. */
     boolean hasExecutionProtocolVersionColumn();
     void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId);
+    record MemberIdentity(String tenantId,String clientId,String ownerJiacn,String taskId,
+                          String executionId,String runId,String requestHash) { }
+    void appendMember(MemberIdentity member,String captureId);
     void insert(PersonalWorkspaceExecutionEntity execution);
     void update(PersonalWorkspaceExecutionEntity execution);
     void insertInput(PersonalWorkspaceExecutionInputEntity input);

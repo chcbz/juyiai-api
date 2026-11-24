@@ -847,6 +847,7 @@ class JuyitingWorkflowMySqlTest {
             context.registerBean(cn.jia.chat.service.ChatReplyPreviewRegistry.class, cn.jia.chat.service.ChatReplyPreviewRegistry::new);
             context.registerBean(cn.jia.chat.deliberation.ChatContextHistoryMapper.class,
                     () -> domain.sql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
+            context.registerBean(cn.jia.agent.service.TaskDiscussionMembership.class,()->mock(cn.jia.agent.service.TaskDiscussionMembership.class));
             context.registerBean(ChatDeliberationService.class,()->new ChatDeliberationService(dao,conversations,messages,agents));
             context.registerBean(ChatDeliberationOutboxService.class,()->new ChatDeliberationOutboxService(dao, new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null)));
             context.registerBean(ChatDeliveryRevisionService.class,()->new ChatDeliveryRevisionService(dao,

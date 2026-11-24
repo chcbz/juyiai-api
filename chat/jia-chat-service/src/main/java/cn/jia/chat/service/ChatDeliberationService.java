@@ -78,6 +78,8 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
     @Autowired public void setMaterialsAuthority(ChatMaterialsInputService service) {materialsAuthority=service;}
     private ChatInspectionAuthorityService inspectionAuthority;
     private ChatActionFinalService actionFinals;
+    private cn.jia.agent.service.TaskDiscussionMembership taskMembers;
+    @Autowired public void setTaskMembers(cn.jia.agent.service.TaskDiscussionMembership value) { taskMembers = value; }
     private ChatDispatchAuthorityService dispatchAuthority;
     @Autowired public void setDispatchAuthority(ChatDispatchAuthorityService value) { dispatchAuthority=value; }
 
@@ -729,6 +731,12 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
                     .setTaskAssignmentRevision(taskGrant.assignmentRevision()).setTaskRequirementRevision(taskGrant.requirementRevision());
             if (dao.insertSnapshot(snapshot) != 1 || dao.insertTurn(turn) != 1 || dao.insertOutbox(outbox) != 1) {
                 throw persistence("Unable to persist chat turn admission");
+            }
+            if (taskGrant != null) {
+                // Admission already owns the task root. Replays returned above. A pre-execution
+                // context replacement stays the same turn; neither a new charge nor a new member.
+                taskMembers.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(tenantId,clientId,ownerJiacn),
+                        scope.taskId(),turnId,dispatchId,requestDigest.substring("sha256:".length()));
             }
             ChatDeliberationOutboxWakeup.afterCommit(outboxEvents, outbox.getAvailableAt());
             dispatches.add(toDispatch(turn, snapshot));

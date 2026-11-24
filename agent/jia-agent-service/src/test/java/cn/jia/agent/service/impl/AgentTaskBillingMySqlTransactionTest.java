@@ -1447,6 +1447,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         typed.setSkillGrants(assignment);
         var entry = new ChatBountyBootstrapAdmissionService(requirements,discussions,conversations,messages,dao,
                 new cn.jia.chat.deliberation.ChatInteractionStepStore(jdbc),mock(ChatConversationEventBroker.class),new ObjectMapper(),typed);
+        var membership = new cn.jia.agent.service.usage.TaskDiscussionMembershipService(executionRows);
+        deliberation.setTaskMembers((owner,task,turn,attempt,hash) -> {membership.admit(owner,task,turn,attempt,hash); throw new InjectedFailure();});
+        assertThrows(InjectedFailure.class,() -> tx.execute(status -> entry.admit(intent)));
+        for(String table:List.of("chat_request","chat_message","chat_turn","chat_dispatch_outbox","chat_context_snapshot","chat_typed_admission")) assertEquals(0,count(table),table);
+        assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
+        deliberation.setTaskMembers(membership);
         var first = tx.execute(status -> entry.admit(intent));
         assertNotNull(first); assertFalse(first.replay()); assertNull(first.stepId()); assertEquals(bound.conversationId(),first.conversationId());
         var again = tx.execute(status -> entry.admit(intent));
@@ -1457,8 +1463,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String saved = independent.queryForObject("SELECT m.content FROM chat_message m JOIN chat_request r ON m.id=r.user_message_id JOIN chat_turn t ON t.request_id=r.request_id JOIN chat_dispatch_outbox o ON o.turn_id=t.turn_id WHERE r.tenant_id=? AND r.client_id=? AND r.owner_jiacn=? AND r.conversation_id=? AND r.request_id=? AND m.message_type='USER' AND t.route='CHAT' AND t.target_agent_id=? AND o.status='READY' AND o.task_grant_id=? AND o.task_grant_version=? AND o.task_assignment_revision=? AND o.task_requirement_revision=?",String.class,
                 TENANT,CLIENT,OWNER,bound.conversationId(),first.requestId(),intent.targetAgentId(),intent.grantId(),intent.grantVersion(),intent.assignmentRevision(),intent.requirementRevision());
         int registered = independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",Integer.class,TENANT,CLIENT,OWNER,intent.taskId());
-        // Diagnostic, not an assertion that uncovered work is desirable; do not log content or IDs.
-        System.out.println("QUOTED_DISCUSSION_COVERAGE readyChat=1 registeredTaskMembers="+registered);
+        assertEquals(1,registered);
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member m JOIN chat_turn t ON t.turn_id=m.execution_id AND t.dispatch_id=m.run_id JOIN chat_request r ON r.request_id=t.request_id WHERE m.task_id=? AND m.capture_id IS NULL AND m.admission_sha256=SUBSTRING(r.request_digest,8) AND r.request_id=?",Integer.class,intent.taskId(),first.requestId()));
         assertEquals(requirement.title()+"\n\n"+requirement.description(),saved);
     }
 

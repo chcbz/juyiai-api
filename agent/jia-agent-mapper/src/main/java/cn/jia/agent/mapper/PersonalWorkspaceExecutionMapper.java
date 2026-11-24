@@ -19,7 +19,7 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
         WHERE s.tenant_id=#{r.tenantId} AND s.client_id=#{r.clientId} AND s.owner_jiacn=#{r.ownerJiacn} AND s.task_id=#{r.taskId}
           AND m.execution_id=#{r.executionId} AND m.run_id=#{r.runId} AND s.terminal_state IS NULL AND m.membership_revision>s.membership_revision
         """)
-    int advanceMemberSet(@Param("r") PersonalWorkspaceExecutionEntity row,@Param("leaf") String leaf);
+    int advanceMemberSet(@Param("r") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("leaf") String leaf);
     @Update("""
         UPDATE agent_task_execution_set SET terminal_state=#{state},terminal_fact_id=#{fact},terminal_revision=#{revision},closed_at=#{time},delivery_state='PENDING'
         WHERE tenant_id=#{t} AND client_id=#{c} AND owner_jiacn=#{o} AND task_id=#{id} AND terminal_state IS NULL
@@ -51,7 +51,7 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
         INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)
         VALUES(#{row.tenantId},#{row.clientId},#{row.ownerJiacn},#{row.taskId},#{row.executionId},#{row.runId},#{row.requestHash},#{capture})
         """)
-    void registerTaskMember(@Param("row") PersonalWorkspaceExecutionEntity row,@Param("capture") String capture);
+    void registerTaskMember(@Param("row") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("capture") String capture);
 
     @Select("""
             SELECT * FROM agent_personal_workspace_execution

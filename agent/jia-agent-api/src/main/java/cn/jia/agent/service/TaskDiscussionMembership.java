@@ -1,0 +1,8 @@
+package cn.jia.agent.service;
+
+/** Internal only. The grant-bound task admission owns the root transaction and replay decision.
+ * A CHAT/INSPECT turn is real work even before a per-call metering source exists for it. */
+public interface TaskDiscussionMembership {
+    void admit(AgentTaskExecutionGrantService.Scope owner, String taskId, String turnId,
+               String initialDispatchId, String requestDigest);
+}
