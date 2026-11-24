@@ -23,7 +23,7 @@ public class TaskCalibrationCatalogService implements TaskCalibrationCatalog {
         var digest=group.digest();var row=db.active(task,digest);if(row==null)return null;
         if(!sha(row.json()).equals(row.sha())||row.generation()<1)throw new IllegalStateException("Invalid calibration receipt commitment");
         var r=json.readValue(row.json(),Receipt.class);var report=r.report();
-        if(!digest.equals(report.group())||!group.execution().routeVersion().equals(report.referenceVersion()))throw new IllegalStateException("Wrong calibration evidence scope");
+        if(!group.privateCalibrationGroup(task).equals(report.group())||!group.execution().routeVersion().equals(report.referenceVersion()))throw new IllegalStateException("Wrong calibration evidence scope");
         for(String commitment:java.util.List.of(r.datasetSha256(),r.splitSha256(),r.referenceBookSha256(),r.policySha256()))
             if(!commitment.matches("[0-9a-f]{64}"))throw new IllegalStateException("Missing calibration evidence identity");
         if(!TaskNeighborSearch.VERSION.equals(r.estimatorVersion())||report.winner()==null||!report.meetsPointCriteria()

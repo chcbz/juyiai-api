@@ -85,20 +85,29 @@ class MeasuredTaskRepricingTest {
     }
     @Test void calibrationChoosesOnlyOnTuneThenScoresUntouchedHoldoutWithoutRetryOrCoverageInflation(){
         var book=new Reference("book",Map.of("render",Map.of("frames",new UnitRate(image,new TaskQuoteCalculator.ToolPrice("p","fixture",BigDecimal.ONE)))));
+        var privateGroup=new TaskEstimateCalibration.PrivateGroup("0","client","owner","a".repeat(64));
         var train=new TaskEstimateEvaluation.Case("tr","a",1,2,TaskEstimateEvaluation.Split.TRAIN);
         var tune=new TaskEstimateEvaluation.Case("tu","b",3,4,TaskEstimateEvaluation.Split.CALIBRATE);
         var hold=new TaskEstimateEvaluation.Case("ho","c",5,6,TaskEstimateEvaluation.Split.HOLDOUT);
-        java.util.function.BiFunction<TaskEstimateEvaluation.Case,Integer,TaskEstimateCalibration.Sample> row=(c,units)->new TaskEstimateCalibration.Sample("group",c.task(),1,c,features(1,0,null),List.of(fact(c.task(),"render","frames",new Units(image,BigDecimal.valueOf(units)))));
+        java.util.function.BiFunction<TaskEstimateEvaluation.Case,Integer,TaskEstimateCalibration.Sample> row=(c,units)->new TaskEstimateCalibration.Sample(privateGroup,c.task(),1,c,features(1,0,null),List.of(fact(c.task(),"render","frames",new Units(image,BigDecimal.valueOf(units)))));
         var fits=new TaskEstimateCalibration.Trial("supported",1,1,1,1,1,0.1,0.2,1,1,0.1,1);
         var outside=new TaskEstimateCalibration.Trial("excluded",1,1,1,1,1,0.1,0.2,1,1,0.01,1);
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var grid=List.of(outside,fits);
-        var good=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate);
-        var detailed=TaskEstimateCalibration.evaluateWithIntervals("group",book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate,17);
+        var good=TaskEstimateCalibration.evaluate(privateGroup,book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate);
+        var detailed=TaskEstimateCalibration.evaluateWithIntervals(privateGroup,book,List.of(row.apply(hold,1),row.apply(tune,1),row.apply(train,1)),grid,gate,17);
         assertEquals(good,detailed.points());assertEquals(1,detailed.uncertainty().families());assertNull(detailed.uncertainty().wape().high());
         assertTrue(good.meetsPointCriteria());assertEquals("supported",good.winner().trial());
-        var drift=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,10)),grid,gate);
+        var held=row.apply(hold,1);
+        for(var other:List.of(new TaskEstimateCalibration.PrivateGroup("1","client","owner","a".repeat(64)),
+                new TaskEstimateCalibration.PrivateGroup("0","Client","owner","a".repeat(64)),
+                new TaskEstimateCalibration.PrivateGroup("0","client","Owner","a".repeat(64)))){
+            var foreign=new TaskEstimateCalibration.Sample(other,held.id(),held.revision(),held.split(),held.features(),held.facts());
+            assertThrows(IllegalArgumentException.class,()->TaskEstimateCalibration.evaluateWithIntervals(privateGroup,book,
+                    List.of(row.apply(train,1),row.apply(tune,1),foreign),grid,gate,17));
+        }
+        var drift=TaskEstimateCalibration.evaluate(privateGroup,book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,10)),grid,gate);
         assertEquals(good.winner(),drift.winner());assertFalse(drift.meetsPointCriteria());assertEquals(1,drift.holdout().underestimates());
-        var insufficient=TaskEstimateCalibration.evaluate("group",book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,1)),grid,new TaskEstimateCalibration.Gate(2,BigDecimal.ONE));
+        var insufficient=TaskEstimateCalibration.evaluate(privateGroup,book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,1)),grid,new TaskEstimateCalibration.Gate(2,BigDecimal.ONE));
         assertNull(insufficient.winner());assertEquals(1,insufficient.holdout().eligible());assertEquals(0,insufficient.holdout().quoted());assertFalse(insufficient.meetsPointCriteria());
     }
     @Test void noFallbackWhenEvidenceOrAnExclusiveBasisIsMissing(){

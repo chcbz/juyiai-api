@@ -46,7 +46,7 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
             throw new IllegalStateException("Calibration source commitment mismatch");
         var facts=operations(row.operations());var split=new cn.jia.economy.pricing.TaskEstimateEvaluation.Case(
                 original.taskId(),family,row.featuresAt(),db.observedByMillis(),partition);
-        return new cn.jia.economy.pricing.TaskEstimateCalibration.Sample(digest,selected.sampleId(),selected.revision(),split,features,facts);
+        return new cn.jia.economy.pricing.TaskEstimateCalibration.Sample(group.privateCalibrationGroup(original),selected.sampleId(),selected.revision(),split,features,facts);
     }
     @Transactional(propagation=Propagation.MANDATORY)
     public boolean lockCurrent(Task query,Group group,Revision selected){

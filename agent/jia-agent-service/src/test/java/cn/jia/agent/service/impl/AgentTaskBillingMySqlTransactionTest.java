@@ -585,13 +585,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var ratio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(BigDecimal.ZERO,BigDecimal.ONE);
         var scores=new cn.jia.economy.pricing.TaskEstimateEvaluation.Scores(1,1,0,1,0,BigDecimal.ZERO,ratio,ratio);
         var fitted=new cn.jia.economy.pricing.TaskEstimateCalibration.Fit("fixture",searchParams,scores);
-        var report=new cn.jia.economy.pricing.TaskEstimateCalibration.Report(group.digest(),group.execution().routeVersion(),fitted,scores,true);
+        var report=new cn.jia.economy.pricing.TaskEstimateCalibration.Report(group.privateCalibrationGroup(query),group.execution().routeVersion(),fitted,scores,true);
         var receipt=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(cn.jia.economy.pricing.TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),"3".repeat(64),"4".repeat(64),gate,report);
         var receiptJson=new ObjectMapper().writeValueAsString(receipt);
         jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,OWNER,group.digest(),receiptJson,receiptJson);
         jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,group.digest(),receiptJson);
         var active=calibrationCatalog.resolve(query,group);assertEquals(searchParams,active.parameters());assertTrue(locked(()->calibrationCatalog.lockCurrent(query,active.pin())));
         assertNull(calibrationCatalog.resolve(new TaskBillingService.Task(query.scope(),"different-owner","offer"),group));
+        // Even an integrity-valid copy of the receipt into another owner's head cannot activate that model there.
+        jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,"copied-owner",group.digest(),receiptJson,receiptJson);
+        jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,"copied-owner",group.digest(),receiptJson);
+        assertThrows(IllegalStateException.class,()->calibrationCatalog.resolve(new TaskBillingService.Task(query.scope(),"copied-owner","offer"),group));
+        jdbc.update("DELETE FROM economy_task_estimator_current WHERE tenant_id=? AND client_id=? AND owner_jiacn='copied-owner'",TENANT,CLIENT);
+
         jdbc.update("UPDATE economy_task_estimator_current SET generation=2,receipt_sha=NULL WHERE group_sha=?",group.digest());
         assertNull(calibrationCatalog.resolve(query,group));assertFalse(locked(()->calibrationCatalog.lockCurrent(query,active.pin())));
         jdbc.update("UPDATE economy_task_estimator_current SET generation=3,receipt_sha=SHA2(?,256) WHERE group_sha=?",receiptJson,group.digest());
@@ -612,7 +618,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
         var observation=observations.observeConfirmed(BILLING_TASK,group,selected,"frozen-family",held);
-        assertEquals(needle,observation.features());assertEquals(group.digest(),observation.group());assertEquals(selected.revision(),observation.revision());
+        assertEquals(needle,observation.features());assertEquals(group.privateCalibrationGroup(BILLING_TASK),observation.group());assertEquals(selected.revision(),observation.revision());
         assertEquals(measured.operations().stream().map(o->o.fact()).toList(),observation.facts());
         assertTrue(observation.split().truthAt()>=beforeRead);assertEquals(held,observation.split().split());
         assertEquals(jdbc.queryForObject("SELECT q.created_at FROM economy_task_quote q JOIN economy_task_cost_sample s ON s.quote_id=q.quote_id WHERE s.sample_id=?",Long.class,sid).longValue(),observation.split().featuresAt());

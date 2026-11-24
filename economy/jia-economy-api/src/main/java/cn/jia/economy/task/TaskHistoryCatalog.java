@@ -13,6 +13,9 @@ public interface TaskHistoryCatalog {
         public static Group of(TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures query){
             return new Group(execution,query.featureVersion(),query.templateVersion(),query.embeddingIdentity());
         }
+        public cn.jia.economy.pricing.TaskEstimateCalibration.PrivateGroup privateCalibrationGroup(TaskBillingService.Task authorized){
+            return new cn.jia.economy.pricing.TaskEstimateCalibration.PrivateGroup(authorized.scope().tenantId(),authorized.scope().clientId(),authorized.ownerJiacn(),digest());
+        }
         /** No payer, role name, feature values, historic unit prices or task-specific request hash in the compatibility key. */
         public String digest(){try{
             var h=MessageDigest.getInstance("SHA-256");
