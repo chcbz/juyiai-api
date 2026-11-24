@@ -105,7 +105,13 @@ class CapabilitySearchTest {
         try(var es=ElasticsearchClient.of(b->b.host("http://127.0.0.1:"+server.getAddress().getPort()).useCompression(false))){
             var beans=new DefaultListableBeanFactory(); beans.registerSingleton("es",es);
             var vector=new float[1024]; vector[0]=1;
-            var result=new CapabilitySearch(beans.getBeanProvider(ElasticsearchClient.class)).retrieve(Set.of("a","b"),List.of(doc),"写作",new TaskFeatureEncoder.Vector(ID,vector));
+            var calls=new java.util.concurrent.atomic.AtomicInteger();
+            var result=new CapabilitySearch(beans.getBeanProvider(ElasticsearchClient.class)).retrieve(Set.of("a","b"),List.of(doc),"写作",()->{
+                assertEquals(3,requests.size(),"PIT, exact coverage and lexical ranking before encoding");calls.incrementAndGet();
+                return new CapabilitySearch.QueryVector(new TaskFeatureEncoder.Vector(ID,vector),null);
+            });
+            assertEquals("HYBRID".equals(expected)?1:0,calls.get());
+            if("LEXICAL_ONLY".equals(expected))assertEquals(List.of("CAPABILITY_VECTOR_INCOMPLETE"),result.reasons());
             assertEquals(expected,result.mode()); assertEquals(2,result.rows().size());
             assertEquals("/agent_capability_evidence/_pit",paths.getFirst()); assertEquals("/_pit",paths.getLast());
             assertEquals(switch(expected){case "HYBRID"->5;case "LEXICAL_ONLY"->4;default->3;},paths.size());

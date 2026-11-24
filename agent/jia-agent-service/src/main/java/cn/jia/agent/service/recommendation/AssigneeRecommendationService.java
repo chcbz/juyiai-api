@@ -47,16 +47,11 @@ public final class AssigneeRecommendationService {
         }
         else {
             var text = TaskRetrievalText.from(task,inputs); truncated=text.truncated();
-            TaskFeatureEncoder.Vector v=null; String vectorFailure=null;
-            try { v=vectors.encode(actor,text).block(); }
-            catch(TaskFeatureEncoder.Unavailable e) { vectorFailure="QUERY_VECTOR_UNAVAILABLE"; }
-            catch(TaskFeatureEncoder.InvalidResult e) { vectorFailure="QUERY_VECTOR_INVALID"; }
-            var retrieval=search.retrieve(observed.keySet(),docs,text.text(),v);
-            if(vectorFailure!=null && !retrieval.reasons().contains(vectorFailure)) {
-                var reasons=new LinkedHashSet<>(retrieval.reasons()); reasons.remove("QUERY_VECTOR_UNAVAILABLE"); reasons.add(vectorFailure);
-                retrieval=new CapabilitySearch.Result(retrieval.mode(),retrieval.rows(),List.copyOf(reasons));
-            }
-            found=retrieval;
+            found=search.retrieve(observed.keySet(),docs,text.text(),()->{
+                try { return new CapabilitySearch.QueryVector(vectors.encode(actor,text).block(),"QUERY_VECTOR_UNAVAILABLE"); }
+                catch(TaskFeatureEncoder.Unavailable e) { return new CapabilitySearch.QueryVector(null,"QUERY_VECTOR_UNAVAILABLE"); }
+                catch(TaskFeatureEncoder.InvalidResult e) { return new CapabilitySearch.QueryVector(null,"QUERY_VECTOR_INVALID"); }
+            });
         }
         var required=new HashSet<String>();if(task.getRequiredAbilities()!=null)for(String r:task.getRequiredAbilities())if(r!=null&&!r.isBlank())required.add(TaskRetrievalText.normalized(r));
         var context=new CandidateSuitability.Context(truncated,Set.copyOf(required),!inputs.isEmpty(),observed.size());

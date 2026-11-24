@@ -35,7 +35,7 @@ class CapabilityIndexElasticsearchTest {
                     record Sample(long nanos,boolean degraded,boolean error){}var pending=new ArrayList<java.util.concurrent.Future<Sample>>();
                     for(int lane=0;lane<concurrency;lane++)pending.add(pool.submit(()->{
                         ready.countDown();go.await();long start=System.nanoTime();try{
-                            var r=search.retrieve(allowed,subset,"合同审查",v);
+                            var r=search.retrieve(allowed,subset,"合同审查",()->new CapabilitySearch.QueryVector(v,null));
                             long elapsed=System.nanoTime()-start;
                             return new Sample(elapsed,!"HYBRID".equals(r.mode()),r.rows().size()!=n || !allowed.equals(r.rows().stream().map(CandidateRankFusion.Ranked::agentId).collect(java.util.stream.Collectors.toSet())));
                         }catch(RuntimeException failure){return new Sample(System.nanoTime()-start,false,true);}
@@ -60,23 +60,23 @@ class CapabilityIndexElasticsearchTest {
             var search=new CapabilitySearch(provider);var writer=new CapabilityIndexWriter(provider);var all=new ArrayList<CapabilityDocuments.Citation>();
             all.addAll(abilities("a",ID,"合同审查","合同条款核对"));all.addAll(abilities("b",ID,"统计报表"));
             var denied=abilities("withdrawn",ID,"合同审查").getFirst();var authorized=all.stream().map(CapabilityDocuments.Citation::doc).toList();var ids=Set.of("a","b","empty");
-            var q=vector(ID,0);assertEquals("UNAVAILABLE",search.retrieve(ids,authorized,"合同审查",q).mode());
+            var q=vector(ID,0);assertEquals("UNAVAILABLE",search.retrieve(ids,authorized,"合同审查",()->new CapabilitySearch.QueryVector(q,null)).mode());
             try(var mapping=Objects.requireNonNull(getClass().getResourceAsStream("/elasticsearch/agent-capability-evidence-v1.json"))){es.indices().create(b->b.index(index).withJson(mapping));}
-            assertEquals("UNAVAILABLE",search.retrieve(ids,authorized,"合同审查",q).mode());
+            assertEquals("UNAVAILABLE",search.retrieve(ids,authorized,"合同审查",()->new CapabilitySearch.QueryVector(q,null)).mode());
             for(var doc:authorized)writer.publishText(doc);es.indices().refresh(b->b.index(index));
-            var lexical=search.retrieve(ids,authorized,"合同审查",q);assertEquals("LEXICAL_ONLY",lexical.mode());assertEquals("a",lexical.rows().getFirst().agentId());assertNotNull(lexical.rows().getFirst().lexical());
+            var lexical=search.retrieve(ids,authorized,"合同审查",()->new CapabilitySearch.QueryVector(q,null));assertEquals("LEXICAL_ONLY",lexical.mode());assertEquals("a",lexical.rows().getFirst().agentId());assertNotNull(lexical.rows().getFirst().lexical());
             var encoder=new TaskFeatureEncoder(){public Identity identity(){return ID;} public Vector encode(String text){return vector(ID,text.contains("合同")?0:1);}};
             writer.repair(all,encoder);writer.repair(List.of(denied),encoder);es.indices().refresh(b->b.index(index));
-            for(var doc:authorized)assertTrue(writer.encoded(doc));var hybrid=search.retrieve(ids,authorized,"合同审查",q);
+            for(var doc:authorized)assertTrue(writer.encoded(doc));var hybrid=search.retrieve(ids,authorized,"合同审查",()->new CapabilitySearch.QueryVector(q,null));
             assertEquals("HYBRID",hybrid.mode());assertEquals("a",hybrid.rows().getFirst().agentId());assertNotNull(hybrid.rows().getFirst().vector());
             assertEquals(ids,hybrid.rows().stream().map(CandidateRankFusion.Ranked::agentId).collect(java.util.stream.Collectors.toSet()));
             var empty=hybrid.rows().stream().filter(r->r.agentId().equals("empty")).findFirst().orElseThrow();assertNull(empty.lexical());assertNull(empty.vector());
             // Stale write after a loses its authority cannot take part even with perfect lexical/vector scores.
             writer.publishVector(authorized.getFirst(),q);es.indices().refresh(b->b.index(index));
-            var onlyB=search.retrieve(Set.of("b"),List.of(authorized.getLast()),"合同审查",q);assertEquals("HYBRID",onlyB.mode());assertEquals(List.of("b"),onlyB.rows().stream().map(CandidateRankFusion.Ranked::agentId).toList());
+            var onlyB=search.retrieve(Set.of("b"),List.of(authorized.getLast()),"合同审查",()->new CapabilitySearch.QueryVector(q,null));assertEquals("HYBRID",onlyB.mode());assertEquals(List.of("b"),onlyB.rows().stream().map(CandidateRankFusion.Ranked::agentId).toList());
             var next=new TaskFeatureEncoder.Identity("fixture-2",ID.model(),1024);var newDoc=abilities("a",next,"合同审查").getFirst().doc();
-            assertFalse(writer.encoded(newDoc));assertEquals("UNAVAILABLE",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",vector(next,0)).mode());
-            writer.publishText(newDoc);es.indices().refresh(b->b.index(index));assertEquals("LEXICAL_ONLY",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",vector(next,0)).mode());
+            assertFalse(writer.encoded(newDoc));assertEquals("UNAVAILABLE",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",()->new CapabilitySearch.QueryVector(vector(next,0),null)).mode());
+            writer.publishText(newDoc);es.indices().refresh(b->b.index(index));assertEquals("LEXICAL_ONLY",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",()->new CapabilitySearch.QueryVector(vector(next,0),null)).mode());
             if(Boolean.getBoolean("cyf.capabilityEsLoad"))measureSearch(search,writer,es);
         }
     }

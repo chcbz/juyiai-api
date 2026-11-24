@@ -23,7 +23,8 @@ final class CapabilitySearch {
     private final ObjectProvider<ElasticsearchClient> clients;
     CapabilitySearch(ObjectProvider<ElasticsearchClient> clients) { this.clients = clients; }
 
-    Result retrieve(Set<String> candidates, List<CapabilityDocuments.Doc> authorized, String text, Vector vector) {
+    record QueryVector(Vector value,String missingReason) { }
+    Result retrieve(Set<String> candidates, List<CapabilityDocuments.Doc> authorized, String text, java.util.function.Supplier<QueryVector> query) {
         var lexical = new ArrayList<CandidateRankFusion.Hit>();
         var semantic = new ArrayList<CandidateRankFusion.Hit>();
         if (candidates.isEmpty()) return new Result("NOT_NEEDED", List.of(), List.of());
@@ -38,7 +39,7 @@ final class CapabilitySearch {
             var open = es.openPointInTime(co.elastic.clients.elasticsearch.core.OpenPointInTimeRequest.of(b -> b.index(INDEX).allowPartialSearchResults(false).keepAlive(t -> t.time(KEEP_ALIVE))));
             view.pit = open.id();
             if (open.shards() != null && open.shards().failed().intValue() != 0) throw new IOException("partial PIT");
-            boolean vectorsComplete = vector != null;
+            boolean vectorsComplete = true;
             for (var batch : batches) {
                 var coverage = view.search(batch.coverage());
                 var total = coverage.hits().total();
@@ -46,11 +47,14 @@ final class CapabilitySearch {
                     return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
                 var count = coverage.aggregations().get("encoded");
                 if (count == null || !count.isFilter() || count.filter().docCount() != total.value()) vectorsComplete = false;
-                if (vector != null && batch.docs.values().stream().anyMatch(d -> !vector.identity().equals(d.embedding()))) vectorsComplete = false;
                 batch.collect(view.search(batch.ranked(text, null)), lexical);
             }
             wordsComplete = true;
-            if (!vectorsComplete) return lexical(candidates, lexical, vector == null ? "QUERY_VECTOR_UNAVAILABLE" : "CAPABILITY_VECTOR_INCOMPLETE");
+            if (!vectorsComplete) return lexical(candidates, lexical, "CAPABILITY_VECTOR_INCOMPLETE");
+            // Only a complete authorized index can consume a query embedding. Never reopen another PIT to rescue this view.
+            var resolved=query.get();var vector=resolved.value();
+            if(vector==null)return lexical(candidates,lexical,resolved.missingReason());
+            if(authorized.stream().anyMatch(d->!vector.identity().equals(d.embedding())))return lexical(candidates,lexical,"CAPABILITY_VECTOR_INCOMPLETE");
             var values = vector.values();
             for (var batch : batches) {
                 var res = view.search(batch.ranked(text, values));

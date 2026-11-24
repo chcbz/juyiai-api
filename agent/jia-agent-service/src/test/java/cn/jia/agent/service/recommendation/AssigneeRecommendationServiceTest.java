@@ -35,11 +35,11 @@ class AssigneeRecommendationServiceTest {
         when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of()));
         when(vectors.identity()).thenReturn(gen);
         when(vectors.encode(eq(actor),any())).thenAnswer(i->{assertFalse(locked);return Mono.just(new TaskFeatureEncoder.Vector(gen,new float[]{1}));});
-        when(search.retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class))).thenAnswer(i->{
+        when(search.retrieve(anySet(),anyList(),anyString(),any())).thenAnswer(i->{
             assertFalse(locked); List<CapabilityDocuments.Doc> docs=i.getArgument(1);
             var h=new CandidateRankFusion.Hit("a",docs.getFirst().evidenceKey(),1,CapabilityIndexWriter.GENERATION);
-            boolean lexical=i.getArgument(3)==null;
-            return new CapabilitySearch.Result(lexical?"LEXICAL_ONLY":"HYBRID",CandidateRankFusion.fuse(Set.of("a"),List.of(h),List.of()),lexical?List.of("QUERY_VECTOR_UNAVAILABLE"):List.of());
+            var query=i.<java.util.function.Supplier<CapabilitySearch.QueryVector>>getArgument(3).get();boolean lexical=query.value()==null;
+            return new CapabilitySearch.Result(lexical?"LEXICAL_ONLY":"HYBRID",CandidateRankFusion.fuse(Set.of("a"),List.of(h),List.of()),lexical?List.of(query.missingReason()):List.of());
         });
         when(tx.observe(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->{
             locked=true; try{return i.<java.util.function.Function<AgentTaskMetaEntity,?>>getArgument(4).apply(lockedRoot);} finally{locked=false;}
@@ -58,7 +58,7 @@ class AssigneeRecommendationServiceTest {
         var cut=new CandidateSuitability.Floors(1d,1.6d);var high=new CandidateSuitability.Cell("HYBRID","BOTH_SAME",false,false,2,2,null,cut);
         var config=calibration(List.of(high),null);var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,config);
         org.mockito.Mockito.doAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var h=new CandidateRankFusion.Hit("b",docs.stream().filter(d->d.agentId().equals("b")).findFirst().orElseThrow().evidenceKey(),1.7,CapabilityIndexWriter.GENERATION);
-            boolean hybrid=i.getArgument(3)!=null;return new CapabilitySearch.Result(hybrid?"HYBRID":"LEXICAL_ONLY",CandidateRankFusion.fuse(Set.of("a","b"),List.of(h),hybrid?List.of(h):List.of()),hybrid?List.of():List.of("QUERY_VECTOR_UNAVAILABLE"));}).when(search).retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class));
+            var query=i.<java.util.function.Supplier<CapabilitySearch.QueryVector>>getArgument(3).get();boolean hybrid=query.value()!=null;return new CapabilitySearch.Result(hybrid?"HYBRID":"LEXICAL_ONLY",CandidateRankFusion.fuse(Set.of("a","b"),List.of(h),hybrid?List.of(h):List.of()),hybrid?List.of():List.of(query.missingReason()));}).when(search).retrieve(anySet(),anyList(),anyString(),any());
         var good=active.recommend(actor,"task",new Request("7"));assertEquals("READY",good.state());assertEquals(List.of("b","a"),good.recommendations().stream().map(r->r.agent().agentId()).toList());assertEquals("HIGH",good.recommendations().getFirst().recommendationLevel());assertNotEquals(CandidateRankFusion.VERSION,good.rankingVersion());
         doReturn(Mono.error(new TaskFeatureEncoder.Unavailable())).when(vectors).encode(eq(actor),any());var degraded=active.recommend(actor,"task",new Request("7"));assertEquals("DEGRADED",degraded.state());assertTrue(degraded.recommendations().stream().allMatch(r->r.recommendationLevel().equals("UNKNOWN")));
     }
