@@ -90,6 +90,23 @@ class AssigneeRecommendationServiceTest {
         var result=active.recommend(actor,"task",new Request("7"));assertEquals("NO_MATCH",result.state());
         var order=inOrder(materials,policy);order.verify(materials).verifyUnchanged(actor,"task",List.of());order.verify(policy).level(anyString(),any(),any(),any(),any());
     }
+    @Test void knownMismatchNeverMeansReadyOrOutranksASuitableExternalAgent(){
+        // The current calibration does not infer LOW from a score. Exercise the projection contract separately.
+        var policy=mock(CandidateSuitability.class);
+        when(policy.level(anyString(),any(),any(),any(),any())).thenReturn("LOW");
+        var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,policy);
+        var mismatch=active.recommend(actor,"task",new Request("7"));
+        assertEquals("NO_MATCH",mismatch.state());assertFalse(mismatch.recommendations().getFirst().evidence().isEmpty());
+        assertTrue(mismatch.recommendations().getFirst().reason().contains("不匹配"));
+        var other=new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("b","Other",null,false,"online"),List.of("排版"),"other");
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row,other));
+        when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of(),"b",List.of()));
+        doAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var hits=docs.stream().map(d->new CandidateRankFusion.Hit(d.agentId(),d.evidenceKey(),1,CapabilityIndexWriter.GENERATION)).toList();
+            return new CapabilitySearch.Result("HYBRID",CandidateRankFusion.fuse(Set.of("a","b"),hits,List.of()),List.of());}).when(search).retrieve(anySet(),anyList(),anyString(),any());
+        doAnswer(i->"b".equals(i.<CapabilityDocuments.Doc>getArgument(4).agentId())?"MEDIUM":"LOW").when(policy).level(anyString(),any(),any(),any(),any());
+        var mixed=active.recommend(actor,"task",new Request("7"));assertEquals("READY",mixed.state());
+        assertEquals(List.of("b","a"),mixed.recommendations().stream().map(r->r.agent().agentId()).toList());
+    }
     Result recommend(){return service.recommend(actor,"task",new Request("7"));}
     @Test void uncalibratedHitCitesOnlyPublicReference() {
         var r=recommend(); assertEquals("NO_MATCH",r.state()); assertEquals("HYBRID",r.retrievalMode()); assertTrue(r.candidateSetComplete());
