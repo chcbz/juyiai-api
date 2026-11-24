@@ -209,6 +209,31 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     /** Read-only observation for multiple discovered candidates. Persistent rows and account snapshots
      * are shared only within this call. New work and money admission still use their original fences. */
     public Map<String,Proof> currentRegisteredProofs(String tenant,String client,Set<String> requested) {
+        var result = new java.util.HashMap<String,Proof>();
+        observeRecommendationChannels(tenant, client, requested, (proof, channel) -> result.put(proof.scope().agentId(), proof));
+        return Map.copyOf(result);
+    }
+
+    /** Synchronous evidence for a recommendation directory read only. It is neither a grant
+     * nor a proof that a durable write may proceed. Never carries across observations or threads. */
+    public final class RecommendationChannel {
+        private final Thread reader = Thread.currentThread();
+        private Binding observed;
+        private RecommendationChannel(Binding observed) { this.observed = observed; }
+
+        public boolean matches(String sessionId, String tenant, String client, String owner, String agent, String instance) {
+            if (Thread.currentThread() != reader) return false;
+            var b = observed;
+            if (b == null || !b.sessionId().equals(sessionId)) return false;
+            var scope = b.proof().scope();
+            return scope.tenantId().equals(tenant) && scope.clientId().equals(client) && scope.ownerJiacn().equals(owner)
+                    && scope.agentId().equals(agent) && scope.runtimeInstanceId().equals(instance)
+                    && b.connected().getAsBoolean() && bindings.get(scope) == b;
+        }
+    }
+
+    public void observeRecommendationChannels(String tenant, String client, Set<String> requested,
+            java.util.function.BiConsumer<Proof,RecommendationChannel> read) {
         requireAdmitted(tenant,client);
         var live=new java.util.ArrayList<Binding>();
         for(var entry:bindings.values()){
@@ -237,9 +262,12 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
                 if(accepted.putIfAbsent(id,b)!=null)ambiguous.add(id);
             }
         }
-        var result=new java.util.HashMap<String,Proof>();
-        accepted.forEach((id,b)->{if(!ambiguous.contains(id)&&b.connected().getAsBoolean()&&bindings.get(b.proof().scope())==b)result.put(id,b.proof());});
-        return Map.copyOf(result);
+        accepted.forEach((id,b) -> {
+            if (ambiguous.contains(id) || !b.connected().getAsBoolean() || bindings.get(b.proof().scope()) != b) return;
+            var channel = new RecommendationChannel(b);
+            try { read.accept(b.proof(), channel); }
+            finally { channel.observed = null; }
+        });
     }
 
     /** No secret is retained in WS attributes or the registry. */

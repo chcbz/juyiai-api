@@ -1340,6 +1340,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");assertEquals(before,es.encodes.get());
                     String other=expected.stream().skip(9).findFirst().orElseThrow();var ids=java.util.Set.of(onlySkill,other);
                     assertEquals(ids,auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
+                    // Same fence and even the same socket ID after disconnect are not the same observed binding.
+                    var escaped = new java.util.concurrent.atomic.AtomicReference<cn.jia.agent.security.AgentRuntimeAuthenticationService.RecommendationChannel>();
+                    String socket="fixture-session-2"+onlySkill;
+                    auth.observeRecommendationChannels(TENANT,CLIENT,java.util.Set.of(onlySkill),(proof,channel)->{
+                        escaped.set(channel);
+                        assertTrue(channel.matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
+                        assertFalse(channel.matches(socket,TENANT,CLIENT,OWNER,other,"instance"));
+                        assertFalse(channel.matches(socket,TENANT,CLIENT,"foreign",onlySkill,"instance"));
+                        assertFalse(java.util.concurrent.CompletableFuture.supplyAsync(()->channel.matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance")).join());
+                    });
+                    assertFalse(escaped.get().matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
+                    auth.observeRecommendationChannels(TENANT,CLIENT,java.util.Set.of(onlySkill),(proof,channel)->{
+                        auth.disconnect(socket); auth.bind(socket,proof,()->true);
+                        assertFalse(channel.matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
+                    });
                     assertEquals(1,jdbc.update("UPDATE agent_persona_binding SET status=0 WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,onlySkill));
                     assertEquals(java.util.Set.of(other),auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
                 }
