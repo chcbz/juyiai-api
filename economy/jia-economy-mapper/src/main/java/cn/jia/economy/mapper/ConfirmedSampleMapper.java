@@ -77,7 +77,8 @@ public interface ConfirmedSampleMapper {
     // Start at eligible samples, not projection rows. A missing or stale projection must not shorten a keyset page.
     @Select("""
         SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,x.feature_meta,x.vector_bytes,
-          SHA2(q.snapshot_json,256)=x.envelope_sha AND ((x.preparation_sha IS NULL AND x.resolved_sha=x.envelope_sha)
+          SHA2(q.snapshot_json,256)=x.envelope_sha AND ((x.preparation_sha IS NULL AND x.resolved_sha=x.envelope_sha
+          AND JSON_CONTAINS_PATH(q.snapshot_json,'one','$.preparation.features'))
           OR (x.preparation_sha IS NOT NULL AND q.snapshot_json->>'$.preparation'=x.preparation_sha
           AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256)))
         FROM economy_task_cost_sample s LEFT JOIN economy_history_feature_projection x ON x.sample_id=s.sample_id

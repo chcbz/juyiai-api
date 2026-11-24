@@ -831,6 +831,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         if(shared){String rec=jdbc.queryForObject("SELECT recommendation_id FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
             jdbc.update("UPDATE economy_history_feature_projection SET recommendation_id='wrong-binding' WHERE sample_id=?",sid);assertEquals(sid,entries.apply(cursor).getFirst().source().sampleId());
             jdbc.update("UPDATE economy_history_feature_projection SET recommendation_id=? WHERE sample_id=?",rec,sid);}
+        if(shared){
+            // A valid compact envelope loses its payer-scoped preparation, without touching either immutable body.
+            // Even if two derived columns now misclassify the intact envelope as inline, authority cannot be revived.
+            String prep=jdbc.queryForObject("SELECT preparation_sha FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
+            String resolved=jdbc.queryForObject("SELECT resolved_sha FROM economy_history_feature_projection WHERE sample_id=?",String.class,sid);
+            jdbc.update("UPDATE economy_task_quote SET payer_user_id='probe-unbound-payer' WHERE quote_id=?",qid);
+            assertNull(jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,qid));
+            jdbc.update("UPDATE economy_history_feature_projection SET preparation_sha=NULL,resolved_sha=envelope_sha WHERE sample_id=?",sid);
+            assertThrows(IllegalStateException.class,()->entries.apply(cursor));
+            assertThrows(IllegalStateException.class,()->engine.estimate(reader,group.execution(),query,pin,params,Map.of()));
+            jdbc.update("UPDATE economy_history_feature_projection SET preparation_sha=?,resolved_sha=? WHERE sample_id=?",prep,resolved,sid);
+            jdbc.update("UPDATE economy_task_quote SET payer_user_id=? WHERE quote_id=?",PAYER,qid);
+        }
         assertEquals(sid,entries.apply(cursor).getFirst().source().sampleId());
         byte[] vector=jdbc.queryForObject("SELECT vector_bytes FROM economy_history_feature_projection WHERE sample_id=?",byte[].class,sid);
         for(byte[] broken:List.of(new byte[4095],new byte[4096],java.util.Arrays.copyOf(vector,4097),vector.clone())){
