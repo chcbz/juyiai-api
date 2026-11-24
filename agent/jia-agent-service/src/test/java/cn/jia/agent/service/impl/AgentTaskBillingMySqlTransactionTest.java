@@ -670,8 +670,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
-        // Test-only corruption; the resolver must not return an unchecked object.
-        jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND payer_user_id=? AND recommendation_id=? AND preparation_sha=?",args.subList(0,7).toArray());
+        // DML cannot invalidate an accepted reference. An independently damaged fixture is never read.
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE preparation_sha=?",sha));
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("DELETE FROM economy_task_quote_preparation WHERE preparation_sha=?",sha));
+        String damaged="6".repeat(64);args.set(6,damaged);args.set(7,"{}");jdbc.update(insert,args.toArray());
+        jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",ref.replace(sha,damaged),id);
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
@@ -683,11 +686,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         for(int i=0;i<40;i++)writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),"multi-"+i,"mixed"),i%2==0?p:second,i==0?null:String.format("%064x",i)));
         writes.add(writes.getFirst()); // database unique binding fails after at least one successful INSERT
         assertThrows(org.springframework.dao.DuplicateKeyException.class,()->locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes)));
-        assertEquals(before,count("economy_task_quote"));writes.removeLast();
+        assertEquals(before,count("economy_task_quote"));assertEquals(0,count("economy_task_quote_preparation"));writes.removeLast();
         var receipts=locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes));assertEquals(40,receipts.size());
         var json=new ObjectMapper();for(int i=0;i<40;i++){
             var q=receipts.get(i);assertEquals(i%2==0?25L:50L,q.amountWen());var expected=writes.get(i);
-            var raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,q.quoteId());
+            var raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,q.quoteId());
             var tree=json.readTree(raw);assertEquals(json.readTree(json.writeValueAsString(expected.prepared())),tree.path("preparation"));
             assertEquals(json.readTree(json.writeValueAsString(expected.binding())),tree.path("binding"));
             if(i==0)assertFalse(tree.has("initialIntentSha256"));else assertEquals(expected.initialIntentSha256(),tree.path("initialIntentSha256").asText());
@@ -2196,7 +2199,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var json=new ObjectMapper();var digest=java.security.MessageDigest.getInstance("SHA-256");
         var bindings=new java.util.HashSet<String>();var lengths=new java.util.HashMap<String,Integer>();long[] sizes={0,0};
         jdbc.query("""
-            SELECT binding_sha256,CAST(snapshot_json AS BINARY) FROM economy_task_quote
+            SELECT binding_sha256,CAST(snapshot_json AS BINARY) FROM economy_task_quote_resolved
             WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
               AND BINARY JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.recommendationId'))=BINARY ?
             """,(org.springframework.jdbc.core.RowCallbackHandler) rs->{
@@ -2215,6 +2218,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         },TENANT,CLIENT,OWNER,task,batch);
         assertEquals(quotes,bindings.size());assertEquals(expectedGroups,lengths.size());assertTrue(sizes[0]>sizes[1]);
         long unique=lengths.values().stream().mapToLong(Integer::longValue).sum();
+        var storage=jdbc.queryForMap("SELECT COUNT(*) groupsStored, SUM(OCTET_LENGTH(preparation_json)) bodyBytes FROM economy_task_quote_preparation WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND recommendation_id=?",TENANT,CLIENT,OWNER,task,batch);
+        assertEquals(expectedGroups,((Number)storage.get("groupsStored")).intValue());assertEquals(unique,((Number)storage.get("bodyBytes")).longValue());
+        long envelope=jdbc.queryForObject("SELECT SUM(OCTET_LENGTH(snapshot_json)) FROM economy_task_quote WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND snapshot_json->>'$.binding.recommendationId'=? AND JSON_TYPE(JSON_EXTRACT(snapshot_json,'$.preparation'))='STRING'",Long.class,TENANT,CLIENT,OWNER,task,batch);
+        assertTrue(envelope>0 && envelope+unique<sizes[0]);System.out.printf("QUOTE_RETAINED groups=%d envelopesBytes=%d bodiesBytes=%d retainedPayloadBytes=%d%n",expectedGroups,envelope,unique,envelope+unique);
         System.out.printf("QUOTE_FROZEN_PAYLOAD rows=%d groups=%d logicalBytes=%d preparationBytes=%d distinctPreparationBytes=%d repeatedPreparationBytes=%d%n",quotes,lengths.size(),sizes[0],sizes[1],unique,sizes[1]-unique);
     }
     private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}

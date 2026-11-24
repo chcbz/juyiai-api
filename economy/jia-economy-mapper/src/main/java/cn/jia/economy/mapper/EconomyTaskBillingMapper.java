@@ -50,6 +50,12 @@ public interface EconomyTaskBillingMapper {
             """)
     int insertQuotes(@Param("rows") java.util.List<EconomyTaskQuoteEntity> rows);
 
+    @Insert("""
+        INSERT INTO economy_task_quote_preparation(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,recommendation_id,preparation_sha,preparation_json)
+        VALUES(#{task.scope.tenantId},#{task.scope.clientId},#{task.ownerJiacn},#{task.taskId},#{payer},#{batch},#{sha},#{json})
+        """) int insertPreparation(@Param("task") cn.jia.economy.task.TaskBillingService.Task task,@Param("payer") String payer,
+                @Param("batch") String batch,@Param("sha") String sha,@Param("json") String json);
+
     // The caller cannot nominate a quote id. Read the charge winner, not the most recent quote or configuration.
     @Select("""
         SELECT JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256')) FROM economy_task_charge c

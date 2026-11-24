@@ -20,3 +20,9 @@ FROM economy_task_quote q LEFT JOIN economy_task_quote_preparation p ON
     AND p.payer_user_id=q.payer_user_id AND p.recommendation_id=q.snapshot_json->>'$.binding.recommendationId'
     AND p.preparation_sha=CASE WHEN BINARY LEFT(q.quote_id,6)=BINARY 'tq_m1_' AND q.snapshot_json->>'$.schema'='MEASURED_TASK_QUOTE_V1'
       AND JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.preparation'))='STRING' THEN (q.snapshot_json->>'$.preparation' COLLATE utf8mb4_0900_bin) END;
+
+-- Same transaction as the quote. Reject future UPDATE/DELETE so a retained quote cannot lose its evidence.
+CREATE TRIGGER trg_economy_quote_preparation_no_update BEFORE UPDATE ON economy_task_quote_preparation
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Frozen quote preparation is immutable';
+CREATE TRIGGER trg_economy_quote_preparation_no_delete BEFORE DELETE ON economy_task_quote_preparation
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Frozen quote preparation is immutable';

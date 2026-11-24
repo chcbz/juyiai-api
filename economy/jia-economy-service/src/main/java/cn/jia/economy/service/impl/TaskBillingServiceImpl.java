@@ -110,13 +110,12 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     }
 
     private EconomyTaskQuoteEntity measuredRow(Task task, String payer, MeasuredWrite write,
-            Map<MeasuredPreparation,FrozenPreparation> cache) {
+            FrozenPreparation frozen, String preparationJson) {
         var p = write.prepared(); var binding = write.binding();
         if (!binding.requirementSha256().equals(p.features().requirementSha256())
                 || !binding.inputSnapshotDigest().equals(p.features().inputSnapshotSha256()))
             throw new TaskBillingException(QUOTE_BINDING_CHANGED);
-        var frozen = cache.computeIfAbsent(p, this::freeze);
-        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, frozen.featureSha(), frozen.groupSha(), write.initialIntentSha256(), frozen.json());
+        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, frozen.featureSha(), frozen.groupSha(), write.initialIntentSha256(), preparationJson);
         return quoteRow(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payer, p.estimate().wen(), encode(snapshot));
     }
 
@@ -125,7 +124,8 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     }
 
     @Override public Quote storeMeasured(Task task, Binding binding, String payer, MeasuredPreparation p) {
-        var row = measuredRow(task, Objects.requireNonNull(payer), new MeasuredWrite(binding,p), new java.util.IdentityHashMap<>());
+        var frozen = freeze(p);
+        var row = measuredRow(task, Objects.requireNonNull(payer), new MeasuredWrite(binding,p), frozen, frozen.json());
         mapper.insertQuote(row);
         return receipt(row);
     }
@@ -135,11 +135,28 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     @Override public List<StoredQuote> storeMeasuredBatch(Task task, String payer, List<MeasuredWrite> writes) {
         Objects.requireNonNull(payer);
         var cache = new java.util.IdentityHashMap<MeasuredPreparation,FrozenPreparation>();
+        // Task and payer are fixed by this call. Never group by amount, agent, or feature hash.
+        // Exact text equality (including numeric representation) precedes digest addressing in the DB.
+        record Content(String batch,String json) {}
+        var counts = new java.util.LinkedHashMap<Content,Integer>();
+        if(writes.size()>1) for(var write:writes){
+            var body=cache.computeIfAbsent(write.prepared(),this::freeze).json();
+            counts.merge(new Content(write.binding().recommendationId(),body),1,Integer::sum);
+        }
+        var references = new java.util.HashMap<Content,String>();
+        for(var entry:counts.entrySet()) if(entry.getValue()>1){
+            var key=entry.getKey();String sha=HexFormat.of().formatHex(digest(key.json().getBytes(StandardCharsets.UTF_8)));
+            // Plain insert only: a conflicting retained key cannot adopt someone else's evidence.
+            requireTransition(mapper.insertPreparation(task,payer,key.batch(),sha,key.json()));
+            references.put(key,encode(sha));
+        }
         var result = new java.util.ArrayList<StoredQuote>(writes.size());
         var chunk = new java.util.ArrayList<EconomyTaskQuoteEntity>(CHUNK_ROWS);
         long bytes = 0;
         for (var write : writes) {
-            var row = measuredRow(task,payer,write,cache);
+            var frozen=cache.computeIfAbsent(write.prepared(),this::freeze);
+            String payload=references.isEmpty()?frozen.json():references.getOrDefault(new Content(write.binding().recommendationId(),frozen.json()),frozen.json());
+            var row = measuredRow(task,payer,write,frozen,payload);
             int size = row.getSnapshotJson().getBytes(StandardCharsets.UTF_8).length;
             if (!chunk.isEmpty() && (chunk.size() >= CHUNK_ROWS || bytes + size > CHUNK_SNAPSHOT_BYTES)) {
                 mapper.insertQuotes(chunk); chunk.clear(); bytes = 0;
