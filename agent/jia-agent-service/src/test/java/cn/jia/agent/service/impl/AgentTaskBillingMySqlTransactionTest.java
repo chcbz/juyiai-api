@@ -1407,16 +1407,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         verifyPreparedEpochLock(agent,binding,measured.fence());
         var nextFence=new AgentManagedSessionLookup.SessionFence("install","host","next-boot",3);
         var m=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),nextFence,measured.version(),measured.executionConfigSha256(),measured.routeSha256(),measured.toolConfigSha256(),measured.capturePolicyVersion(),measured.profile());
-        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(new TaskBillingService.MeasuredGroup(m.version(),m.executionConfigSha256(),m.routeSha256(),"fixture",m.toolConfigSha256(),m.capturePolicyVersion()),Map.of());
+        var config=new cn.jia.economy.task.PreparedReferenceRoutes.Configuration(m.version(),m.executionConfigSha256(),m.routeSha256(),m.toolConfigSha256(),m.capturePolicyVersion());
+        var routeKey=Map.of("tenant",TENANT,"client",CLIENT,"owner",OWNER,"configuration",config);
+        var manifest=new ObjectMapper().writeValueAsBytes(Map.of("schema","prepared-reference-routes-v1","entries",List.of(Map.of("key",routeKey,"channel","fixture","model","fixture","tier","test"))));
+        var file=Files.write(httpDirectory.resolve("reference-routes.json"),manifest);
+        var routes=new cn.jia.economy.service.impl.PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(manifest)));
+        var terms=routes.resolve(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),config);assertNotNull(terms);
         var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);
-        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,(task,config)->terms);
+        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,routes);
         var inputs=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),Long.toString(req.taskVersion()),req.requirementRevision(),req.sha256(),input);
         var targets=List.of(target,new AgentExternalServicePolicyService.QuoteTarget(ids.get(1),OWNER,binding+1,target.externalPolicyRevision()));
         var missing=source.observe(inputs,targets);assertTrue(missing.isEmpty());assertTrue(locked(()->source.current(inputs,targets,missing)));
         var nextTicket=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);assertTrue(service.recordMeasurement(nextTicket,agent,m));
         var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms)),ready);
         assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
-        guard.retire(TENANT,CLIENT,agent,OWNER,nextFence);assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
+        verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
+        assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
 
         service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
         assertFalse(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
@@ -1426,6 +1432,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
         assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
+    }
+    // Use an actual signed quote request with two authorized candidates and one current native receipt.
+    // The test injector retires that real epoch after estimation, before the quote transaction rechecks it.
+    private void verifyPreparedQuoteHttp(Authority authority,WorkspaceRows workspace,cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution source,List<String> ids,Runnable retire)throws Exception{
+        String second=ids.getLast();jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"second",second,TENANT,CLIENT);
+        long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,second);
+        jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'fixture',1,1)",second,CLIENT,OWNER,TENANT,binding);
+        var engine=mock(cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
+        var real=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
+        var race=new java.util.concurrent.atomic.AtomicBoolean();var estimator=new cn.jia.economy.task.TaskBudgetEstimator(){
+            public Outcome prepare(TaskBillingService.Task task,cn.jia.economy.pricing.TaskEstimateFeatures features,Terms terms){var result=real.prepare(task,features,terms);if(terms!=null&&race.compareAndSet(true,false))retire.run();return result;}
+            public void lockSelected(TaskBillingService.Task task,List<Available> offers){real.lockSelected(task,offers);}
+        };
+        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),mock(PersonalWorkspaceStorage.class),mock(PersonalWorkspaceWriteService.class)));
+        var encodes=new java.util.concurrent.atomic.AtomicInteger();var encoder=new TaskFeatureEncoder(){public Identity identity(){return new Identity("cfg","fixture",1024);}public Vector encode(String text){encodes.incrementAndGet();float[] v=new float[1024];v[0]=1;return new Vector(identity(),v);}};
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,encoder,source,estimator,billing);
+        startHttp();int initial=count("economy_task_quote_batch"),money=count("economy_transaction");String token=httpToken();var mapper=new ObjectMapper();
+        var body=mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","prepared","data",Map.of("expectedTaskVersion","0","agentIds",ids)));
+        try(var client=HttpClient.newHttpClient()){
+            class Post{tools.jackson.databind.JsonNode run(String key,int status,String code)throws Exception{
+                var r=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","prepared").header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                var reply=client.send(r,HttpResponse.BodyHandlers.ofString());assertEquals(status,reply.statusCode(),reply.body());var env=mapper.readTree(reply.body());assertEquals(code,env.path("code").asText());return env.path("data");
+            }}var post=new Post();var original=post.run("prepared-first",200,"E0");var rows=original.path("quotes");assertEquals(2,rows.size());
+            for(int i=0;i<2;i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertEquals("UNAVAILABLE",row.path("state").asText());assertFalse(row.path("amount").isObject());assertFalse(row.path("quoteId").isString());}
+            assertEquals("NO_BASELINE",rows.get(0).path("unavailableReason").asText());assertEquals("BILLING_ROUTE_MISSING",rows.get(1).path("unavailableReason").asText());
+            race.set(true);post.run("prepared-racing",409,"QUOTE_STALE");assertFalse(race.get());assertEquals(initial+1,count("economy_task_quote_batch"));
+            assertEquals(original,post.run("prepared-first",200,"E0"));var fresh=post.run("prepared-racing",200,"E0");assertEquals("BILLING_ROUTE_MISSING",fresh.at("/quotes/0/unavailableReason").asText());
+        }assertEquals(1,encodes.get());assertEquals(initial+2,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));verifyNoInteractions(engine);
     }
     private void awaitPreparationRowWait(java.util.concurrent.Future<?> writer){
         long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
