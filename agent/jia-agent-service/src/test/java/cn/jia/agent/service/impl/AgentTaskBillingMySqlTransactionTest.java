@@ -1483,7 +1483,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
         if(System.getProperty("ownedMeteredRuntime")!=null){
             relay.setDispatchAuthority(dispatch);
-            verifyDiscussionInbox(tx,relay,row,outgoing);
+            var finals=new ChatActionFinalService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc),dao,new cn.jia.chat.handler.TypedInspectionSessionRegistry());
+            deliberation.setActionFinals(finals);
+            verifyDiscussionInbox(tx,relay,row,outgoing,deliberation);
         }
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
 
@@ -1520,7 +1522,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for
      * network transport here; device selection and authentication are separate tests. No model call. */
     private void verifyDiscussionInbox(TransactionTemplate tx,ChatDeliberationOutboxService outbox,
-            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,ChatDispatchAuthorityService.Binding outgoing) throws Exception {
+            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,ChatDispatchAuthorityService.Binding outgoing,ChatDeliberationService deliberation) throws Exception {
         var codec=new ObjectMapper();var builder=mock(ChatDeliberationOutboxRelay.class,org.mockito.Mockito.CALLS_REAL_METHODS);
         Map<String,Object> wire=ReflectionTestUtils.invokeMethod(builder,"hostedWire",row,codec.readValue(row.getPayloadJson(),Map.class));
         var frame=cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null);
@@ -1541,6 +1543,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assert.throws(()=>validateActionOutcome({...outcome,action:{...action,actionId:'not-advertised'}},facts),/ACTION_NOT_ADVERTISED/);
             const inbox=new PersistentChatInbox(opts);inbox.initialize();const first=await inbox.accept(m);assert.equal(first.accepted,true);
             const restored=new PersistentChatInbox(opts);assert.equal(restored.initialize().pending,1);assert.equal((await restored.accept(m)).duplicate,true);
+            // Fixture at the model boundary, not at the action-final or dispatch boundary.
+            const {runFastChat}=await import('./agent-client.mjs');const item=restored.claim(first.key);assert.ok(item);
+            const frames=[];let turns=0;const result=await runFastChat({...profile,chatEngine:'app-server',chatSandbox:'read-only',chatToolPolicy:'read-only-constrained'},m,{
+              chatWorkdir:process.env.TMPDIR,adapter:{readback:{initialize:{},schema:{measured:true}},
+                startOrResumeThread:async()=>({threadId:'quote-thread'}),runTurn:async({threadId,policy,onAccepted})=>{
+                  assert.equal(threadId,'quote-thread');const actionSchema=policy.outputSchema.properties.action.anyOf;
+                  assert.ok(actionSchema.some(v=>v.properties?.actionId?.enum?.includes(descriptor.actionId)));
+                  turns++;onAccepted({threadId,turnId:'quote-turn'});return {threadId,turnId:'quote-turn',content:JSON.stringify(outcome),finishReason:'completed'};}},
+              controls:{markRunning:()=>{},isCancelled:()=>false,markFinalPrepared:v=>restored.markFinalPrepared(item,v),markFinalPublication:v=>restored.markFinalPublication(item,v)},
+              sendProtocolFn:(type,payload)=>{frames.push(payload);return true;}});
+            assert.equal(turns,1);assert.equal(result.serverPersistence,'unconfirmed');assert.equal(frames.length,1);
+            fs.writeFileSync(process.env.TMPDIR+'/final.json',JSON.stringify(frames[0]));
             const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId}));
             """);pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString()));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(codec.writeValueAsBytes(frame));}assertTrue(proc.waitFor(20,TimeUnit.SECONDS));assertEquals(0,proc.exitValue());}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
@@ -1548,6 +1562,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(outgoing.turn().getContextDigest(),receipt.path("context").asText());assertEquals(row.getTurnId(),receipt.path("turn").asText());assertEquals(row.getDispatchId(),ack.path("dispatchId").asText());assertEquals(row.getEventId(),ack.path("messageId").asText());
             for(int i=0;i<2;i++)assertTrue(tx.execute(st->outbox.acknowledgeHostedDispatch(TENANT,outgoing.executorOwner(),CLIENT,ack.path("agentId").asText(),ack.path("dispatchId").asText(),ack.path("messageId").asText(),System.currentTimeMillis())).booleanValue());
             assertEquals("SENT",independent.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?",String.class,row.getEventId()));
+            var output=temp.resolve("final.json");assertTrue(Files.size(output)<16384);var reply=codec.readTree(Files.readAllBytes(output));
+            var sender=new ServerResolvedAgentSender("agent","Quoted agent",outgoing.executorOwner(),CLIENT,outgoing.turn().getTargetAgentId());
+            java.util.function.Supplier<ChatDeliberationService.FinalResult> save=()->tx.execute(st->deliberation.persistFinal(TENANT,OWNER,CLIENT,reply.path("conversationId").asText(),reply.path("conversationGeneration").asLong(),reply.path("targetAgentId").asText(),reply.path("requestId").asText(),reply.path("turnId").asText(),reply.path("dispatchId").asText(),reply.path("contextSnapshotId").asText(),reply.path("contextHash").asText(),reply.path("content").asText(),reply.path("outcomeContractVersion").asInt(),reply.path("interactionOutcome").toString(),null,codec.convertValue(reply.path("contextReceipt"),Map.class),sender));
+            var saved=save.get();assertEquals(ChatDeliberationService.FinalStatus.PERSISTED,saved.status());
+            var repeated=save.get();assertEquals(ChatDeliberationService.FinalStatus.DUPLICATE,repeated.status());assertEquals(saved.messageId(),repeated.messageId());
+            assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_dispatch_outbox WHERE turn_id=? AND event_type='ACTION_REQUESTED' AND status='READY'",Integer.class,row.getTurnId()));
+            assertEquals(0,count("chat_step_execution_link")); // Event committed, consumer not yet run.
         }finally{org.springframework.util.FileSystemUtils.deleteRecursively(temp);}
     }
 
