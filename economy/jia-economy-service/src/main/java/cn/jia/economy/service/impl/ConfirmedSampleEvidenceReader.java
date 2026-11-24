@@ -12,7 +12,8 @@ import static cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.*;
 @Service
 public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn.jia.economy.usage.BenchmarkSampleEvidence {
     private final ConfirmedSampleMapper db;
-    public ConfirmedSampleEvidenceReader(ConfirmedSampleMapper db){this.db=db;}
+    private final tools.jackson.databind.ObjectMapper json;
+    public ConfirmedSampleEvidenceReader(ConfirmedSampleMapper db,tools.jackson.databind.ObjectMapper json){this.db=db;this.json=json;}
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Assessment inspect(Task task,String id){
         var h=db.confirmed(task,id);return h==null?null:assess(task,id,h);
@@ -51,6 +52,19 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
     @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measureReviewed(Task task,String caseId,String sha,String fact,String review,Decoder decoder){
         return measureHeader(task,sha,decoder,db.reviewedBenchmark(task,caseId,sha,fact,review));
+    }
+    @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public cn.jia.economy.task.TaskCalibrationObservations.Frozen freezeReviewed(Task task,cn.jia.economy.task.TaskHistoryCatalog.Group group,
+            cn.jia.economy.task.TaskHistoryCatalog.Revision selected,Pin pin,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split split,Decoder decoder){
+        var h=db.reviewedBenchmark(task,pin.caseId(),pin.manifestSha(),pin.fact(),pin.reviewSha());
+        if(h==null||!pin.manifestSha().equals(selected.sampleId())||h.evidenceRevision()!=selected.revision())throw new cn.jia.economy.task.TaskCalibrationObservations.NotEligible();
+        var measured=measureHeader(task,pin.manifestSha(),decoder,h);
+        if(measured.assessment().verdict()!=MATCHED)throw new cn.jia.economy.task.TaskCalibrationObservations.NotEligible();
+        var originals=db.benchmarkOriginals(task,pin.caseId(),pin.manifestSha(),pin.reviewSha());
+        var entry=new cn.jia.economy.pricing.TaskEstimateEvaluation.Case(task.taskId(),family,originals.featuresAt(),db.observedByMillis(),split);
+        var snapshot=new FrozenBenchmarkObservation("benchmark-observation-v1",entry,selected,originals.manifest(),originals.review(),
+                measured.operations().stream().map(op->ProjectedTaskOperation.from(op,json)).toList());
+        snapshot.sample(json,task,group,selected,pin,family,split);return snapshot.seal(json);
     }
     private Measured measureHeader(Task task,String id,Decoder decoder,ConfirmedSampleMapper.Header h){
         if(h==null)return null;

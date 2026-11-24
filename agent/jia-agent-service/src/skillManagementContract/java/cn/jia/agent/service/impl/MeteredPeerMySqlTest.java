@@ -195,7 +195,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         return new Scenario(task,billing,reference,jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class));
     }
     void verifyAcceptedSample(Scenario s,SqlSessionTemplate sql,DataSourceTransactionManager manager,boolean retry){
-        var mapper=sql.getMapper(ConfirmedSampleMapper.class);var reader=transactional(new ConfirmedSampleEvidenceReader(mapper),ConfirmedSampleEvidence.class,manager);var decoder=new NativeSampleResponseDecoder();
+        var mapper=sql.getMapper(ConfirmedSampleMapper.class);var reader=transactional(new ConfirmedSampleEvidenceReader(mapper,new tools.jackson.databind.ObjectMapper()),ConfirmedSampleEvidence.class,manager);var decoder=new NativeSampleResponseDecoder();
         assertEquals(ConfirmedSampleEvidence.Verdict.ACTIVE,reader.inspect(s.task,s.sample).verdict());
         tx.executeWithoutResult(st->{lockTask();executions.closeTaskMembers("0","client","owner","task",cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,"decision",11,777);s.billing.capture(s.task);});
         var terminal=executions.pending("0","client",executions.pendingPage("0","client","").getFirst().fact());

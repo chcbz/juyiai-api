@@ -260,7 +260,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var fixed=new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT);
         calibrationCatalog=proxy(new cn.jia.economy.service.impl.TaskCalibrationCatalogService(sql.getMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationCatalog.class);
         historyCatalog=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskHistoryCatalog.class);
-        sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
+        sampleEvidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.usage.ConfirmedSampleEvidence.class);
         sampleProjection=proxy(new cn.jia.economy.service.impl.ConfirmedSampleProjectionService(sampleEvidence,sql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper(),manager),cn.jia.economy.usage.ConfirmedSampleProjection.class);
         var schedules=new cn.jia.task.scheduling.ScheduledWorkStore(sql.getMapper(cn.jia.task.mapper.ScheduledWorkMapper.class),fixed,manager);
         var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
@@ -535,7 +535,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals("CLOSED",step.get());assertEquals("CLOSED",step.get());assertEquals(65,count("economy_task_cost_sample_member"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE sample_id=? AND lifecycle_state='ACCEPTED' AND sample_state='WAITING_EVIDENCE' AND evidence_revision=2",Integer.class,sha));
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-review-v1.sql")).execute(jdbc.getDataSource());
-        var evidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.BenchmarkSampleEvidence.class);
+        var evidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),json),cn.jia.economy.usage.BenchmarkSampleEvidence.class);
         var decoder=textFixture(r->new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture",r.captureId()),"MODEL_RESPONSE","INFERENCE",r.evidenceSha(),new MeasuredTaskRepricing.Tokens("fixture",Map.of(ModelTokenPrice.Category.INPUT,1L))));
         String digest=jdbc.queryForObject("SELECT set_digest FROM economy_task_membership_receipt WHERE fact_id=?",String.class,fact);
         java.util.function.Function<String,String> registerReview=membership->{var review=new cn.jia.economy.usage.BenchmarkSampleEvidence.Review("benchmark-review-v1","case",sha,fact,membership,"ACCEPTED","fixture reviewer","fixture reviewed output");
@@ -547,9 +547,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("INSERT INTO economy_usage_capture_dispatch_group SELECT id,1,'NATIVE_DISPATCH_GROUP_V1',REPEAT('c',64),REPEAT('f',64),REPEAT('d',64),'cp',REPEAT('9',64) FROM economy_usage_capture");
         jdbc.update("INSERT INTO economy_usage_capture_record(capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,binding_sha256,evidence_json,is_associated_head,association_state) SELECT id,REPEAT('1',64),REPEAT('2',64),'1','RESPONSE',REPEAT('3',64),REPEAT('4',64),'{}',1,'APPLIED' FROM economy_usage_capture");
         var match=measured.apply(key);assertEquals("MATCHED",match.assessment().verdict().name());assertEquals(65,match.operations().size());
+        var pin=new cn.jia.economy.usage.BenchmarkSampleEvidence.Pin("case",sha,fact,key);var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(exec,f);
+        var selected=new cn.jia.economy.task.TaskHistoryCatalog.Revision(sha,match.assessment().evidenceRevision());var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
+        java.util.function.Supplier<cn.jia.economy.task.TaskCalibrationObservations.Frozen> freeze=()->evidence.freezeReviewed(bench,group,selected,pin,"bench-family",held,decoder);
+        var frozen=freeze.get();var body=json.readTree(frozen.json());assertEquals(65,body.path("operations").size());assertEquals(raw,body.path("manifest").asText());
+        assertEquals(jdbc.queryForObject("SELECT review_json FROM economy_task_benchmark_review WHERE review_sha=?",String.class,key),body.path("review").asText());
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->evidence.freezeReviewed(bench,group,new cn.jia.economy.task.TaskHistoryCatalog.Revision(sha,selected.revision()+1),pin,"bench-family",held,decoder));
         assertNull(sampleEvidence.measure(bench,sha,decoder)); // cannot masquerade as confirmed history
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");var stale=measured.apply(key);
-        assertEquals("USAGE_INCOMPLETE",stale.assessment().verdict().name());assertTrue(stale.operations().isEmpty());
+        assertEquals("USAGE_INCOMPLETE",stale.assessment().verdict().name());assertTrue(stale.operations().isEmpty());assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,freeze::get);
         jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=TRUE WHERE review_sha=?",key);assertNull(measured.apply(key));
         jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,step::get);assertThrows(denied,()->lock.apply(enroll));
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));

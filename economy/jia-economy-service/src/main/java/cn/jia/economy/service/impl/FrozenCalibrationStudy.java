@@ -21,13 +21,14 @@ public final class FrozenCalibrationStudy {
     private final ObjectMapper json;
     private final TaskCalibrationObservations observations;
     public FrozenCalibrationStudy(ObjectMapper json,TaskCalibrationObservations observations){this.json=json;this.observations=observations;}
-    public record Assignment(String task,String family,Split split){}
-    public record Member(String task,TaskHistoryCatalog.Revision source,String observationSha256){}
+    public record Assignment(String task,String family,Split split,String benchmarkCase){public Assignment(String task,String family,Split split){this(task,family,split,null);}}
+    public record Member(String task,TaskHistoryCatalog.Revision source,String observationSha256,cn.jia.economy.usage.BenchmarkSampleEvidence.Pin benchmark){
+        public Member(String task,TaskHistoryCatalog.Revision source,String observationSha256){this(task,source,observationSha256,null);}}
     public record Roster(TaskEstimateCalibration.PrivateGroup group,List<Assignment> assignments){}
     public record Dataset(TaskEstimateCalibration.PrivateGroup group,List<Member> members){}
     public record Policy(String evaluatorVersion,List<TaskEstimateCalibration.Trial> trials,TaskEstimateCalibration.Gate gate,long seed){}
     // Changing scoring, temporal split, trial selection, bootstrap or wire semantics requires a new study version.
-    public static final String VERSION="private-confirmed-study-v1";
+    public static final String VERSION="private-scoped-study-v2";
     public record Artifact(String sha256,String json){@Override public String toString(){return "Artifact[private]";}}
     public record Pins(String split,String dataset,String reference,String policy){}
     public record Result(TaskCalibrationCatalog.Receipt receipt,TaskEstimateCalibration.EvaluationReport report){}
@@ -65,7 +66,10 @@ public final class FrozenCalibrationStudy {
         for(var a:split.assignments()){
             var m=byTask.remove(a.task());if(m==null)throw new IllegalArgumentException("Missing or repeated assigned task");
             String bytes=objects.apply(m.observationSha256());if(bytes==null)throw new IllegalArgumentException("Missing assigned observation");
-            samples.add(observations.replay(new Task(scope,owner.ownerJiacn(),a.task()),group,m.source(),a.family(),a.split(),m.observationSha256(),bytes));
+            var task=new Task(scope,owner.ownerJiacn(),a.task());
+            if(!Objects.equals(a.benchmarkCase(),m.benchmark()==null?null:m.benchmark().caseId()))throw new IllegalArgumentException("Unplanned study source");
+            samples.add(m.benchmark()==null?observations.replay(task,group,m.source(),a.family(),a.split(),m.observationSha256(),bytes):
+                    FrozenBenchmarkObservation.replay(json,task,group,m.source(),m.benchmark(),a.family(),a.split(),m.observationSha256(),bytes));
         }if(!byTask.isEmpty())throw new IllegalArgumentException("Unassigned dataset member");
         var report=TaskEstimateCalibration.evaluateWithIntervals(owner,book,samples,policy.trials(),policy.gate(),policy.seed());
         var receipt=new TaskCalibrationCatalog.Receipt(TaskNeighborSearch.VERSION,pins.dataset(),pins.split(),pins.reference(),pins.policy(),policy.gate(),report.points());
