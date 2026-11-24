@@ -691,6 +691,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.measuredBatchQuoteLoad",matches="true")
     void denseHistorySharedPhaseCosts(){profileHistoryPages(true,1025,true);}
     private void profileHistoryPages(boolean shared,int n){profileHistoryPages(shared,n,false);}
+    private static String denseDigest(String role,int i){
+        try{return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(("synthetic-dense-v2:"+role+":"+i).getBytes(StandardCharsets.UTF_8)));}catch(java.security.NoSuchAlgorithmException e){throw new AssertionError(e);}
+    }
     private void profileHistoryPages(boolean shared,int n,boolean dense){
         // Synthetic READY rows for deterministic read cost only, never accuracy/quality evidence.
         var f=measuredOffer();var prep=f.preparation();var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(prep.group(),prep.features());
@@ -701,11 +704,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var task=new TaskBillingService.Task(reader.scope(),OWNER,"history-"+i);
                 var original=prep.features();var vector=new java.util.ArrayList<Float>();
                 if(dense){var random=new java.util.Random(i+42L);vector.add(1f);for(int j=1;j<1024;j++)vector.add((random.nextFloat()-0.5f)*0.01f);}
-                var source=dense?new TaskEstimateFeatures(original.featureVersion(),original.templateVersion(),original.requirementSha256(),original.inputSnapshotSha256(),original.textSha256(),original.embeddingIdentity(),vector,original.files(),original.requestedDeliverables()):original;
+                var files=!dense || i%4==0?original.files():List.of(new TaskEstimateFeatures.File(i%2==0?"reference":"input",i%3==0?"text/plain":"image/png",1024L*(i+1),1+i%7));
+                Integer deliverables=dense && i%3!=0?Integer.valueOf(1+i%5):original.requestedDeliverables();
+                var source=dense?new TaskEstimateFeatures(original.featureVersion(),original.templateVersion(),denseDigest("requirement",i),denseDigest("inputs",i),denseDigest("text",i),original.embeddingIdentity(),vector,files,deliverables):original;
                 var storedPrep=dense?new TaskBillingService.MeasuredPreparation(source,prep.group(),prep.estimatorVersion(),prep.calibrationVersion(),prep.qualityStatus(),prep.estimate()):prep;
-                var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"batch-"+task.taskId()),storedPrep)).toList();
+                var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,source.requirementSha256(),source.inputSnapshotSha256(),a,"batch-"+task.taskId()),storedPrep)).toList();
                 var stored=writer.storeMeasuredBatch(task,PAYER,writes);
-                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,?,?,?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),dense?null:1,dense?"WAITING_EVIDENCE":"READY",group.digest());
+                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,?,?,?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),source.requirementSha256(),source.inputSnapshotSha256(),source.digest(),dense?null:1,dense?"WAITING_EVIDENCE":"READY",group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
         if(dense){
@@ -756,16 +761,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var mapper=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         var json=new ObjectMapper();String groupSha=group.digest();
         for(int run=0;run<4;run++){
-            long fetch=0,decode=0,verify=0,chars=0;int pos=0,pages=0;String after="";
+            long fetch=0,decode=0,verify=0,chars=0;int pos=0,pages=0,withFiles=0,knownDeliverables=0;String after="";
             while(true){long t=System.nanoTime();var page=mapper.history(reader,groupSha,after,64);fetch+=System.nanoTime()-t;pages++;
                 if(page.isEmpty())break;
                 for(var row:page){assertEquals(ids.get(pos++),row.id());chars+=row.featuresJson().length();
                     t=System.nanoTime();var feature=json.readValue(row.featuresJson(),TaskEstimateFeatures.class);decode+=System.nanoTime()-t;
                     t=System.nanoTime();String sha=feature.digest();var inferred=cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),feature);verify+=System.nanoTime()-t;
                     assertEquals(row.featureSha(),sha);assertEquals(group,inferred);
+                    int index=pos-1;assertEquals(denseDigest("requirement",index),feature.requirementSha256());assertEquals(denseDigest("inputs",index),feature.inputSnapshotSha256());assertEquals(denseDigest("text",index),feature.textSha256());
+                    if(!feature.files().isEmpty())withFiles++;if(feature.requestedDeliverables()!=null)knownDeliverables++;
                 }after=page.getLast().id();
             }
             assertEquals(ids.size(),pos);assertEquals((ids.size()+63)/64+1,pages);
+            assertEquals(pos-(pos+3)/4,withFiles);assertEquals(pos-(pos+2)/3,knownDeliverables);
+            if(run==0)System.out.printf("DENSE_METADATA_V2 shared=%s rows=%d withFiles=%d knownDeliverables=%d%n",shared,pos,withFiles,knownDeliverables);
             System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_READ shared=%s run=%d rows=%d pages=%d chars=%d mapperFetchMs=%.3f jsonDecodeMs=%.3f featureVerifyMs=%.3f%n",shared,run,pos,pages,chars,fetch/1e6,decode/1e6,verify/1e6);
         }
     }
