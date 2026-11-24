@@ -30,6 +30,9 @@ public interface TaskHistoryCatalog {
     }
     record Revision(String sampleId,long revision){}
     record Entry(Revision source,String sourceTaskId,TaskEstimateFeatures features){}
+    List<Entry> candidatePage(TaskBillingService.Task query,Group group,TaskCalibrationCatalog.Pin pin,String after);
+    List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> candidateQuantities(TaskBillingService.Task query,Group group,TaskCalibrationCatalog.Pin pin,Revision selected);
+    boolean lockCandidate(TaskBillingService.Task query,Group group,TaskCalibrationCatalog.Pin pin,Revision selected);
     List<Entry> page(TaskBillingService.Task query,Group group,String afterSampleId);
     /** Read only the selected immutable projection while still current. Null = revision became unavailable, not zero cost. */
     List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> quantities(TaskBillingService.Task query,Group group,Revision selected);

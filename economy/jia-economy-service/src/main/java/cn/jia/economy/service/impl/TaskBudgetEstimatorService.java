@@ -28,7 +28,7 @@ public class TaskBudgetEstimatorService implements TaskBudgetEstimator {
         if(terms==null||terms.routes().isEmpty())return new Unavailable(BILLING_ROUTE_MISSING);
         var group=TaskHistoryCatalog.Group.of(terms.execution(),features);var active=calibration.resolve(task,group);
         if(active==null)return new Unavailable(NO_BASELINE);
-        try{var estimate=engine.estimate(task,terms.execution(),features,active.parameters(),terms.routes());
+        try{var estimate=engine.estimate(task,terms.execution(),features,active.pin(),active.parameters(),terms.routes());
             return new Available(new TaskBillingService.MeasuredPreparation(features,terms.execution(),TaskNeighborSearch.VERSION,active.pin().receiptSha256(),"CALIBRATED",estimate),active.pin());
         }catch(MeasuredHistoryEstimateEngine.StaleSample changed){throw new Stale();}
         catch(TaskPricingService.Unavailable missing){return switch(missing.reason()){
@@ -52,7 +52,7 @@ public class TaskBudgetEstimatorService implements TaskBudgetEstimator {
             for(var line:p.estimate().contributions()){var item=new Selected(group,new TaskHistoryCatalog.Revision(line.sampleId(),Long.parseLong(line.revision())));
                 var old=rows.putIfAbsent(line.sampleId(),item);if(old!=null&&!old.equals(item))throw new Stale();}}
         for(var pin:heads.values())if(!calibration.lockCurrent(task,pin))throw new Stale();
-        for(var sel:rows.values())if(!history.lockCurrent(task,sel.group(),sel.revision()))throw new Stale();
+        for(var sel:rows.values())if(!history.lockCandidate(task,sel.group(),heads.get(sel.group().digest()),sel.revision()))throw new Stale();
     }
     private record Selected(TaskHistoryCatalog.Group group,TaskHistoryCatalog.Revision revision){}
 }

@@ -107,3 +107,5 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 基准评价另需维护迁移 `economy-task-benchmark-review-v1.sql`（closure 表之后）。专用评审身份按备案原文的完成标准核对实际交付，保留评审者和交付证据，在不可覆写的评审正文绑定清单/终态/成员摘要后登记；业务连接只读，不把成员关闭当评审，不为训练自动写 ACCEPTED。撤回旧评审仅设置 withdrawn，原正文保留。摘要和证据引用不替代真实评审授权。
 
 受控基准在线用途：显式安装 `economy-task-benchmark-use-v1.sql`，不灌数据。用途审批身份仅 INSERT grant/stop，绑定当前精确校准代次、私有作用域和观察摘要；不授 UPDATE/DELETE，撤销永久覆盖该代许可。重新批准必须换校准代次。物化身份仅按 `economy-task-benchmark-materialize.sql` 执行参数化写入，三个参数依次为原始训练清单、原始观察 UTF-8 文本与代次；必须影响恰好一行。重复主键不覆盖，不用 REPLACE。应用连接对三表只读。物化不改变资格、计价或样本状态；消费者仍须锁定当前校准头、用途、备案、评审和样本实测修订，不能把物化表直接作可报价集合。
+
+在线读取需先安装 `economy-task-benchmark-use-fence-v1.sql`；触发器让撤回 INSERT 在写 stop 前锁定同一条用途授权，固定报价先共享锁授权行再做当前读，不依赖缺行间隙锁。业务开关 `jia.economy.measured-benchmark-use` 默认 false；显式开启前验证触发器、只增权限及已授权作用域。不开启不查询新增表。开关不是费用或在线用途许可。

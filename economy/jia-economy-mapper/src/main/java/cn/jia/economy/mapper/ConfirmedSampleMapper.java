@@ -55,6 +55,28 @@ public interface ConfirmedSampleMapper {
     String historyQuantities(@Param("t") Task query,@Param("group") String group,@Param("id") String id,@Param("revision") long revision);
     @Select("SELECT s.projection_revision FROM economy_task_cost_sample s WHERE "+HISTORY+" AND s.sample_id=#{id} AND s.projection_revision=#{revision} FOR SHARE")
     Long lockHistory(@Param("t") Task query,@Param("group") String group,@Param("id") String id,@Param("revision") long revision);
+    String GRANT_SCOPE="g.tenant_id=#{t.scope.tenantId} AND g.client_id=#{t.scope.clientId} AND g.owner_jiacn=#{t.ownerJiacn} AND g.group_sha=#{p.group} AND g.generation=#{p.generation} AND g.receipt_sha=#{p.receiptSha256} ";
+    String BENCHMARK_USE="""
+        FROM economy_task_benchmark_use_grant g JOIN economy_task_benchmark_use_projection p
+          USING(tenant_id,client_id,owner_jiacn,group_sha,generation,sample_id)
+        JOIN economy_task_cost_sample s ON s.sample_id=g.sample_id AND s.tenant_id=g.tenant_id AND s.client_id=g.client_id AND s.owner_jiacn=g.owner_jiacn
+          AND s.history_group_sha256=g.group_sha AND s.evidence_revision=p.evidence_revision AND s.lifecycle_state='ACCEPTED' AND s.quote_id IS NULL
+        JOIN economy_task_benchmark_case b ON b.tenant_id=s.tenant_id AND b.client_id=s.client_id AND b.owner_jiacn=s.owner_jiacn AND b.task_id=s.task_id
+          AND b.manifest_sha=s.sample_id AND b.benchmark_case_id=s.benchmark_case_id AND NOT b.retired
+        JOIN economy_task_benchmark_review v ON v.sample_id=s.sample_id AND v.review_sha=p.review_sha AND NOT v.withdrawn
+        JOIN economy_task_benchmark_closure x ON x.sample_id=s.sample_id AND x.terminal_fact_id=p.terminal_fact AND x.completed
+        LEFT JOIN economy_task_benchmark_use_stop z ON z.tenant_id=g.tenant_id AND z.client_id=g.client_id AND z.owner_jiacn=g.owner_jiacn
+          AND z.group_sha=g.group_sha AND z.generation=g.generation AND z.sample_id=g.sample_id
+        WHERE z.sample_id IS NULL AND s.task_id<>#{t.taskId} AND NOT EXISTS(SELECT 1 FROM economy_task_charge ch WHERE ch.tenant_id=s.tenant_id
+          AND ch.client_id=s.client_id AND ch.owner_jiacn=s.owner_jiacn AND ch.task_id=s.task_id) AND
+        """+GRANT_SCOPE;
+    @Select("SELECT g.sample_id,p.evidence_revision,s.task_id,s.initial_feature_sha256,JSON_EXTRACT(b.manifest_json,'$.features') "+BENCHMARK_USE+" AND g.sample_id>#{after} ORDER BY g.sample_id LIMIT #{limit}")
+    List<HistoryRow> benchmarkPage(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("after") String after,@Param("limit") int limit);
+    String EXACT=BENCHMARK_USE+" AND g.sample_id=#{id} AND p.evidence_revision=#{revision} ";
+    @Select("SELECT p.operations "+EXACT) String benchmarkQuantities(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("id") String id,@Param("revision") long revision);
+    @Select("SELECT g.generation FROM economy_task_benchmark_use_grant g WHERE "+GRANT_SCOPE+" AND g.sample_id=#{id} FOR SHARE")
+    Long lockGrant(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("id") String id);
+    @Select("SELECT p.evidence_revision "+EXACT+" FOR SHARE") Long lockBenchmark(@Param("t") Task t,@Param("p") cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,@Param("id") String id,@Param("revision") long revision);
     record Header(String lifecycle,long evidenceRevision,String fact,String outcome,Boolean verified,Long memberCount,
                   String agent,String groupVersion,String executionConfig,String localRoute,String referenceRoute,String tools,String policy) {}
     @Select("""

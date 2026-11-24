@@ -558,15 +558,45 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var train=evidence.freezeReviewed(bench,group,selected,pin,"bench-family",cn.jia.economy.pricing.TaskEstimateEvaluation.Split.TRAIN,decoder);
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,null);
         var roster=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.TrainingBenchmarks(group.privateCalibrationGroup(bench),new cn.jia.economy.service.impl.FrozenCalibrationStudy.Pins("s","d","r","p"),List.of(new cn.jia.economy.service.impl.FrozenCalibrationStudy.Member(bench.taskId(),selected,train.sha256(),pin))));
-        String receipt=json.writeValueAsString(Map.of("trainingBenchmarksSha256",roster.sha256())); // commitment fixture only, not qualified for pricing
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-use-fence-v1.sql")).execute(jdbc.getDataSource());
+        var query=BILLING_TASK;var candidates=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),json,true),cn.jia.economy.task.TaskHistoryCatalog.class);
+        var searchParams=new cn.jia.economy.pricing.TaskNeighborSearch.Parameters(cn.jia.economy.pricing.TaskNeighborSearch.trainingScales(List.of(f)),1,1,1,1,1,0.1,0.2,1,1,1,1);
+        var gate=new cn.jia.economy.pricing.TaskEstimateCalibration.Gate(1,BigDecimal.ONE);
+        var ratio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(BigDecimal.ZERO,BigDecimal.ONE);
+        var scores=new cn.jia.economy.pricing.TaskEstimateEvaluation.Scores(1,1,0,1,0,BigDecimal.ZERO,ratio,ratio);
+        var fitted=new cn.jia.economy.pricing.TaskEstimateCalibration.Fit("fixture",searchParams,scores);
+        var report=new cn.jia.economy.pricing.TaskEstimateCalibration.Report(group.privateCalibrationGroup(query),group.execution().routeVersion(),fitted,scores,true);
+        var structured=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(cn.jia.economy.pricing.TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),"3".repeat(64),"4".repeat(64),roster.sha256(),gate,report);
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(candidates,(priceScope,v,routes,kinds)->{
+            assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
+            var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
+            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        String receipt=json.writeValueAsString(structured); // synthetic passing calibration, not evidence of production accuracy
+        var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,candidates,engine);
+        var unavailable=new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE);
         jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,OWNER,group.digest(),receipt,receipt);
         jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,group.digest(),receipt);
         assertEquals(0,jdbc.update(publish,roster.json(),train.json(),1));
+        assertEquals(unavailable,estimator.prepare(query,f,terms));
         jdbc.update("INSERT INTO economy_task_benchmark_use_grant VALUES(?,?,?,?,1,SHA2(?,256),?,?,?)",TENANT,CLIENT,OWNER,group.digest(),receipt,sha,train.sha256(),"test-purpose");
         assertEquals(0,jdbc.update(publish,roster.json(),frozen.json(),1));assertEquals(0,jdbc.update(publish,roster.json()+" ",train.json(),1));
         assertEquals(0,jdbc.update(publish,roster.json(),train.json(),2));assertEquals(1,jdbc.update(publish,roster.json(),train.json(),1));
         assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operations) FROM economy_task_benchmark_use_projection",Integer.class));
-        jdbc.update("INSERT INTO economy_task_benchmark_use_stop VALUES(?,?,?,?,1,?)",TENANT,CLIENT,OWNER,group.digest(),sha);
+        var offer=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,f,terms));assertEquals(65,offer.preparation().estimate().wen());
+        assertEquals(sha,offer.preparation().estimate().contributions().getFirst().sampleId());assertEquals(unavailable,estimator.prepare(bench,f,terms));
+        assertEquals(unavailable,estimator.prepare(new TaskBillingService.Task(query.scope(),"foreign",query.taskId()),f,terms));
+        locked(()->{estimator.lockSelected(query,List.of(offer));return null;});
+        try(var writer=independent.getDataSource().getConnection();var worker=Executors.newSingleThreadExecutor()){
+            writer.setAutoCommit(false);try{
+                try(var ps=writer.prepareStatement("INSERT INTO economy_task_benchmark_use_stop VALUES(?,?,?,?,1,?)")){
+                    int n=0;for(var value:List.of(TENANT,CLIENT,OWNER,group.digest(),sha))ps.setString(++n,value);assertEquals(1,ps.executeUpdate());}
+                var pending=worker.submit(()->assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->locked(()->{estimator.lockSelected(query,List.of(offer));return null;})));
+                boolean waited=false;long start=System.nanoTime();while(!pending.isDone()&&System.nanoTime()-start<TimeUnit.SECONDS.toNanos(5)){
+                    if(admin.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME='economy_task_benchmark_use_grant'",Integer.class,database)>0){waited=true;break;}Thread.sleep(5);}
+                assertTrue(waited,"quote must wait for the transaction revoking its grant");writer.commit();pending.get(5,TimeUnit.SECONDS);
+            }finally{writer.rollback();}}
+        assertEquals(unavailable,estimator.prepare(query,f,terms));
         assertEquals(0,jdbc.update(publish,roster.json(),train.json(),1));
         assertNull(sampleEvidence.measure(bench,sha,decoder)); // cannot masquerade as confirmed history
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");var stale=measured.apply(key);
@@ -684,7 +714,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
             return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
-        var prediction=engine.estimate(query,group.execution(),needle,searchParams,Map.of());assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
+        var prediction=engine.estimate(query,group.execution(),needle,calibrationCatalog.resolve(query,group).pin(),searchParams,Map.of());assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
         var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine);
         var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING),estimator.prepare(query,needle,null));

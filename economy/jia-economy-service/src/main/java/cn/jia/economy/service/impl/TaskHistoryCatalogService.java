@@ -14,15 +14,43 @@ import tools.jackson.databind.ObjectMapper;
 public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.economy.task.TaskCalibrationObservations {
     private final ConfirmedSampleMapper db;
     private final ObjectMapper json;
-    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json){this.db=db;this.json=json;}
+    private final boolean benchmarks;
+    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json){this(db,json,false);}
+    @org.springframework.beans.factory.annotation.Autowired
+    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.measured-benchmark-use:false}") boolean benchmarks){this.db=db;this.json=json;this.benchmarks=benchmarks;}
+    @Transactional(propagation=Propagation.NEVER)
+    public List<Entry> candidatePage(Task query,Group group,cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,String after){
+        if(!benchmarks)return page(query,group,after);
+        if(!group.digest().equals(pin.group()))throw new IllegalArgumentException("Wrong benchmark scope");
+        var h=db.history(query,pin.group(),after,PAGE);var b=db.benchmarkPage(query,pin,after,PAGE);
+        // Both sources share the sample table's global primary key. Merge bounded keysets before vector decoding.
+        var result=new java.util.ArrayList<Entry>();int i=0,j=0;
+        while(result.size()<PAGE && (i<h.size() || j<b.size())){
+            boolean takeHistory=j==b.size() || (i<h.size() && h.get(i).id().compareTo(b.get(j).id())<0);
+            result.add(entry(group,takeHistory?h.get(i++):b.get(j++)));
+        }return result;
+    }
+    @Transactional(propagation=Propagation.NEVER)
+    public List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> candidateQuantities(Task q,Group g,cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,Revision r){
+        var facts=quantities(q,g,r);if(facts!=null||!benchmarks)return facts;
+        if(!g.digest().equals(pin.group()))throw new IllegalArgumentException("Wrong benchmark scope");
+        var raw=db.benchmarkQuantities(q,pin,r.sampleId(),r.revision());return raw==null?null:operations(raw);
+    }
+    @Transactional(propagation=Propagation.MANDATORY)
+    public boolean lockCandidate(Task q,Group g,cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,Revision r){
+        if(lockCurrent(q,g,r))return true;
+        return benchmarks && g.digest().equals(pin.group()) && db.lockGrant(q,pin,r.sampleId())!=null && db.lockBenchmark(q,pin,r.sampleId(),r.revision())!=null;
+    }
     @Transactional(propagation=Propagation.NEVER)
     public List<Entry> page(Task query,Group group,String after){
-        return db.history(query,group.digest(),after,PAGE).stream().map(r->{
+        return db.history(query,group.digest(),after,PAGE).stream().map(r->entry(group,r)).toList();
+    }
+    private Entry entry(Group group,ConfirmedSampleMapper.HistoryRow r){
             var features=json.readValue(r.featuresJson(),TaskEstimateFeatures.class);
             if(!features.digest().equals(r.featureSha())||!Group.of(group.execution(),features).equals(group))
                 throw new IllegalStateException("History feature commitment mismatch");
             return new Entry(new Revision(r.id(),r.revision()),r.taskId(),features);
-        }).toList();
     }
     @Transactional(propagation=Propagation.NEVER)
     public List<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> quantities(Task query,Group group,Revision selected){
