@@ -1138,6 +1138,7 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    systemProperty 'cyf.denseQuoteConcurrency', providers.gradleProperty('denseQuoteConcurrency').getOrElse('false')
     systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
     if (providers.gradleProperty('ownedPickupCodex').isPresent()) {
         systemProperty 'cyf.ownedPickupCodex', providers.gradleProperty('ownedPickupCodex').get()

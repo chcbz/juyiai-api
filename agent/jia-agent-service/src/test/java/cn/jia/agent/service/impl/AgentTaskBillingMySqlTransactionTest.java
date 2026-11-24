@@ -1859,6 +1859,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
         if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile,expectedWen);
+        if(Boolean.getBoolean("cyf.denseQuoteConcurrency") && id.startsWith("dense-http-")) {
+            // Keep the serial baseline above. This adds distinct intentions on the same task/root and hot feature.
+            var multi=java.util.stream.IntStream.range(0,108).mapToObj(i->String.format(java.util.Locale.ROOT,"q-target-%03d",i)).toList();
+            for(var ids:List.of(List.of(agent),multi))for(int lanes:List.of(5,10))
+                concurrentDenseQuotes(id,token,ids,lanes,calls,profile,expectedWen);
+        }
         if(window!=null){String export=Files.readString(window.directory.resolve("roster.json"))+Files.readString(window.directory.resolve("capture.json"));
             for(String raw:privateKeys)assertFalse(export.contains(raw),"transport artifacts retain only key digests");}
         var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest(privateKeys.get(0)));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
@@ -2855,6 +2861,38 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
         profileFrozenPayload(task,first.path("quotes").get(0).path("recommendationId").asText(),107,1);
         samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());
+    }
+
+    private void concurrentDenseQuotes(String task,String token,List<String> ids,int lanes,java.util.concurrent.atomic.AtomicInteger encodes,QuoteProfile profile,long wen)throws Exception {
+        var mapper=new ObjectMapper();int before=encodes.get(),fixed=count("economy_task_quote"),batchesBefore=count("economy_task_quote_batch"),money=count("economy_transaction");
+        profile.reset();var endpoint=URI.create(origin+"/agent/tasks/"+task+"/quotes");int payable=ids.size()==1?1:ids.size()-1;
+        var quoteIds=new java.util.HashSet<String>();var batches=new java.util.HashSet<String>();var samples=new java.util.ArrayList<Long>();int errors=0;
+        record Sample(int status,long nanos,tools.jackson.databind.JsonNode data){}
+        try(var client=HttpClient.newHttpClient();var pool=java.util.concurrent.Executors.newFixedThreadPool(lanes)){
+            class Wire {Sample send(int index)throws Exception {
+                String key="dense-"+ids.size()+"-"+lanes+"-"+index;
+                var body=mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId",key,"data",Map.of("expectedTaskVersion","0","agentIds",ids)));
+                var req=HttpRequest.newBuilder(endpoint).timeout(java.time.Duration.ofSeconds(45)).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                long start=System.nanoTime();try {var res=client.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-start;
+                    if(res.statusCode()!=200)return new Sample(res.statusCode(),elapsed,null);
+                    var env=mapper.readTree(res.body());assertEquals(key,env.path("requestId").asText());assertEquals("E0",env.path("code").asText());return new Sample(200,elapsed,env.path("data"));
+                }catch(java.io.IOException failure){return new Sample(0,System.nanoTime()-start,null);}
+            }}
+            var wire=new Wire();Sample first=null;var statuses=new java.util.TreeMap<Integer,Integer>();
+            for(int base=0;base<30;base+=lanes){var gate=new java.util.concurrent.CyclicBarrier(lanes);var pending=new java.util.ArrayList<java.util.concurrent.Future<Sample>>();
+                for(int i=0;i<lanes;i++){int index=base+i;pending.add(pool.submit(()->{gate.await(15,java.util.concurrent.TimeUnit.SECONDS);return wire.send(index);}));}
+                for(var job:pending){var sample=job.get(50,java.util.concurrent.TimeUnit.SECONDS);samples.add(sample.nanos());statuses.merge(sample.status(),1,Integer::sum);if(sample.status()!=200){errors++;continue;}
+                    if(first==null)first=sample;var rows=sample.data().path("quotes");assertEquals(ids.size(),rows.size());var batch=rows.get(0).path("recommendationId").asText();assertFalse(batch.isBlank());assertTrue(batches.add(batch));
+                    for(int i=0;i<ids.size();i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertEquals(batch,row.path("recommendationId").asText());
+                        if(i<payable){assertEquals("AVAILABLE",row.path("state").asText());assertEquals(Long.toString(wen),row.at("/amount/amountMinor").asText());var quote=row.path("quoteId").asText();assertFalse(quote.isBlank());assertTrue(quoteIds.add(quote));}
+                        else{assertEquals("UNAVAILABLE",row.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",row.path("unavailableReason").asText());assertFalse(row.path("amount").isObject());}}
+                }
+            }
+            samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"DENSE_QUOTE_CONCURRENT history=%s candidates=%d lanes=%d n=%d errors=%d p50ms=%.3f p95ms=%.3f maxms=%.3f encodes=%d prepareMs=%.3f selectedMs=%.3f storeMs=%.3f statuses=%s%n",task,ids.size(),lanes,samples.size(),errors,samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,encodes.get()-before,profile.ms("prepare"),profile.ms("lockSelected"),profile.ms("storeMeasuredBatch"),statuses);
+            assertEquals(0,errors);assertNotNull(first);assertEquals(first.data(),wire.send(0).data());
+        }
+        assertEquals(30*(payable==1?1:2),profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertEquals(before,encodes.get());
+        assertEquals(30*payable,quoteIds.size());assertEquals(fixed+quoteIds.size(),count("economy_task_quote"));assertEquals(batchesBefore+30,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));
     }
 
     private SqlSessionTemplate recommendationSql;
