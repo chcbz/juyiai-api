@@ -97,3 +97,7 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 ### 逐响应计量（开发候选，未启用）
 
 在部署含新执行实体的 API **之前**，通过原维护窗口应用 `agent/jia-agent-service/src/main/resources/db/agent-personal-workspace-metered-capture-v2.sql`。本迁移只新增两列；随后通过同一显式维护窗口执行同目录 `agent-native-capture-profile-v1.sql`，仅增加可空准入摘要。`jia.agent.conversation-execution.local-artifact-metering-profile-sha256` 默认为空；不得复制未核实 PLAN 的值作为准入配置。该配置只在新增无选定技能的正式事项执行时冻结，轮换不追改旧执行；不影响授权或价格。不要把存量执行补写成已采集。Economy 的 `db/economy-usage-capture.sql` 沿已有 usage-cost 显式维护入口。`jia.agent.conversation-execution.metered-capture-enabled` 默认关闭；建表/加列不等于启用。Runtime 真实命令接线、原执行鉴权、账本重放与 ACK 未联验前不要开启。
+
+### 预算基准：独立事前备案（开发候选）
+
+`economy-task-benchmark-case-v1.sql` 仅在显式维护窗口建空表。备案须来自真实独立的成本授权，保留原始批准记录、固定任务/承办者、事前特征、执行配置及整事项验收标准。业务账号只读备案，不授予写入/修改权限；维护方仅新登记或退役，不覆写已批准清单。只有在后续专用基准创建链可在首次派发前持有任务根、并实际落实这些权限后才能启用。摘要不是成本授权；本候选不安装表、不写批准记录、不启动执行。

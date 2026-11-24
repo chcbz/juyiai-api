@@ -497,6 +497,25 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
         return new PreparedFixture(binding,features,offer,prepared);
     }
+    @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
+        var cfg=recommendationSql.getConfiguration();cfg.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
+        var json=new ObjectMapper();var svc=proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),json),cn.jia.economy.task.TaskBenchmarkAdmission.class);
+        var exec=new TaskBillingService.MeasuredGroup("v1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp");
+        var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture","a".repeat(64),"b".repeat(64),"c".repeat(64),new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),List.of(),null);
+        var manifest=new cn.jia.economy.task.TaskBenchmarkAdmission.Manifest("benchmark-case-v1",BILLING_TASK,"case",AGENT,"fixture approval, not a real cost grant","review the entire completed task",exec,f);
+        String raw=json.writeValueAsString(manifest);String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,raw);
+        var denied=cn.jia.economy.task.TaskBenchmarkAdmission.NotAdmitted.class;
+        java.util.function.Supplier<String> enroll=()->svc.enroll(BILLING_TASK,"case",sha,AGENT,exec,f);
+        assertThrows(denied,()->locked(enroll));jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,"case",raw,sha);
+        assertThrows(denied,()->locked(()->svc.enroll(BILLING_TASK,"case",sha,"other",exec,f)));
+        assertThrows(denied,()->locked(()->svc.enroll(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),"case",sha,AGENT,exec,f)));
+        assertThrows(InjectedFailure.class,()->locked(()->{enroll.get();throw new InjectedFailure();}));assertEquals(0,count("economy_task_cost_sample"));
+        assertEquals(sha,locked(enroll));assertEquals(sha,locked(enroll));assertEquals(1,count("economy_task_cost_sample"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE quote_id IS NULL AND benchmark_case_id='case' AND sample_state='WAITING_EVIDENCE' AND projection_revision IS NULL AND history_group_sha256=?",Integer.class,cn.jia.economy.task.TaskHistoryCatalog.Group.of(exec,f).digest()));
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,()->locked(enroll));
+        assertEquals(0,count("economy_task_quote"));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+    }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");
         var g=p.group();var group=new TaskBillingService.MeasuredGroup(g.dispatchGroupVersion(),"e".repeat(64),g.localRouteSha256(),g.routeVersion(),g.toolConfigSha256(),g.capturePolicyVersion());
