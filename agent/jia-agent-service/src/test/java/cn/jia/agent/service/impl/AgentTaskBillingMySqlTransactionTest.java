@@ -788,6 +788,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long elapsed=System.nanoTime()-start;samples.sort(Long::compare);assertEquals(ids.size(),count("economy_history_feature_projection"));assertEquals(ids.size(),count("economy_task_cost_sample_revision"));
         System.out.printf(java.util.Locale.ROOT,"QUOTE_READY_PUBLISH shared=%s rows=%d totalMs=%.3f p50ms=%.3f p95ms=%.3f maxms=%.3f%n",shared,ids.size(),elapsed/1e6,samples.get((ids.size()-1)/2)/1e6,samples.get((95*ids.size()+99)/100-1)/1e6,samples.getLast()/1e6);return elapsed;
     }
+    private final QuoteProfile denseCalls=new QuoteProfile();
+    private String compactStatementDigest;
     private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query,long build){
         var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         int[] miss={0};var mapperClass=cn.jia.economy.mapper.ConfirmedSampleMapper.class;
@@ -795,19 +797,25 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             if(method.getName().equals("history"))miss[0]++;
             try{return method.invoke(original,args);}catch(java.lang.reflect.InvocationTargetException e){throw e.getCause();}
         }));
+        var timedMapper=denseCalls.wrap(mapperClass,counted,java.util.Set.of("compactHistory"));
         var registry=io.micrometer.observation.ObservationRegistry.create();
         var events=new java.util.concurrent.ConcurrentHashMap<String,Integer>();
         registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
             public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+            public void onStart(io.micrometer.observation.Observation.Context c){c.put("denseStartNs",System.nanoTime());}
             public void onStop(io.micrometer.observation.Observation.Context c){
+                long start=c.get("denseStartNs");denseCalls.nanos.computeIfAbsent(c.getName(),k->new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime()-start);
                 var labels=new java.util.HashMap<String,String>();c.getLowCardinalityKeyValues().forEach(k->labels.put(k.getKey(),k.getValue()));
                 assertEquals(java.util.Set.of("outcome"),labels.keySet());assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());
                 String k=c.getName()+":"+labels.get("outcome");events.merge(k,1,Integer::sum);
             }
         });
-        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(counted,json,false,true,java.util.Optional.of(registry)),cn.jia.economy.task.TaskHistoryCatalog.class);
+        var projection=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(timedMapper,json,false,true,java.util.Optional.of(registry)),cn.jia.economy.task.TaskHistoryCatalog.class);
         java.util.function.Function<String,List<cn.jia.economy.task.TaskHistoryCatalog.Entry>> entries=after->projection.page(reader,group,after);
         java.util.function.Function<String,List<String>> page=after->entries.apply(after).stream().map(e->e.source().sampleId()).toList();
+        var beforeSql=recShapes();assertEquals(64,page.apply("").size());var matches=new java.util.ArrayList<String>();
+        recShapes().forEach((k,v)->{var old=beforeSql.getOrDefault(k,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(k);});
+        assertEquals(1,matches.size());compactStatementDigest=matches.getFirst();
         for(int run=0;run<4;run++){long t=System.nanoTime();String after="";var seen=new java.util.ArrayList<String>();while(true){var chunk=page.apply(after);if(chunk.isEmpty())break;seen.addAll(chunk);after=chunk.getLast();}long ns=System.nanoTime()-t;assertEquals(ids,seen);
             System.out.printf(java.util.Locale.ROOT,"QUOTE_PROBE shared=%s run=%d rows=%d buildMs=%.3f walkMs=%.3f%n",shared,run,seen.size(),build/1e6,ns/1e6);}
         var scal=TaskNeighborSearch.trainingScales(List.of(query));var params=new TaskNeighborSearch.Parameters(scal,1,1,1,1,1,0.1,0.2,3,1,1,1);
@@ -2865,6 +2873,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
 
     private void concurrentDenseQuotes(String task,String token,List<String> ids,int lanes,java.util.concurrent.atomic.AtomicInteger encodes,QuoteProfile profile,long wen)throws Exception {
         var mapper=new ObjectMapper();int before=encodes.get(),fixed=count("economy_task_quote"),batchesBefore=count("economy_task_quote_batch"),money=count("economy_transaction");
+        denseCalls.reset();var sqlBefore=recShapes().get(compactStatementDigest);
         profile.reset();var endpoint=URI.create(origin+"/agent/tasks/"+task+"/quotes");int payable=ids.size()==1?1:ids.size()-1;
         var quoteIds=new java.util.HashSet<String>();var batches=new java.util.HashSet<String>();var samples=new java.util.ArrayList<Long>();int errors=0;
         record Sample(int status,long nanos,tools.jackson.databind.JsonNode data){}
@@ -2889,6 +2898,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
             }
             samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"DENSE_QUOTE_CONCURRENT history=%s candidates=%d lanes=%d n=%d errors=%d p50ms=%.3f p95ms=%.3f maxms=%.3f encodes=%d prepareMs=%.3f selectedMs=%.3f storeMs=%.3f statuses=%s%n",task,ids.size(),lanes,samples.size(),errors,samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,encodes.get()-before,profile.ms("prepare"),profile.ms("lockSelected"),profile.ms("storeMeasuredBatch"),statuses);
+            var end=recShapes().get(compactStatementDigest);double server=(end.picos()-sqlBefore.picos())/1e9,fetch=denseCalls.ms("compactHistory"),page=denseCalls.ms("cyf.task.quote.history.projection.page"),estimate=denseCalls.ms("cyf.task.quote.estimate");
+            long pages=denseCalls.count("compactHistory"),digestCalls=end.calls()-sqlBefore.calls(),sent=end.sent()-sqlBefore.sent();
+            System.out.printf(java.util.Locale.ROOT,"DENSE_PHASE history=%s candidates=%d lanes=%d pages=%d digestCalls=%d sent=%d examined=%d serverMs=%.3f mapperMs=%.3f restoreAndValidateMs=%.3f estimateOutsidePageMs=%.3f estimateMs=%.3f%n",task,ids.size(),lanes,pages,digestCalls,sent,end.examined()-sqlBefore.examined(),server,fetch,page-fetch,estimate-page,estimate);
+            assertEquals(17L*30,pages);assertTrue(page>=fetch && estimate>=page);assertTrue(digestCalls>0 && sent>0 && server>0);
             assertEquals(0,errors);assertNotNull(first);assertEquals(first.data(),wire.send(0).data());
         }
         assertEquals(30*(payable==1?1:2),profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertEquals(before,encodes.get());
