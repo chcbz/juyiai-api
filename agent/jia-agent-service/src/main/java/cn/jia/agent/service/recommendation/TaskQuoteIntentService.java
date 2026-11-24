@@ -38,7 +38,7 @@ final class TaskQuoteIntentService {
         var read=roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
             var stored=batches.replay(key,intent);if(stored!=null)return new Read(stored,null,null,null);
             if(!"open".equals(root.getRewardStatus())||!intent.expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
-            return new Read(null,requirements.readCurrent(scope,task),AgentTaskStoredLists.read(root.getRequiredAbilities()),grants.snapshotTaskInputsWithinLockedTask(scope,task));
+            return new Read(null,requirements.readCurrentWithinLockedTask(scope,task,root),AgentTaskStoredLists.read(root.getRequiredAbilities()),grants.snapshotTaskInputsWithinLockedTask(scope,task));
         });
         if(read.replay()!=null)return new Replay(read.replay());
         var selected=authorized(scope,task,intent.agentIds(),false);var meta=materials.observe(actor,task);var input=features.observe(read.requirement(),read.abilities(),read.catalogue(),meta);
@@ -51,7 +51,7 @@ final class TaskQuoteIntentService {
         var key=start.key();var id=key.task().taskId();var scope=new AgentTaskExecutionGrantService.Scope(actor.tenantId(),actor.clientId(),actor.ownerJiacn());
         return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),id,root->batches.commit(key,start.intent(),batch->{
             if(!"open".equals(root.getRewardStatus())||!start.intent().expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
-            var current=requirements.readCurrent(scope,id);var catalogue=grants.snapshotTaskInputsWithinLockedTask(scope,id);
+            var current=requirements.readCurrentWithinLockedTask(scope,id,root);var catalogue=grants.snapshotTaskInputsWithinLockedTask(scope,id);
             if(current.requirementRevision()!=start.requirementRevision()||!current.sha256().equals(start.features().requirementSha256())||!catalogue.digest().equals(start.features().inputSnapshotSha256()))throw new Stale();
             var meta=materials.observe(actor,id);if(!start.metadata().equals(meta))throw new Stale();
             var observed=features.observe(current,AgentTaskStoredLists.read(root.getRequiredAbilities()),catalogue,meta);

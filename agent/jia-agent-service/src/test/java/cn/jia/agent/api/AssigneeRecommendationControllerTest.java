@@ -50,6 +50,19 @@ class AssigneeRecommendationControllerTest {
         api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isBadGateway()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_INVALID"));
         api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_UNAVAILABLE"));
     }
+    @Test void quoteRequirementErrorsStayDistinctFromEncoderAndPerCandidateFailures()throws Exception {
+        var app=mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        var api=MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app)).setMessageConverters(new JacksonJsonHttpMessageConverter())
+                .setControllerAdvice(new ApiEnvelopeAdvice()).addFilters(new RequestIdFilter()).build();
+        for(var reason:cn.jia.agent.service.AgentTaskRequirementReadException.Reason.values()){
+            doThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(reason)).when(app).quote(any(),anyString(),anyString(),any());
+            int expected=switch(reason){case NOT_FOUND->404;case RECONFIRM_REQUIRED->409;default->503;};
+            var body=BODY.replace("\"7\"","\"7\",\"agentIds\":[\"a\"]");
+            api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key"))
+               .andExpect(status().is(expected)).andExpect(jsonPath("$.code").value(switch(expected){case 404->"QUOTE_NOT_FOUND";case 409->"QUOTE_STALE";default->"QUOTE_UNAVAILABLE";}))
+               .andExpect(jsonPath("$.data.quotes").doesNotExist());
+        }
+    }
     @Test void recommendationAndQuoteDoNotDiscloseRevokedMaterialsOrHideStorageFailure() throws Exception {
         var missing = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
         var outage = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE);

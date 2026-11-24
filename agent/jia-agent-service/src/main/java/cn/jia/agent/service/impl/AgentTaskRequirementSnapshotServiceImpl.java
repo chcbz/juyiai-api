@@ -138,24 +138,39 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
     @Override public CurrentSnapshot readCurrent(
             AgentTaskExecutionGrantService.Scope scope, String taskId) {
         validReadScope(scope,taskId);
+        return readSafely(() -> transactions.executeWithLockedTaskRootInOwnerScope(
+                scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,root -> currentForRoot(scope,taskId,root)));
+    }
+
+    @Override public CurrentSnapshot readCurrentWithinLockedTask(AgentTaskExecutionGrantService.Scope scope,String taskId,
+            cn.jia.agent.entity.AgentTaskMetaEntity root) {
+        validReadScope(scope,taskId);
+        if (!TransactionSynchronizationManager.isActualTransactionActive())
+            throw new IllegalStateException("Current requirement needs the caller's task transaction");
+        return readSafely(() -> currentForRoot(scope,taskId,root));
+    }
+
+    private CurrentSnapshot currentForRoot(AgentTaskExecutionGrantService.Scope scope,String taskId,
+            cn.jia.agent.entity.AgentTaskMetaEntity root) {
+        if (root==null || !Objects.equals(root.getTenantId(),scope.tenantId())
+                || !Objects.equals(root.getClientId(),scope.clientId())
+                || !Objects.equals(root.getOwnerJiacn(),scope.ownerJiacn())
+                || !Objects.equals(root.getTaskId(),taskId)
+                || root.getTaskVersion()==null || root.getTaskVersion()<0) {
+            throw new SnapshotIntegrityException();
+        }
+        Snapshot current=currentRequirements.read(scope,taskId);
+        if (current==null) {
+            throw new AgentTaskRequirementReadException(
+                    AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED);
+        }
+        return new CurrentSnapshot(taskId,root.getTaskVersion(),current.revision(),
+                current.title(),current.description(),current.sha256(),current.source());
+    }
+
+    private static CurrentSnapshot readSafely(java.util.function.Supplier<CurrentSnapshot> read) {
         try {
-            return transactions.executeWithLockedTaskRootInOwnerScope(
-                    scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,root -> {
-                        if (root==null || !Objects.equals(root.getTenantId(),scope.tenantId())
-                                || !Objects.equals(root.getClientId(),scope.clientId())
-                                || !Objects.equals(root.getOwnerJiacn(),scope.ownerJiacn())
-                                || !Objects.equals(root.getTaskId(),taskId)
-                                || root.getTaskVersion()==null || root.getTaskVersion()<0) {
-                            throw new SnapshotIntegrityException();
-                        }
-                        Snapshot current=currentRequirements.read(scope,taskId);
-                        if (current==null) {
-                            throw new AgentTaskRequirementReadException(
-                                    AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED);
-                        }
-                        return new CurrentSnapshot(taskId,root.getTaskVersion(),current.revision(),
-                                current.title(),current.description(),current.sha256(),current.source());
-                    });
+            return read.get();
         } catch (AgentTaskRequirementReadException failure) {
             throw failure;
         } catch (SnapshotIntegrityException failure) {

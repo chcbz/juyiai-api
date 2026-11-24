@@ -44,6 +44,9 @@ public final class IndependentTaskQuoteController {
     @ExceptionHandler(TaskFeatureEncoder.Unavailable.class) public ResponseEntity<JsonResult<Void>> upstream(){return error(503,"QUOTE_FEATURE_UNAVAILABLE");}
     @ExceptionHandler(AgentTaskCollaborationException.class) public ResponseEntity<JsonResult<Void>> task(AgentTaskCollaborationException e){return switch(e.getReason()){
         case NOT_FOUND,FORBIDDEN -> missing();case VERSION_CONFLICT,INVALID_TRANSITION -> changed();default -> error(503,"QUOTE_UNAVAILABLE");};}
+    @ExceptionHandler(cn.jia.agent.service.AgentTaskRequirementReadException.class)
+    public ResponseEntity<JsonResult<Void>> requirement(cn.jia.agent.service.AgentTaskRequirementReadException e){return switch(e.reason()){
+        case NOT_FOUND -> missing();case RECONFIRM_REQUIRED -> changed();case INTEGRITY_ERROR,SOURCE_UNAVAILABLE -> error(503,"QUOTE_UNAVAILABLE");};}
     @ExceptionHandler(AgentTaskExecutionGrantException.class) public ResponseEntity<JsonResult<Void>> grant(AgentTaskExecutionGrantException e){return switch(e.status()){
         case 400 -> bad();case 401 -> error(401,"UNAUTHENTICATED");case 403,404 -> missing();case 409 -> changed();default -> error(503,"QUOTE_UNAVAILABLE");};}
     @ExceptionHandler(PersonalWorkspaceException.class) public ResponseEntity<JsonResult<Void>> workspace(PersonalWorkspaceException e){return switch(e.getReason()){

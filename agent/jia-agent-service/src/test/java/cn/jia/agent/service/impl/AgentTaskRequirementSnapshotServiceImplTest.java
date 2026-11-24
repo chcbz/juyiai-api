@@ -148,6 +148,17 @@ class AgentTaskRequirementSnapshotServiceImplTest {
         assertEquals(updatesBefore,jdbc.updateCalls,"GET projection must not write");
     }
 
+    @Test void alreadyLockedReadChecksScopeAndTransactionWithoutAnotherRootLookup(){
+        service.captureOnCreate(OWNER,"task-1","Original","Full body"); lockOrder.clear();
+        assertEquals("Full body",service.readCurrentWithinLockedTask(OWNER,"task-1",task).description());
+        assertEquals(List.of("requirement-current"),lockOrder);lockOrder.clear();
+        assertReason(AgentTaskRequirementReadException.Reason.INTEGRITY_ERROR,()->service.readCurrentWithinLockedTask(OWNER,"different",task));
+        assertReason(AgentTaskRequirementReadException.Reason.INTEGRITY_ERROR,()->service.readCurrentWithinLockedTask(new AgentTaskExecutionGrantService.Scope("0","client","other"),"task-1",task));
+        TransactionSynchronizationManager.setActualTransactionActive(false);
+        assertThrows(IllegalStateException.class,()->service.readCurrentWithinLockedTask(OWNER,"task-1",task));
+        assertTrue(lockOrder.isEmpty());
+    }
+
     @Test void currentReadFailsClosedAcrossMissingForeignCorruptAndUnavailableSources() {
         assertReason(AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED,
                 () -> service.readCurrent(OWNER,"task-1"));
