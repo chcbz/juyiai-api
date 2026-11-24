@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.agent.exception.AgentTaskCollaborationException;
 import cn.jia.agent.cache.AgentPersonaCatalogCache;
 import cn.jia.agent.cache.AgentPersonaCatalogCache.CatalogEntry;
 import cn.jia.agent.common.AgentConstants;
@@ -1309,12 +1310,17 @@ public class AgentServiceImpl implements AgentService, cn.jia.agent.service.reco
         var meta = requireTask(taskId);
         var dto = new AgentTaskDTO();
         dto.setId(meta.getTaskId());
-        dto.setTitle(meta.getTaskId());
         dto.setStatus(meta.getRewardStatus());
         dto.setTaskVersion(meta.getTaskVersion() == null ? null : Long.toString(meta.getTaskVersion()));
         dto.setRequiredAbilities(parseList(meta.getRequiredAbilities()));
-        enrichTaskPlan(dto, meta);
-        enrichCurrentRequirement(dto, meta);
+        // Ranking uses the authoritative requirement, never the short display plan or an ID as text.
+        var current = requirementSnapshots.readCurrent(new AgentTaskExecutionGrantService.Scope(
+                meta.getTenantId(), meta.getClientId(), meta.getOwnerJiacn()), taskId);
+        if (!Objects.equals(meta.getTaskVersion(), current.taskVersion()))
+            throw new AgentTaskCollaborationException(AgentTaskCollaborationException.Reason.VERSION_CONFLICT,
+                    "Task changed during recommendation observation");
+        dto.setTitle(current.title());
+        dto.setDescription(current.description());
         return dto;
     }
 

@@ -1716,9 +1716,18 @@ class AgentServiceImplTest extends BaseMockTest {
         meta.setOwnerJiacn("jiacn"); meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
         meta.setTaskVersion(9L); meta.setRequiredAbilities("[\"analysis\"]");
         when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001")).thenReturn(meta);
+        var snapshots=mock(AgentTaskRequirementSnapshotService.class);agentService.setRequirementSnapshots(snapshots);
+        var scope=new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","fixture-client_id-1","jiacn");
+        when(snapshots.readCurrent(scope,"task-001")).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",9,1,"当前完整标题","完整需求", "a".repeat(64),"CREATE"),
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",10,2,"新版","新要求", "b".repeat(64),"UPDATE"))
+                .thenThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED));
         var input = agentService.getTaskRecommendationInput("task-001");
         assertEquals("9", input.getTaskVersion());
-        assertEquals("task-001", input.getTitle());
+        assertEquals("当前完整标题",input.getTitle());assertEquals("完整需求",input.getDescription());
+        assertEquals(cn.jia.agent.exception.AgentTaskCollaborationException.Reason.VERSION_CONFLICT,assertThrows(cn.jia.agent.exception.AgentTaskCollaborationException.class,()->agentService.getTaskRecommendationInput("task-001")).getReason());
+        assertEquals(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED,assertThrows(cn.jia.agent.service.AgentTaskRequirementReadException.class,()->agentService.getTaskRecommendationInput("task-001")).reason());
+        verifyNoInteractions(taskServiceProvider);
         assertEquals(List.of("analysis"), input.getRequiredAbilities());
         verifyNoInteractions(externalServicePolicies, agentTaskMemberDao);
     }

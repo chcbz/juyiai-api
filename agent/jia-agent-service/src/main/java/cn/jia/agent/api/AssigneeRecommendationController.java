@@ -62,6 +62,14 @@ public final class AssigneeRecommendationController {
             default -> failure(new Failure(503, "RECOMMENDATION_UNAVAILABLE"));
         };
     }
+    @ExceptionHandler(cn.jia.agent.service.AgentTaskRequirementReadException.class)
+    public ResponseEntity<JsonResult<Void>> requirement(cn.jia.agent.service.AgentTaskRequirementReadException error) {
+        return switch(error.reason()) {
+            case NOT_FOUND -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+            case RECONFIRM_REQUIRED -> failure(new Failure(409, "RECOMMENDATION_STALE"));
+            case INTEGRITY_ERROR, SOURCE_UNAVAILABLE -> unavailable(error);
+        };
+    }
     @ExceptionHandler(PersonalWorkspaceException.class)
     public ResponseEntity<JsonResult<Void>> workspace(PersonalWorkspaceException error) {
         return switch (error.getReason()) {

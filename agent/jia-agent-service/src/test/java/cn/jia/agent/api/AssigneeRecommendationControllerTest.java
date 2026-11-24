@@ -113,6 +113,15 @@ class AssigneeRecommendationControllerTest {
         mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
                 .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("RECOMMENDATION_NOT_FOUND"));
     }
+    @Test void missingRequirementConflictsAndCannotMasqueradeAsNoMatch()throws Exception {
+        for(var reason:cn.jia.agent.service.AgentTaskRequirementReadException.Reason.values()){
+            doThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(reason)).when(service).recommend(any(),anyString(),any());
+            int expected=switch(reason){case NOT_FOUND->404; case RECONFIRM_REQUIRED->409; default->503;};
+            String code=switch(expected){case 404->"RECOMMENDATION_NOT_FOUND";case 409->"RECOMMENDATION_STALE";default->"RECOMMENDATION_UNAVAILABLE";};
+            mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
+               .andExpect(status().is(expected)).andExpect(jsonPath("$.code").value(code)).andExpect(jsonPath("$.data.recommendations").doesNotExist());
+        }
+    }
     @Test void modelFailureUsesRealFailureNotEmptySuccessfulArray() throws Exception {
         when(service.recommend(any(), anyString(), any())).thenThrow(new Failure(503, "RECOMMENDATION_UNAVAILABLE"));
         mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
