@@ -1383,7 +1383,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(Map.of(agent,frozen),service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids));
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion()+1,ids).isEmpty());
         var slow=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);var fresh=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);
-        var measured=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),new AgentManagedSessionLookup.SessionFence("install","host","boot",2),"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1");
+        var measured=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),new AgentManagedSessionLookup.SessionFence("install","host","boot",2),"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64)));
         assertFalse(service.recordMeasurement(slow,agent,measured));assertTrue(service.recordMeasurement(fresh,agent,measured));
         assertFalse(service.recordMeasurement(fresh,agent,measured));assertFalse(locked(()->service.lockMeasurement(slow.ticket(),frozen,measured)));
         assertTrue(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
@@ -1415,19 +1415,28 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }while(!writer.isDone()&&System.nanoTime()<until);fail("expected a real preparation row lock wait");
     }
     private void verifyPreparedEpochLock(String agent,long binding,AgentManagedSessionLookup.SessionFence fence)throws Exception{
-        for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
+        for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql","agent-runtime-prepared-profile-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
         jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'test',?,UNHEX(?),1,'ACTIVE',?,?)",fence.runtimeInstallationId(),agent,"a".repeat(64),"a".repeat(64),TENANT,CLIENT);
         jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation) VALUES(?,'test',?,?,?,?,'online',?,?,?,?)",agent,TENANT,CLIENT,OWNER,binding,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
-        var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);var epoch=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence);
-        java.util.function.Supplier<Boolean> exact=()->guard.lock(TENANT,CLIENT,List.of(epoch));assertTrue(locked(exact));
-        assertFalse(locked(()->guard.lock(TENANT,CLIENT,List.of(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding+1,fence)))));
+        var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);var epoch=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence,new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64)));
+        java.util.function.Supplier<Boolean> exact=()->guard.lock(TENANT,CLIENT,List.of(epoch));assertFalse(locked(exact));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,epoch.profile());assertTrue(locked(exact));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,new NativeTaskConfigurationProbe.Profile(2,null));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,epoch.profile());assertFalse(locked(exact));
+        var restored=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence,new NativeTaskConfigurationProbe.Profile(3,epoch.profile().profileSha256()));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,restored.profile());assertTrue(locked(()->guard.lock(TENANT,CLIENT,List.of(restored))));assertFalse(locked(exact));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,new NativeTaskConfigurationProbe.Profile(3,"5".repeat(64)));guard.report(TENANT,CLIENT,agent,OWNER,fence,restored.profile());
+        assertFalse(locked(()->guard.lock(TENANT,CLIENT,List.of(restored))));
+        var latest=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence,new NativeTaskConfigurationProbe.Profile(4,epoch.profile().profileSha256()));
+        guard.report(TENANT,CLIENT,agent,OWNER,fence,latest.profile());java.util.function.Supplier<Boolean> current=()->guard.lock(TENANT,CLIENT,List.of(latest));assertTrue(locked(current));
+        assertFalse(locked(()->guard.lock(TENANT,CLIENT,List.of(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding+1,fence,latest.profile())))));
         try(var writer=independent.getDataSource().getConnection()){
             writer.setAutoCommit(false);try{try(var p=writer.prepareStatement("UPDATE agent_runtime SET runtime_session_generation=runtime_session_generation+1 WHERE agent_id=?")){p.setString(1,agent);assertEquals(1,p.executeUpdate());}
-                assertFalse(locked(exact),"NOWAIT: cannot wait on a session writer under the task lock");writer.commit();
+                assertFalse(locked(current),"NOWAIT: cannot wait on a session writer under the task lock");writer.commit();
             }finally{writer.rollback();}}
-        assertFalse(locked(exact));
+        assertFalse(locked(current));
         jdbc.update("UPDATE agent_runtime SET runtime_session_generation=? WHERE agent_id=?",fence.sessionGeneration(),agent);
-        jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",fence.runtimeInstallationId());assertFalse(locked(exact));
+        jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",fence.runtimeInstallationId());assertFalse(locked(current));
     }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();

@@ -346,7 +346,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
                 throw new IllegalArgumentException("Runtime proof mismatch");
             if("agent.register".equals(envelope.messageType()))cn.jia.agent.skill.SkillManagementCodec.validateEmbeddedDeclaration(message.getPayload());
             if("runtime.task.configuration.measured".equals(envelope.messageType())){
-                if(message.getPayloadLength()<=16384){runtimeAuthentication.validateCurrent(sessionProof(session),false);taskProbes.receive(session,envelope);}return;
+                if(message.getPayloadLength()<=16384){runtimeAuthentication.validateCurrent(sessionProof(session),false);taskProbes.receive(session,envelope,profile->reportProfile(session,profile));}return;
             }
             incomingWire.set(envelope);
             var business=cn.jia.agent.common.AgentMessageWire.business(envelope);
@@ -379,6 +379,15 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             runtimeAuthentication.validateCurrent(sessionProof(session), false);
             payload = objectMapper.readValue(message.getPayload(), MESSAGE_TYPE);
             validateSessionEnvelope(session, payload);
+            var wire=incomingWire.get();
+            if(wire!=null&&"agent.presence".equals(wire.messageType())&&wire.data().containsKey("configurationEpoch")){
+                var proof=sessionProof(session);var sc=proof.scope();var identity=Map.<String,Object>of("tenantId",sc.tenantId(),"clientId",sc.clientId(),"hostId",proof.hostId(),
+                    "runtimeInstallationId",proof.installationId(),"runtimeInstanceId",sc.runtimeInstanceId(),"agentId",sc.agentId(),"sourceAgentId",sc.agentId(),"sessionGeneration",Long.toString(proof.sessionGeneration()));
+                if(wire.data().entrySet().containsAll(identity.entrySet())&&successfullyRegisteredAgentIds(session.getId()).contains(sc.agentId())){
+                    try{reportProfile(session,NativeTaskProbeChannel.epoch(wire.data().get("configurationEpoch")));}
+                    catch(RuntimeException unavailable){log.warn("Prepared profile observation unavailable");} // Do not stop normal presence or billable work.
+                }
+            }
         } catch (cn.jia.agent.service.impl.AgentServiceImpl.AgentBizException rejected) {
             sendSessionIdentityError(session, payload, rejected.getCode(), "Runtime message proof rejected");
             return;
@@ -3010,6 +3019,19 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             if (matchesNativeSkill(session,tenant,client,agent,fence)) count++;
         }
         return count==1;
+    }
+    private cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder preparedProfiles;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setPreparedProfiles(cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder recorder){this.preparedProfiles=recorder;}
+    private void reportProfile(WebSocketSession session,Profile profile){
+        if(preparedProfiles==null)throw new IllegalStateException("Prepared profile storage unavailable");
+        var proof=sessionProof(session);var s=proof.scope();
+        // Presence repeats the same observation to survive delivery loss. Do not write each heartbeat.
+        synchronized(session.getAttributes()){
+            if(profile.equals(session.getAttributes().get("storedPreparedProfile")))return;
+            preparedProfiles.report(s.tenantId(),s.clientId(),s.agentId(),s.ownerJiacn(),new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),s.runtimeInstanceId(),proof.sessionGeneration()),profile);
+            session.getAttributes().put("storedPreparedProfile",profile);
+        }
     }
     private final NativeTaskProbeChannel taskProbes=new NativeTaskProbeChannel();
     @Override public java.util.concurrent.CompletionStage<Measurement> measure(cn.jia.agent.service.NativeTaskPreparation.Frozen frozen,

@@ -31,7 +31,7 @@ public class PreparedTaskTermsReader {
             if(!scope.equals(b.scope())||!task.equals(b.task())||!b.equals(o.decision().intent().binding())||!o.decision().sha256().equals(m.intentSha256())||ordered.putIfAbsent(t.agent(),o)!=null)return false;
             var now=routes.resolve(subject,new PreparedReferenceRoutes.Configuration(m.version(),m.executionConfigSha256(),m.routeSha256(),m.toolConfigSha256(),m.capturePolicyVersion()));
             if(now==null||!now.equals(o.reference()))return false;
-            expected.add(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(t.agent(),t.provider(),t.binding(),m.fence()));
+            expected.add(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(t.agent(),t.provider(),t.binding(),m.fence(),m.profile()));
         }
         if(!epochs.lock(scope.tenantId(),scope.clientId(),expected))return false;
         for(var o:ordered.values())if(!decisions.lockMeasurement(o.ticket(),o.decision(),o.measurement()))return false;

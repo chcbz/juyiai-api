@@ -39,21 +39,27 @@ final class NativeTaskProbeChannel {
         return result.minimalCompletionStage();
     }
 
-    void receive(WebSocketSession socket,ProtocolMessage<Map<String,Object>> envelope){
+    static cn.jia.agent.service.NativeTaskConfigurationProbe.Profile epoch(Object raw){
+        if(!(raw instanceof Map<?,?> m)||!m.keySet().equals(Set.of("sequence","profileSha256"))||!(m.get("sequence") instanceof String seq)||!seq.matches("[1-9][0-9]{0,18}")
+                || m.get("profileSha256")!=null&&!sha(m.get("profileSha256")))throw new IllegalArgumentException("Invalid prepared profile stamp");
+        return new cn.jia.agent.service.NativeTaskConfigurationProbe.Profile(Long.parseLong(seq),(String)m.get("profileSha256"));
+    }
+    void receive(WebSocketSession socket,ProtocolMessage<Map<String,Object>> envelope,java.util.function.Consumer<cn.jia.agent.service.NativeTaskConfigurationProbe.Profile> publish){
         var p=pending.get(envelope.requestId());var d=envelope.data();
         if(p==null || p.socket()!=socket || !p.message().equals(envelope.correlationId()) || !"E0".equals(envelope.code()) || !"ok".equals(envelope.msg()))return;
-        var keys=new HashSet<>(p.identity().keySet());keys.addAll(List.of("sourceAgentId","intentSha256","measurement"));
+        var keys=new HashSet<>(p.identity().keySet());keys.addAll(List.of("sourceAgentId","intentSha256","measurement","configurationEpoch"));
         if(d.containsKey("requestId")){if(!envelope.requestId().equals(d.get("requestId")))return;keys.add("requestId");}
         if(!keys.equals(d.keySet()) || !d.entrySet().containsAll(p.identity().entrySet()) || !p.identity().get("agentId").equals(d.get("sourceAgentId")) || !p.intent().equals(d.get("intentSha256")))return;
+        var profile=epoch(d.get("configurationEpoch"));if((d.get("measurement")==null)!=(profile.profileSha256()==null))return;
         Measurement value=null;
         if(d.get("measurement")!=null){
             if(!(d.get("measurement") instanceof Map<?,?> m) || !m.keySet().equals(Set.of("version","executionConfigSha256","routeSha256","toolConfigSha256","capturePolicyVersion"))
                 || !"NATIVE_DISPATCH_GROUP_V1".equals(m.get("version")) || !"NATIVE_LOCAL_ARTIFACT_TEXT_V1".equals(m.get("capturePolicyVersion"))
                 || !sha(m.get("executionConfigSha256")) || !sha(m.get("routeSha256")) || !sha(m.get("toolConfigSha256")))return;
             value=new Measurement(p.intent(),p.fence(),(String)m.get("version"),(String)m.get("executionConfigSha256"),(String)m.get("routeSha256"),
-                (String)m.get("toolConfigSha256"),(String)m.get("capturePolicyVersion"));
+                (String)m.get("toolConfigSha256"),(String)m.get("capturePolicyVersion"),profile);
         }
-        p.result().complete(p.current().get()==socket?value:null);
+        if(p.current().get()!=socket){p.result().complete(null);return;}publish.accept(profile);p.result().complete(value);
     }
     void closed(WebSocketSession socket){pending.values().forEach(p->{if(p.socket()==socket)p.result().complete(null);});}
 }

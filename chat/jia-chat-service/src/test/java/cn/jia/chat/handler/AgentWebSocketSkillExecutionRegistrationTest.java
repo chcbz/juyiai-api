@@ -60,6 +60,7 @@ class AgentWebSocketSkillExecutionRegistrationTest {
     @Test void preparedProbeUsesFixedRuntimeCodecAndRejectsUncorrelatedOrExtendedMeasurements()throws Exception{
         String root=System.getProperty("ownedMeteredRuntime");org.junit.jupiter.api.Assumptions.assumeTrue(root!=null);
         var f=fixture();f.handler.afterConnectionEstablished(f.session);register(f,null);
+        var recorder=mock(cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder.class);f.handler.setPreparedProfiles(recorder);
         var future=f.handler.measure(prepared(OWNER),fence).toCompletableFuture();String wire=f.frames.getLast();
         assertFalse(wire.contains("private-task"));assertTrue(wire.contains("runtime.task.configuration.probe"));
         var process=new ProcessBuilder("node","--input-type=module","-e","""
@@ -67,7 +68,7 @@ class AgentWebSocketSkillExecutionRegistrationTest {
             const {messageId,requestId,tenantId,clientId,agentId,installationId,hostId,runtimeInstanceId,sessionGeneration,intentSha256,outputs}=fromAgentWire(fs.readFileSync(0,'utf8'));
             if(outputs.dataSchema!==null || outputs.mimeTypes[0]!=='text/plain')throw Error('output mismatch');
             const measurement={version:'NATIVE_DISPATCH_GROUP_V1',executionConfigSha256:'1'.repeat(64),routeSha256:'2'.repeat(64),toolConfigSha256:'3'.repeat(64),capturePolicyVersion:'NATIVE_LOCAL_ARTIFACT_TEXT_V1'};
-            console.log(JSON.stringify(toAgentWire({messageType:'runtime.task.configuration.measured',messageId:'result',requestId,correlationId:messageId,agentId,sourceAgentId:agentId,tenantId,clientId,installationId,hostId,runtimeInstanceId,sessionGeneration,intentSha256,measurement})));
+            console.log(JSON.stringify(toAgentWire({messageType:'runtime.task.configuration.measured',messageId:'result',requestId,correlationId:messageId,agentId,sourceAgentId:agentId,tenantId,clientId,installationId,hostId,runtimeInstanceId,sessionGeneration,intentSha256,measurement,configurationEpoch:{sequence:'1',profileSha256:'4'.repeat(64)}})));
             """).directory(java.nio.file.Path.of(root,"conf/codex-bridge").toFile()).redirectErrorStream(true).start();
         try{try(var out=process.getOutputStream()){out.write(wire.getBytes(java.nio.charset.StandardCharsets.UTF_8));}
             assertTrue(process.waitFor(3,java.util.concurrent.TimeUnit.SECONDS));String reply=new String(process.getInputStream().readAllBytes(),java.nio.charset.StandardCharsets.UTF_8).trim();assertEquals(0,process.exitValue(),reply);
