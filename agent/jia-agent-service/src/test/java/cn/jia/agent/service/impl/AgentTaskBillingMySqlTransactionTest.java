@@ -712,7 +712,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
             assertEquals(prior,jdbc.queryForList(oldRows));
         }
-        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);if(dense)profileFeatureRead(reader,group,ids,shared);return;}
+        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);if(dense){profileFeatureRead(reader,group,ids,shared);profileProjection(reader,group,ids,shared);}return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
         assertEquals(1,matches.size());var pageDigest=matches.getFirst();var cfg=recommendationSql.getConfiguration();
@@ -764,6 +764,45 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(ids.size(),pos);assertEquals((ids.size()+63)/64+1,pages);
             System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_READ shared=%s run=%d rows=%d pages=%d chars=%d mapperFetchMs=%.3f jsonDecodeMs=%.3f featureVerifyMs=%.3f%n",shared,run,pos,pages,chars,fetch/1e6,decode/1e6,verify/1e6);
         }
+    }
+    // Research fixture only: no application schema, permission, cache or rollout change.
+    private record ProbeMeta(String featureVersion,String templateVersion,String requirementSha256,String inputSnapshotSha256,
+            String textSha256,TaskEstimateFeatures.Identity embeddingIdentity,List<TaskEstimateFeatures.File> files,Integer requestedDeliverables){}
+    private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared){
+        var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        jdbc.execute("CREATE TABLE fixture_feature_probe(sid CHAR(64) PRIMARY KEY,rev BIGINT NOT NULL,qid VARCHAR(100) NOT NULL,raw_sha CHAR(64) NOT NULL,resolved_sha CHAR(64) NOT NULL,rec VARCHAR(100),prep CHAR(64),meta TEXT NOT NULL,v BLOB NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin");
+        String seal="""
+            INSERT INTO fixture_feature_probe SELECT s.sample_id,s.projection_revision,q.quote_id,SHA2(q.snapshot_json,256),SHA2(r.snapshot_json,256),
+            q.snapshot_json->>'$.binding.recommendationId',IF(JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.preparation'))='STRING',q.snapshot_json->>'$.preparation',NULL),?,?
+            FROM economy_task_cost_sample s JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id
+            JOIN economy_task_quote_resolved r ON r.id=q.id WHERE s.sample_id=? AND s.projection_revision=? AND s.initial_feature_sha256=?
+            """;
+        long build=System.nanoTime();new TransactionTemplate(manager).executeWithoutResult(status->{String after="";
+            while(true){var page=original.history(reader,groupSha,after,64);if(page.isEmpty())break;
+                for(var row:page){var f=json.readValue(row.featuresJson(),TaskEstimateFeatures.class);assertEquals(row.featureSha(),f.digest());
+                    var meta=new ProbeMeta(f.featureVersion(),f.templateVersion(),f.requirementSha256(),f.inputSnapshotSha256(),f.textSha256(),f.embeddingIdentity(),f.files(),f.requestedDeliverables());
+                    var binary=java.nio.ByteBuffer.allocate(4096);f.vector().forEach(binary::putFloat);
+                    assertEquals(1,jdbc.update(seal,json.writeValueAsString(meta),binary.array(),row.id(),row.revision(),row.featureSha()));
+                }after=page.getLast().id();}
+        });build=System.nanoTime()-build;
+        String read="""
+            SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,x.meta,x.v,
+            SHA2(q.snapshot_json,256)=x.raw_sha AND ((x.prep IS NULL AND x.resolved_sha=x.raw_sha) OR (x.prep IS NOT NULL AND q.snapshot_json->>'$.preparation'=x.prep AND q.snapshot_json->>'$.binding.recommendationId'=x.rec AND p.preparation_sha=SHA2(p.preparation_json,256))) AS valid
+            FROM economy_task_cost_sample s LEFT JOIN fixture_feature_probe x ON x.sid=s.sample_id AND x.rev=s.projection_revision AND x.qid=s.quote_id
+            LEFT JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=x.qid
+            LEFT JOIN economy_task_quote_preparation p ON p.tenant_id=q.tenant_id AND p.client_id=q.client_id AND p.owner_jiacn=q.owner_jiacn AND p.task_id=q.task_id
+              AND p.payer_user_id=q.payer_user_id AND p.recommendation_id=x.rec AND p.preparation_sha=x.prep
+            WHERE
+            """+cn.jia.economy.mapper.ConfirmedSampleMapper.HISTORY.replace("#{t.scope.tenantId}","?").replace("#{t.scope.clientId}","?").replace("#{t.ownerJiacn}","?").replace("#{group}","?").replace("#{t.taskId}","?")+" AND s.sample_id>? ORDER BY s.sample_id LIMIT 64";
+        org.springframework.jdbc.core.RowMapper<String> decode=(rs,n)->{if(!rs.getBoolean(7))throw new IllegalStateException("Invalid projection source");
+            var m=json.readValue(rs.getString(5),ProbeMeta.class);var b=java.nio.ByteBuffer.wrap(rs.getBytes(6));assertEquals(4096,b.remaining());var floats=new java.util.ArrayList<Float>(1024);
+            while(b.hasRemaining())floats.add(b.getFloat());var f=new TaskEstimateFeatures(m.featureVersion(),m.templateVersion(),m.requirementSha256(),m.inputSnapshotSha256(),m.textSha256(),m.embeddingIdentity(),floats,m.files(),m.requestedDeliverables());
+            assertEquals(rs.getString(4),f.digest());assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),f));return rs.getString(1);};
+        java.util.function.Function<String,List<String>> page=after->jdbc.query(read,decode,TENANT,CLIENT,OWNER,groupSha,reader.taskId(),after);
+        for(int run=0;run<4;run++){long t=System.nanoTime();String after="";var seen=new java.util.ArrayList<String>();while(true){var chunk=page.apply(after);if(chunk.isEmpty())break;seen.addAll(chunk);after=chunk.getLast();}long ns=System.nanoTime()-t;assertEquals(ids,seen);
+            System.out.printf(java.util.Locale.ROOT,"QUOTE_PROBE shared=%s run=%d rows=%d buildMs=%.3f walkMs=%.3f%n",shared,run,seen.size(),build/1e6,ns/1e6);}
+        int at=80;String sid=ids.get(at);jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=2 WHERE sample_id=?",sid);assertFalse(page.apply(ids.get(at-1)).contains(sid));
+        jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=1,quote_id='missing' WHERE sample_id=?",sid);assertThrows(IllegalStateException.class,()->page.apply(ids.get(at-1)));
     }
     private void applyHistoryFeatures(){new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());}
     private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared,boolean dense){
