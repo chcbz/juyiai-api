@@ -94,6 +94,18 @@ class AgentWebSocketSkillExecutionRegistrationTest {
     }
     void register(Fixture f, Object report) { f.handler.handleTextMessage(f.session, new TextMessage(wire(f, report))); }
 
+    @Test void grantBoundChatDoesNotFanOutAcrossCurrentSessions() throws Exception {
+        var a=fixture();var b=fixture();when(b.session.getId()).thenReturn("socket-b");
+        a.handler.afterConnectionEstablished(a.session);register(a,null);
+        a.handler.afterConnectionEstablished(b.session);a.handler.handleTextMessage(b.session,new TextMessage(wire(b,null)));
+        a.frames.clear();b.frames.clear();var payload=Map.of("messageType","chat_message","messageId","original-dispatch");
+        var ambiguous=a.handler.sendSingleTaskChat(TENANT,OWNER,CLIENT,AGENT,payload);
+        assertEquals(AgentWebSocketHandler.CapabilityDispatchStatus.AMBIGUOUS,ambiguous.status());assertFalse(ambiguous.delivered());
+        assertTrue(a.frames.isEmpty());assertTrue(b.frames.isEmpty());
+        when(a.auth.isCurrentBinding(eq("socket-b"),any(),any(),any(),any(),any())).thenReturn(false);
+        assertTrue(a.handler.sendSingleTaskChat(TENANT,OWNER,CLIENT,AGENT,payload).delivered());
+        assertEquals(1,a.frames.size());assertTrue(b.frames.isEmpty());
+    }
     @Test void onlyDeliveredAuthenticatedRegistrationActivatesExactTrustedSubject() throws Exception {
         var f = fixture();
         doAnswer(inv -> {

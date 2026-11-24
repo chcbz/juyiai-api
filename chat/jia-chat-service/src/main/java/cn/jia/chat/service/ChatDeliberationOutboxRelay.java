@@ -395,8 +395,12 @@ public class ChatDeliberationOutboxRelay implements SmartLifecycle, AutoCloseabl
         boolean live = broker.runIfLiveOrThrow(conversationId, generation,
                 () -> conversations.isLiveGeneration(row.getTenantId(), row.getOwnerJiacn(),
                         row.getClientId(), conversationId, generation),
-                () -> dispatch.set(sockets.sendNegotiatedChatMessageToAgent(
-                        row.getTenantId(), binding.executorOwner(), row.getClientId(), agentId, route, hostedWire(row, p))));
+                () -> {
+                    var wire=hostedWire(row,p);
+                    dispatch.set(route==InteractionRoute.CHAT && binding.dispatch().getTaskGrantId()!=null
+                            ? sockets.sendSingleTaskChat(row.getTenantId(),binding.executorOwner(),row.getClientId(),agentId,wire)
+                            : sockets.sendNegotiatedChatMessageToAgent(row.getTenantId(),binding.executorOwner(),row.getClientId(),agentId,route,wire));
+                });
         if (!live) {
             log.warn("Durable chat dispatch rejected by exact live-generation fence, eventId={}, conversationId={}, generation={}",
                     row.getEventId(), conversationId, generation);
@@ -419,6 +423,7 @@ public class ChatDeliberationOutboxRelay implements SmartLifecycle, AutoCloseabl
             return;
         }
         switch (result.status()) {
+            case AMBIGUOUS -> outbox.retry(claim,"TARGET_CHAT_SESSION_AMBIGUOUS",System.currentTimeMillis());
             case WAITING_DISABLED -> outbox.retry(claim, "TARGET_CHAT_PROFILE_DISABLED", System.currentTimeMillis());
             case OFFLINE -> outbox.retry(claim, "AGENT_OFFLINE", System.currentTimeMillis());
             case UNSUPPORTED -> {

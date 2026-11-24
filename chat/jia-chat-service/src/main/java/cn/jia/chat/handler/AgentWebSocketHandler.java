@@ -2603,6 +2603,15 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     public CapabilityDispatchResult sendNegotiatedChatMessageToAgent(
             String tenantId, String ownerJiacn, String clientId, String agentId,
             InteractionRoute route, Map<String, ?> payload) {
+        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,route,payload,false);
+    }
+
+    /** Only the relay's original grant-bound CHAT branch selects this lane. No caller wire field enables it. */
+    public CapabilityDispatchResult sendSingleTaskChat(String tenantId,String ownerJiacn,String clientId,String agentId,Map<String,?> payload) {
+        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,InteractionRoute.CHAT,payload,true);
+    }
+    private CapabilityDispatchResult negotiatedChat(String tenantId,String ownerJiacn,String clientId,String agentId,
+            InteractionRoute route, Map<String, ?> payload, boolean singleTask) {
         requireNoActiveTransactionForChatDelivery();
         if (!validExactDispatchId(tenantId, 50) || !validExactDispatchId(ownerJiacn, 50)
                 || !validExactDispatchId(clientId, 50) || !validExactDispatchId(agentId, 100)
@@ -2610,6 +2619,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             return new CapabilityDispatchResult(CapabilityDispatchStatus.UNSUPPORTED, false, Map.of());
         }
         Map<String, AgentRuntimeCapabilities> exact = new LinkedHashMap<>();
+        WebSocketSession selected=null;
         for (Map.Entry<String, Set<String>> entry : successfullyRegisteredAgentIds.entrySet()) {
             String sessionId = entry.getKey();
             if (!entry.getValue().contains(agentId) || !registeredAgentIds(sessionId).contains(agentId)) continue;
@@ -2620,6 +2630,10 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
                     || !tenantId.equals(sessionTenantId(session))
                     || !ownerJiacn.equals(sessionJiacn(session))
                     || !clientId.equals(sessionClientId(session))) continue;
+            if(singleTask){
+                if(selected!=null)return new CapabilityDispatchResult(CapabilityDispatchStatus.AMBIGUOUS,false,Map.of());
+                selected=session;
+            }
             exact.put(sessionId, sessionRuntimeCapabilities.getOrDefault(
                     sessionId, AgentRuntimeCapabilities.legacy()));
         }
@@ -2664,8 +2678,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
         boolean delivered = false;
         Map<String, Object> negotiated = Map.of();
         for (Map.Entry<String, AgentRuntimeCapabilities> entry : eligible.entrySet()) {
-            WebSocketSession session = sessions.get(entry.getKey());
+            WebSocketSession session = singleTask ? selected : sessions.get(entry.getKey());
             if (session == null || !session.isOpen()) continue;
+            if(singleTask && (sessions.get(entry.getKey())!=session || !typedDeliberationSessionCurrent(session,agentId))) continue;
             AgentRuntimeCapabilities.Decision decision = entry.getValue().decision(route);
             Map<String, Object> wire = new LinkedHashMap<>(outbound);
             negotiated = entry.getValue().negotiatedProfile(route, decision);
@@ -2718,7 +2733,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     }
 
     public enum CapabilityDispatchStatus {
-        READY, LEGACY_COMPATIBLE, WAITING_DISABLED, UNSUPPORTED, OFFLINE
+        READY, LEGACY_COMPATIBLE, WAITING_DISABLED, UNSUPPORTED, OFFLINE, AMBIGUOUS
     }
 
     public record CapabilityDispatchResult(CapabilityDispatchStatus status, boolean delivered,
