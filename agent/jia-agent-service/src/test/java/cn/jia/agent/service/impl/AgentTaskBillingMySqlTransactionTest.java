@@ -1095,6 +1095,36 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(batchCount+31,count("economy_task_quote_batch"));assertEquals(fixed+31,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
+        if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls);
+    }
+
+    // Same feature cache as the preceding single-candidate request. Terms and roster are fixture inputs;
+    // estimation, reference repricing, individual bindings, atomic persistence and replay are not mocked.
+    private void measureBatchQuoteHttp(String task,String token,cn.jia.agent.service.AgentExternalServicePolicyService agents,
+            cn.jia.agent.service.recommendation.ProspectiveTaskExecution source,cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs subject,
+            cn.jia.economy.task.TaskBudgetEstimator.Terms terms,java.util.concurrent.atomic.AtomicInteger encodes)throws Exception{
+        int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
+        var roster=java.util.stream.IntStream.range(0,108).mapToObj(i->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(String.format(java.util.Locale.ROOT,"q-target-%03d",i),OWNER,100+i,0)).toList();
+        var ids=roster.stream().map(c->c.agent()).toList();var noConfig=ids.getLast();var proofs=new java.util.HashMap<String,cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence>();
+        for(var c:roster)if(!c.agent().equals(noConfig))proofs.put(c.agent(),new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("frozen-terms",terms));
+        when(agents.quoteTargets(eq(SCOPE),eq(task),eq(ids),anyBoolean())).thenReturn(roster);when(source.observe(subject,roster)).thenReturn(proofs);when(source.current(subject,roster,proofs)).thenReturn(true);
+        var mapper=new ObjectMapper();String body=mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","multi-quote","data",Map.of("expectedTaskVersion","0","agentIds",ids)));
+        var samples=new java.util.ArrayList<Long>();var all=new java.util.HashSet<String>();tools.jackson.databind.JsonNode first=null;long replay=0;
+        try(var client=HttpClient.newHttpClient()){
+            for(int i=0;i<=30;i++){
+                int key=i==30?0:i;var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key","quote-batch-"+key).header("X-Request-Id","multi-quote").POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                long t=System.nanoTime();var res=client.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
+                assertEquals(200,res.statusCode());var env=mapper.readTree(res.body());assertEquals("E0",env.path("code").asText());var data=env.path("data");if(i==30){replay=elapsed;assertEquals(first,data);break;}
+                samples.add(elapsed);if(i==0)first=data;var items=data.path("quotes");assertEquals(108,items.size());String batch=items.get(0).path("recommendationId").asText();assertFalse(batch.isBlank());
+                for(int j=0;j<ids.size();j++){var item=items.get(j);assertEquals(ids.get(j),item.path("agentId").asText());assertEquals(batch,item.path("recommendationId").asText());
+                    if(j+1==ids.size()){assertEquals("UNAVAILABLE",item.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",item.path("unavailableReason").asText());assertFalse(item.path("amount").isObject());}
+                    else{assertEquals("AVAILABLE",item.path("state").asText());assertEquals("65",item.at("/amount/amountMinor").asText());String q=item.path("quoteId").asText();assertFalse(q.isBlank());assertTrue(all.add(q));}
+                }
+            }
+        }
+        assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3210,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
+        verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
+        samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());
     }
 
     private SqlSessionTemplate recommendationSql;

@@ -1132,6 +1132,7 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
     // The owned ES fixture is never resolved from application/production properties.
     if (providers.gradleProperty('ownedCapabilityEsPort').isPresent()) {
         systemProperty 'cyf.capabilityEsPort', providers.gradleProperty('ownedCapabilityEsPort').get()
