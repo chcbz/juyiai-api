@@ -174,7 +174,8 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             if("RESPONSE".equals(kind)&&cuts.compareAndSet(null,exchange.getRequestHeaders().getFirst("X-Request-Id"))){
                 assertEquals(1,count("economy_usage_revision"));
                 if(rotate){originalBody.set(input);rotated.set(tx.execute(st->auth.issue(installations.lock(INSTALL),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(INSTALL,"0","client",AGENT,"1","a".repeat(64),"host","rt"),2)));assertEquals(2,rotated.get().sessionGeneration());}
-                return;
+                if(!rotate)return; // Other lost-response cases drop the actual socket.
+                exchange.getResponseHeaders().set("X-Fixture-Drop-Committed","yes");
             }
             if("GET".equals(kind))assertTrue(exchange.getRequestURI().getPath().endsWith("/receipts/"+cuts.get()));
             for(var h:response.getHeaderNames())exchange.getResponseHeaders().put(h,response.getHeaders(h));byte[] bytes=response.getContentAsByteArray();exchange.sendResponseHeaders(response.getStatus(),bytes.length);exchange.getResponseBody().write(bytes);

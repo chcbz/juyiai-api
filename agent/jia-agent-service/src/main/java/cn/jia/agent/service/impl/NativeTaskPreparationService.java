@@ -133,6 +133,8 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         var row=committed(scope,task,sha,false);if(!agent.equals(row.intent().binding().target().agent()))throw new IllegalStateException("Wrong quoted initial target");
         return row.execution()==null?row.intent().output():null;
     }
+    @org.springframework.beans.factory.annotation.Autowired
+    private TaskAssigneeAdmission admission = new TaskAssigneeAdmission(false);
     private org.springframework.context.ApplicationEventPublisher events;
     @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}
     private static Output output(Choice c){return switch(c){case LOCAL_ANSWER->new Output(Mode.ANSWER,List.of());case LOCAL_TEXT_FILE->new Output(Mode.ARTIFACTS,List.of("text/plain"));};}
@@ -147,6 +149,8 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
                 input=hash(json.writeValueAsString(List.of(version,choice.name())));
                 var saved=db.query("SELECT input_sha,task_version,selection_version,selected_choice FROM agent_task_native_selection_receipt WHERE operation_sha=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)},op);
                 if(!saved.isEmpty()){var r=saved.getFirst();if(!input.equals(r[0]))throw new KeyConflict();return new View(r[1],agent,r[2],r[3]);}
+                // A first selection schedules a post-commit device probe; GET and committed receipts do not.
+                admission.requireOpen();
             }
             if(!"open".equals(root.getRewardStatus()))throw new Changed();var req=requirements.readCurrentWithinLockedTask(scope,task,root);
             var b=new Binding(scope,task,root.getTaskVersion(),req.requirementRevision(),req.sha256(),grants.snapshotTaskInputsWithinLockedTask(scope,task).digest(),targets.getFirst());

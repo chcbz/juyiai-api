@@ -2154,9 +2154,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     b.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
                 var r=client.send(b.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());return env.path("data");
             }}var call=new Call();var empty=call.run(null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt");
+            var choiceService=ReflectionTestUtils.getField(initialSelectionController,"choices");
+            var pause=new cn.jia.agent.service.TaskAssigneeAdmission(true);var open=new cn.jia.agent.service.TaskAssigneeAdmission(false);
+            ReflectionTestUtils.setField(choiceService,"admission",pause);int frozen=count("agent_task_native_preparation");
+            assertEquals(empty,call.run(null,null,null,200,"E0"));call.run("one","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+            assertEquals(before,count("agent_task_native_selection_receipt"));assertEquals(frozen,count("agent_task_native_preparation"));
+            ReflectionTestUtils.setField(choiceService,"admission",open);
             call.run(null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");var saved=call.run("one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());checked.call();
             jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
+            ReflectionTestUtils.setField(choiceService,"admission",pause);
             assertEquals(saved,call.run("one","LOCAL_ANSWER",stamp,200,"E0"));call.run("one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");
+            call.run("new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+            ReflectionTestUtils.setField(choiceService,"admission",open);
             call.run("new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");assertEquals(before+1,count("agent_task_native_selection_receipt"));
         }
     }
