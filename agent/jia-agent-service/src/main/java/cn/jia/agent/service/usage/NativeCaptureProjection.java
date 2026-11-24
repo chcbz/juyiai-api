@@ -8,6 +8,7 @@ import cn.jia.task.scheduling.ScheduledInvocation;
 import cn.jia.task.scheduling.ScheduledJobHandler;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.event.EventListener;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -21,7 +22,10 @@ public final class NativeCaptureProjection implements ScheduledJobHandler {
     public String getName(){return NAME;}
     @EventListener public void changed(UsageCaptureProjection.Key k){
         if(!TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing evidence transaction");
-        scope.requireAdmitted(k.tenant(),k.client());schedules.getObject().signal(new ScheduleKey(k.client(),NAME,Long.toString(k.pk()),""),System.currentTimeMillis()+5000);
+        scope.requireAdmitted(k.tenant(),k.client());
+        var scheduler=schedules.getIfAvailable();
+        if(scheduler==null)throw new DataAccessResourceFailureException("Usage projection scheduler unavailable");
+        scheduler.signal(new ScheduleKey(k.client(),NAME,Long.toString(k.pk()),""),System.currentTimeMillis()+5000);
     }
     public void executeScheduled(ScheduledInvocation invocation){
         var key=invocation.key();scope.requireAdmitted(invocation.tenantId(),key.clientId());
