@@ -103,15 +103,24 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     /** The caller owns the task root, authorized grant and execution transaction. No current quote/probe read here. */
     void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,boolean localOnly,Map<String,Object> outputs){
         if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing native admission transaction");
-        String where=" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND intent_sha=?";
-        Object[] args={scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha};
-        var rows=db.query("SELECT intent_json,initial_execution_id FROM "+TABLE+where+" FOR UPDATE",(rs,n)->new String[]{rs.getString(1),rs.getString(2)},args);
-        if(rows.size()!=1||!hash(rows.getFirst()[0]).equals(sha))throw new IllegalStateException("Missing or changed quoted initial intent");
-        var row=rows.getFirst();if(row[1]!=null&&!row[1].equals(execution))return; // a committed first execution exists; later actions use their own contract
-        var intent=json.readValue(row[0],Intent.class);var b=intent.binding();var t=b.target();
+        var row=committed(scope,task,sha,true);if(row.execution()!=null&&!row.execution().equals(execution))return;
+        var intent=row.intent();var b=intent.binding();var t=b.target();
         if(!scope.equals(b.scope())||!task.equals(b.task())||!t.agent().equals(target.agentId())||!t.provider().equals(target.ownerJiacn())||t.binding()!=target.bindingId()
             ||!localOnly||!intent.output().commandOutputs().equals(outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
-        if(row[1]==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+where+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
+        if(row.execution()==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+COMMITTED+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
+    }
+    private static final String COMMITTED=" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND intent_sha=?";
+    private record Committed(Intent intent,String execution){}
+    private Committed committed(AgentTaskExecutionGrantService.Scope scope,String task,String sha,boolean consume){
+        var rows=db.query("SELECT intent_json,initial_execution_id FROM "+TABLE+COMMITTED+(consume?" FOR UPDATE":" FOR SHARE"),(rs,n)->{
+            String body=rs.getString(1);if(!hash(body).equals(sha))throw new IllegalStateException("Changed quoted initial intent");
+            var intent=json.readValue(body,Intent.class);if(!scope.equals(intent.binding().scope())||!task.equals(intent.binding().task()))throw new IllegalStateException("Wrong initial intent scope");
+            return new Committed(intent,rs.getString(2));},scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha);
+        if(rows.size()!=1)throw new IllegalStateException("Missing quoted initial intent");return rows.getFirst();
+    }
+    Output pendingOutput(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String sha){
+        var row=committed(scope,task,sha,false);if(!agent.equals(row.intent().binding().target().agent()))throw new IllegalStateException("Wrong quoted initial target");
+        return row.execution()==null?row.intent().output():null;
     }
     private org.springframework.context.ApplicationEventPublisher events;
     @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}

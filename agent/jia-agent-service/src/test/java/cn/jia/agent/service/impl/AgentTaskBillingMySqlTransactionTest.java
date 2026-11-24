@@ -1441,11 +1441,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
         var held=mock(TaskBillingService.class);when(held.heldInitialIntent(inputs.task(),agent)).thenReturn(frozen.sha256());
         var admit=new QuotedInitialActionAdmission(held,service);var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,OWNER,agent,binding,null);
+        assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent)));assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent))); // projection never consumes
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",false,output.commandOutputs());return null;}));
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,Map.of());return null;}));
         assertThrows(InjectedFailure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());throw new InjectedFailure();}));
         assertNull(jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
         locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());return null;});
+        assertNull(locked(()->admit.pending(SCOPE,TASK,agent)));
         locked(()->{admit.admit(SCOPE,TASK,granted,"followup",false,Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
         initialSelectionController=new cn.jia.agent.api.TaskInitialActionController(service);
         verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
