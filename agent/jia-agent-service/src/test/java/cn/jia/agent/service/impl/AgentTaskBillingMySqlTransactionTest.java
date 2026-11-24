@@ -1352,9 +1352,44 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var created=nativeActions.create(ownerScope,right);assertEquals("QUEUED",created.state());assertEquals(created,nativeActions.create(ownerScope,right));
                 assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertEquals(created.executionId(),consumed.get());
                 assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
+                verifyNativePickup(authority,service,created,pending);
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
             }return null;
         };
+    }
+
+    /** Same committed execution: authenticated MVC filter, controller, service, MySQL lease. Socket liveness is a fixture. */
+    private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
+        for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
+        String agent=created.targetAgentId(),install="rti_"+"2".repeat(32),host="pickup-host",boot="pickup-boot";
+        jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'1',REPEAT('a',64),UNHEX(REPEAT('01',32)),1,'ACTIVE',?,?)",install,agent,TENANT,CLIENT);
+        var installations=withMapper(new AgentRuntimeV1InstallationDaoImpl(),AgentRuntimeV1InstallationMapper.class);
+        var accounts=mock(cn.jia.user.security.AccountSecurityService.class);when(accounts.findUniqueByExactJiacn(OWNER)).thenReturn(java.util.Optional.of(new cn.jia.user.security.AccountSecuritySnapshot(1,OWNER,cn.jia.user.security.AccountState.ACTIVE,1)));
+        var gate=new cn.jia.agent.config.AgentTaskEventsGate(new cn.jia.agent.config.AgentTaskEventsProperties(true,List.of(new cn.jia.agent.config.AgentTaskEventsProperties.AllowedScope(TENANT,CLIENT))));
+        var target=new cn.jia.agent.security.AgentRuntimeAuthenticationService(authority.runtimes(),installations,withMapper(new AgentIdentityRegistryDaoImpl(),AgentIdentityRegistryMapper.class),authority.identities(),accounts,gate,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
+        var factory=new ProxyFactory(target);factory.setProxyTargetClass(true);factory.addAdvice(new TransactionInterceptor(manager,new AnnotationTransactionAttributeSource()));
+        var auth=(cn.jia.agent.security.AgentRuntimeAuthenticationService)factory.getProxy();service.setRuntimeAuthentication(auth);
+        var session=new TransactionTemplate(manager).execute(tx->auth.issue(installations.lock(install),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(install,TENANT,CLIENT,agent,"1","a".repeat(64),host,boot),System.currentTimeMillis()));assertNotNull(session);
+        var principal=new org.springframework.security.web.servletapi.SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
+        var controller=new cn.jia.agent.api.PersonalWorkspaceConversationRuntimeController(proxy(service,PersonalWorkspaceExecutionService.class),auth);
+        var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new cn.jia.agent.security.AgentRuntimeAuthenticationFilter(auth),principal).build();
+        var json=new ObjectMapper();String queue="/internal/agent/executions/commands",run="/internal/agent/executions/"+created.executionId()+"/runs/"+created.runId();
+        class Device{int seq;tools.jackson.databind.JsonNode call(String path,Object data,int expectedStatus)throws Exception{
+            String id="pickup-"+(++seq);var req=org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request(data==null?org.springframework.http.HttpMethod.GET:org.springframework.http.HttpMethod.POST,URI.create(path));
+            req.header("Authorization","AgentRuntime "+session.sessionToken()).header("X-Agent-Id",agent).header("X-Agent-Installation-Id",install).header("X-Agent-Host-Id",host).header("X-Agent-Runtime-Id",boot).header("X-Agent-Session-Generation",Long.toString(session.sessionGeneration())).header("X-Request-Id",id);
+            if(data!=null)req.contentType("application/json").content(json.writeValueAsBytes(Map.of("protocolVersion",1,"requestId",id,"data",data)));
+            var res=mvc.perform(req).andReturn().getResponse();assertEquals(expectedStatus,res.getStatus());return json.readTree(res.getContentAsByteArray()).path("data");}}
+        var device=new Device();assertFalse(device.call(queue,null,401).has("items"));
+        jdbc.update("UPDATE agent_runtime SET status='online' WHERE tenant_id=? AND client_id=? AND agent_id=? AND runtime_instance_id=?",TENANT,CLIENT,agent,boot);
+        var headers=new cn.jia.agent.security.AgentRuntimeAuthenticationFilter.SessionHeaders(agent,install,host,boot,session.sessionGeneration(),session.sessionToken());
+        auth.bind("pickup-socket",auth.verify(headers),()->true);
+        try{var items=device.call(queue,null,200).path("items");assertEquals(1,items.size());var cmd=items.get(0);assertEquals(created.executionId(),cmd.path("executionId").asText());assertEquals(created.runId(),cmd.path("runId").asText());
+            assertEquals(created.snapshotDigest(),cmd.path("snapshotSha256").asText());assertEquals(created.taskId(),cmd.at("/scope/taskId").asText());assertEquals(json.valueToTree(expected.commandOutputs()),cmd.path("outputs"));assertTrue(cmd.path("skills").isArray()&&cmd.path("skills").isEmpty());
+            var claim=Map.of("commandId",cmd.path("commandId").asText(),"messageId",cmd.path("messageId").asText());var lease=device.call(run+"/lease",claim,200);assertEquals("1",lease.path("version").asText());assertTrue(lease.path("token").asText().matches("[0-9a-f-]{36}"));
+            var replay=device.call(run+"/lease",claim,200);assertTrue(lease.equals(replay),"same live lease without exposing its token");
+            var inputs=device.call(run+"/inputs",Map.of("version","1","token",lease.path("token").asText()),200);assertEquals(created.snapshotDigest(),inputs.path("snapshotSha256").asText());assertTrue(inputs.path("noReferencedMaterials").asBoolean());
+            assertTrue(device.call(queue,null,200).path("items").isEmpty());assertEquals("RUNNING",independent.queryForObject("SELECT phase FROM agent_skill_execution WHERE execution_id=?",String.class,created.executionId()));
+        }finally{auth.disconnect("pickup-socket");}assertFalse(device.call(queue,null,401).has("items"));
     }
 
     /** Test-scoped attribution only; no application counters, raw SQL/inputs, or per-row log lines. */
