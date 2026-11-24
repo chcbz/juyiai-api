@@ -17,7 +17,7 @@ class ChatUsageCostRecorderTest {
     private final ChatDispatchAuthorityMapper dispatches = mock(ChatDispatchAuthorityMapper.class);
     private final ChatDeliberationDao turns = mock(ChatDeliberationDao.class);
     private final UsageCostService costs = mock(UsageCostService.class);
-    private final ChatUsageCostRecorder recorder = new ChatUsageCostRecorder(dispatches, turns, costs);
+    private final ChatUsageCostRecorder recorder = new ChatUsageCostRecorder(new ChatUsageDispatchAuthority(dispatches, turns), costs);
     private final AuthenticatedRuntimeOperation.Scope scope =
             new AuthenticatedRuntimeOperation.Scope("0", "client", "executor", "agent");
     private ChatDispatchOutboxEntity dispatch;

@@ -169,11 +169,17 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     @Transactional(rollbackFor = Exception.class)
     public <T> T withAuthenticatedRuntime(java.security.Principal principal,
             java.util.function.Function<cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope, T> operation) {
+        return withAuthenticatedDevice(principal, device -> operation.apply(device.subject()));
+    }
+
+    @Override @Transactional(rollbackFor = Exception.class)
+    public <T> T withAuthenticatedDevice(java.security.Principal principal,
+            java.util.function.Function<cn.jia.agent.service.AuthenticatedRuntimeOperation.Device,T> operation) {
         if (!(principal instanceof org.springframework.security.core.Authentication authentication)) throw denied();
-        var proof = requireProof(authentication);
-        var scope = proof.scope();
-        return withFence(proof, false, () -> operation.apply(new cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope(
-                scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId())));
+        var proof=requireProof(authentication);var scope=proof.scope();
+        return withFence(proof,false,()->operation.apply(new cn.jia.agent.service.AuthenticatedRuntimeOperation.Device(
+                new cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),scope.agentId()),
+                new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration()))));
     }
 
     /** Native business commit boundary. This entry point owns a proxy transaction;

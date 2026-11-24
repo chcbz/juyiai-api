@@ -1619,14 +1619,26 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var host=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
         assertThrows(InjectedFailure.class,()->tx.executeWithoutResult(st->{origins.beforeSend(claim,context,host);throw new InjectedFailure();}));
         assertEquals(0,count("chat_task_dispatch_origin"));
+        var mapper=recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class);
+        var authority=new cn.jia.chat.service.usage.ChatUsageDispatchAuthority(mapper,new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class)));
+        var store=new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc);var turn=mapper.findDispatch(TENANT,CLIENT,row.getDispatchId()).getFirst();
+        var target=new ObjectMapper().readTree(turn.getPayloadJson()).path("targetAgentId").asText();
+        var subject=new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,OWNER,target);var device=new AuthenticatedRuntimeOperation.Device(subject,host);
+        java.util.function.BooleanSupplier matches=()->authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),context,store);
+        assertFalse(matches.getAsBoolean());
         tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
+        assertTrue(matches.getAsBoolean());assertFalse(authority.matchesTaskSource(device,"other-turn",row.getDispatchId(),context,store));
+        assertFalse(authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),"sha256:"+"0".repeat(64),store));
+        var changed=new AuthenticatedRuntimeOperation.Device(subject,new AgentManagedSessionLookup.SessionFence("installation","host","boot",2));
+        assertFalse(authority.matchesTaskSource(changed,row.getTurnId(),row.getDispatchId(),context,store));
+        assertThrows(ChatDeliberationException.class,()->authority.matchesTaskSource(new AuthenticatedRuntimeOperation.Device(new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,"different-owner",target),host),row.getTurnId(),row.getDispatchId(),context,store));
         assertEquals(1,count("chat_task_dispatch_origin"));assertEquals(0,independent.queryForObject("SELECT mixed_origin FROM chat_task_dispatch_origin",Integer.class));
         assertTrue(tx.execute(st->relay.retry(claim,"TEST_LOST_SEND",now)).booleanValue());
         assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(st->origins.beforeSend(claim,context,host)));
         var later=tx.execute(st->relay.claim(draft,"next-relay",now+2000,60000));assertNotNull(later);
         tx.executeWithoutResult(st->origins.beforeSend(later,context,new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation-2","host-2","boot-2",2)));
         tx.executeWithoutResult(st->origins.beforeSend(later,context,host));
-        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));assertFalse(matches.getAsBoolean());
     }
 
     private Map<String,Object> quotedChatPhase; // This test instance owns one quoted discussion. No production log or store.

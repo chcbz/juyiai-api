@@ -197,10 +197,13 @@ class AgentRuntimePersistentSessionFenceTest {
         var ordered=inOrder(manager,installations,rows);
         ordered.verify(manager).getTransaction(any());ordered.verify(installations).lock(ID);
         ordered.verify(rows).lockInScope("0","client",AGENT);ordered.verify(manager).commit(status);
+        var device=proxy.withAuthenticatedDevice(admitted,value->value);
+        assertEquals(scope,device.subject());assertEquals(new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(ID,"host","boot",session.sessionGeneration()),device.fence());
         auth.issue(installation,request("host","replacement"),1001);clearInvocations(manager);
         AtomicBoolean entered=new AtomicBoolean();
         assertThrows(RuntimeException.class,()->proxy.withAuthenticatedRuntime(admitted,value->entered.compareAndSet(false,true)));
         assertFalse(entered.get());verify(manager).rollback(status);verify(manager,never()).commit(any());
+        assertThrows(RuntimeException.class,()->proxy.withAuthenticatedDevice(admitted,value->entered.compareAndSet(false,true)));
         assertThrows(RuntimeException.class,()->proxy.withAuthenticatedRuntime(
                 new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("owner","ignored",List.of()),
                 value->entered.compareAndSet(false,true)));
