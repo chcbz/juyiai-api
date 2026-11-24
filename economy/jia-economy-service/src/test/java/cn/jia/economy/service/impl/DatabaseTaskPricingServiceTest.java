@@ -36,6 +36,21 @@ class DatabaseTaskPricingServiceTest {
     private static String tools(String units) {
         return "[{\"channel\":\"tool-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"" + units + "\"}]";
     }
+    @Test void preparedReferenceRoutesArePrivateExactImmutableAndContentVersioned(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)throws Exception{
+        var c=new cn.jia.economy.task.PreparedReferenceRoutes.Configuration("NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1");
+        var key=Map.of("tenant","tenant","client","client","owner","owner","configuration",c);
+        var entry=Map.of("key",key,"model","modelA","channel","channel","tier","standard");
+        var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","task");var file=dir.resolve("manifest");
+        class Load {PinnedReferenceRoutes from(Object... rows)throws Exception{var bytes=new ObjectMapper().writeValueAsBytes(Map.of("schema","prepared-reference-routes-v1","entries",java.util.List.of(rows)));
+            java.nio.file.Files.write(file,bytes);return new PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));}}
+        var load=new Load();var first=load.from(entry);var terms=first.resolve(task,c);assertNotNull(terms);
+        assertEquals(new TaskReferencePricing.TokenRoute("channel","modelA","standard","RESPONSES_TEXT_TOKENS_V1"),terms.routes().get("MODEL_RESPONSE").get("INFERENCE"));
+        assertNull(first.resolve(new cn.jia.economy.task.TaskBillingService.Task(scope,"other","task"),c));
+        assertNull(first.resolve(task,new cn.jia.economy.task.PreparedReferenceRoutes.Configuration(c.version(),c.executionSha(),c.localRouteSha(),"4".repeat(64),c.capturePolicy())));
+        var edited=new java.util.HashMap<String,Object>(entry);edited.put("model","modelB");assertNotEquals(terms.execution().routeVersion(),load.from(edited).resolve(task,c).execution().routeVersion());
+        assertEquals(terms,first.resolve(task,c));assertNull(load.from(entry,edited).resolve(task,c));
+        assertNull(new PinnedReferenceRoutes(file.toString(),"0".repeat(64)).resolve(task,c));assertNull(new PinnedReferenceRoutes("","").resolve(task,c));
+    }
     @Test void licensedAndConfirmedKeysetsMergeAcrossInterleavedPagesAndOneSourceTail(){
         var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var catalog=new TaskHistoryCatalogService(db,json,true);
         var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
