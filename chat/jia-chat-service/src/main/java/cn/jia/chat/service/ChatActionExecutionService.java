@@ -170,14 +170,11 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
     }
 
     static Map<String,Object> nativeOutputs(Map<String,Object> parameters,List<String> mimeTypes) {
-        return switch ((String)parameters.get("outputMode")) {
-            case "ANSWER" -> Map.of("mimeTypes",List.of(),"multiple",false,"artifactsRequired",false,
-                    "dataSchema",Map.of("$schema","https://json-schema.org/draft/2020-12/schema","type","object",
-                            "properties",Map.of("answer",Map.of("type","string","minLength",1,"pattern","\\S")),
-                            "required",List.of("answer"),"additionalProperties",false));
-            case "ARTIFACTS" -> Map.of("mimeTypes",mimeTypes,"multiple",true,"artifactsRequired",true);
-            default -> throw conflict();
-        };
+        var mode=switch ((String)parameters.get("outputMode")) {
+            case "ANSWER" -> cn.jia.agent.service.NativeTaskPreparation.Mode.ANSWER;
+            case "ARTIFACTS" -> cn.jia.agent.service.NativeTaskPreparation.Mode.ARTIFACTS;
+            default -> throw conflict();};
+        return new cn.jia.agent.service.NativeTaskPreparation.Output(mode,mimeTypes).commandOutputs();
     }
 
     static Map<String,Object> nativeSelection(InstalledSkillDescriptorLookup.Snapshot current,ChatActionOutcomeContract.Capability capability) {

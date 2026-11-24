@@ -111,3 +111,5 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 在线读取需先安装 `economy-task-benchmark-use-fence-v1.sql`；触发器让撤回 INSERT 在写 stop 前锁定同一条用途授权，固定报价先共享锁授权行再做当前读，不依赖缺行间隙锁。业务开关 `jia.economy.measured-benchmark-use` 默认 false；显式开启前验证触发器、只增权限及已授权作用域。不开启不查询新增表。开关不是费用或在线用途许可。
 
 启用基准在线选样前另执行 `economy-task-benchmark-retirement-v1.sql`。备案退役、评审撤回均为一次性终态；旧行不能通过改回标志复活。维护角色对原行只授相应标志列的 UPDATE，不授正文/主键 UPDATE、DELETE、REPLACE 或 DDL。报价值锁内已复核且先提交的不追改。
+
+正式 TASK 已明确本地原生初始动作的准备记录由 Agent 维护：显式安装 `agent-task-native-preparation-v1.sql`，应用仅需 SELECT/INSERT，不回填、无默认技能或用途许可。只有可信任务创建/编排方已决定初始动作时才冻结；开放议事、历史命令和浏览器不是生产者。此记录不是 Runtime 已测配置、定价路由、费用授权或执行命令。

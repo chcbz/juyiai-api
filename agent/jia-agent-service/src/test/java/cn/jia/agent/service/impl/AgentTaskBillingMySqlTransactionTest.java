@@ -58,6 +58,7 @@ import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import cn.jia.agent.service.NativeTaskPreparation;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
@@ -1355,6 +1356,32 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             } finally {writer.rollback();}
         }
         assertEquals(0,count("economy_transaction"));
+    }
+    @Test void explicitNativeTaskIntentFreezesOnlyExactOpenInputsAndCandidateWithoutDispatch() throws Exception {
+        var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
+        ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
+        attachQuoteFile(0);
+        String agent="agt_00000000000000000000000000000001";
+        jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-fixture",agent,TENANT,CLIENT);
+        long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
+        jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
+        locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql"))).execute(jdbc.getDataSource());
+        var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
+        var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
+        var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
+        var bindingKey=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,target);
+        var types=new java.util.ArrayList<>(List.of("text/plain"));var output=new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ARTIFACTS,types);types.clear();
+        var intent=new NativeTaskPreparation.Intent("TASK_NATIVE_LOCAL_FILES_V1",bindingKey,output);assertNull(service.find(bindingKey));
+        assertTrue(output.comparisonOutputs().containsKey("dataSchema"));assertNull(output.comparisonOutputs().get("dataSchema"));assertFalse(output.commandOutputs().containsKey("dataSchema"));
+        assertEquals(List.of("text/plain"),output.mimeTypes());int quotes=count("economy_task_quote"),executions=count("agent_personal_workspace_execution");
+        assertThrows(InjectedFailure.class,()->locked(()->{service.freeze(intent);throw new InjectedFailure();}));assertNull(service.find(bindingKey));
+        var frozen=service.freeze(intent);assertEquals(frozen,service.freeze(intent));assertEquals(frozen,service.find(bindingKey));
+        assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),bindingKey,new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ANSWER,List.of()))));
+        var wrong=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,new AgentExternalServicePolicyService.QuoteTarget(agent,target.provider(),target.binding()+1,target.externalPolicyRevision()));
+        assertNull(service.find(wrong));assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),wrong,output)));
+        jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
+        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
     }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
