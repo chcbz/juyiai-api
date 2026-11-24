@@ -617,21 +617,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
-        var observation=observations.observeConfirmed(BILLING_TASK,group,selected,"frozen-family",held);
+        var frozen=observations.freezeConfirmed(BILLING_TASK,group,selected,"frozen-family",held);
+        var observation=observations.replay(BILLING_TASK,group,selected,"frozen-family",held,frozen.sha256(),frozen.json());
+        assertThrows(IllegalArgumentException.class,()->observations.replay(BILLING_TASK,group,selected,"frozen-family",held,frozen.sha256(),frozen.json()+" "));
+        assertThrows(IllegalArgumentException.class,()->observations.replay(BILLING_TASK,group,selected,"other-family",held,frozen.sha256(),frozen.json()));
+        assertThrows(IllegalArgumentException.class,()->observations.replay(BILLING_TASK,group,selected,"frozen-family",cn.jia.economy.pricing.TaskEstimateEvaluation.Split.TRAIN,frozen.sha256(),frozen.json()));
+        assertThrows(IllegalArgumentException.class,()->observations.replay(query,group,selected,"frozen-family",held,frozen.sha256(),frozen.json()));
         assertEquals(needle,observation.features());assertEquals(group.privateCalibrationGroup(BILLING_TASK),observation.group());assertEquals(selected.revision(),observation.revision());
         assertEquals(measured.operations().stream().map(o->o.fact()).toList(),observation.facts());
         assertTrue(observation.split().truthAt()>=beforeRead);assertEquals(held,observation.split().split());
         assertEquals(jdbc.queryForObject("SELECT q.created_at FROM economy_task_quote q JOIN economy_task_cost_sample s ON s.quote_id=q.quote_id WHERE s.sample_id=?",Long.class,sid).longValue(),observation.split().featuresAt());
         for(var foreign:List.of(query,new TaskBillingService.Task(query.scope(),"other",TASK),new TaskBillingService.Task(new cn.jia.economy.service.EconomyScope(TENANT,"other"),OWNER,TASK)))
-            assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.observeConfirmed(foreign,group,selected,"frozen-family",held));
-        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.observeConfirmed(BILLING_TASK,group,new cn.jia.economy.task.TaskHistoryCatalog.Revision(sid,selected.revision()+1),"frozen-family",held));
+            assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.freezeConfirmed(foreign,group,selected,"frozen-family",held));
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.freezeConfirmed(BILLING_TASK,group,new cn.jia.economy.task.TaskHistoryCatalog.Revision(sid,selected.revision()+1),"frozen-family",held));
         var recovered=historyCatalog.quantities(query,group,selected);assertEquals(measured.operations().stream().map(o->o.fact()).toList(),recovered);
         assertNull(historyCatalog.quantities(new TaskBillingService.Task(query.scope(),"other","new-task"),group,selected));
         assertTrue(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertEquals(1024,entries.getFirst().features().vector().size());
         assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operation_refs) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'"); // synthetic source invalidation, journal/CAS tested independently
         assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->locked(()->{estimator.lockSelected(query,List.of(available));return null;}));
-        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.observeConfirmed(BILLING_TASK,group,selected,"frozen-family",held));
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.freezeConfirmed(BILLING_TASK,group,selected,"frozen-family",held));
+        assertEquals(observation,observations.replay(BILLING_TASK,group,selected,"frozen-family",held,frozen.sha256(),frozen.json()),"replay preserves the original observation and its time; it is not fresh eligibility");
         assertTrue(historyCatalog.page(query,group,"").isEmpty());assertFalse(locked(()->historyCatalog.lockCurrent(query,group,selected)));assertNull(historyCatalog.quantities(query,group,selected));
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
