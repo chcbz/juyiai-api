@@ -79,6 +79,15 @@ class CapabilitySearchTest {
     @Test void staleOrUnindexedDocumentsCannotBecomeNoMatch() throws Exception { exchange(0,0,"UNAVAILABLE"); }
 
     private static void exchange(int present,int encoded,String expected) throws Exception {
+        exchange(present,encoded,expected,0);
+    }
+    @Test void lostPitAfterEncodingReturnsOnlyPreviouslyAuthorizedLexicalHits() throws Exception {
+        exchange(1,1,"LEXICAL_ONLY",4);
+    }
+    @Test void lostPitBeforeLexicalCompletesNeverEncodesOrReturnsPartialRanks() throws Exception {
+        exchange(1,1,"UNAVAILABLE",3);
+    }
+    private static void exchange(int present,int encoded,String expected,int expiredAt) throws Exception {
         var doc=CapabilityDocuments.observe(OWNER,agent("a",List.of("写作")),List.of(),ID).getFirst().doc();
         var requests=new CopyOnWriteArrayList<JsonNode>(); var paths=new CopyOnWriteArrayList<String>();
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
@@ -86,7 +95,10 @@ class CapabilitySearchTest {
             var path=x.getRequestURI().getPath(); paths.add(path);
             var body=x.getRequestBody().readAllBytes(); var query=body.length==0?JSON.createObjectNode():JSON.readTree(body); requests.add(query);
             Object response;
-            if (path.endsWith("/_pit") && !"DELETE".equals(x.getRequestMethod())) response=Map.of("id","view-1","_shards",SHARDS);
+            int status=200;
+            if(expiredAt!=0 && (requests.size()==expiredAt || "DELETE".equals(x.getRequestMethod()))){
+                status=404;response=Map.of("error",Map.of("type","search_context_missing_exception","reason","fixture view expired"),"status",404);
+            } else if (path.endsWith("/_pit") && !"DELETE".equals(x.getRequestMethod())) response=Map.of("id","view-1","_shards",SHARDS);
             else if ("DELETE".equals(x.getRequestMethod())) response=Map.of("succeeded",true,"num_freed",1);
             else {
                 var result=new LinkedHashMap<String,Object>(); result.put("_shards",SHARDS); result.put("took",1); result.put("timed_out",false);
@@ -98,7 +110,7 @@ class CapabilitySearchTest {
                 response=result;
             }
             var bytes=JSON.writeValueAsBytes(response); x.getResponseHeaders().set("Content-Type","application/json");
-            x.getResponseHeaders().set("X-Elastic-Product","Elasticsearch"); x.sendResponseHeaders(200,bytes.length);
+            x.getResponseHeaders().set("X-Elastic-Product","Elasticsearch"); x.sendResponseHeaders(status,bytes.length);
             try(var out=x.getResponseBody()){out.write(bytes);}
         });
         server.start();
@@ -110,11 +122,12 @@ class CapabilitySearchTest {
                 assertEquals(3,requests.size(),"PIT, exact coverage and lexical ranking before encoding");calls.incrementAndGet();
                 return new CapabilitySearch.QueryVector(new TaskFeatureEncoder.Vector(ID,vector),null);
             });
-            assertEquals("HYBRID".equals(expected)?1:0,calls.get());
-            if("LEXICAL_ONLY".equals(expected))assertEquals(List.of("CAPABILITY_VECTOR_INCOMPLETE"),result.reasons());
+            assertEquals("HYBRID".equals(expected)||expiredAt==4?1:0,calls.get());
+            if(expiredAt!=0)assertEquals(List.of(expiredAt==4?"CAPABILITY_VECTOR_SEARCH_FAILED":"CAPABILITY_SEARCH_FAILED"),result.reasons());
+            else if("LEXICAL_ONLY".equals(expected))assertEquals(List.of("CAPABILITY_VECTOR_INCOMPLETE"),result.reasons());
             assertEquals(expected,result.mode()); assertEquals(2,result.rows().size());
             assertEquals("/agent_capability_evidence/_pit",paths.getFirst()); assertEquals("/_pit",paths.getLast());
-            assertEquals(switch(expected){case "HYBRID"->5;case "LEXICAL_ONLY"->4;default->3;},paths.size());
+            assertEquals(expiredAt!=0?expiredAt+1:switch(expected){case "HYBRID"->5;case "LEXICAL_ONLY"->4;default->3;},paths.size());
             for(int i=1;i<requests.size()-1;i++){
                 assertEquals("/_search",paths.get(i));var req=requests.get(i);
                 assertEquals("view-"+i,req.at("/pit/id").asText());
@@ -122,8 +135,11 @@ class CapabilitySearchTest {
                 assertEquals(doc.id(),filter.at("/0/ids/values/0").asText());assertEquals(doc.partition(),filter.at("/1/term/partition/value").asText());
                 if(i>1)assertEquals("agent_id",req.at("/collapse/field").asText());
             }
-            assertEquals("view-"+(requests.size()-1),requests.getLast().path("id").asText());
-            if(encoded!=0)assertNotNull(result.rows().getFirst().vector());
+            assertEquals("view-"+(expiredAt==0?requests.size()-1:expiredAt-1),requests.getLast().path("id").asText());
+            if("HYBRID".equals(expected))assertNotNull(result.rows().getFirst().vector());
+            else assertTrue(result.rows().stream().allMatch(row->row.vector()==null));
+            var cited=result.rows().stream().filter(row->row.lexical()!=null).map(row->row.lexical().evidenceKey()).toList();
+            assertEquals("UNAVAILABLE".equals(expected)?List.of():List.of(doc.evidenceKey()),cited);
         } finally {server.stop(0);}
     }
 }
