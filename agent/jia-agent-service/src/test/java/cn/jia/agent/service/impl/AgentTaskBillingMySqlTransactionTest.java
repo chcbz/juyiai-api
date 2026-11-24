@@ -1366,7 +1366,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
-        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql"))).execute(jdbc.getDataSource());
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-expiry-v1.sql"))).execute(jdbc.getDataSource());
         var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
         var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
         var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
@@ -1398,6 +1398,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var late=locked(()->{service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);var old=pool.submit(()->service.recordMeasurement(unmeasured,agent,measured));
                 awaitPreparationRowWait(old);return old;});assertFalse(late.get(5,TimeUnit.SECONDS));
         }
+        var bounded=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);assertTrue(service.recordMeasurement(bounded,agent,measured));
+        assertEquals(new NativeTaskPreparation.Recorded(bounded.ticket(),frozen,measured),service.recorded(SCOPE,TASK,List.of(bindingKey,wrong),false).get(bindingKey));
+        jdbc.update("UPDATE agent_task_native_preparation SET probe_valid_until=UTC_TIMESTAMP(6) WHERE probe_ticket=?",bounded.ticket());
+        assertTrue(service.recorded(SCOPE,TASK,List.of(bindingKey),false).isEmpty());assertFalse(locked(()->service.lockMeasurement(bounded.ticket(),frozen,measured)));
+        var tooLate=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);
+        jdbc.update("UPDATE agent_task_native_preparation SET probe_valid_until=NULL WHERE probe_ticket=?",tooLate.ticket());assertFalse(service.recordMeasurement(tooLate,agent,measured));
         verifyPreparedEpochLock(agent,binding,measured.fence());
         service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
         assertFalse(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
@@ -1437,6 +1443,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertFalse(locked(current));
         jdbc.update("UPDATE agent_runtime SET runtime_session_generation=? WHERE agent_id=?",fence.sessionGeneration(),agent);
         jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",fence.runtimeInstallationId());assertFalse(locked(current));
+        jdbc.update("UPDATE agent_runtime_v1_installation SET status='ACTIVE' WHERE installation_id=?",fence.runtimeInstallationId());assertTrue(locked(current));
+        guard.retire(TENANT,CLIENT,agent,OWNER,fence);guard.report(TENANT,CLIENT,agent,OWNER,fence,latest.profile());assertFalse(locked(current));
+        var nextFence=new AgentManagedSessionLookup.SessionFence(fence.runtimeInstallationId(),fence.hostId(),"next-boot",fence.sessionGeneration()+1);
+        jdbc.update("UPDATE agent_runtime SET runtime_instance_id=?,runtime_session_generation=? WHERE agent_id=?",nextFence.runtimeInstanceId(),nextFence.sessionGeneration(),agent);
+        var next=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,nextFence,epoch.profile());guard.report(TENANT,CLIENT,agent,OWNER,nextFence,epoch.profile());
+        guard.retire(TENANT,CLIENT,agent,OWNER,fence);assertTrue(locked(()->guard.lock(TENANT,CLIENT,List.of(next))));
     }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();

@@ -30,6 +30,9 @@ public interface NativeTaskPreparation {
     /** No quote authority: records the first authenticated observation for the reserved comparison only. */
     boolean recordMeasurement(Comparison comparison,String agent,NativeTaskConfigurationProbe.Measurement measurement);
     /** Under caller's existing transaction: exact stored observation only, not a check of live registration or configuration drift. */
+    record Recorded(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement) {}
+    /** Authorized exact bindings only. Uses database time; no task or runtime network lookup. */
+    Map<Binding,Recorded> recorded(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking);
     boolean lockMeasurement(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement);
     Map<String,Frozen> currentForProbes(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> agentIds);
 }

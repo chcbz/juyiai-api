@@ -75,6 +75,7 @@ class AgentWebSocketSkillExecutionRegistrationTest {
             for(String bad:List.of(reply.replace("a".repeat(64),"b".repeat(64)),reply.replace("NATIVE_DISPATCH_GROUP_V1","OTHER"),reply.replace("executionConfigSha256","price"))){
                 f.handler.handleTextMessage(f.session,new TextMessage(bad));assertFalse(future.isDone());}
             f.handler.handleTextMessage(f.session,new TextMessage(reply));assertEquals("2".repeat(64),future.join().routeSha256());
+            f.handler.afterConnectionClosed(f.session,CloseStatus.NORMAL);verify(recorder).retire(TENANT,CLIENT,AGENT,OWNER,fence);
         }finally{process.destroyForcibly();}
     }
     Fixture fixture() throws Exception {

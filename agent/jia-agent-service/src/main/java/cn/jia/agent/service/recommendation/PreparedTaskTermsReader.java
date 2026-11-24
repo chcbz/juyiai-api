@@ -34,7 +34,8 @@ public class PreparedTaskTermsReader {
             expected.add(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(t.agent(),t.provider(),t.binding(),m.fence(),m.profile()));
         }
         if(!epochs.lock(scope.tenantId(),scope.clientId(),expected))return false;
-        for(var o:ordered.values())if(!decisions.lockMeasurement(o.ticket(),o.decision(),o.measurement()))return false;
+        var receipts=decisions.recorded(scope,task,selected.keySet(),true);
+        for(var e:selected.entrySet()){var o=e.getValue();if(!new NativeTaskPreparation.Recorded(o.ticket(),o.decision(),o.measurement()).equals(receipts.get(e.getKey())))return false;}
         return true;
     }
     /** Only explicitly chosen candidates. No socket send under the task root; authentication proof never leaves Agent. */

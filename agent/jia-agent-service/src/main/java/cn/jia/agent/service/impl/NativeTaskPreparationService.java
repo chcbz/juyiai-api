@@ -11,6 +11,9 @@ import tools.jackson.databind.ObjectMapper;
 /** The task root serializes first registration with edits and assignment. This service never creates an execution or quote. */
 @Service
 public class NativeTaskPreparationService implements NativeTaskPreparation {
+    // A new observation must be obtained within the existing service liveness horizon. Heartbeats do not renew a ticket.
+    @org.springframework.beans.factory.annotation.Value("${jia.agent.status.heartbeat-timeout-seconds:60}")
+    private long probeLifetimeSeconds=60;
     private static final String TABLE="agent_task_native_preparation";
     private final JdbcTemplate db;private final AgentTaskMutationTransaction roots;private final AgentTaskRequirementSnapshotService requirements;
     private final AgentTaskExecutionGrantService grants;private final AgentExternalServicePolicyService candidates;private final ObjectMapper json;
@@ -56,8 +59,8 @@ public class NativeTaskPreparationService implements NativeTaskPreparation {
                 if(ticket!=null){
                     var matched=keys.entrySet().stream().filter(e->found.containsKey(e.getValue().target().agent())).map(Map.Entry::getKey).toList();
                     if(!matched.isEmpty()){
-                        var params=new ArrayList<Object>(List.of(ticket,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));params.addAll(matched);
-                        int changed=db.update("UPDATE "+TABLE+" SET probe_ticket=?,measurement_sha=NULL,measurement_json=NULL WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("
+                        var params=new ArrayList<Object>(List.of(ticket,probeLifetimeSeconds,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));params.addAll(matched);
+                        int changed=db.update("UPDATE "+TABLE+" SET probe_ticket=?,probe_valid_until=TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)),measurement_sha=NULL,measurement_json=NULL WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("
                             +String.join(",",Collections.nCopies(matched.size(),"?"))+")",params.toArray());
                         if(changed!=matched.size())throw new IllegalStateException("Preparation changed while reserving comparison");
                     }
@@ -72,13 +75,30 @@ public class NativeTaskPreparationService implements NativeTaskPreparation {
         var decision=comparison.decisions().get(agent);
         if(decision==null||measurement==null||!decision.sha256().equals(measurement.intentSha256()))return false;
         String body=json.writeValueAsString(measurement);var args=new ArrayList<Object>(List.of(hash(body),body));args.addAll(observationKey(decision,comparison.ticket()));
-        return db.update("UPDATE "+TABLE+" SET measurement_sha=?,measurement_json=?"+EXACT+" AND measurement_sha IS NULL",args.toArray())==1;
+        return db.update("UPDATE "+TABLE+" SET measurement_sha=?,measurement_json=?"+EXACT+" AND probe_valid_until>UTC_TIMESTAMP(6) AND measurement_sha IS NULL",args.toArray())==1;
     }
     @Override public boolean lockMeasurement(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement){
-        if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
-        if(!decision.sha256().equals(measurement.intentSha256()))return false;
-        var args=new ArrayList<>(observationKey(decision,ticket));String body=json.writeValueAsString(measurement);args.add(hash(body));
-        return !db.query("SELECT measurement_json FROM "+TABLE+EXACT+" AND measurement_sha=? FOR SHARE",(rs,i)->rs.getString(1),args.toArray()).stream().filter(body::equals).toList().isEmpty();
+        var binding=decision.intent().binding();var found=recorded(binding.scope(),binding.task(),List.of(binding),true).get(binding);
+        return found!=null&&found.equals(new Recorded(ticket,decision,measurement));
+    }
+    @Override public Map<Binding,Recorded> recorded(AgentTaskExecutionGrantService.Scope scope,String task,Collection<Binding> bindings,boolean locking){
+        if(locking&&!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
+        var keys=new TreeMap<String,Binding>();for(var binding:bindings){
+            if(!scope.equals(binding.scope())||!task.equals(binding.task()))throw new IllegalArgumentException("Mixed task scope");
+            keys.put(key(binding),binding);
+        }
+        var result=new HashMap<Binding,Recorded>();var ids=List.copyOf(keys.keySet());
+        for(int i=0;i<ids.size();i+=128){var chunk=ids.subList(i,Math.min(i+128,ids.size()));
+            var args=new ArrayList<Object>(List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task));args.addAll(chunk);
+            db.query("SELECT binding_sha,intent_sha,intent_json,probe_ticket,measurement_sha,measurement_json,(probe_valid_until>UTC_TIMESTAMP(6)) FROM "+TABLE
+                +" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND binding_sha IN ("+String.join(",",Collections.nCopies(chunk.size(),"?"))+") ORDER BY binding_sha"+(locking?" FOR SHARE":""),
+                (org.springframework.jdbc.core.RowCallbackHandler)rs->{if(!rs.getBoolean(7)||rs.getString(5)==null)return;
+                    var binding=keys.get(rs.getString(1));var decision=decode(binding,rs.getString(2),rs.getString(3));String body=rs.getString(6);
+                    if(body==null||!hash(body).equals(rs.getString(5)))throw new IllegalStateException("Changed task measurement");
+                    var m=json.readValue(body,NativeTaskConfigurationProbe.Measurement.class);
+                    if(!decision.sha256().equals(m.intentSha256())||rs.getString(4)==null)throw new IllegalStateException("Unbound task measurement");
+                    result.put(binding,new Recorded(rs.getString(4),decision,m));},args.toArray());
+        }return Map.copyOf(result);
     }
     public Frozen freeze(Intent intent){var b=intent.binding();var scope=b.scope();return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),root->{
         if(!"open".equals(root.getRewardStatus())||root.getTaskVersion()!=b.taskVersion())throw new IllegalStateException("Task is no longer open at the selected version");

@@ -499,7 +499,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
         if (replyPreviews != null) replyPreviews.closeSession(session.getId());
-        if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
+        disconnectRuntimeSession(session);
         sessions.remove(session.getId());
         taskProbes.closed(session);
         nativeWorkNotificationSessions.remove(session.getId());
@@ -984,7 +984,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             stage = "registration_receipt";
             if (!sendEvent(session, "agent_registered", event)) {
                 if (replyPreviews != null) replyPreviews.closeSession(session.getId());
-        if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
+        disconnectRuntimeSession(session);
                 successfullyRegisteredAgentIds.remove(session.getId());
                 sessionRuntimeCapabilities.remove(session.getId());
                 sessionDurableStateHealthy.remove(session.getId());
@@ -1048,7 +1048,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             log.warn("Agent registration unavailable at stage={}, failure={}", stage,
                     e.getClass().getSimpleName());
             if (replyPreviews != null) replyPreviews.closeSession(session.getId());
-        if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
+        disconnectRuntimeSession(session);
             successfullyRegisteredAgentIds.remove(session.getId());
             sessionRuntimeCapabilities.remove(session.getId());
             sessionDurableStateHealthy.remove(session.getId());
@@ -1141,7 +1141,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             if (AgentConstants.STATUS_OFFLINE.equals(agent.getStatus())
                     || AgentConstants.STATUS_ERROR.equals(agent.getStatus())) {
                 if (replyPreviews != null) replyPreviews.closeSession(session.getId());
-        if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
+        disconnectRuntimeSession(session);
                 successfullyRegisteredAgentIds.remove(session.getId());
                 sessionRuntimeCapabilities.remove(session.getId());
                 sessionDurableStateHealthy.remove(session.getId());
@@ -3023,11 +3023,24 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     private cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder preparedProfiles;
     @org.springframework.beans.factory.annotation.Autowired(required=false)
     public void setPreparedProfiles(cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder recorder){this.preparedProfiles=recorder;}
+    private void disconnectRuntimeSession(WebSocketSession session){
+        if(runtimeAuthentication!=null)runtimeAuthentication.disconnect(session.getId());
+        synchronized(session.getAttributes()){
+            if(session.getAttributes().get("storedPreparedProfile")==null)return; // no stored budget observation on this transport
+            session.getAttributes().put("preparedBudgetRetired",Boolean.TRUE);
+            try{var proof=sessionProof(session);var sc=proof.scope();preparedProfiles.retire(sc.tenantId(),sc.clientId(),sc.agentId(),sc.ownerJiacn(),
+                new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),sc.runtimeInstanceId(),proof.sessionGeneration()));
+                session.getAttributes().remove("storedPreparedProfile");
+            }catch(RuntimeException unavailable){log.warn("Prepared profile retirement not recorded; observation deadline remains in force");}
+        }
+    }
     private void reportProfile(WebSocketSession session,Profile profile){
         if(preparedProfiles==null)throw new IllegalStateException("Prepared profile storage unavailable");
         var proof=sessionProof(session);var s=proof.scope();
         // Presence repeats the same observation to survive delivery loss. Do not write each heartbeat.
         synchronized(session.getAttributes()){
+            if(Boolean.TRUE.equals(session.getAttributes().get("preparedBudgetRetired"))||sessions.get(session.getId())!=session||!session.isOpen()
+                ||!runtimeAuthentication.isCurrentBinding(session.getId(),s.tenantId(),s.clientId(),s.ownerJiacn(),s.agentId(),s.runtimeInstanceId()))throw new IllegalStateException("Prepared session no longer current");
             if(profile.equals(session.getAttributes().get("storedPreparedProfile")))return;
             preparedProfiles.report(s.tenantId(),s.clientId(),s.agentId(),s.ownerJiacn(),new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),s.runtimeInstanceId(),proof.sessionGeneration()),profile);
             session.getAttributes().put("storedPreparedProfile",profile);
@@ -3403,7 +3416,7 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     private void sendSessionIdentityError(WebSocketSession session, Map<String, Object> payload,
             String code, String message) {
         if (replyPreviews != null) replyPreviews.closeSession(session.getId());
-        if (runtimeAuthentication != null) runtimeAuthentication.disconnect(session.getId());
+        disconnectRuntimeSession(session);
         if (isProtocolV1(payload)) {
             sendProtocolError(session, payload, code, message);
         } else {
