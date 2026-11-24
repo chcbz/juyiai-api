@@ -1366,7 +1366,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
-        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql"))).execute(jdbc.getDataSource());
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql"))).execute(jdbc.getDataSource());
         var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
         var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
         var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
@@ -1382,6 +1382,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var ids=List.of(agent,"agt_00000000000000000000000000000002",agent);
         assertEquals(Map.of(agent,frozen),service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids));
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion()+1,ids).isEmpty());
+        var slow=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);var fresh=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);
+        var measured=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),new AgentManagedSessionLookup.SessionFence("install","host","boot",2),"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1");
+        assertFalse(service.recordMeasurement(slow,agent,measured));assertTrue(service.recordMeasurement(fresh,agent,measured));
+        assertFalse(service.recordMeasurement(fresh,agent,measured));assertFalse(locked(()->service.lockMeasurement(slow.ticket(),frozen,measured)));
+        assertTrue(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
+        assertThrows(InjectedFailure.class,()->locked(()->{service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);throw new InjectedFailure();}));
+        assertTrue(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
+        service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
+        assertFalse(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
+
         assertNull(service.find(wrong));assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),wrong,output)));
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());

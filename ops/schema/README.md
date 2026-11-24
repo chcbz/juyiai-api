@@ -112,4 +112,4 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 
 启用基准在线选样前另执行 `economy-task-benchmark-retirement-v1.sql`。备案退役、评审撤回均为一次性终态；旧行不能通过改回标志复活。维护角色对原行只授相应标志列的 UPDATE，不授正文/主键 UPDATE、DELETE、REPLACE 或 DDL。报价值锁内已复核且先提交的不追改。
 
-正式 TASK 已明确本地原生初始动作的准备记录由 Agent 维护：显式安装 `agent-task-native-preparation-v1.sql`，应用仅需 SELECT/INSERT，不回填、无默认技能或用途许可。只有可信任务创建/编排方已决定初始动作时才冻结；开放议事、历史命令和浏览器不是生产者。此记录不是 Runtime 已测配置、定价路由、费用授权或执行命令。
+正式 TASK 已明确本地原生初始动作的准备记录由 Agent 维护：显式安装 `agent-task-native-preparation-v1.sql`，应用仅需 SELECT/INSERT，不回填、无默认技能或用途许可。只有可信任务创建/编排方已决定初始动作时才冻结；开放议事、历史命令和浏览器不是生产者。此记录不是 Runtime 已测配置、定价路由、费用授权或执行命令。 后台比较另需显式执行同目录 `agent-task-native-observation-v1.sql`，仅授予该表新增 `probe_ticket,measurement_sha,measurement_json` 三列 UPDATE；不允许改写原意图列。每次比较在准确事项锁下先换票并清空旧测量，迟到回执不能覆盖新票；未启用生产、无回填。

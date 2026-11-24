@@ -18,11 +18,11 @@ public class PreparedTaskTermsReader {
     public PreparedTaskTermsReader(NativeTaskPreparation decisions,AgentRuntimeAuthenticationService sessions,ObjectProvider<NativeTaskConfigurationProbe> transport,PreparedReferenceRoutes routes){
         this.decisions=decisions;this.sessions=sessions;this.transport=transport;this.routes=routes;
     }
-    public record Observation(NativeTaskPreparation.Frozen decision,NativeTaskConfigurationProbe.Measurement measurement,TaskBudgetEstimator.Terms reference) {}
+    public record Observation(String ticket,NativeTaskPreparation.Frozen decision,NativeTaskConfigurationProbe.Measurement measurement,TaskBudgetEstimator.Terms reference) {}
     /** Only explicitly chosen candidates. No socket send under the task root; authentication proof never leaves Agent. */
     @Transactional(propagation=Propagation.NEVER)
-    public Map<String,CompletionStage<Observation>> compare(AgentTaskExecutionGrantService.Scope scope,String task,long version,List<String> candidates){
-        var selected=decisions.currentForProbes(scope,task,version,candidates);if(selected.isEmpty())return Map.of();
+    public Map<String,Observation> refresh(AgentTaskExecutionGrantService.Scope scope,String task,long version,List<String> candidates){
+        var reservation=decisions.reserveComparisons(scope,task,version,candidates);var selected=reservation.decisions();if(selected.isEmpty())return Map.of();
         var channel=transport.getIfAvailable();if(channel==null)return Map.of();
         var current=sessions.currentRegisteredProofs(scope.tenantId(),scope.clientId(),selected.keySet());
         var result=new HashMap<String,CompletionStage<Observation>>();
@@ -34,9 +34,13 @@ public class PreparedTaskTermsReader {
             result.put(agent,channel.measure(decision,fence).thenApply(m->{
                 if(m==null||!fence.equals(m.fence())||!decision.sha256().equals(m.intentSha256()))return null;
                 var terms=routes.resolve(subject,new PreparedReferenceRoutes.Configuration(m.version(),m.executionConfigSha256(),m.routeSha256(),m.toolConfigSha256(),m.capturePolicyVersion()));
-                return terms==null?null:new Observation(decision,m,terms);
+                return terms==null?null:new Observation(reservation.ticket(),decision,m,terms);
             }));
         });
-        return Map.copyOf(result);
+        // Join on the invoking background worker. No database write or block on a socket callback thread.
+        var published=new HashMap<String,Observation>();
+        result.forEach((agent,pending)->{var observed=pending.toCompletableFuture().join();
+            if(observed!=null&&decisions.recordMeasurement(reservation,agent,observed.measurement()))published.put(agent,observed);
+        });return Map.copyOf(published);
     }
 }

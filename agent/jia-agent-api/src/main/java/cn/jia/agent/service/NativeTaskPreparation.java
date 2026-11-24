@@ -24,5 +24,12 @@ public interface NativeTaskPreparation {
     Frozen find(Binding binding);
     /** Prepare inputs for background comparisons. Read current authorized candidates and exact persisted decisions
      * at one task-root revision. Missing/stale/undecided candidates have no entry. No network or quote authority. */
+    record Comparison(String ticket,Map<String,Frozen> decisions){public Comparison{decisions=Map.copyOf(decisions);}}
+    /** Supersedes previous observation even when no reply follows. Call before transport I/O. */
+    Comparison reserveComparisons(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> agentIds);
+    /** No quote authority: records the first authenticated observation for the reserved comparison only. */
+    boolean recordMeasurement(Comparison comparison,String agent,NativeTaskConfigurationProbe.Measurement measurement);
+    /** Under caller's existing transaction: exact stored observation only, not a check of live registration or configuration drift. */
+    boolean lockMeasurement(String ticket,Frozen decision,NativeTaskConfigurationProbe.Measurement measurement);
     Map<String,Frozen> currentForProbes(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> agentIds);
 }
