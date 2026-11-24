@@ -83,6 +83,12 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         verifyPeer(temp,measured,retry,successor,false);
     }
     private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion) throws Exception {
+        verifyPeer(temp,measured,retry,successor,discussion,false);
+    }
+    @Test void originalDiscussionLostResponseAfterCommitReadsSameRevision(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null,false,false,false,true);
+    }
+    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion,boolean chat) throws Exception {
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -95,6 +101,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES(?,'OPAQUE','ACTIVE','client','executor','0',77,1,1,'fixture',1,1)",AGENT);
         jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'1',REPEAT('a',64),UNHEX(REPEAT('01',32)),1,'ACTIVE','0','client')",INSTALL,AGENT);
         jdbc.update("INSERT INTO agent_task_execution_grant(grant_id,tenant_id,client_id,owner_jiacn,task_id,requirement_revision,assignment_revision,target_agent_id,executor_owner_jiacn,executor_binding_id,permitted_operations_json,permitted_tool_policy_ref,input_scope_json,source_business_action_id,idempotency_key,request_hash,policy_revision,grant_version,state,issued_by,created_at) VALUES('g','0','client','owner','task',1,1,?,'executor',77,'[]','policy','{}','action','key',REPEAT('a',64),'v',1,'REVOKED','owner',1)",AGENT);
+        if(!chat){
         row("exec1","owner","task","CONVERSATION","RESULT_COMMITTED",6);
         jdbc.update("UPDATE agent_personal_workspace_execution SET target_agent_id=?,task_grant_id='g',task_grant_version=1,usage_mode='RESPONSE_V2',capture_protocol='METERED_CAPTURE_V2' WHERE execution_id='exec1'",AGENT);
         skill("exec1","COMPLETE");
@@ -103,8 +110,10 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         assertEquals(admitted,executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","run-exec1"));
         assertNull(executions.admittedCaptureProfile("0","client","executor","task",AGENT,"exec1","run-exec1"));
         assertNull(executions.admittedCaptureProfile("0","client","owner","task",AGENT,"exec1","foreign"));
+        }
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
         for(var cl:List.of(AgentRuntimeMapper.class,AgentRuntimeV1InstallationMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentPersonaBindingMapper.class,EconomyUsageCostMapper.class,EconomyUsageCaptureMapper.class,ConfirmedSampleMapper.class,EconomyLedgerMapper.class,EconomyTaskBillingMapper.class,TaskMembershipReceiptMapper.class,ScheduledWorkMapper.class)) config.addMapper(cl);
+        if(chat){config.addMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class);config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);}
         var factory=new MybatisSqlSessionFactoryBean();factory.setConfiguration(config);factory.setDataSource(ds);
         var sql=new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
         var installations=wire(new AgentRuntimeV1InstallationDaoImpl(),sql.getMapper(AgentRuntimeV1InstallationMapper.class));
@@ -123,8 +132,18 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);
         var recovery=new NativeCaptureRecovery(journal,settle,scope,schedules,manager);
         var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions,skills),new cn.jia.agent.service.usage.RuntimeCaptureIntakeService(journal,settle,recovery));
+        Map<String,Object> payload=chat?discussionPayload():Map.of();Object receiver=ctrl;
+        if(chat){
+            var member=transactional(new TaskDiscussionMembershipService(executions),TaskDiscussionMembershipService.class,manager);
+            var origins=new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc);
+            seedSentDiscussion(payload,member,origins);
+            var dispatches=new cn.jia.chat.service.usage.ChatUsageDispatchAuthority(sql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class),
+                    new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(sql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class)),origins);
+            receiver=new cn.jia.chat.api.ChatDiscussionCaptureController(new cn.jia.chat.service.usage.ChatDiscussionCaptureAccess(auth,dispatches,member),
+                    new RuntimeCaptureIntakeService(journal,settle,recovery));
+        }
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
-        var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
+        var mvc=MockMvcBuilders.standaloneSetup(receiver).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         if(measured!=null){
             // Original, unchanged wire records from an isolated CLI + loopback TLS run. Independent pin predated PLAN.
             var scenario=confirmTestTask(measured,sql,manager,schema,retry,discussion);
@@ -153,12 +172,12 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
-            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
+            try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
                 var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
         }finally{server.stop(0);}
-        assertEquals(successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
+        assertEquals(chat?List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL"):successor?List.of("PLAN","SOURCE","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"):List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","SOURCE_FINAL","CAPTURE_FINAL","RESPONSE"),trace);
         // Consume the real transactionally registered work keys, deliberately run coverage BEFORE association.
         String pendingSql="SELECT business_key FROM task_scheduled_work WHERE tenant_id='0' AND client_id='client' AND handler=?";
         var projectionKey=jdbc.queryForObject(pendingSql,String.class,projection.getName());
@@ -170,11 +189,34 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         projection.executeScheduled(work);projection.executeScheduled(work);
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture WHERE coverage_state='INCOMPLETE' AND projection_revision=input_revision",Integer.class));
         String path="/internal/agent/executions/exec1/runs/run-exec1/usage/receipts/"+cuts.get();
+        if(chat)path="/internal/agent/chat/dispatches/"+payload.get("dispatchId")+"/turns/"+payload.get("turnId")+"/contexts/"+payload.get("contextHash").toString().substring(7)+"/captures/"+NativeCaptureEvidence.captureIdentity((String)payload.get("turnId"),(String)payload.get("dispatchId"))+"/usage/receipts/"+cuts.get();
         var read=get(path).header("Authorization","AgentRuntime "+session.sessionToken()).header("X-Agent-Id",AGENT).header("X-Agent-Installation-Id",INSTALL).header("X-Agent-Host-Id","host").header("X-Agent-Runtime-Id","rt").header("X-Agent-Session-Generation","1");
         jdbc.update("UPDATE agent_task_execution_grant SET executor_owner_jiacn='foreign' WHERE grant_id='g'");assertEquals(404,mvc.perform(read).andReturn().getResponse().getStatus());
         jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",INSTALL);assertEquals(401,mvc.perform(read).andReturn().getResponse().getStatus());
         assertEquals(successor?9:7,count("economy_usage_capture_receipt"));assertEquals(1,count("economy_usage_attempt"));assertEquals(1,count("economy_usage_revision"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision WHERE status='PENDING_USAGE' AND cost_yuan IS NULL AND revision=1",Integer.class));
+    }
+    // Test boundary: committed original dispatch, not admission, model execution, or business finality.
+    @SuppressWarnings("unchecked") Map<String,Object> discussionPayload() throws Exception {
+        String template=Files.readString(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge/contracts/api-hosted-wire-v1.json"));
+        Map<String,Object> wire=json.readValue(template.replace("hosted-agent-contract",AGENT).replace("client-contract","client").replace("tenant-contract","0").replace("owner-contract","owner").replace("task-contract-17","task"),Map.class);
+        wire.put("route","CHAT");var facts=(Map<String,Object>)wire.get("factsManifest");facts.put("participantAgentIds",List.of(AGENT));
+        ((Map<String,Object>)facts.get("task")).put("assignedAgentIds",List.of(AGENT));facts.put("contextDelivery",Map.of("mode","BOOTSTRAP"));
+        facts.put("taskUsageCapture",Map.of("protocol","METERED_CAPTURE_V2","captureId",NativeCaptureEvidence.captureIdentity((String)wire.get("turnId"),(String)wire.get("dispatchId"))));
+        String hash=cn.jia.chat.service.ChatDeliberationService.digest(Map.of("sourceVector",wire.get("sourceVector"),"facts",facts));wire.put("contextHash",hash);
+        var snap=(Map<String,Object>)wire.get("contextSnapshot");snap.put("facts",facts);snap.put("contextHash",hash);return wire;
+    }
+    void seedSentDiscussion(Map<String,Object> w,TaskDiscussionMembershipService members,cn.jia.chat.deliberation.ChatTaskDispatchOriginStore origins){
+        var ds=Objects.requireNonNull(jdbc.getDataSource());new ResourceDatabasePopulator(new ClassPathResource("db/chat-deliberation-schema.sql"),new ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(ds);
+        String turn=(String)w.get("turnId"),run=(String)w.get("dispatchId"),req=(String)w.get("requestId"),ctx=(String)w.get("contextHash"),snap=(String)w.get("contextSnapshotId"),event=(String)w.get("messageId");
+        String digest=NativeCaptureEvidence.digest(List.of("fixture-admission",req,turn,run));
+        tx.executeWithoutResult(status->{
+            jdbc.update("INSERT INTO chat_request(tenant_id,owner_jiacn,client_id,request_id,request_revision,request_digest,conversation_id,conversation_generation,user_message_id,aggregate_state,created_at,updated_at) VALUES('0','owner','client',?,7,?,'42',3,1,'RUNNING',1,1)",req,"sha256:"+digest);
+            jdbc.update("INSERT INTO chat_turn(turn_id,tenant_id,owner_jiacn,client_id,request_id,request_revision,conversation_id,conversation_generation,target_agent_id,snapshot_id,context_digest,dispatch_id,route,state,created_at,updated_at) VALUES(?,'0','owner','client',?,7,'42',3,?,?,?,?,'CHAT','RUNNING',1,1)",turn,req,AGENT,snap,ctx,run);
+            var original=new LinkedHashMap<>(w);original.remove("contextSnapshot");
+            jdbc.update("INSERT INTO chat_dispatch_outbox(event_id,tenant_id,owner_jiacn,client_id,turn_id,dispatch_id,event_type,task_grant_id,task_grant_version,status,payload_json,created_at,updated_at) VALUES(?,'0','owner','client',?,?,'DISPATCH','g',1,'SENT',?,1,1)",event,turn,run,json.writeValueAsString(original));
+            origins.observe(event,ctx,INSTALL,"host","rt",1);assertEquals(NativeCaptureEvidence.captureIdentity(turn,run),members.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task",turn,run,digest,true));
+        });assertEquals(0,count("agent_personal_workspace_execution"));
     }
     // The test supplies only the upstream quote estimate and acceptance decision. Wallet, membership,
     // response association, whole-task projection and repricing use production services on this fixture DB.
