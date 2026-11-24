@@ -2163,22 +2163,32 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
-    // Diagnostic on test-owned committed rows, outside request timing. MySQL JSON text lengths,
-    // not InnoDB allocation. Emit counts only; no task vectors, samples, prices or digests.
-    private void profileFrozenPayload(String task,String batch,int quotes,int expectedGroups){
-        var groups=jdbc.query("""
-            SELECT COUNT(*),COUNT(DISTINCT binding_sha256),SUM(total_bytes),SUM(prep_bytes),MAX(prep_bytes)
-            FROM (SELECT binding_sha256,OCTET_LENGTH(snapshot_json) total_bytes,
-              OCTET_LENGTH(JSON_EXTRACT(snapshot_json,'$.preparation')) prep_bytes,
-              SHA2(JSON_EXTRACT(snapshot_json,'$.preparation'),256) fingerprint
-              FROM economy_task_quote WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
-                AND BINARY JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.recommendationId'))=BINARY ?
-            ) payload GROUP BY fingerprint
-            """,(rs,n)->new long[]{rs.getLong(1),rs.getLong(2),rs.getLong(3),rs.getLong(4),rs.getLong(5)},TENANT,CLIENT,OWNER,task,batch);
-        assertEquals(expectedGroups,groups.size());long rows=0,total=0,preparations=0,unique=0;
-        for(var g:groups){assertEquals(g[0],g[1]);assertTrue(g[4]>0);assertEquals(g[0]*g[4],g[3]);rows+=g[0];total+=g[2];preparations+=g[3];unique+=g[4];}
-        assertEquals(quotes,rows);assertTrue(total>preparations);
-        System.out.printf("QUOTE_FROZEN_PAYLOAD rows=%d groups=%d logicalBytes=%d preparationBytes=%d distinctPreparationBytes=%d repeatedPreparationBytes=%d%n",rows,groups.size(),total,preparations,unique,preparations-unique);
+    // Outside measured requests. Count original UTF-8 LONGTEXT bytes, not JSON_EXTRACT's
+    // reserialized representation or InnoDB allocation. Never emit content or private digests.
+    private void profileFrozenPayload(String task,String batch,int quotes,int expectedGroups) throws Exception {
+        var json=new ObjectMapper();var digest=java.security.MessageDigest.getInstance("SHA-256");
+        var bindings=new java.util.HashSet<String>();var lengths=new java.util.HashMap<String,Integer>();long[] sizes={0,0};
+        jdbc.query("""
+            SELECT binding_sha256,CAST(snapshot_json AS BINARY) FROM economy_task_quote
+            WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
+              AND BINARY JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.recommendationId'))=BINARY ?
+            """,(org.springframework.jdbc.core.RowCallbackHandler) rs->{
+            assertTrue(bindings.add(rs.getString(1)));byte[] raw=rs.getBytes(2);sizes[0]+=raw.length;
+            try(var p=json.createParser(raw)){
+                assertEquals(tools.jackson.core.JsonToken.START_OBJECT,p.nextToken());boolean found=false;
+                while(p.nextToken()!=tools.jackson.core.JsonToken.END_OBJECT){
+                    boolean prep="preparation".equals(p.currentName());var token=p.nextToken();int start=Math.toIntExact(p.currentTokenLocation().getByteOffset());
+                    p.skipChildren();p.finishToken();if(!prep)continue;
+                    assertFalse(found);found=true;assertEquals(tools.jackson.core.JsonToken.START_OBJECT,token);
+                    int end=Math.toIntExact(p.currentLocation().getByteOffset());assertEquals((byte)'{',raw[start]);assertEquals((byte)'}',raw[end-1]);
+                    int size=end-start;digest.update(raw,start,size);var id=java.util.HexFormat.of().formatHex(digest.digest());
+                    Integer old=lengths.putIfAbsent(id,size);if(old!=null)assertEquals(size,old.intValue());sizes[1]+=size;
+                }assertTrue(found);
+            }
+        },TENANT,CLIENT,OWNER,task,batch);
+        assertEquals(quotes,bindings.size());assertEquals(expectedGroups,lengths.size());assertTrue(sizes[0]>sizes[1]);
+        long unique=lengths.values().stream().mapToLong(Integer::longValue).sum();
+        System.out.printf("QUOTE_FROZEN_PAYLOAD rows=%d groups=%d logicalBytes=%d preparationBytes=%d distinctPreparationBytes=%d repeatedPreparationBytes=%d%n",quotes,lengths.size(),sizes[0],sizes[1],unique,sizes[1]-unique);
     }
     private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}
     private QuoteWrites readQuoteWrites(String task){
