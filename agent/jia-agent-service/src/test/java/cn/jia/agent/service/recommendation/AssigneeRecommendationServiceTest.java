@@ -36,7 +36,7 @@ class AssigneeRecommendationServiceTest {
         when(vectors.encode(eq(actor),any())).thenAnswer(i->{assertFalse(locked);return Mono.just(new TaskFeatureEncoder.Vector(gen,new float[]{1}));});
         when(search.retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class))).thenAnswer(i->{
             assertFalse(locked); List<CapabilityDocuments.Doc> docs=i.getArgument(1);
-            var h=new CandidateRankFusion.Hit("a",docs.getFirst().evidenceKey(),1);
+            var h=new CandidateRankFusion.Hit("a",docs.getFirst().evidenceKey(),1,CapabilityIndexWriter.GENERATION);
             boolean lexical=i.getArgument(3)==null;
             return new CapabilitySearch.Result(lexical?"LEXICAL_ONLY":"HYBRID",CandidateRankFusion.fuse(Set.of("a"),List.of(h),List.of()),lexical?List.of("QUERY_VECTOR_UNAVAILABLE"):List.of());
         });
