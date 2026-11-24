@@ -41,7 +41,7 @@ class AssigneeRecommendationServiceTest {
             return new CapabilitySearch.Result(lexical?"LEXICAL_ONLY":"HYBRID",CandidateRankFusion.fuse(Set.of("a"),List.of(h),List.of()),lexical?List.of("QUERY_VECTOR_UNAVAILABLE"):List.of());
         });
         when(tx.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->{
-            locked=true; try{return i.<AgentTaskMutationTransaction.LockedTaskMutation<Result>>getArgument(4).apply(null);} finally{locked=false;}
+            locked=true; try{return i.<AgentTaskMutationTransaction.LockedTaskMutation<?>>getArgument(4).apply(null);} finally{locked=false;}
         });
     }
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path directory;
@@ -80,6 +80,14 @@ class AssigneeRecommendationServiceTest {
         for(String bad:List.of(good.replaceFirst("[{]","{\"unknownSelector\":1,"),good.replaceFirst("[{]","{\"schema\":\"incompatible\","),good+" {}")){
             var bytes=bad.getBytes(java.nio.charset.StandardCharsets.UTF_8);java.nio.file.Files.write(file,bytes);String pin=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
             assertEquals(CandidateRankFusion.VERSION,new CandidateSuitability(file.toString(),pin).rankingVersion());}
+    }
+    @Test void projectionUsesTheVerifiedSnapshotAfterReleasingTheTaskLock(){
+        var policy=mock(CandidateSuitability.class);
+        when(policy.level(anyString(),any(),any(),any(),any())).thenAnswer(i->{assertFalse(locked);return "UNKNOWN";});
+        doAnswer(i->{assertTrue(locked);return null;}).when(materials).verifyUnchanged(actor,"task",List.of());
+        var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,policy);
+        var result=active.recommend(actor,"task",new Request("7"));assertEquals("NO_MATCH",result.state());
+        var order=inOrder(materials,policy);order.verify(materials).verifyUnchanged(actor,"task",List.of());order.verify(policy).level(anyString(),any(),any(),any(),any());
     }
     Result recommend(){return service.recommend(actor,"task",new Request("7"));}
     @Test void uncalibratedHitCitesOnlyPublicReference() {

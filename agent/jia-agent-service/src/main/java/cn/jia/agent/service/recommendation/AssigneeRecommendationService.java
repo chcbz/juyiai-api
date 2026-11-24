@@ -52,7 +52,7 @@ public final class AssigneeRecommendationService {
         }
         var required=new HashSet<String>();if(task.getRequiredAbilities()!=null)for(String r:task.getRequiredAbilities())if(r!=null&&!r.isBlank())required.add(TaskRetrievalText.normalized(r));
         var context=new CandidateSuitability.Context(truncated,Set.copyOf(required),!inputs.isEmpty(),observed.size());
-        return transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
+        var verified=transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
             var current=task(taskId,request.expectedTaskVersion());
             if(!Objects.equals(task.getTitle(),current.getTitle()) || !Objects.equals(task.getDescription(),current.getDescription())
                     || !Objects.equals(task.getRequiredAbilities(),current.getRequiredAbilities())) throw stale();
@@ -60,8 +60,10 @@ public final class AssigneeRecommendationService {
             if(!observed.keySet().equals(after.keySet())) throw stale();
             for(var id:observed.keySet()) if(!observed.get(id).sameFacts(after.get(id))) throw stale();
             if(!after.isEmpty()) materials.verifyUnchanged(actor,taskId,inputs);
-            return project(taskId,request.expectedTaskVersion(),time,found,after,context);
+            return after;
         });
+        // Use only the final authorized observation; formatting and ranking do not need the task lock.
+        return project(taskId,request.expectedTaskVersion(),time,found,verified,context);
     }
     private AgentTaskDTO task(String id,String version) {
         var task=agents.getTaskRecommendationInput(id);
