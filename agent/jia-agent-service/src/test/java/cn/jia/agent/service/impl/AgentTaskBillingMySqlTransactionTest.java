@@ -1381,6 +1381,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private final class AssignmentNode implements AutoCloseable {
         final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
         cn.jia.agent.api.AssigneeRecommendationController recommendation;
+        NativeTaskPreparationService selection;
         String base;
         void start(String name,boolean paused) throws Exception {start(name,paused,null);}
         void start(String name,boolean paused,cn.jia.agent.api.IndependentTaskQuoteController quote) throws Exception {
@@ -1392,11 +1393,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
             var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
             app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);if(quote!=null)f.registerSingleton("quotes",quote);
+                if(selection!=null)f.registerSingleton("selection",new cn.jia.agent.api.TaskInitialActionController(selection));
                 if(recommendation!=null)f.registerSingleton("recommendation",recommendation);
                 f.registerSingleton("point",new AgentTaskDeliberationOperationController(operationReads,service));
                 f.registerSingleton("cancel",new AgentTaskCancellationController(cancellation));});
             app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
             if(quote!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(ReflectionTestUtils.getField(quote,"quotes"),"intents"),"admission",app.getBean(TaskAssigneeAdmission.class));
+            if(selection!=null)ReflectionTestUtils.setField(selection,"admission",app.getBean(TaskAssigneeAdmission.class));
             if(recommendation!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(recommendation,"recommendations"),"admission",app.getBean(TaskAssigneeAdmission.class));
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
@@ -2323,7 +2326,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());return null;});
         assertNull(locked(()->admit.pending(SCOPE,TASK,agent)));
         locked(()->{admit.admit(SCOPE,TASK,granted,"followup",false,Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
-        initialSelectionController=new cn.jia.agent.api.TaskInitialActionController(service);
         verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
         assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
 
@@ -2335,9 +2337,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
         assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
-        verifySignedSelectionWorker(service,ids.get(1));
+        verifySignedSelectionWorker(service,ids.get(1),()->new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper()));
     }
-    private void verifySignedSelectionWorker(NativeTaskPreparationService service,String agent)throws Exception{
+    private void verifySignedSelectionWorker(NativeTaskPreparationService service,String agent,java.util.function.Supplier<NativeTaskPreparationService> factory)throws Exception{
         var sessions=mock(cn.jia.agent.security.AgentRuntimeAuthenticationService.class);
         var proof=new cn.jia.agent.security.AgentRuntimeAuthenticationService.Proof(new cn.jia.agent.security.AgentRuntimeAuthentication.Scope(TENANT,CLIENT,OWNER,agent,"boot"),"inst","host",1,"fixture",1,1);
         when(sessions.currentRegisteredProofs(TENANT,CLIENT,Set.of(agent))).thenReturn(Map.of(agent,proof));
@@ -2350,35 +2352,38 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             ctx.registerBean(org.springframework.transaction.event.TransactionalEventListenerFactory.class);
             ctx.registerBean(NativeTaskConfigurationProbe.class,()->probe);
             var reader=new cn.jia.agent.service.recommendation.PreparedTaskTermsReader(service,sessions,ctx.getDefaultListableBeanFactory().getBeanProvider(NativeTaskConfigurationProbe.class));
-            ctx.registerBean(cn.jia.agent.service.recommendation.SelectedTaskComparison.class,()->new cn.jia.agent.service.recommendation.SelectedTaskComparison(pool,reader));ctx.refresh();service.setSelectionEvents(ctx);
-            verifySignedSelectionReplay(agent,()->{
-                pool.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(1,sends.get());
-                assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_native_preparation WHERE JSON_UNQUOTE(JSON_EXTRACT(intent_json,'$.binding.target.agent'))=? AND measurement_sha IS NOT NULL",Integer.class,agent));return null;
-            });pool.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(1,sends.get());
+            var queued=new java.util.concurrent.atomic.AtomicInteger();var release=new java.util.concurrent.CountDownLatch(1);
+            // Occupy the original worker until both HTTP admission surfaces are paused. Do not stop its event context.
+            pool.submit(()->{release.await();return null;});
+            try {
+                ctx.registerBean(cn.jia.agent.service.recommendation.SelectedTaskComparison.class,()->new cn.jia.agent.service.recommendation.SelectedTaskComparison(job->{queued.incrementAndGet();pool.execute(job);},reader));ctx.refresh();service.setSelectionEvents(ctx);
+                java.util.function.Supplier<NativeTaskPreparationService> peer=()->{var p=factory.get();p.setSelectionEvents(ctx);return p;};
+                verifySignedSelectionReplay(agent,service,peer,()->{
+                    String measured="SELECT COUNT(*) FROM agent_task_native_preparation WHERE JSON_UNQUOTE(JSON_EXTRACT(intent_json,'$.binding.target.agent'))=? AND measurement_sha IS NOT NULL";
+                    assertEquals(1,queued.get());assertEquals(0,sends.get());assertEquals(0,independent.queryForObject(measured,Integer.class,agent));
+                    release.countDown();pool.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(1,sends.get());assertEquals(1,independent.queryForObject(measured,Integer.class,agent));return null;
+                });assertEquals(1,queued.get());assertEquals(1,sends.get());
+            }finally{release.countDown();}
         }
     }
-    private void verifySignedSelectionReplay(String agent,java.util.concurrent.Callable<Void> checked)throws Exception{
-        var uri=URI.create(origin+"/agent/tasks/"+TASK+"/initial-actions/"+agent);var token=httpToken();var mapper=new ObjectMapper();
-        try(var client=HttpClient.newHttpClient()){
-            class Call{tools.jackson.databind.JsonNode run(String key,String choice,String version,int expected,String code)throws Exception{
-                var b=HttpRequest.newBuilder(uri).header("Authorization","Bearer "+token).header("X-Request-Id","selection");if(choice!=null){
-                    if(key!=null)b.header("Idempotency-Key",key);var data=Map.of("choice",choice,"selectionVersion",version);
-                    b.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
-                var r=client.send(b.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());return env.path("data");
-            }}var call=new Call();var empty=call.run(null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt");
-            var choiceService=ReflectionTestUtils.getField(initialSelectionController,"choices");
-            var pause=new cn.jia.agent.service.TaskAssigneeAdmission(true);var open=new cn.jia.agent.service.TaskAssigneeAdmission(false);
-            ReflectionTestUtils.setField(choiceService,"admission",pause);int frozen=count("agent_task_native_preparation");
-            assertEquals(empty,call.run(null,null,null,200,"E0"));call.run("one","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
-            assertEquals(before,count("agent_task_native_selection_receipt"));assertEquals(frozen,count("agent_task_native_preparation"));
-            ReflectionTestUtils.setField(choiceService,"admission",open);
-            call.run(null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");var saved=call.run("one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());checked.call();
-            jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
-            ReflectionTestUtils.setField(choiceService,"admission",pause);
-            assertEquals(saved,call.run("one","LOCAL_ANSWER",stamp,200,"E0"));call.run("one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");
-            call.run("new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
-            ReflectionTestUtils.setField(choiceService,"admission",open);
-            call.run("new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");assertEquals(before+1,count("agent_task_native_selection_receipt"));
+    private void verifySignedSelectionReplay(String agent,NativeTaskPreparationService original,java.util.function.Supplier<NativeTaskPreparationService> peer,java.util.concurrent.Callable<Void> drain)throws Exception{
+        var token=httpToken();var mapper=new ObjectMapper();
+        try(var client=HttpClient.newHttpClient();var a=new AssignmentNode();var b=new AssignmentNode()){
+            class Call{tools.jackson.databind.JsonNode run(AssignmentNode node,String key,String choice,String version,int expected,String code)throws Exception{
+                var uri=URI.create(node.base+"/agent/tasks/"+TASK+"/initial-actions/"+agent);var req=HttpRequest.newBuilder(uri).header("Authorization","Bearer "+token).header("X-Request-Id","selection");if(choice!=null){
+                    if(key!=null)req.header("Idempotency-Key",key);var data=Map.of("choice",choice,"selectionVersion",version);
+                    req.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
+                var r=client.send(req.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());assertEquals("selection",env.path("requestId").asText());String cache=String.join(",",r.headers().allValues("Cache-Control"));assertTrue(cache.contains("no-store")&&cache.contains("private"),cache);return env.path("data");
+            }}var call=new Call();a.selection=peer.get();a.start("paused-a",true);var empty=call.run(a,null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt"),frozen=count("agent_task_native_preparation");
+            call.run(a,"one","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");assertEquals(before,count("agent_task_native_selection_receipt"));assertEquals(frozen,count("agent_task_native_preparation"));
+            tools.jackson.databind.JsonNode saved;
+            try(var open=new AssignmentNode()){open.selection=original;open.start("open",false);assertEquals(empty,call.run(open,null,null,null,200,"E0"));call.run(open,null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");saved=call.run(open,"one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());}
+            b.selection=peer.get();b.start("paused-b",true);assertNotEquals(a.base,b.base);
+            for(var node:List.of(a,b)){assertEquals(saved,call.run(node,null,null,null,200,"E0"));assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));call.run(node,"new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");}
+            drain.call();jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
+            for(var node:List.of(b,a)){assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));call.run(node,"one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");call.run(node,"new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");}
+            try(var reopened=new AssignmentNode()){reopened.selection=peer.get();reopened.start("reopened",false);call.run(reopened,"new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");}
+            assertEquals(before+1,count("agent_task_native_selection_receipt"));assertEquals(frozen+1,count("agent_task_native_preparation"));
         }
     }
     // Use an actual signed quote request with two authorized candidates and one current native receipt.
