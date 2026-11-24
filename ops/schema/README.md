@@ -124,4 +124,4 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 
 多事项使用同一只读一致性快照执行上述 SQL，把所有目标的原始行合并导出为 JSON 数组（BIGINT 可用十进制字符串）。另从固定受理范围准备 `scopes.json`，每项有 `tenant_id/client_id/owner_jiacn/task_id`，不能从成功查询或设备报告反推。在私有目录以 `umask 077` 执行 `node discussion_source_roster.mjs <固定Runtime源码根> scopes.json before.json > plan.json`；仅使用受信任的固定候选（复用其 subjectKey 实现）。按原设备元组向该主体提供对应的 `devices[].manifest`，不得跨安装借用报告。核完后独立再取一轮 `after.json`，同命令末尾加 `after.json <首次生成清单时独立留存的snapshotSha256>`，同时核对前后两份原件与原固定摘要，只输出名册是否未变；不能复验时才从可变文件生成该摘要。零退出不表示设备已确认或集群已排空；任一失败不发布部分清单。未知成员、漏事项、同一原安装的会话冲突、成员或原派发变化均停止。本工具不联网、不持有数据库或设备凭证，也不安装组件。清单、前后原件及回执保存在授权运维私有目录，不写应用日志。
 
-历史特征读取 V2：V1 表、视图及不可变触发器就绪后，再显式执行 `economy-task-quote-features-v2.sql` 的三个 SQL SECURITY INVOKER 视图，然后安装新 Economy 读端。只变更读取视图，不修改七表定义、锁或写入结构，不回填特征、不复制向量。按依赖次序核验视图、实际调用身份的最小读取权限和既存报价逐行还原；元数据安装仍须受控获授权。
+报价原件完整性补丁 `economy-task-quote-features-v2.sql`：在已安装 V1 后显式替换原 INVOKER 报价视图，仅补验证唯一被替换的引用确实位于顶层 `preparation`，否则解析为 NULL；不能借嵌套同名字段伪造成功。已否决的历史特征专用读视图不安装，线上分页仍使用原报价视图。此补丁不改七表、触发器、原件、权限或开关，不需回填；需固定版本、核已有报价还原及实际调用身份后另行授权应用。

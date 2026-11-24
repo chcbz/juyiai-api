@@ -712,8 +712,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
             assertEquals(prior,jdbc.queryForList(oldRows));
         }
-        // Compare every authenticated feature value, not just the three selected winners, with the full envelope reader.
-        assertEquals((long)2*n,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote_resolved q JOIN economy_task_quote_history_features h USING(quote_id,tenant_id,client_id,owner_jiacn,task_id) WHERE q.task_id LIKE 'history-%' AND h.features_json IS NOT NULL AND BINARY CAST(h.features_json AS CHAR)=BINARY CAST(JSON_EXTRACT(q.snapshot_json,'$.preparation.features') AS CHAR)",Long.class));
         if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
@@ -788,7 +786,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String query="SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?";
         for(int i=0;i<scope.size();i++){var args=new java.util.ArrayList<String>(scope);args.set(i,args.get(i)+"-wrong");args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());}
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
-        String features="SELECT features_json FROM economy_task_quote_history_features WHERE quote_id=?";assertNull(jdbc.queryForObject(features,String.class,id));
+        String features="SELECT JSON_EXTRACT(snapshot_json,'$.preparation.features') FROM economy_task_quote_resolved WHERE quote_id=?";assertNull(jdbc.queryForObject(features,String.class,id));
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
         assertEquals(jdbc.queryForObject(features,String.class,fixture.offer().quoteId()),jdbc.queryForObject(features,String.class,id));
