@@ -48,11 +48,23 @@ public final class ChatUsageDispatchAuthority {
                 && List.of(scope.agentId()).equals(facts.get("participantAgentIds"));
         return new Original(dispatch, turn, taskId, singleBountyExecutor);
     }
-    /** Point-in-time dispatch-origin observation only. No capture enrollment, receipt or fee is implied. */
-    public boolean matchesTaskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash){
-        var original=original(device.subject(),dispatchId);var dispatch=original.dispatch();var fence=device.fence();
-        return original.taskId()!=null && original.singleBountyExecutor() && dispatch.getTaskGrantId()!=null && dispatch.getTaskGrantVersion()!=null
-                && Objects.equals(dispatch.getTurnId(),turnId) && origins.matches(dispatch.getEventId(),contextHash,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
+    /** Transport attribution only. Neither an ACK nor a final reply proves measured usage. */
+    public enum TaskSource { UNMATCHED, OBSERVED, FINAL_BOUND }
+
+    public TaskSource taskSource(AuthenticatedRuntimeOperation.Device device, String turnId, String dispatchId, String contextHash) {
+        var original = original(device.subject(), dispatchId);
+        var dispatch = original.dispatch();
+        var turn = original.turn();
+        var fence = device.fence();
+        if (original.taskId() == null || !original.singleBountyExecutor() || dispatch.getTaskGrantId() == null
+                || dispatch.getTaskGrantVersion() == null || !Objects.equals(dispatch.getTurnId(), turnId)
+                || !Objects.equals(turn.getDispatchId(), dispatchId) || !Objects.equals(turn.getContextDigest(), contextHash)
+                || !origins.matches(dispatch.getEventId(), contextHash, fence.runtimeInstallationId(), fence.hostId(),
+                        fence.runtimeInstanceId(), fence.sessionGeneration())) return TaskSource.UNMATCHED;
+        // SENT alone may still undergo pre-turn bootstrap replacement. A persisted final closes that path.
+        boolean finalBound = "SENT".equals(dispatch.getStatus()) && turn.getFinalMessageId() != null
+                && ("FINAL_PERSISTED".equals(turn.getState()) || "PUBLISHED".equals(turn.getState()));
+        return finalBound ? TaskSource.FINAL_BOUND : TaskSource.OBSERVED;
     }
     private static ChatDeliberationException denied() {
         return new ChatDeliberationException(ChatDeliberationException.Reason.NOT_FOUND_OR_FORBIDDEN,

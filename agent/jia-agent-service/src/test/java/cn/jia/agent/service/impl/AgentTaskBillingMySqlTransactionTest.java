@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource;
 import cn.jia.economy.pricing.TaskEstimateFeatures;
 import cn.jia.economy.pricing.TaskQuoteCalculator;
 import cn.jia.economy.pricing.MeasuredTaskRepricing;
@@ -716,7 +717,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private static cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder textFixture(java.util.function.Function<cn.jia.economy.usage.ConfirmedSampleEvidence.Response,MeasuredTaskRepricing.Fact> fn){
         return new cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder(){public boolean coversAllOperations(String group,String policy){return "NATIVE_DISPATCH_GROUP_V1".equals(group)&&"cp".equals(policy);} public MeasuredTaskRepricing.Fact decode(cn.jia.economy.usage.ConfirmedSampleEvidence.Response r){return fn.apply(r);}};
     }
+    private boolean conflictOnDiscussionRetry;
+    @Test void sameDeviceDiscussionFinalStillDoesNotProveMeteredUsage() throws Exception {
+        verifyCurrentMemberEligibility();
+    }
     @Test void confirmedEligibilityComparesEveryCurrentMemberButNeverTreatsReferenceRouteAsActualIdentity() throws Exception {
+        conflictOnDiscussionRetry = true;
+        verifyCurrentMemberEligibility();
+    }
+    private void verifyCurrentMemberEligibility() throws Exception {
         confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
         assertNull(sampleEvidence.inspect(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),sid));
         assertEquals("ACTIVE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());prepareSubmitted();
@@ -1486,13 +1495,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var outgoing=dispatch.outgoing(row);assertEquals(OWNER,outgoing.executorOwner());
         assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
         assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
-        verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
+        var finalSource = verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
         QuotedAction selected=null;
         if(System.getProperty("ownedMeteredRuntime")!=null){
             relay.setDispatchAuthority(dispatch);
             var finals=new ChatActionFinalService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc),dao,new cn.jia.chat.handler.TypedInspectionSessionRegistry());
             deliberation.setActionFinals(finals);
-            verifyDiscussionInbox(tx,relay,row,outgoing,deliberation);
+            verifyDiscussionInbox(tx,relay,row,outgoing,deliberation,finalSource);
             selected=(executions,outputs)->{
                 var store=new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc);
                 var observed=new java.util.concurrent.atomic.AtomicReference<SkillExecutionService.Creation>();
@@ -1557,7 +1566,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for
      * network transport here; device selection and authentication are separate tests. No model call. */
     private void verifyDiscussionInbox(TransactionTemplate tx,ChatDeliberationOutboxService outbox,
-            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,ChatDispatchAuthorityService.Binding outgoing,ChatDeliberationService deliberation) throws Exception {
+            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,ChatDispatchAuthorityService.Binding outgoing,ChatDeliberationService deliberation,java.util.function.Supplier<cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource> source) throws Exception {
         var codec=new ObjectMapper();var builder=mock(ChatDeliberationOutboxRelay.class,org.mockito.Mockito.CALLS_REAL_METHODS);
         Map<String,Object> wire=ReflectionTestUtils.invokeMethod(builder,"hostedWire",row,codec.readValue(row.getPayloadJson(),Map.class));
         var frame=cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null);
@@ -1602,17 +1611,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(outgoing.turn().getContextDigest(),receipt.path("context").asText());assertEquals(row.getTurnId(),receipt.path("turn").asText());assertEquals(row.getDispatchId(),ack.path("dispatchId").asText());assertEquals(row.getEventId(),ack.path("messageId").asText());
             for(int i=0;i<2;i++)assertTrue(tx.execute(st->outbox.acknowledgeHostedDispatch(TENANT,outgoing.executorOwner(),CLIENT,ack.path("agentId").asText(),ack.path("dispatchId").asText(),ack.path("messageId").asText(),System.currentTimeMillis())).booleanValue());
             assertEquals("SENT",independent.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?",String.class,row.getEventId()));
+            assertEquals(conflictOnDiscussionRetry ? TaskSource.UNMATCHED : TaskSource.OBSERVED, source.get());
             var output=temp.resolve("final.json");assertTrue(Files.size(output)<16384);var reply=codec.readTree(Files.readAllBytes(output));
             var sender=new ServerResolvedAgentSender("agent","Quoted agent",outgoing.executorOwner(),CLIENT,outgoing.turn().getTargetAgentId());
             java.util.function.Supplier<ChatDeliberationService.FinalResult> save=()->tx.execute(st->deliberation.persistFinal(TENANT,OWNER,CLIENT,reply.path("conversationId").asText(),reply.path("conversationGeneration").asLong(),reply.path("targetAgentId").asText(),reply.path("requestId").asText(),reply.path("turnId").asText(),reply.path("dispatchId").asText(),reply.path("contextSnapshotId").asText(),reply.path("contextHash").asText(),reply.path("content").asText(),reply.path("outcomeContractVersion").asInt(),reply.path("interactionOutcome").toString(),null,codec.convertValue(reply.path("contextReceipt"),Map.class),sender));
             var saved=save.get();assertEquals(ChatDeliberationService.FinalStatus.PERSISTED,saved.status());
+            assertEquals(conflictOnDiscussionRetry ? TaskSource.UNMATCHED : TaskSource.FINAL_BOUND, source.get());
             var repeated=save.get();assertEquals(ChatDeliberationService.FinalStatus.DUPLICATE,repeated.status());assertEquals(saved.messageId(),repeated.messageId());
             assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_dispatch_outbox WHERE turn_id=? AND event_type='ACTION_REQUESTED' AND status='READY'",Integer.class,row.getTurnId()));
             assertEquals(0,count("chat_step_execution_link")); // Event committed, consumer not yet run.
         }finally{org.springframework.util.FileSystemUtils.deleteRecursively(temp);}
     }
 
-    private void verifyDiscussionOrigin(TransactionTemplate tx,ChatDeliberationOutboxService relay,ChatDeliberationOutboxService.Claim claim,
+    private java.util.function.Supplier<cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource> verifyDiscussionOrigin(TransactionTemplate tx,ChatDeliberationOutboxService relay,ChatDeliberationOutboxService.Claim claim,
             cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,cn.jia.chat.deliberation.ChatDispatchOutboxEntity draft,String context,long now){
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(jdbc.getDataSource());
         var origins=new ChatTaskDispatchOriginService(relay,new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc));
@@ -1623,7 +1634,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class)),new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc));
         var target=new ObjectMapper().readTree(row.getPayloadJson()).path("targetAgentId").asText();
         var subject=new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,OWNER,target);var device=new AuthenticatedRuntimeOperation.Device(subject,host);
-        java.util.function.BooleanSupplier matches=()->authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),context);
+        java.util.function.Supplier<cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource> source = () -> authority.taskSource(device,row.getTurnId(),row.getDispatchId(),context);
+        java.util.function.BooleanSupplier matches = () -> source.get() != TaskSource.UNMATCHED;
         assertThrows(ChatDeliberationException.class, matches::getAsBoolean);
         // Supply only the original executor binding. No live session or device proof is fabricated here.
         assertEquals(1,jdbc.update("""
@@ -1633,18 +1645,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 """,TENANT,CLIENT,OWNER,target));
         assertFalse(matches.getAsBoolean());
         tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
-        assertTrue(matches.getAsBoolean());assertFalse(authority.matchesTaskSource(device,"other-turn",row.getDispatchId(),context));
-        assertFalse(authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),"sha256:"+"0".repeat(64)));
+        assertTrue(matches.getAsBoolean());assertEquals(TaskSource.UNMATCHED,authority.taskSource(device,"other-turn",row.getDispatchId(),context));
+        assertEquals(TaskSource.UNMATCHED,authority.taskSource(device,row.getTurnId(),row.getDispatchId(),"sha256:"+"0".repeat(64)));
         var changed=new AuthenticatedRuntimeOperation.Device(subject,new AgentManagedSessionLookup.SessionFence("installation","host","boot",2));
-        assertFalse(authority.matchesTaskSource(changed,row.getTurnId(),row.getDispatchId(),context));
-        assertThrows(ChatDeliberationException.class,()->authority.matchesTaskSource(new AuthenticatedRuntimeOperation.Device(new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,"different-owner",target),host),row.getTurnId(),row.getDispatchId(),context));
+        assertEquals(TaskSource.UNMATCHED,authority.taskSource(changed,row.getTurnId(),row.getDispatchId(),context));
+        assertThrows(ChatDeliberationException.class,()->authority.taskSource(new AuthenticatedRuntimeOperation.Device(new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,"different-owner",target),host),row.getTurnId(),row.getDispatchId(),context));
         assertEquals(1,count("chat_task_dispatch_origin"));assertEquals(0,independent.queryForObject("SELECT mixed_origin FROM chat_task_dispatch_origin",Integer.class));
         assertTrue(tx.execute(st->relay.retry(claim,"TEST_LOST_SEND",now)).booleanValue());
         assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(st->origins.beforeSend(claim,context,host)));
         var later=tx.execute(st->relay.claim(draft,"next-relay",now+2000,60000));assertNotNull(later);
-        tx.executeWithoutResult(st->origins.beforeSend(later,context,new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation-2","host-2","boot-2",2)));
+        if (conflictOnDiscussionRetry) tx.executeWithoutResult(st->origins.beforeSend(later,context,new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation-2","host-2","boot-2",2)));
         tx.executeWithoutResult(st->origins.beforeSend(later,context,host));
-        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));assertFalse(matches.getAsBoolean());
+        assertEquals(conflictOnDiscussionRetry ? 1 : 0,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));
+        assertEquals(conflictOnDiscussionRetry ? TaskSource.UNMATCHED : TaskSource.OBSERVED, source.get());
+        return source;
     }
 
     private Map<String,Object> quotedChatPhase; // This test instance owns one quoted discussion. No production log or store.
