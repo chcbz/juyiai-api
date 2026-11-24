@@ -497,7 +497,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
         return new PreparedFixture(binding,features,offer,prepared);
     }
-    @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {
+    @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {benchmarkOfferFence("stop-first");}
+    @Test void benchmarkCaseQuoteFirstKeepsItsFixedPriceAfterRevocation() throws Exception {benchmarkOfferFence("quote-first");}
+    @Test void benchmarkCaseReviewRetirementCannotResurrectPreparation() throws Exception {benchmarkOfferFence("review");}
+    @Test void benchmarkCaseManifestRetirementCannotResurrectPreparation() throws Exception {benchmarkOfferFence("manifest");}
+    @Test void benchmarkCaseMemberProjectionInvalidatesTheWholeOffer() throws Exception {benchmarkOfferFence("usage");}
+    private void benchmarkOfferFence(String scenario) throws Exception {
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
         var cfg=recommendationSql.getConfiguration();cfg.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
         var json=new ObjectMapper();var svc=proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),json),cn.jia.economy.task.TaskBenchmarkAdmission.class);
@@ -559,6 +564,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,null);
         var roster=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.TrainingBenchmarks(group.privateCalibrationGroup(bench),new cn.jia.economy.service.impl.FrozenCalibrationStudy.Pins("s","d","r","p"),List.of(new cn.jia.economy.service.impl.FrozenCalibrationStudy.Member(bench.taskId(),selected,train.sha256(),pin))));
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-use-fence-v1.sql")).execute(jdbc.getDataSource());
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-retirement-v1.sql")).execute(jdbc.getDataSource());
         var query=BILLING_TASK;var candidates=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),json,true),cn.jia.economy.task.TaskHistoryCatalog.class);
         var searchParams=new cn.jia.economy.pricing.TaskNeighborSearch.Parameters(cn.jia.economy.pricing.TaskNeighborSearch.trainingScales(List.of(f)),1,1,1,1,1,0.1,0.2,1,1,1,1);
         var gate=new cn.jia.economy.pricing.TaskEstimateCalibration.Gate(1,BigDecimal.ONE);
@@ -587,6 +593,37 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(sha,offer.preparation().estimate().contributions().getFirst().sampleId());assertEquals(unavailable,estimator.prepare(bench,f,terms));
         assertEquals(unavailable,estimator.prepare(new TaskBillingService.Task(query.scope(),"foreign",query.taskId()),f,terms));
         locked(()->{estimator.lockSelected(query,List.of(offer));return null;});
+        if(scenario.equals("quote-first")){
+            var quoteLocked=new CountDownLatch(1);
+            try(var worker=Executors.newSingleThreadExecutor()){
+                var stop=worker.submit(()->{assertTrue(quoteLocked.await(8,TimeUnit.SECONDS));return independent.update("INSERT INTO economy_task_benchmark_use_stop VALUES(?,?,?,?,1,?)",TENANT,CLIENT,OWNER,group.digest(),sha);});
+                var fixed=locked(()->{estimator.lockSelected(query,List.of(offer));quoteLocked.countDown();
+                    long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);int waits;
+                    do{waits=admin.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME='economy_task_benchmark_use_grant'",Integer.class,database);
+                        if(waits==0)java.util.concurrent.locks.LockSupport.parkNanos(5_000_000);
+                    }while(waits==0 && !stop.isDone() && System.nanoTime()<until);
+                    assertTrue(waits>0,"revocation must wait for the existing quote transaction");
+                    var binding=new TaskBillingService.Binding(1,f.requirementSha256(),f.inputSnapshotSha256(),AGENT,"bench-quote-first");
+                    return billing.storeMeasuredBatch(query,PAYER,List.of(new TaskBillingService.MeasuredWrite(binding,offer.preparation()))).getFirst();});
+                assertEquals(1,stop.get(5,TimeUnit.SECONDS));assertEquals(65L,fixed.amountWen());
+                assertEquals(65L,jdbc.queryForObject("SELECT amount_wen FROM economy_task_quote WHERE quote_id=?",Long.class,fixed.quoteId()));}
+        }else if(scenario.equals("review")){
+            jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=TRUE WHERE review_sha=?",key);
+            jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=FALSE WHERE review_sha=?",key);
+        }else if(scenario.equals("manifest")){
+            jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE WHERE manifest_sha=?",sha);
+            jdbc.update("UPDATE economy_task_benchmark_case SET retired=FALSE WHERE manifest_sha=?",sha);
+        }else if(scenario.equals("usage")){
+            cfg.addMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
+            var projection=proxy(new cn.jia.economy.service.impl.UsageCaptureProjectionStore(recommendationSql.getMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class)),cn.jia.economy.usage.UsageCaptureProjection.class);
+            jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");
+            long pk=jdbc.queryForObject("SELECT id FROM economy_usage_capture WHERE execution_id='bench-exec64'",Long.class);
+            assertTrue(projection.publish(new cn.jia.economy.usage.UsageCaptureProjection.Key(TENANT,CLIENT,pk),2,cn.jia.economy.usage.UsageCaptureProjection.Coverage.INCOMPLETE));
+        }
+        if(!scenario.equals("stop-first")){
+            assertEquals(unavailable,estimator.prepare(query,f,terms));assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->locked(()->{estimator.lockSelected(query,List.of(offer));return null;}));
+            assertEquals(quoteCount+(scenario.equals("quote-first")?1:0),count("economy_task_quote"));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));return;
+        }
         try(var writer=independent.getDataSource().getConnection();var worker=Executors.newSingleThreadExecutor()){
             writer.setAutoCommit(false);try{
                 try(var ps=writer.prepareStatement("INSERT INTO economy_task_benchmark_use_stop VALUES(?,?,?,?,1,?)")){

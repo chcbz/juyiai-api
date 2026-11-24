@@ -36,6 +36,20 @@ class DatabaseTaskPricingServiceTest {
     private static String tools(String units) {
         return "[{\"channel\":\"tool-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"" + units + "\"}]";
     }
+    @Test void licensedAndConfirmedKeysetsMergeAcrossInterleavedPagesAndOneSourceTail(){
+        var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var catalog=new TaskHistoryCatalogService(db,json,true);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
+        var execution=new cn.jia.economy.task.TaskBillingService.MeasuredGroup("v1","1".repeat(64),"2".repeat(64),"book","3".repeat(64),"capture");
+        var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(execution,features);var query=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","query");
+        var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),7,"a".repeat(64));var bytes=json.writeValueAsString(features);var digest=features.digest();
+        var rows=java.util.stream.IntStream.range(0,201).mapToObj(i->new cn.jia.economy.mapper.ConfirmedSampleMapper.HistoryRow("%04x".formatted(i),i+1,"task-"+i,digest,bytes)).toList();
+        java.util.function.Predicate<cn.jia.economy.mapper.ConfirmedSampleMapper.HistoryRow> history=r->r.revision()>128 || r.revision()%2==0;
+        when(db.history(eq(query),eq(pin.group()),anyString(),eq(64))).thenAnswer(i->rows.stream().filter(history).filter(r->r.id().compareTo(i.getArgument(2,String.class))>0).limit(64).toList());
+        when(db.benchmarkPage(eq(query),eq(pin),anyString(),eq(64))).thenAnswer(i->rows.stream().filter(history.negate()).filter(r->r.id().compareTo(i.getArgument(2,String.class))>0).limit(64).toList());
+        var ids=new java.util.ArrayList<String>();String after="";for(int size:new int[]{64,64,64,9}){
+            var page=catalog.candidatePage(query,group,pin,after);assertEquals(size,page.size());for(var e:page)ids.add(e.source().sampleId());after=page.getLast().source().sampleId();}
+        assertEquals(rows.stream().map(r->r.id()).toList(),ids);verify(db,times(4)).history(eq(query),eq(pin.group()),anyString(),eq(64));verify(db,times(4)).benchmarkPage(eq(query),eq(pin),anyString(),eq(64));verifyNoMoreInteractions(db);
+    }
     @Test void offlineStudyJoinsTheEntirePinnedRosterAndRepricesOnlyFromRetainedBytes(){
         var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         var obs=new TaskHistoryCatalogService(db,json);var study=new FrozenCalibrationStudy(json,obs);
