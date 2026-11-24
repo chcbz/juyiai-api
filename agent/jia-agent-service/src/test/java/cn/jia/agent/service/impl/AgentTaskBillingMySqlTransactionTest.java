@@ -1334,6 +1334,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }}var point=new Point();point.post("different-batch",409);assertEquals(balance,wallet(independent));assertEquals(grants,count("agent_task_execution_grant"));
                 var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
                 assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
+                // The point-and-deliberate boundary yields a discussion, not an execution step.
+                var relaySource = new AgentTaskBountyBootstrapOutboxServiceImpl(outbox, new ObjectMapper(), manager,
+                        req, new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT, CLIENT));
+                long claimTime = System.currentTimeMillis();
+                var discussion = relaySource.claimNextAvailable("quote-chat-fixture", claimTime);
+                assertNotNull(discussion);
+                assertEquals("DELIBERATE", discussion.permittedOperation());
+                assertEquals(TENANT, discussion.tenantId()); assertEquals(CLIENT, discussion.clientId());
+                assertEquals(OWNER, discussion.ownerJiacn()); assertEquals(id, discussion.taskId());
+                assertEquals(agent, discussion.targetAgentId()); assertEquals(subject.requirementRevision(), discussion.requirementRevision());
+                assertEquals(receipt.path("grantId").asText(), discussion.grantId());
+                assertEquals(receipt.path("grantVersion").asLong(), discussion.grantVersion());
+                assertEquals(receipt.path("assignmentRevision").asLong(), discussion.assignmentRevision());
+                assertNull(relaySource.claimNext(SCOPE, "second-chat-fixture", claimTime));
+                // Below this boundary the existing execution fixture does not represent a Chat admission.
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
                 prepareNativeExecutionSchema();
                 new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-skill-application.sql"),new org.springframework.core.io.ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(jdbc.getDataSource());
