@@ -1366,7 +1366,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
-        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql"))).execute(jdbc.getDataSource());
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql"))).execute(jdbc.getDataSource());
         var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
         var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
         var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
