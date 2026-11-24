@@ -11,7 +11,13 @@ public final class EconomyHistoryFeatureBytes {
     public record Metadata(String featureVersion, String templateVersion, String requirementSha256,
             String inputSnapshotSha256, String textSha256, TaskEstimateFeatures.Identity embeddingIdentity,
             List<TaskEstimateFeatures.File> files, Integer requestedDeliverables) {
-        public Metadata { files = List.copyOf(files); }
+        public Metadata {
+            if(featureVersion==null || templateVersion==null || requirementSha256==null || inputSnapshotSha256==null
+                    || textSha256==null || embeddingIdentity==null || embeddingIdentity.providerConfigVersion()==null
+                    || embeddingIdentity.model()==null || files==null || files.stream().anyMatch(f->f==null||f.purpose()==null||f.contentMimeType()==null))
+                throw new IllegalArgumentException("Incomplete historical feature metadata");
+            files=List.copyOf(files);
+        }
         @Override public String toString() { return "HistoryFeatureMetadata[private]"; }
     }
 

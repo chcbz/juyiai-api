@@ -16,19 +16,29 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     private final ObjectMapper json;
     private final boolean benchmarks;
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json){this(db,json,false);}
+    private final boolean compact;
+    public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,boolean benchmarks){this(db,json,benchmarks,false);}
     @org.springframework.beans.factory.annotation.Autowired
     public TaskHistoryCatalogService(ConfirmedSampleMapper db,ObjectMapper json,
-            @org.springframework.beans.factory.annotation.Value("${jia.economy.measured-benchmark-use:false}") boolean benchmarks){this.db=db;this.json=json;this.benchmarks=benchmarks;}
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.measured-benchmark-use:false}") boolean benchmarks,
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.history-feature-projection:false}") boolean compact){
+        this.db=db;this.json=json;this.benchmarks=benchmarks;this.compact=compact;
+    }
     @Transactional(propagation=Propagation.NEVER)
     public List<Entry> candidatePage(Task query,Group group,cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,String after){
         if(!benchmarks)return page(query,group,after);
         if(!group.digest().equals(pin.group()))throw new IllegalArgumentException("Wrong benchmark scope");
-        var h=db.history(query,pin.group(),after,PAGE);var b=db.benchmarkPage(query,pin,after,PAGE);
-        // Both sources share the sample table's global primary key. Merge bounded keysets before vector decoding.
+        var b=db.benchmarkPage(query,pin,after,PAGE);
+        if(compact){var projected=projectedPage(query,group,after);
+            if(projected!=null)return merge(group,projected,b,e->e.source().sampleId(),e->e);}
+        return merge(group,db.history(query,pin.group(),after,PAGE),b,ConfirmedSampleMapper.HistoryRow::id,r->entry(group,r));
+    }
+    private <T> List<Entry> merge(Group group,List<T> h,List<ConfirmedSampleMapper.HistoryRow> b,
+            java.util.function.Function<T,String> id,java.util.function.Function<T,Entry> decode){
         var result=new java.util.ArrayList<Entry>();int i=0,j=0;
         while(result.size()<PAGE && (i<h.size() || j<b.size())){
-            boolean takeHistory=j==b.size() || (i<h.size() && h.get(i).id().compareTo(b.get(j).id())<0);
-            result.add(entry(group,takeHistory?h.get(i++):b.get(j++)));
+            boolean takeHistory=j==b.size() || (i<h.size() && id.apply(h.get(i)).compareTo(b.get(j).id())<0);
+            result.add(takeHistory?decode.apply(h.get(i++)):entry(group,b.get(j++)));
         }return result;
     }
     @Transactional(propagation=Propagation.NEVER)
@@ -44,7 +54,21 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     }
     @Transactional(propagation=Propagation.NEVER)
     public List<Entry> page(Task query,Group group,String after){
+        if(compact){var projected=projectedPage(query,group,after);if(projected!=null)return projected;}
         return db.history(query,group.digest(),after,PAGE).stream().map(r->entry(group,r)).toList();
+    }
+    // Only unusable derived data falls back. Never suppress database faults or canonical-source failures.
+    private List<Entry> projectedPage(Task query,Group group,String after){
+        var rows=db.compactHistory(query,group.digest(),after,PAGE);var result=new java.util.ArrayList<Entry>(rows.size());
+        for(var row:rows){
+            if(!Integer.valueOf(1).equals(row.sourceValid())||row.metadata()==null)return null;
+            try{
+                var meta=json.readValue(row.metadata(),EconomyHistoryFeatureBytes.Metadata.class);
+                var f=EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());
+                if(!Group.of(group.execution(),f).equals(group))return null;
+                result.add(new Entry(new Revision(row.id(),row.revision()),row.taskId(),f));
+            }catch(IllegalArgumentException|tools.jackson.core.JacksonException invalid){return null;}
+        }return result;
     }
     private Entry entry(Group group,ConfirmedSampleMapper.HistoryRow r){
             if(r.featuresJson()==null)throw new IllegalStateException("Unresolvable history quote features");

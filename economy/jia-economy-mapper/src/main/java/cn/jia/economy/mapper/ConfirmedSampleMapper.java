@@ -48,6 +48,24 @@ public interface ConfirmedSampleMapper {
         AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
     List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
+    record CompactRow(String id,long revision,String taskId,String featureSha,String metadata,byte[] vector,Integer sourceValid){
+        @Override public String toString(){return "CompactRow[private]";}
+    }
+    // Start at eligible samples, not projection rows. A missing or stale projection must not shorten a keyset page.
+    @Select("""
+        SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,x.feature_meta,x.vector_bytes,
+          SHA2(q.snapshot_json,256)=x.envelope_sha AND ((x.preparation_sha IS NULL AND x.resolved_sha=x.envelope_sha)
+          OR (x.preparation_sha IS NOT NULL AND q.snapshot_json->>'$.preparation'=x.preparation_sha
+          AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256)))
+        FROM economy_task_cost_sample s LEFT JOIN economy_history_feature_projection x ON x.sample_id=s.sample_id
+          AND x.sample_revision=s.projection_revision AND x.quote_id=s.quote_id
+        LEFT JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn
+          AND q.task_id=s.task_id AND q.quote_id=x.quote_id
+        LEFT JOIN economy_task_quote_preparation p ON p.tenant_id=q.tenant_id AND p.client_id=q.client_id AND p.owner_jiacn=q.owner_jiacn
+          AND p.task_id=q.task_id AND p.payer_user_id=q.payer_user_id AND p.recommendation_id=x.recommendation_id
+          AND p.preparation_sha=x.preparation_sha WHERE
+        """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
+    List<CompactRow> compactHistory(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
     @Select("""
         SELECT r.operation_refs FROM economy_task_cost_sample s JOIN economy_task_cost_sample_revision r
         ON r.sample_id=s.sample_id AND r.sample_revision=s.projection_revision AND r.sample_state='READY' WHERE
