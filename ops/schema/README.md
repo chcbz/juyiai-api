@@ -124,6 +124,4 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 
 多事项使用同一只读一致性快照执行上述 SQL，把所有目标的原始行合并导出为 JSON 数组（BIGINT 可用十进制字符串）。另从固定受理范围准备 `scopes.json`，每项有 `tenant_id/client_id/owner_jiacn/task_id`，不能从成功查询或设备报告反推。在私有目录以 `umask 077` 执行 `node discussion_source_roster.mjs <固定Runtime源码根> scopes.json before.json > plan.json`；仅使用受信任的固定候选（复用其 subjectKey 实现）。按原设备元组向该主体提供对应的 `devices[].manifest`，不得跨安装借用报告。核完后独立再取一轮 `after.json`，同命令末尾加 `after.json <首次生成清单时独立留存的snapshotSha256>`，同时核对前后两份原件与原固定摘要，只输出名册是否未变；不能复验时才从可变文件生成该摘要。零退出不表示设备已确认或集群已排空；任一失败不发布部分清单。未知成员、漏事项、同一原安装的会话冲突、成员或原派发变化均停止。本工具不联网、不持有数据库或设备凭证，也不安装组件。清单、前后原件及回执保存在授权运维私有目录，不写应用日志。
 
-历史特征读取 V2：在专属 V1 表/视图/不可变触发器已就绪后，显式维护 `economy-task-quote-features-v2.sql`，再安装使用新历史视图的 Economy 读端。两列为引擎维护的 STORED 元数据（原件选择与摘要校验），不复制向量，不改变原始 JSON。ALTER 可能重建两表、耗时并占临时盘；需用实际表规模验证维护窗口、空间与授权，应用启动不执行。部分 DDL 成功不得重跑整文件；核列定义和 INVOKER 视图链及必要读权限后仅补缺项。原 V1 完整报价读入口名保持；不删除原件、回填人工摘要、启用共享写或授权生产回退。
-
-V2 在既有 MySQL 8.0.21 使用可见生成列，基础表写入须显式列名（不向生成列赋值），授权应用只通过既有职责访问。迁移前盘点外部裸表 `SELECT *`/无列名 INSERT 依赖；报价视图列契约保持不变。
+历史特征读取 V2：V1 表、视图及不可变触发器就绪后，再显式执行 `economy-task-quote-features-v2.sql` 的三个 SQL SECURITY INVOKER 视图，然后安装新 Economy 读端。只变更读取视图，不修改七表定义、锁或写入结构，不回填特征、不复制向量。按依赖次序核验视图、实际调用身份的最小读取权限和既存报价逐行还原；元数据安装仍须受控获授权。
