@@ -1432,7 +1432,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(visible?"TASK_ASSIGNEE_ADMISSION_PAUSED":"RECOMMENDATION_NOT_FOUND",env.path("code").asText());assertEquals(id,env.path("requestId").asText());assertTrue(env.at("/data/recommendations").isMissingNode());
                 String cache=String.join(",",res.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);
             }
-            first.verifyUntouched().run();second.verifyUntouched().run();assertAssignmentAbsent();
+            first.verifyUntouched().run();second.verifyUntouched().run();
+            assertEquals(100,wallet(independent));assertEquals(0,count("economy_transaction"));assertEquals(0,count("agent_task_execution_grant"));
+            assertEquals(0,count("agent_task_bounty_bootstrap_outbox"));assertEquals(1,count("economy_task_quote"));
+            assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_meta WHERE task_id IN (?,?) AND task_version=0 AND reward_status='open'",Integer.class,TASK,"other-rec"));
         }
     }
     @Test void pointAssignmentStoppedNodesReplayReadAndCancelOriginalGrant() throws Exception {
