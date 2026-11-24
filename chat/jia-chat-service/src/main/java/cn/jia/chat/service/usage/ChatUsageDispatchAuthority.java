@@ -14,7 +14,7 @@ public final class ChatUsageDispatchAuthority {
     private final ChatDispatchAuthorityMapper dispatches;private final ChatDeliberationDao turns;
     private static final ObjectMapper JSON=new ObjectMapper();
     public ChatUsageDispatchAuthority(ChatDispatchAuthorityMapper dispatches,ChatDeliberationDao turns,ChatTaskDispatchOriginStore origins){this.origins=origins;this.dispatches=dispatches;this.turns=turns;}
-    record Original(ChatDispatchOutboxEntity dispatch,ChatTurnEntity turn,String taskId,boolean singleBountyExecutor) { }
+    record Original(ChatDispatchOutboxEntity dispatch,ChatTurnEntity turn,String taskId,boolean singleBountyExecutor, Map<?,?> payload) { }
     Original original(AuthenticatedRuntimeOperation.Scope scope,String dispatchId){
         var rows = dispatches.findDispatch(scope.tenantId(), scope.clientId(), dispatchId);
         if (rows == null || rows.size() != 1) throw denied();
@@ -46,13 +46,15 @@ public final class ChatUsageDispatchAuthority {
         boolean singleBountyExecutor = "bounty".equals(payload.get("conversationScopeType"))
                 && payload.get("factsManifest") instanceof Map<?, ?> facts
                 && List.of(scope.agentId()).equals(facts.get("participantAgentIds"));
-        return new Original(dispatch, turn, taskId, singleBountyExecutor);
+        return new Original(dispatch, turn, taskId, singleBountyExecutor, payload);
     }
     /** Transport attribution only. Neither an ACK nor a final reply proves measured usage. */
     public enum TaskSource { UNMATCHED, OBSERVED, FINAL_BOUND }
 
     public TaskSource taskSource(AuthenticatedRuntimeOperation.Device device, String turnId, String dispatchId, String contextHash) {
-        var original = original(device.subject(), dispatchId);
+        return taskSource(device,turnId,dispatchId,contextHash,original(device.subject(),dispatchId));
+    }
+    private TaskSource taskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash,Original original) {
         var dispatch = original.dispatch();
         var turn = original.turn();
         var fence = device.fence();
@@ -65,6 +67,25 @@ public final class ChatUsageDispatchAuthority {
         boolean finalBound = "SENT".equals(dispatch.getStatus()) && turn.getFinalMessageId() != null
                 && ("FINAL_PERSISTED".equals(turn.getState()) || "PUBLISHED".equals(turn.getState()));
         return finalBound ? TaskSource.FINAL_BOUND : TaskSource.OBSERVED;
+    }
+    /** Resolve only inside the authenticated device transaction, before journal access. No final or charge implied. */
+    cn.jia.economy.usage.UsageCaptureJournal.Binding capture(AuthenticatedRuntimeOperation.Device device,String turnId,
+            String dispatchId,String contextHash,String captureId,cn.jia.agent.service.TaskDiscussionCaptureLookup members) {
+        var scope=device.subject();var original=original(scope,dispatchId);var row=original.dispatch();var turn=original.turn();
+        var payload=original.payload();
+        if (!"SENT".equals(row.getStatus()) || contextHash==null || captureId==null
+                || taskSource(device,turnId,dispatchId,contextHash,original)==TaskSource.UNMATCHED
+                || !contextHash.equals(payload.get("contextHash")) || !Objects.equals(turn.getSnapshotId(),payload.get("contextSnapshotId"))
+                || !(payload.get("factsManifest") instanceof Map<?,?> facts) || facts.containsKey("materialsInput")
+                || !(facts.get("contextDelivery") instanceof Map<?,?> delivery) || !"BOOTSTRAP".equals(delivery.get("mode"))
+                || !Map.of("protocol","METERED_CAPTURE_V2","captureId",captureId).equals(facts.get("taskUsageCapture"))
+                || !(payload.get("sourceVector") instanceof Map<?,?> vector)
+                || !contextHash.equals(cn.jia.chat.service.ChatDeliberationService.digest(Map.of("sourceVector",vector,"facts",facts)))) throw denied();
+        var owner=new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),row.getOwnerJiacn());
+        var request=turns.findRequest(scope.tenantId(),owner.ownerJiacn(),scope.clientId(),turn.getRequestId());
+        if(request==null || request.getRequestDigest()==null || !request.getRequestDigest().startsWith("sha256:")
+                || !members.enrolled(owner,original.taskId(),turnId,dispatchId,request.getRequestDigest().substring(7),captureId)) throw denied();
+        return new cn.jia.economy.usage.UsageCaptureJournal.Binding(owner.tenantId(),owner.clientId(),owner.ownerJiacn(),scope.agentId(),original.taskId(),turnId,dispatchId,captureId);
     }
     private static ChatDeliberationException denied() {
         return new ChatDeliberationException(ChatDeliberationException.Reason.NOT_FOUND_OR_FORBIDDEN,

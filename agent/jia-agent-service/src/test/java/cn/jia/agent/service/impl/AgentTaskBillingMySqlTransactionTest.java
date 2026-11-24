@@ -1470,6 +1470,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
         deliberation.setTaskMembers(membership);
         // Exercise explicit enrollment in a rollback-only copy of this new admission. Baseline flow stays unmetered.
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(jdbc.getDataSource());
         var enrolledWire = new java.util.concurrent.atomic.AtomicReference<byte[]>();
         ReflectionTestUtils.setField(typed,"textBootstrapCaptureEnabled",true);
         tx.executeWithoutResult(status -> {
@@ -1491,6 +1492,32 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 enrolledWire.set(codec.writeValueAsBytes(cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null)));
                 var request=dao.findRequest(TENANT,OWNER,CLIENT,admitted.requestId());var history=recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
                 String turn=frozen.getTurnId(),run=frozen.getDispatchId(),digest=request.getRequestDigest().substring("sha256:".length());
+                String hash=bytes.path("contextHash").asText(),target=intent.targetAgentId();
+                var host=new AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
+                var subject=new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,OWNER,target);
+                var presenting=new java.util.concurrent.atomic.AtomicReference<>(new AuthenticatedRuntimeOperation.Device(subject,host));
+                // Only authentication is a fixture: the scope/lease, original grant, member and snapshot are actual DB rows.
+                var auth=new AuthenticatedRuntimeOperation(){
+                    public <T>T withAuthenticatedDevice(java.security.Principal p,java.util.function.Function<Device,T> op){return op.apply(presenting.get());}
+                    public <T>T withAuthenticatedRuntime(java.security.Principal p,java.util.function.Function<Scope,T> op){throw new AssertionError();}
+                };
+                var store=new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc);
+                var access=new cn.jia.chat.service.usage.ChatDiscussionCaptureAccess(auth,new cn.jia.chat.service.usage.ChatUsageDispatchAuthority(
+                    recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class),dao,store),membership);
+                assertEquals(1,jdbc.update("""
+                    INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status)
+                    SELECT agent_id,'capture-test',tenant_id,client_id,jiacn,id,'offline' FROM agent_persona_binding
+                    WHERE tenant_id=? AND client_id=? AND jiacn=? AND agent_id=? AND status=1
+                    """,TENANT,CLIENT,OWNER,target));
+                java.util.function.Supplier<cn.jia.economy.usage.UsageCaptureJournal.Binding> resolve=()->access.withCapture(null,turn,run,hash,expected,b->b);
+                var origins=new ChatTaskDispatchOriginService(relay,store);origins.beforeSend(claimed,hash,host);
+                assertThrows(ChatDeliberationException.class,resolve::get); // beforeSend is not a delivered dispatch
+                relay.setDispatchAuthority(dispatch);assertTrue(relay.acknowledgeHostedDispatch(TENANT,OWNER,CLIENT,target,run,frozen.getEventId(),now));
+                var binding=resolve.get();assertEquals(expected,binding.captureId());assertEquals(intent.taskId(),binding.taskId());
+                assertThrows(ChatDeliberationException.class,()->access.withCapture(null,turn,run,hash,"0".repeat(64),b->b));
+                assertThrows(ChatDeliberationException.class,()->access.withCapture(null,turn,run,"sha256:"+"0".repeat(64),expected,b->b));
+                presenting.set(new AuthenticatedRuntimeOperation.Device(subject,new AgentManagedSessionLookup.SessionFence("installation","host","boot",2)));
+                assertThrows(ChatDeliberationException.class,resolve::get);
                 assertTrue(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,expected));
                 assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,null));
                 assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,expected+" "));
