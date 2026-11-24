@@ -183,6 +183,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         factory.setConfiguration(config); factory.setGlobalConfig(global);
         for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);
+        config.addMapper(cn.jia.chat.mapper.ChatMessageMapper.class);
         config.addMapper(cn.jia.chat.mapper.ChatConversationMapper.class);
         config.addMapper(cn.jia.chat.mapper.AgentTaskThreadMapper.class);
         config.addMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class);
@@ -1412,7 +1414,52 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.taskId(), view.taskId()); assertEquals(List.of(intent.targetAgentId()), view.targetAgentIds());
         assertThrows(IllegalStateException.class, () -> access.requireAccessible(
                 new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,"other-owner"), discussion.conversationId()));
+        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx);
         return new BoundBountyChat(discussion, access);
+    }
+
+    /** Chat owns all request/turn/message/outbox writes. Device capabilities and the task display DTO
+     * are fixtures here, not a claim of executing the discussion or accepting its eventual answer. */
+    private void verifyBootstrapRequest(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,
+            ChatBountyConversationService discussions, cn.jia.chat.dao.ChatConversationDao conversations,
+            ChatBountyConversationService.Discussion bound, TransactionTemplate tx) throws Exception {
+        createTable(Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql"), "chat_message", false);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-native-execution-v6.sql"),new org.springframework.core.io.ClassPathResource("db/chat-typed-deliberation-schema-v1.sql")).execute(jdbc.getDataSource());
+        var dao = new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class));
+        var messages = new cn.jia.chat.dao.impl.ChatMessageDaoImpl();
+        ReflectionTestUtils.setField(messages, "baseMapper", recommendationSql.getMapper(cn.jia.chat.mapper.ChatMessageMapper.class));
+        var requirement = requirements.read(SCOPE, intent.taskId(), intent.requirementRevision());
+        var agents = mock(AgentService.class); var dto = new AgentTaskDTO();
+        dto.setId(intent.taskId()); dto.setClientId(CLIENT); dto.setTenantId(TENANT); dto.setTitle(requirement.title());
+        dto.setAssignedAgentId(intent.targetAgentId()); dto.setTaskVersion(Long.toString(intent.assignmentRevision()));
+        when(agents.getTask(intent.taskId())).thenReturn(dto);
+        var deliberation = new ChatDeliberationService(dao, conversations, messages, agents);
+        var dispatch = new ChatDispatchAuthorityService(mock(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class), dao,
+                mock(TaskAssigneeAuthorityService.class), assignment, roots);
+        deliberation.setDispatchAuthority(dispatch);
+        var context = mock(ChatTypedDeliberationContextService.class);
+        var locator = new ChatTypedDeliberationContextService.Scope(TENANT,OWNER,CLIENT,bound.conversationId(),bound.generation());
+        when(context.resolve(locator,intent.taskId(),intent.targetAgentId(),List.of())).thenReturn(
+                new ChatTypedDeliberationContextService.Context(Map.of(),"[]",List.of(),Map.of()));
+        var typed = new ChatTypedDiscussionAdmissionService(roots,new cn.jia.chat.deliberation.ChatBountyBindingStore(jdbc),
+                conversations,new JuyitingConversationScopeService(new BuiltinHallAgentSupport(agents),agents),deliberation,dao,context,
+                new ChatTypedDeliberationService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc)), mock(ChatActionFinalService.class));
+        typed.setSkillGrants(assignment);
+        var entry = new ChatBountyBootstrapAdmissionService(requirements,discussions,conversations,messages,dao,
+                new cn.jia.chat.deliberation.ChatInteractionStepStore(jdbc),mock(ChatConversationEventBroker.class),new ObjectMapper(),typed);
+        var first = tx.execute(status -> entry.admit(intent));
+        assertNotNull(first); assertFalse(first.replay()); assertNull(first.stepId()); assertEquals(bound.conversationId(),first.conversationId());
+        var again = tx.execute(status -> entry.admit(intent));
+        assertTrue(again.replay()); assertEquals(first.requestId(),again.requestId()); assertEquals(first.userMessageId(),again.userMessageId());
+        for (String table : List.of("chat_message","chat_request","chat_turn","chat_context_snapshot","chat_dispatch_outbox","chat_typed_admission"))
+            assertEquals(1,count(table),table);
+        assertEquals(0,count("chat_interaction_step")); assertEquals(0,count("chat_step_execution_link"));
+        String saved = independent.queryForObject("SELECT m.content FROM chat_message m JOIN chat_request r ON m.id=r.user_message_id JOIN chat_turn t ON t.request_id=r.request_id JOIN chat_dispatch_outbox o ON o.turn_id=t.turn_id WHERE r.tenant_id=? AND r.client_id=? AND r.owner_jiacn=? AND r.conversation_id=? AND r.request_id=? AND m.message_type='USER' AND t.route='CHAT' AND t.target_agent_id=? AND o.status='READY' AND o.task_grant_id=? AND o.task_grant_version=? AND o.task_assignment_revision=? AND o.task_requirement_revision=?",String.class,
+                TENANT,CLIENT,OWNER,bound.conversationId(),first.requestId(),intent.targetAgentId(),intent.grantId(),intent.grantVersion(),intent.assignmentRevision(),intent.requirementRevision());
+        int registered = independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",Integer.class,TENANT,CLIENT,OWNER,intent.taskId());
+        // Diagnostic, not an assertion that uncovered work is desirable; do not log content or IDs.
+        System.out.println("QUOTED_DISCUSSION_COVERAGE readyChat=1 registeredTaskMembers="+registered);
+        assertEquals(requirement.title()+"\n\n"+requirement.description(),saved);
     }
 
     private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
