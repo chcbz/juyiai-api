@@ -23,6 +23,9 @@ class MeasuredTaskRepricingTest {
         var complete=List.of(rows.getFirst(),new TaskEstimateEvaluation.Prediction("b",BigDecimal.ONE,100L),
                 new TaskEstimateEvaluation.Prediction("c",BigDecimal.ONE,0L));
         var bounded=TaskEstimateUncertainty.estimate(manifest,complete,17);
+        var paired=TaskEstimateUncertainty.paired(Map.of("a","x","b","x","c","y"),complete.reversed(),17);
+        assertEquals(2,paired.families());assertEquals(1000,paired.draws());assertEquals(bounded.wape(),paired.wape());assertEquals(bounded.p90Relative(),paired.p90Relative());
+        assertThrows(IllegalArgumentException.class,()->TaskEstimateUncertainty.paired(Map.of("a","x"),complete,17));
         for(var band:List.of(bounded.wape(),bounded.p90Relative(),bounded.underestimateRate())){assertEquals(bounded.draws(),band.defined());
             assertEquals(0,band.low().numerator().signum());assertEquals(0,band.high().numerator().compareTo(band.high().denominator()));}
         var one=TaskEstimateUncertainty.estimate(manifest.subList(0,2),rows.subList(0,2),17);assertEquals(0,one.draws());assertNull(one.coverage().high());

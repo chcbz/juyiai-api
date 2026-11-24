@@ -145,15 +145,24 @@ public final class FrozenCalibrationStudy {
                 new TaskCalibrationObservations.Frozen(artifact.sha256(),artifact.json()));
     }
     public record ObservedRow(String intentRef,String taskId,String agentId,String offerSha256,String reason,String wholeTaskTruthSha256){}
-    public record ObservedRoster(String format,String observationsSha256,String truthSha256,String manifestSha256,String referenceSha256,List<ObservedRow> rows){}
+    public record BootstrapPlan(long seed,Map<String,String> families){}
+    public record ObservedRoster(String format,String observationsSha256,String truthSha256,String manifestSha256,String referenceSha256,List<ObservedRow> rows,BootstrapPlan bootstrap){}
     private record Outcome(String schema,String forecastSha256,cn.jia.economy.usage.ConfirmedSampleEvidence.Assessment assessment,List<ProjectedTaskOperation> operations){}
-    public record ObservedErrors(long candidateRequests,long pricedRequests,long missingTruthRequests,long pairedRequests,TaskEstimateEvaluation.Scores uniqueTaskErrors){}
+    public record GroupErrors(long pricedRequests,TaskEstimateEvaluation.Scores uniqueTaskErrors,cn.jia.economy.pricing.TaskEstimateUncertainty.Errors intervals){}
+    private static cn.jia.economy.pricing.TaskEstimateUncertainty.Errors intervals(BootstrapPlan plan,Collection<TaskEstimateEvaluation.Prediction> points){
+        return plan==null?null:cn.jia.economy.pricing.TaskEstimateUncertainty.paired(plan.families(),points,plan.seed());
+    }
+    public record ObservedErrors(long candidateRequests,long pricedRequests,long missingTruthRequests,long pairedRequests,TaskEstimateEvaluation.Scores uniqueTaskErrors,cn.jia.economy.pricing.TaskEstimateUncertainty.Errors intervals,Map<String,GroupErrors> byPricedGroup){}
     private static boolean pin(String value){return value!=null&&value.matches("[0-9a-f]{64}");}
     /** Consume the complete reconciled roster, with externally trusted Economy outcome pins. No DB access, calibration or activation. */
     public ObservedErrors scoreObserved(EconomyScope scope,String owner,String rosterSha,Function<String,String> objects){
         var roster=read(objects,rosterSha,ObservedRoster.class);
         if(!"budget-evaluation-roster-v1".equals(roster.format())||!pin(roster.observationsSha256())||!pin(roster.truthSha256())||!pin(roster.manifestSha256())||!pin(roster.referenceSha256())||roster.rows().isEmpty())throw new IllegalArgumentException("Invalid observation roster");
         var book=reference(read(objects,roster.referenceSha256(),Book.class));var pairs=new HashMap<String,TaskEstimateEvaluation.Prediction>();
+        var plan=roster.bootstrap();
+        if(plan!=null&&(!plan.families().keySet().equals(roster.rows().stream().map(ObservedRow::taskId).collect(java.util.stream.Collectors.toSet()))
+                ||plan.families().values().stream().anyMatch(f->f==null||f.isBlank())))throw new IllegalArgumentException("Incomplete frozen family plan");
+        var priced=new TreeMap<String,Long>();var grouped=new HashMap<String,List<TaskEstimateEvaluation.Prediction>>();
         var origins=new HashMap<String,List<String>>();var rows=new HashSet<List<String>>();long quoted=0,missing=0,paired=0;
         for(var row:roster.rows()){
             if(!rows.add(List.of(row.intentRef(),row.agentId())))throw new IllegalArgumentException("Repeated observation row");
@@ -162,6 +171,8 @@ public final class FrozenCalibrationStudy {
             if(!measured)missing++;if(row.offerSha256()==null)continue;quoted++;
             var offer=read(objects,row.offerSha256(),OfferedHoldout.class);var task=new Task(scope,owner,row.taskId());
             if(!task.equals(offer.original())||!row.agentId().equals(offer.agentId())||!roster.referenceSha256().equals(offer.referenceSha()))throw new IllegalArgumentException("Wrong observed offer");
+            if(!pin(offer.groupSha())||plan!=null&&!plan.families().get(row.taskId()).equals(offer.family()))throw new IllegalArgumentException("Forecast differs from frozen study grouping");
+            priced.merge(offer.groupSha(),1L,Long::sum);
             if(!measured)continue;paired++;
             var origin=List.of(row.offerSha256(),row.wholeTaskTruthSha256());var old=origins.putIfAbsent(task.taskId(),origin);
             if(old!=null){if(!old.equals(origin))throw new IllegalArgumentException("Conflicting outcomes for one task");continue;}
@@ -169,9 +180,11 @@ public final class FrozenCalibrationStudy {
             if(!"confirmed-holdout-outcome-v1".equals(end.schema())||!row.offerSha256().equals(end.forecastSha256())||end.assessment().verdict()!=cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.MATCHED
                     ||end.assessment().members()<=0||end.operations().stream().map(ProjectedTaskOperation::memberRevision).distinct().count()!=end.assessment().members())throw new IllegalArgumentException("Incomplete or foreign whole-task evidence");
             var actual=MeasuredTaskRepricing.reprice(book,end.operations().stream().map(op->op.fact(json)).toList());
-            pairs.put(task.taskId(),new TaskEstimateEvaluation.Prediction(task.taskId(),actual.yuan(),offer.wen()));
+            var point=new TaskEstimateEvaluation.Prediction(task.taskId(),actual.yuan(),offer.wen());pairs.put(task.taskId(),point);
+            grouped.computeIfAbsent(offer.groupSha(),k->new ArrayList<>()).add(point);
         }
-        return new ObservedErrors(rows.size(),quoted,missing,paired,TaskEstimateEvaluation.pairedErrors(pairs.values()));
+        var byGroup=new TreeMap<String,GroupErrors>();priced.forEach((g,n)->{var points=grouped.getOrDefault(g,List.of());byGroup.put(g,new GroupErrors(n,TaskEstimateEvaluation.pairedErrors(points),intervals(plan,points)));});
+        return new ObservedErrors(rows.size(),quoted,missing,paired,TaskEstimateEvaluation.pairedErrors(pairs.values()),intervals(plan,pairs.values()),Collections.unmodifiableMap(byGroup));
     }
     private MeasuredTaskRepricing.Reference reference(Book book){
         var rates=new HashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
