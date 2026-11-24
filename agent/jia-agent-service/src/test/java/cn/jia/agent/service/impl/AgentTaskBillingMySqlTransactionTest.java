@@ -156,7 +156,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc = new JdbcTemplate(source);
         independent = new JdbcTemplate(source(database));
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
-        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/agent-task-execution-members-v1.sql")).execute(source);
         // Read unchanged production definitions; no parallel hand-written table schema.
         String schema = Files.readString(DDL.resolve("schema.sql"));
@@ -705,6 +705,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
+        // Compare every authenticated feature value, not just the three selected winners, with the full envelope reader.
+        assertEquals((long)2*n,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote_resolved q JOIN economy_task_quote_history_features h USING(quote_id,tenant_id,client_id,owner_jiacn,task_id) WHERE q.task_id LIKE 'history-%' AND h.features_json IS NOT NULL AND BINARY CAST(h.features_json AS CHAR)=BINARY CAST(JSON_EXTRACT(q.snapshot_json,'$.preparation.features') AS CHAR)",Long.class));
         if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
@@ -778,14 +780,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String query="SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?";
         for(int i=0;i<scope.size();i++){var args=new java.util.ArrayList<String>(scope);args.set(i,args.get(i)+"-wrong");args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());}
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
+        String features="SELECT features_json FROM economy_task_quote_history_features WHERE quote_id=?";assertNull(jdbc.queryForObject(features,String.class,id));
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
+        assertEquals(jdbc.queryForObject(features,String.class,fixture.offer().quoteId()),jdbc.queryForObject(features,String.class,id));
+        // A single matching token in a nested object is not proof that the canonical replacement is top-level.
+        String misplaced=ref.replace("\"preparation\":\""+sha+"\"","\"preparation\" : \""+sha+"\",\"decoy\":{\"preparation\":\""+sha+"\"}");assertNotEquals(ref,misplaced);
+        jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",misplaced,id);assertNull(jdbc.queryForObject(features,String.class,id));assertNull(jdbc.queryForObject(query,String.class,id));
         // DML cannot invalidate an accepted reference. An independently damaged fixture is never read.
         assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE preparation_sha=?",sha));
         assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("DELETE FROM economy_task_quote_preparation WHERE preparation_sha=?",sha));
         String damaged="6".repeat(64);args.set(6,damaged);args.set(7,"{}");jdbc.update(insert,args.toArray());
         jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",ref.replace(sha,damaged),id);
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
+        assertNull(jdbc.queryForObject(features,String.class,id));
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");

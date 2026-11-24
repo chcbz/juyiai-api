@@ -43,8 +43,8 @@ public interface ConfirmedSampleMapper {
     @Select("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)+1") long observedByMillis();
     record HistoryRow(String id,long revision,String taskId,String featureSha,String featuresJson){}
     @Select("""
-        SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,JSON_EXTRACT(q.snapshot_json,'$.preparation.features')
-        FROM economy_task_cost_sample s LEFT JOIN economy_task_quote_resolved q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+        SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,q.features_json
+        FROM economy_task_cost_sample s LEFT JOIN economy_task_quote_history_features q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
         AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
     List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
