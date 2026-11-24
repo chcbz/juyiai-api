@@ -68,14 +68,15 @@ public interface AgentExternalServicePolicyMapper extends BaseMapper<AgentExtern
                 WHERE p2.tenant_id=p.tenant_id AND p2.client_id=p.client_id
                   AND p2.agent_id=p.agent_id AND p2.binding_id=p.binding_id)))
         """;
-    // Registry uses a byte-exact collation and runtime can use the schema's default.
-    // Convert the lookup value, not the indexed runtime column. The following BINARY
-    // predicates still prove the canonical ID and tenant/client/owner before display.
+    // Coarse lookup only: indexable on the default MySQL 8 utf8mb4 runtime table.
+    // An explicit value-side collation also resolves older general_ci/bin runtime
+    // columns without an illegal implicit mix. Other collations may use a scan.
+    // The byte-exact ID/scope and binding predicates below remain authoritative.
     @Select("""
         SELECT i.canonical_agent_id AS agentId, i.owner_jiacn AS ownerJiacn,
                COALESCE(NULLIF(r.name,''), i.canonical_agent_id) AS displayName, r.status AS status
         """+BOUND_IDENTITIES+"""
-        LEFT JOIN agent_runtime r ON r.agent_id=CAST(i.canonical_agent_id AS CHAR CHARACTER SET utf8mb4)
+        LEFT JOIN agent_runtime r ON r.agent_id=(i.canonical_agent_id COLLATE utf8mb4_0900_ai_ci)
           AND BINARY r.agent_id=BINARY i.canonical_agent_id AND BINARY r.tenant_id=BINARY i.tenant_id
           AND BINARY r.client_id=BINARY i.client_id AND BINARY r.owner_jiacn=BINARY i.owner_jiacn
           AND r.binding_id=i.binding_id
