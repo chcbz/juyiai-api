@@ -1333,7 +1333,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);if(i==1)installed.retained(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
-                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es.encodes);
+                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es.encodes,installed);
                 if(n==1){String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
                     String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
@@ -1476,7 +1476,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 """,(rs,n)->{var count=rs.getObject(1);var millis=rs.getObject(2);assertNotNull(count);assertNotNull(millis);return new long[]{rs.getLong(1),rs.getLong(2)};});
         return new RecSql(values[0],values[1],values[2],values[3],values[4],lock[0],lock[1]);
     }
-    private void measureRecommendationHttp(String task, java.util.Set<String> expected, java.util.concurrent.atomic.AtomicInteger encodes) throws Exception {
+    private void measureRecommendationHttp(String task, java.util.Set<String> expected, java.util.concurrent.atomic.AtomicInteger encodes,cn.jia.agent.skill.InstalledPurposeHttpFixture installed) throws Exception {
         int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
         try(var client=HttpClient.newHttpClient()){
             record Observation(long nanos,boolean degraded,boolean invalid){}
@@ -1492,7 +1492,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
-                long sharedBefore=sharedTaskRootSelects();var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
+                long execBefore=installed.inventoryExecutions();long sharedBefore=sharedTaskRootSelects();var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1507,6 +1507,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 if(expected.size()==108){assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation")-physical.get("installationPoint"),"one installation batch for each observation");assertEquals(0L,physical.get("installationPoint"),"each matching Chat session uses the exact native batch observation, independently on both reads");}
                 long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
+                long executed=installed.inventoryExecutions()-execBefore;
+                System.out.printf("RECOMMEND_INVENTORY_CROSSCHECK concurrency=%d executed=%d digest=%d invalid=%d degraded=%d%n",concurrency,executed,inventory,invalid,degraded);
+                assertEquals(installs==0?0L:2L*times.size(),executed,"completed physical inventory reads");
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");
                 times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
                 long shared=sharedTaskRootSelects()-sharedBefore;assertEquals(2L*times.size(),shared,"independent shared root observations before and after retrieval");
