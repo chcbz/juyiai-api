@@ -302,9 +302,11 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
                 """;
             var child=new ProcessBuilder("node","--input-type=module","-e",probe,device.toString(),AGENT,ids.get(0),ids.get(1)).directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile()).start();
             try{assertTrue(child.waitFor(15,TimeUnit.SECONDS));assertEquals(0,child.exitValue());var audit=json.readTree(child.getInputStream().readAllBytes());assertEquals(2,audit.required("expected").asInt());assertEquals(1,audit.required("acknowledged").asInt());assertEquals(1,audit.required("missing").asInt());assertEquals(0,audit.required("unexpected").asInt());}finally{child.destroyForcibly();}
-            jdbc.update("UPDATE chat_task_dispatch_origin SET mixed_origin=TRUE WHERE event_id=?",payload.get("messageId"));
+            // Restore both original mappings before checking the independent authorization boundaries below.
+            try{jdbc.update("UPDATE chat_task_dispatch_origin SET mixed_origin=TRUE WHERE event_id=?",payload.get("messageId"));
             assertEquals(List.of("UNVERIFIED","MAPPED_SENT_ORIGIN"),inventory().stream().map(r->r.get("source_state")).toList());
             jdbc.update("DELETE FROM chat_task_dispatch_origin");assertEquals(List.of("UNVERIFIED","UNVERIFIED"),inventory().stream().map(r->r.get("source_state")).toList());
+            }finally{seedOriginalOrigin(payload);seedOriginalOrigin(discussionPayload(true));}
         }
         if(rotate){
             assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","RESPONSE"),trace);
@@ -347,6 +349,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         String hash=cn.jia.chat.service.ChatDeliberationService.digest(Map.of("sourceVector",wire.get("sourceVector"),"facts",facts));wire.put("contextHash",hash);
         var snap=(Map<String,Object>)wire.get("contextSnapshot");snap.put("facts",facts);snap.put("contextHash",hash);return wire;
     }
+    void seedOriginalOrigin(Map<String,Object> w){new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc).observe((String)w.get("messageId"),(String)w.get("contextHash"),INSTALL,"host","rt",1);}
     void seedSentDiscussion(Map<String,Object> w,TaskDiscussionMembershipService members,cn.jia.chat.deliberation.ChatTaskDispatchOriginStore origins){
         var ds=Objects.requireNonNull(jdbc.getDataSource());new ResourceDatabasePopulator(new ClassPathResource("db/chat-deliberation-schema.sql"),new ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(ds);
         String turn=(String)w.get("turnId"),run=(String)w.get("dispatchId"),req=(String)w.get("requestId"),ctx=(String)w.get("contextHash"),snap=(String)w.get("contextSnapshotId"),event=(String)w.get("messageId");
