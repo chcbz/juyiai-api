@@ -6,6 +6,7 @@ import cn.jia.economy.pricing.TaskNeighborSearch;
 import cn.jia.economy.pricing.TaskReferencePricing;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.economy.task.TaskHistoryCatalog;
+import cn.jia.economy.pricing.MeasuredTaskRepricing;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.util.*;
