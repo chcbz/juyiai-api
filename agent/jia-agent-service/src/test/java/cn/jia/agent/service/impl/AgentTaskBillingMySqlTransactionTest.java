@@ -805,6 +805,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(control,actual); // ordered sample ids, revisions, exact weights, prices and currency rounding
             System.out.printf(java.util.Locale.ROOT,"QUOTE_PROBE_ESTIMATE shared=%s run=%d rows=%d selected=%d payloadBytes=%d estimateMs=%.3f%n",shared,i,ids.size(),actual.contributions().size(),payload,elapsed/1e6);
         }
+        // Same signed HTTP harness as the one-history lifecycle test: no stub of prepare, selection locks or persist.
+        // The receipt, prospective device evidence and encoder are deterministic fixtures, not field-quality evidence.
+        var requester=new TaskBillingService.Task(reader.scope(),reader.ownerJiacn(),shared?"dense-http-shared":"dense-http-inline");
+        var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var zero=new TaskEstimateEvaluation.Ratio(BigDecimal.ZERO,BigDecimal.ONE);
+        var scores=new TaskEstimateEvaluation.Scores(1,1,0,1,0,BigDecimal.ZERO,zero,zero);
+        var fit=new TaskEstimateCalibration.Fit("dense-fixture",params,scores);
+        var report=new TaskEstimateCalibration.Report(group.privateCalibrationGroup(requester),group.execution().routeVersion(),fit,scores,true);
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
+        var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,new cn.jia.economy.service.impl.TaskHistoryCatalogService(original,json));
+        var book=study.freezeContractReference(requester,terms,reference);
+        var receipt=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),book.sha256(),"4".repeat(64),"5".repeat(64),gate,report);
+        String encoded=json.writeValueAsString(receipt);jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,OWNER,groupSha,encoded,encoded);
+        jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,groupSha,encoded);
+        var estimator=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,projection,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
+        System.out.printf("QUOTE_DENSE_HTTP_START shared=%s histories=%d%n",shared,ids.size());
+        assertDoesNotThrow(()->{verifyHistoryQuoteHttp(study,group,book,requester,estimator,terms,control.wen());});
+        System.out.printf("QUOTE_DENSE_HTTP_END shared=%s histories=%d%n",shared,ids.size());
         assertEquals(0,miss[0]);int at=80;String sid=ids.get(at);String cursor=ids.get(at-1);
         // Separate transactions simulate fault injection; restoring exact row bytes permits a clean control read.
         String quote=jdbc.queryForObject("SELECT q.snapshot_json FROM economy_task_quote q JOIN economy_history_feature_projection x ON x.quote_id=q.quote_id WHERE x.sample_id=?",String.class,sid);
@@ -1063,7 +1080,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(new TaskBillingService.Task(query.scope(),"other","offer"),needle,terms));
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
         locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
-        var pointRecordedQuote=verifyHistoryQuoteHttp(study,group,book,query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms);
+        var pointRecordedQuote=verifyHistoryQuoteHttp(study,group,book,query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms,65);
         var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
         var point=study.confirmedPoint(BILLING_TASK,group,selected,forecast.sha256(),artifacts::get,quotes);
         var mismatch=assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,drift.sha256(),driftObjects::get,quotes));
@@ -1708,7 +1725,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.api.TaskInitialActionController initialSelectionController;
     /** The archived sample, cutoff, candidate and terms are deliberately synthetic. Test real HTTP/SQL/commit/replay, not accuracy. */
     private java.util.concurrent.Callable<Void> verifyHistoryQuoteHttp(cn.jia.economy.service.impl.FrozenCalibrationStudy study,cn.jia.economy.task.TaskHistoryCatalog.Group group,cn.jia.economy.service.impl.FrozenCalibrationStudy.Artifact book,TaskBillingService.Task newTask,cn.jia.economy.task.TaskBudgetEstimator estimator,
-                                        cn.jia.economy.task.TaskBudgetEstimator.Terms terms) throws Exception {
+                                        cn.jia.economy.task.TaskBudgetEstimator.Terms terms,long expectedWen) throws Exception {
         String id=newTask.taskId();jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",id,OWNER,TENANT,CLIENT);
         var authority=quoteAndRecommendationAuthority();var req=authority.req();String agent="agt_00000000000000000000000000000002";
         jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-point",agent,TENANT,CLIENT);
@@ -1761,7 +1778,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 if(window!=null&&i<2){window.received(request,rawBody,sent,window.elapsed(),response);if(i==1)window.seal();}
                 assertEquals(200,response.statusCode(),response.body());var envelope=new ObjectMapper().readTree(response.body());assertEquals("E0",envelope.path("code").asText());
                 if(i==0||i==1){var data=mapper.treeToValue(envelope.path("data"),TaskQuoteBatches.Result.class);if(i==0)observedFirst=data;else observedOther=data;}
-                var item=envelope.at("/data/quotes/0");assertEquals("AVAILABLE",item.path("state").asText());assertEquals("65",item.at("/amount/amountMinor").asText());
+                var item=envelope.at("/data/quotes/0");assertEquals("AVAILABLE",item.path("state").asText());assertEquals(Long.toString(expectedWen),item.at("/amount/amountMinor").asText());
                 if(i==0){firstId=item.path("quoteId").asText();firstBatch=item.path("recommendationId").asText();assertEquals(agent,item.path("agentId").asText());assertFalse(firstId.isBlank());cold=elapsed;}
                 else if(i==31){assertEquals(firstId,item.path("quoteId").asText());replay=elapsed;}
                 else {assertNotEquals(firstId,item.path("quoteId").asText());hot.add(elapsed);}
@@ -1789,7 +1806,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(batchCount+31,count("economy_task_quote_batch"));assertEquals(fixed+31,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
-        if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile);
+        if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile,expectedWen);
         if(window!=null){String export=Files.readString(window.directory.resolve("roster.json"))+Files.readString(window.directory.resolve("capture.json"));
             for(String raw:privateKeys)assertFalse(export.contains(raw),"transport artifacts retain only key digests");}
         var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest(privateKeys.get(0)));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
@@ -1822,7 +1839,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertNotNull(previousDiscussion); assertEquals(TASK, previousDiscussion.taskId());
                 assertNotEquals(id, previousDiscussion.taskId());
                 var receipt=point.post(batchId,200);assertEquals(receipt,point.post(batchId,200));assertEquals(agent,receipt.path("targetAgentId").asText());assertEquals(id,receipt.path("taskId").asText());
-                assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
+                assertEquals(balance-expectedWen,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
                 var absent=assertThrows(cn.jia.economy.service.impl.FrozenCalibrationStudy.MissingOutcome.class,()->study.outcomePoint(newTask,group,forecast.sha256(),objects::get,quotes,sampleEvidence,textFixture(r->{throw new AssertionError("Active task has no terminal cost");})));
                 assertEquals("ACTIVE",absent.getMessage());
                 if(window!=null){var selected=jdbc.queryForObject("SELECT quote_id FROM economy_task_charge WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",String.class,TENANT,CLIENT,OWNER,id);
@@ -1869,7 +1886,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertEquals(created.executionId(),consumed.get());
                 assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
                 verifyNativePickup(authority,service,created,pending);
-                assertEquals(balance-65,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
+                assertEquals(balance-expectedWen,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
             }return null;
         };
     }
@@ -2758,7 +2775,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     // estimation, reference repricing, individual bindings, atomic persistence and replay are not mocked.
     private void measureBatchQuoteHttp(String task,String token,cn.jia.agent.service.AgentExternalServicePolicyService agents,
             cn.jia.agent.service.recommendation.ProspectiveTaskExecution source,cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs subject,
-            cn.jia.economy.task.TaskBudgetEstimator.Terms terms,java.util.concurrent.atomic.AtomicInteger encodes,QuoteProfile profile)throws Exception{
+            cn.jia.economy.task.TaskBudgetEstimator.Terms terms,java.util.concurrent.atomic.AtomicInteger encodes,QuoteProfile profile,long expectedWen)throws Exception{
         profile.reset();var writes=readQuoteWrites(task);
         int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var roster=java.util.stream.IntStream.range(0,108).mapToObj(i->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(String.format(java.util.Locale.ROOT,"q-target-%03d",i),OWNER,100+i,0)).toList();
@@ -2775,7 +2792,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 samples.add(elapsed);if(i==0)first=data;var items=data.path("quotes");assertEquals(108,items.size());String batch=items.get(0).path("recommendationId").asText();assertFalse(batch.isBlank());
                 for(int j=0;j<ids.size();j++){var item=items.get(j);assertEquals(ids.get(j),item.path("agentId").asText());assertEquals(batch,item.path("recommendationId").asText());
                     if(j+1==ids.size()){assertEquals("UNAVAILABLE",item.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",item.path("unavailableReason").asText());assertFalse(item.path("amount").isObject());}
-                    else{assertEquals("AVAILABLE",item.path("state").asText());assertEquals("65",item.at("/amount/amountMinor").asText());String q=item.path("quoteId").asText();assertFalse(q.isBlank());assertTrue(all.add(q));}
+                    else{assertEquals("AVAILABLE",item.path("state").asText());assertEquals(Long.toString(expectedWen),item.at("/amount/amountMinor").asText());String q=item.path("quoteId").asText();assertFalse(q.isBlank());assertTrue(all.add(q));}
                 }
             }
         }
