@@ -88,7 +88,26 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     @Test void originalDiscussionLostResponseAfterCommitReadsSameRevision(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,false,false,DiscussionPeer.ORIGINAL);
     }
-    enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT, WEB_CUTOVER }
+    @Test void liveDiscussionDrainsEveryFrozenRevisionBeforeSessionRelease(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,null,false,false,false,DiscussionPeer.LIVE_DRAIN);
+    }
+    enum DiscussionPeer { NONE, ORIGINAL, ROTATE_AFTER_COMMIT, WEB_CUTOVER, LIVE_DRAIN }
+    // Fixed, sealed single-source fixture. Compare each revision, not a queue size or count of POSTs.
+    private Map<String,String> originalRevisions(Path state) throws Exception {
+        var roster=new TreeMap<String,String>();var hash=java.security.MessageDigest.getInstance("SHA-256");
+        try(var files=Files.walk(state)){for(var f:files.filter(Files::isRegularFile).toList()){
+            if(!f.getParent().getFileName().toString().startsWith("usage-capture-")||!f.getFileName().toString().endsWith(".json"))continue;
+            byte[] bytes=Files.readAllBytes(f);var raw=json.readTree(bytes);if(!raw.has("receiptId"))continue;
+            assertNull(roster.put(raw.required("receiptId").asText(),HexFormat.of().formatHex(hash.digest(bytes))));
+        }}assertEquals(7,roster.size());return Map.copyOf(roster);
+    }
+    private Set<String> durableDeviceReceipts(Path state,Map<String,String> roster)throws Exception {
+        var seen=new HashSet<String>();try(var files=Files.walk(state)){for(var f:files.filter(Files::isRegularFile).toList()){
+            if(!f.getParent().getFileName().toString().startsWith("usage-acks-"))continue;
+            var ack=json.readTree(Files.readAllBytes(f));String key=ack.required("receiptId").asText();assertTrue(roster.containsKey(key)&&seen.add(key));
+            assertEquals("DURABLE",ack.required("acceptance").asText());assertEquals(json.readTree(jdbc.queryForObject("SELECT ack_json FROM economy_usage_capture_receipt WHERE receipt_id=?",String.class,key)),ack);
+        }}return seen;
+    }
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="ownedCutoverController",matches=".+")
     void pendingDiscussionSurvivesWebFailureAndPeerRestart(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,false,false,DiscussionPeer.WEB_CUTOVER);
@@ -217,12 +236,19 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
         var rotated=new AtomicReference<cn.jia.agent.entity.AgentRuntimeV1SessionResponse>();var originalBody=new AtomicReference<byte[]>();
+        boolean liveDrain=peerMode==DiscussionPeer.LIVE_DRAIN;Path device=temp.resolve("cutover-inbox");var roster=new AtomicReference<Map<String,String>>();
         com.sun.net.httpserver.HttpHandler handler=exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
             byte[] input=exchange.getRequestBody().readAllBytes();if(input.length>0)req.content(input);
+            if(liveDrain){
+                assertEquals("1",exchange.getRequestHeaders().getFirst("X-Agent-Session-Generation"));assertEquals("rt",exchange.getRequestHeaders().getFirst("X-Agent-Runtime-Id"));
+                if(roster.get()==null){assertEquals("PLAN",json.readTree(input).at("/data/kind").asText());roster.set(originalRevisions(device));assertTrue(durableDeviceReceipts(device,roster.get()).isEmpty());}
+                if(input.length>0)assertTrue(roster.get().containsKey(exchange.getRequestHeaders().getFirst("Idempotency-Key")));
+            }
             var response=mvc.perform(req).andReturn().getResponse();String kind=input.length==0?"GET":json.readTree(input).path("data").path("kind").asText();trace.add(kind);
             assertEquals(rotated.get()==null?200:401,response.getStatus(),kind+":"+response.getContentAsString());
             if("RESPONSE".equals(kind)&&cuts.compareAndSet(null,exchange.getRequestHeaders().getFirst("X-Request-Id"))){
                 assertEquals(1,count("economy_usage_revision"));
+                if(liveDrain){assertEquals(5,count("economy_usage_capture_receipt"));var have=durableDeviceReceipts(device,roster.get());assertEquals(4,have.size());assertFalse(have.contains(cuts.get()));}
                 if(rotate){originalBody.set(input);rotated.set(tx.execute(st->auth.issue(installations.lock(INSTALL),new cn.jia.agent.entity.AgentRuntimeV1SessionRequest(INSTALL,"0","client",AGENT,"1","a".repeat(64),"host","rt"),2)));assertEquals(2,rotated.get().sessionGeneration());}
                 if(cutover){originalBody.set(input);exchange.getResponseHeaders().set("X-Fixture-Stop-After-Commit","yes");}
                 else if(rotate)exchange.getResponseHeaders().set("X-Fixture-Drop-Committed","yes");
@@ -236,7 +262,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         }catch(Throwable t){error.compareAndSet(null,t);}};server.createContext("/",handler);server.start();
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
-            for(String phase:cutover?List.of("stop","resume"):List.of("")){
+            for(String phase:cutover?List.of("stop","resume"):List.of(liveDrain?"live":"")){
             String fixture=System.getProperty("ownedRuntimeRepairFixture");
             boolean repaired=phase.equals("resume") && fixture!=null;
             var pb=repaired?new ProcessBuilder("python3","-B",Path.of(System.getProperty("ownedCutoverController"),"ops/orchestration/tests/runtime_cutover_resume_probe.py").toString(),fixture,peer.toString(),temp.toString()):new ProcessBuilder("node",peer.toString());
@@ -253,6 +279,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
             }
         }finally{if(server!=null)server.stop(0);}
+        if(liveDrain){assertNull(rotated.get());assertEquals(roster.get(),originalRevisions(device));assertEquals(roster.get().keySet(),durableDeviceReceipts(device,roster.get()));}
         if(rotate){
             assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","RESPONSE"),trace);
             var data=json.readTree(originalBody.get()).path("data");String id=cuts.get();assertEquals(id,data.path("receiptId").asText());
