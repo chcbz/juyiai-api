@@ -56,8 +56,8 @@ class AssigneeRecommendationServiceTest {
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row,other));when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of(),"b",List.of()));
         var cut=new CandidateSuitability.Floors(1d,1.6d);var high=new CandidateSuitability.Cell("HYBRID","BOTH_SAME",false,false,2,2,null,cut);
         var config=calibration(List.of(high),null);var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,config);
-        when(search.retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class))).thenAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var h=new CandidateRankFusion.Hit("b",docs.stream().filter(d->d.agentId().equals("b")).findFirst().orElseThrow().evidenceKey(),1.7,CapabilityIndexWriter.GENERATION);
-            boolean hybrid=i.getArgument(3)!=null;return new CapabilitySearch.Result(hybrid?"HYBRID":"LEXICAL_ONLY",CandidateRankFusion.fuse(Set.of("a","b"),List.of(h),hybrid?List.of(h):List.of()),hybrid?List.of():List.of("QUERY_VECTOR_UNAVAILABLE"));});
+        org.mockito.Mockito.doAnswer(i->{List<CapabilityDocuments.Doc> docs=i.getArgument(1);var h=new CandidateRankFusion.Hit("b",docs.stream().filter(d->d.agentId().equals("b")).findFirst().orElseThrow().evidenceKey(),1.7,CapabilityIndexWriter.GENERATION);
+            boolean hybrid=i.getArgument(3)!=null;return new CapabilitySearch.Result(hybrid?"HYBRID":"LEXICAL_ONLY",CandidateRankFusion.fuse(Set.of("a","b"),List.of(h),hybrid?List.of(h):List.of()),hybrid?List.of():List.of("QUERY_VECTOR_UNAVAILABLE"));}).when(search).retrieve(anySet(),anyList(),anyString(),nullable(TaskFeatureEncoder.Vector.class));
         var good=active.recommend(actor,"task",new Request("7"));assertEquals("READY",good.state());assertEquals(List.of("b","a"),good.recommendations().stream().map(r->r.agent().agentId()).toList());assertEquals("HIGH",good.recommendations().getFirst().recommendationLevel());assertNotEquals(CandidateRankFusion.VERSION,good.rankingVersion());
         doReturn(Mono.error(new TaskFeatureEncoder.Unavailable())).when(vectors).encode(eq(actor),any());var degraded=active.recommend(actor,"task",new Request("7"));assertEquals("DEGRADED",degraded.state());assertTrue(degraded.recommendations().stream().allMatch(r->r.recommendationLevel().equals("UNKNOWN")));
     }
@@ -71,6 +71,16 @@ class AssigneeRecommendationServiceTest {
         for(var invalid:List.of(calibration(List.of(c),"d".repeat(64)),calibration(List.of(c,c),null)))assertEquals("UNKNOWN",invalid.level("LEXICAL_ONLY",hit,ctx,ev,doc));
     }
 
+    @Test void calibratedLexicalOnlyMayRecommendButStillDisclosesDegradation()throws Exception{
+        var c=new CandidateSuitability.Cell("LEXICAL_ONLY","LEXICAL",false,false,1,1,new CandidateSuitability.Floors(0.5,null),null);
+        var calibrated=calibration(List.of(c),null);var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,calibrated);
+        doReturn(Mono.error(new TaskFeatureEncoder.Unavailable())).when(vectors).encode(eq(actor),any());var r=active.recommend(actor,"task",new Request("7"));
+        assertEquals("DEGRADED",r.state());assertEquals("MEDIUM",r.recommendations().getFirst().recommendationLevel());assertEquals(List.of("QUERY_VECTOR_UNAVAILABLE"),r.degradedReasons());
+        var file=directory.resolve("test-calibration.json");String good=java.nio.file.Files.readString(file);
+        for(String bad:List.of(good.replaceFirst("[{]","{\"unknownSelector\":1,"),good.replaceFirst("[{]","{\"schema\":\"incompatible\","),good+" {}")){
+            var bytes=bad.getBytes(java.nio.charset.StandardCharsets.UTF_8);java.nio.file.Files.write(file,bytes);String pin=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+            assertEquals(CandidateRankFusion.VERSION,new CandidateSuitability(file.toString(),pin).rankingVersion());}
+    }
     Result recommend(){return service.recommend(actor,"task",new Request("7"));}
     @Test void uncalibratedHitCitesOnlyPublicReference() {
         var r=recommend(); assertEquals("NO_MATCH",r.state()); assertEquals("HYBRID",r.retrievalMode()); assertTrue(r.candidateSetComplete());
