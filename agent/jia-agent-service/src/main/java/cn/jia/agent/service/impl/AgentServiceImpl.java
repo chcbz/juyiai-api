@@ -1308,14 +1308,23 @@ public class AgentServiceImpl implements AgentService, cn.jia.agent.service.reco
     @Override
     public AgentTaskDTO getTaskRecommendationInput(String taskId) {
         var meta = requireTask(taskId);
+        var scope = new AgentTaskExecutionGrantService.Scope(meta.getTenantId(),meta.getClientId(),meta.getOwnerJiacn());
+        return recommendationInput(meta,requirementSnapshots.readCurrent(scope,taskId));
+    }
+
+    @Override
+    public AgentTaskDTO getTaskRecommendationInputWithinLockedTask(String taskId, AgentTaskMetaEntity root) {
+        var scope = new AgentTaskExecutionGrantService.Scope(resolveCurrentTenantId(),resolveCurrentClientId(),resolveCurrentJiacn());
+        return recommendationInput(root,requirementSnapshots.readCurrentWithinLockedTask(scope,taskId,root));
+    }
+
+    private AgentTaskDTO recommendationInput(AgentTaskMetaEntity meta, AgentTaskRequirementSnapshotService.CurrentSnapshot current) {
         var dto = new AgentTaskDTO();
         dto.setId(meta.getTaskId());
         dto.setStatus(meta.getRewardStatus());
         dto.setTaskVersion(meta.getTaskVersion() == null ? null : Long.toString(meta.getTaskVersion()));
         dto.setRequiredAbilities(parseList(meta.getRequiredAbilities()));
         // Ranking uses the authoritative requirement, never the short display plan or an ID as text.
-        var current = requirementSnapshots.readCurrent(new AgentTaskExecutionGrantService.Scope(
-                meta.getTenantId(), meta.getClientId(), meta.getOwnerJiacn()), taskId);
         if (!Objects.equals(meta.getTaskVersion(), current.taskVersion()))
             throw new AgentTaskCollaborationException(AgentTaskCollaborationException.Reason.VERSION_CONFLICT,
                     "Task changed during recommendation observation");

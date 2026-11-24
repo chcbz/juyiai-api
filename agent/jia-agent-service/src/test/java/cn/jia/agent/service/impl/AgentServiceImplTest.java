@@ -1724,6 +1724,12 @@ class AgentServiceImplTest extends BaseMockTest {
                 .thenThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED));
         var input = agentService.getTaskRecommendationInput("task-001");
         assertEquals("9", input.getTaskVersion());
+        when(snapshots.readCurrentWithinLockedTask(scope,"task-001",meta)).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",9,1,"当前完整标题","完整需求", "a".repeat(64),"CREATE"));
+        var recheck=agentService.getTaskRecommendationInputWithinLockedTask("task-001",meta);
+        assertEquals(input.getDescription(),recheck.getDescription());
+        verify(agentTaskMetaDao,times(1)).findByTaskIdInOwnerScope("0","fixture-client_id-1","jiacn","task-001");
+        verify(snapshots,times(1)).readCurrent(scope,"task-001");
         assertEquals("当前完整标题",input.getTitle());assertEquals("完整需求",input.getDescription());
         assertEquals(cn.jia.agent.exception.AgentTaskCollaborationException.Reason.VERSION_CONFLICT,assertThrows(cn.jia.agent.exception.AgentTaskCollaborationException.class,()->agentService.getTaskRecommendationInput("task-001")).getReason());
         assertEquals(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED,assertThrows(cn.jia.agent.service.AgentTaskRequirementReadException.class,()->agentService.getTaskRecommendationInput("task-001")).reason());

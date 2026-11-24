@@ -29,7 +29,7 @@ public final class AssigneeRecommendationService {
     }
     public Result recommend(Actor actor, String taskId, Request request) {
         if(request==null || request.expectedTaskVersion()==null || request.expectedTaskVersion().isBlank()) throw new Failure(400,"BAD_REQUEST");
-        var task = task(taskId, request.expectedTaskVersion());
+        var task = task(agents.getTaskRecommendationInput(taskId), request.expectedTaskVersion());
         var observed = observe(actor, taskId);
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();
@@ -53,7 +53,7 @@ public final class AssigneeRecommendationService {
         var required=new HashSet<String>();if(task.getRequiredAbilities()!=null)for(String r:task.getRequiredAbilities())if(r!=null&&!r.isBlank())required.add(TaskRetrievalText.normalized(r));
         var context=new CandidateSuitability.Context(truncated,Set.copyOf(required),!inputs.isEmpty(),observed.size());
         var verified=transactions.executeWithLockedTaskRootInOwnerScope(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,root->{
-            var current=task(taskId,request.expectedTaskVersion());
+            var current=task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
             if(!Objects.equals(task.getTitle(),current.getTitle()) || !Objects.equals(task.getDescription(),current.getDescription())
                     || !Objects.equals(task.getRequiredAbilities(),current.getRequiredAbilities())) throw stale();
             var after=observe(actor,taskId);
@@ -65,8 +65,7 @@ public final class AssigneeRecommendationService {
         // Use only the final authorized observation; formatting and ranking do not need the task lock.
         return project(taskId,request.expectedTaskVersion(),time,found,verified,context);
     }
-    private AgentTaskDTO task(String id,String version) {
-        var task=agents.getTaskRecommendationInput(id);
+    private static AgentTaskDTO task(AgentTaskDTO task,String version) {
         if(!version.equals(task.getTaskVersion()) || !"open".equalsIgnoreCase(task.getStatus())) throw stale();
         return task;
     }
