@@ -470,6 +470,7 @@ def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegress
         include 'cn/jia/agent/service/impl/AgentCommandTransportRealTransactionTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskFormalDeliveryDecisionServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/chat/handler/SelectedProbeTestPeer.java'
         include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
         include 'cn/jia/agent/service/recommendation/RecommendationHttpTestWiring.java'
         include 'cn/jia/agent/hosting/HostingRentRenewalMySqlTest.java'
@@ -1109,6 +1110,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/agent/security/PlatformKnowledgeUsageControllerTest.java'
         include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/chat/handler/SelectedProbeTestPeer.java'
         include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
         include 'cn/jia/agent/service/recommendation/RecommendationHttpTestWiring.java'
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
@@ -1135,6 +1137,9 @@ tasks.register('taskQuoteRegression', Test) {
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
     systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
+    if (providers.gradleProperty('exportSelectedProbeFixture').getOrElse('false') == 'true') {
+        systemProperty 'cyf.selectedProbeFixture', layout.buildDirectory.file('test-results/taskQuoteRegression/selected-answer-probe.json').get().asFile.absolutePath
+    }
     // The owned ES fixture is never resolved from application/production properties.
     if (providers.gradleProperty('ownedCapabilityEsPort').isPresent()) {
         systemProperty 'cyf.capabilityEsPort', providers.gradleProperty('ownedCapabilityEsPort').get()

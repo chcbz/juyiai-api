@@ -1493,7 +1493,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         NativeTaskConfigurationProbe probe=(decision,fence)->{
             assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
             assertEquals(NativeTaskPreparation.Mode.ANSWER,decision.intent().output().mode());assertEquals(decision,service.find(decision.intent().binding()));sends.incrementAndGet();
-            return java.util.concurrent.CompletableFuture.completedFuture(new NativeTaskConfigurationProbe.Measurement(decision.sha256(),fence,"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64))));};
+            return cn.jia.chat.handler.SelectedProbeTestPeer.exchange(decision,fence);};
         try(var pool=Executors.newSingleThreadExecutor();var ctx=new org.springframework.context.annotation.AnnotationConfigApplicationContext()){
             ctx.registerBean(org.springframework.transaction.event.TransactionalEventListenerFactory.class);
             ctx.registerBean(NativeTaskConfigurationProbe.class,()->probe);
