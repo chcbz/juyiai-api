@@ -46,6 +46,18 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
         <if test="c != null">AND client_id=#{c}</if> AND terminal_fact_id &gt; #{after} ORDER BY terminal_fact_id LIMIT #{limit}</script>
         """) java.util.List<cn.jia.economy.usage.TaskMembership.Pending> pendingMembershipPage(@Param("t") String tenant,@Param("c") String client,@Param("after") String after,@Param("limit") int limit);
 
+    // Seek the unique membership key. The binary comparisons additionally reject padded aliases.
+    @Select("""
+        SELECT EXISTS(SELECT 1 FROM agent_task_execution_member
+          WHERE tenant_id=#{row.tenantId} AND client_id=#{row.clientId} AND owner_jiacn=#{row.ownerJiacn}
+            AND task_id=#{row.taskId} AND execution_id=#{row.executionId} AND run_id=#{row.runId}
+            AND BINARY tenant_id=BINARY #{row.tenantId} AND BINARY client_id=BINARY #{row.clientId}
+            AND BINARY owner_jiacn=BINARY #{row.ownerJiacn} AND BINARY task_id=BINARY #{row.taskId}
+            AND BINARY execution_id=BINARY #{row.executionId} AND BINARY run_id=BINARY #{row.runId}
+            AND BINARY admission_sha256=BINARY #{row.requestHash} AND BINARY capture_id=BINARY #{capture})
+        """)
+    boolean hasMemberCapture(@Param("row") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("capture") String capture);
+
     /** Append under the original task-root lock. Revision is an ordering cursor, not a count. */
     @org.apache.ibatis.annotations.Insert("""
         INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)

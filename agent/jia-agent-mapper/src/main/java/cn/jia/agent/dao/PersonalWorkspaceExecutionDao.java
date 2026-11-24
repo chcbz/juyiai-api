@@ -48,6 +48,7 @@ public interface PersonalWorkspaceExecutionDao extends TaskExecutionClosureDao {
     void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId);
     record MemberIdentity(String tenantId,String clientId,String ownerJiacn,String taskId,
                           String executionId,String runId,String requestHash) { }
+    boolean hasMemberCapture(MemberIdentity member,String captureId);
     void appendMember(MemberIdentity member,String captureId);
     void insert(PersonalWorkspaceExecutionEntity execution);
     void update(PersonalWorkspaceExecutionEntity execution);

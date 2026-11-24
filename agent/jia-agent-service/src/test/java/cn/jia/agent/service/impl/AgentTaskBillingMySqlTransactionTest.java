@@ -1490,6 +1490,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 Map<String,Object> wire=ReflectionTestUtils.invokeMethod(builder,"hostedWire",frozen,codec.readValue(frozen.getPayloadJson(),Map.class));
                 enrolledWire.set(codec.writeValueAsBytes(cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null)));
                 var request=dao.findRequest(TENANT,OWNER,CLIENT,admitted.requestId());var history=recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
+                String turn=frozen.getTurnId(),run=frozen.getDispatchId(),digest=request.getRequestDigest().substring("sha256:".length());
+                assertTrue(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,expected));
+                assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,null));
+                assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run,digest,expected+" "));
+                assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run,"0".repeat(64),expected));
+                assertFalse(membership.enrolled(SCOPE,intent.taskId(),turn,run+" ",digest,expected));
+                var otherOwner=new AgentTaskExecutionGrantService.Scope(TENANT,CLIENT,OWNER+"-other");
+                assertFalse(membership.enrolled(otherOwner,intent.taskId(),turn,run,digest,expected));
                 assertFalse(history.hasEarlierRequest(request));request.setId(request.getId()+1);assertTrue(history.hasEarlierRequest(request));
 
             }

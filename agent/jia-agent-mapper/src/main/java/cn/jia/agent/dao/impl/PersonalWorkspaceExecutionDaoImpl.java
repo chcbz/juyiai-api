@@ -116,6 +116,9 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         appendMember(new MemberIdentity(execution.getTenantId(),execution.getClientId(),execution.getOwnerJiacn(),execution.getTaskId(),
                 execution.getExecutionId(),execution.getRunId(),execution.getRequestHash()),captureId);
     }
+    @Override public boolean hasMemberCapture(MemberIdentity member,String captureId) {
+        return executions.hasMemberCapture(member,captureId);
+    }
     @Override public void appendMember(MemberIdentity execution,String captureId) {
         String t=execution.tenantId(),c=execution.clientId(),o=execution.ownerJiacn(),id=execution.taskId();
         String leaf=cn.jia.economy.usage.TaskMembershipDigest.member(t,c,o,id,execution.executionId(),execution.runId(),captureId,execution.requestHash());
