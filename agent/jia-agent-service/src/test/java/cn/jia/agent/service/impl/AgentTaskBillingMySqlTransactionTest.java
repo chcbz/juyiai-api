@@ -797,6 +797,25 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long elapsed=System.nanoTime()-start;samples.sort(Long::compare);assertEquals(ids.size(),count("economy_history_feature_projection"));assertEquals(ids.size(),count("economy_task_cost_sample_revision"));
         System.out.printf(java.util.Locale.ROOT,"QUOTE_READY_PUBLISH shared=%s rows=%d totalMs=%.3f p50ms=%.3f p95ms=%.3f maxms=%.3f%n",shared,ids.size(),elapsed/1e6,samples.get((ids.size()-1)/2)/1e6,samples.get((95*ids.size()+99)/100-1)/1e6,samples.getLast()/1e6);return elapsed;
     }
+    // A serial diagnostic of the actual mapper/JSON/restore operations, not inferred CPU or concurrent HTTP time.
+    private void profileCompactStages(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared){
+        var db=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var json=new ObjectMapper();String groupSha=group.digest();
+        var known=new java.util.HashMap<String,String>();
+        for(int run=0;run<4;run++){
+            long mapper=0,decode=0,restore=0;int pos=0,pages=0;String after="";
+            while(true){long t=System.nanoTime();var rows=db.compactHistory(reader,groupSha,after,64,known.getOrDefault(after,""));mapper+=System.nanoTime()-t;pages++;
+                var learned=new java.util.StringJoiner(",");
+                for(var row:rows){assertEquals(ids.get(pos++),row.id());assertEquals(Integer.valueOf(1),row.sourceValid());
+                    t=System.nanoTime();var meta=json.readValue(row.metadata(),cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.Metadata.class);decode+=System.nanoTime()-t;
+                    t=System.nanoTime();var feature=cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());restore+=System.nanoTime()-t;
+                    assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),feature));if(row.inlineSha()!=null)learned.add(row.inlineSha());
+                }
+                if(learned.length()>0)known.put(after,learned.toString());if(rows.size()<64)break;after=rows.getLast().id();
+            }
+            assertEquals(ids.size(),pos);assertEquals(17,pages);
+            System.out.printf(java.util.Locale.ROOT,"DENSE_COMPACT_STAGES shared=%s run=%d rows=%d mapperMs=%.3f metadataDecodeMs=%.3f vectorRestoreAndDigestMs=%.3f%n",shared,run,pos,mapper/1e6,decode/1e6,restore/1e6);
+        }
+    }
     private final QuoteProfile denseCalls=new QuoteProfile();
     private String compactStatementDigest;
     private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query,long build){
@@ -835,6 +854,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(projection,reference,java.util.Optional.of(registry));
         var originalEngine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,reference);
         var control=originalEngine.estimate(reader,group.execution(),query,pin,params,Map.of());assertEquals(3,control.contributions().size());assertEquals(25,control.wen());
+        // Isolate a different logical request with an attached file and explicit deliverable count. The vector is
+        // deliberately identical to one history for an exact-neighbour control; not independent holdout truth.
+        int anchor=721;var observed=historyCatalog.page(reader,group,ids.get(anchor-1)).getFirst();
+        var shape=observed.features();assertEquals(ids.get(anchor),observed.source().sampleId());assertEquals(1,shape.files().size());assertNotNull(shape.requestedDeliverables());
+        var rich=new TaskEstimateFeatures(query.featureVersion(),query.templateVersion(),denseDigest("new-req",1),denseDigest("new-input",1),denseDigest("new-text",1),query.embeddingIdentity(),shape.vector(),shape.files(),shape.requestedDeliverables());
+        // Training-only synthetic range, not a deployment calibration; no change to the HTTP fixture's admission.
+        var train=historyCatalog.page(reader,group,"").stream().map(cn.jia.economy.task.TaskHistoryCatalog.Entry::features).toList();
+        var richParams=new TaskNeighborSearch.Parameters(TaskNeighborSearch.trainingScales(train),1,1,1,1,1,0.1,0.2,3,3,10,1);
+        var richControl=originalEngine.estimate(reader,group.execution(),rich,pin,richParams,Map.of());
+        assertEquals(ids.get(anchor),richControl.contributions().getFirst().sampleId());assertEquals(3,richControl.contributions().size());assertEquals(25,richControl.wen());
+        assertEquals(richControl,engine.estimate(reader,group.execution(),rich,pin,richParams,Map.of()));
+        profileCompactStages(reader,group,ids,shared);
         long payload=jdbc.queryForObject("SELECT SUM(OCTET_LENGTH(feature_meta)+OCTET_LENGTH(vector_bytes)) FROM economy_history_feature_projection",Long.class);
         for(int i=0;i<6;i++){
             long start=System.nanoTime();var actual=engine.estimate(reader,group.execution(),query,pin,params,Map.of());long elapsed=System.nanoTime()-start;
