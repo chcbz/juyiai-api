@@ -17,7 +17,6 @@ public class PreparedTaskTermsReader {
         this.decisions=decisions;this.sessions=sessions;this.transport=transport;
     }
     @Transactional(propagation=Propagation.NEVER)
-    @Transactional(propagation=Propagation.NEVER)
     public void refreshDue(Set<NativeTaskPreparation.Binding> bindings){
         if(bindings.isEmpty())return;var b=bindings.iterator().next();compare(b.scope(),decisions.reserveDue(b,bindings));
     }
