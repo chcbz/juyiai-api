@@ -1482,11 +1482,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var frozen=decisions.find(new NativeTaskPreparation.Binding(SCOPE,id,0,1,requirement.sha256(),inputs.digest(),targets.getFirst()));assertNotNull(frozen);
         var proofs=Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence("fixture-fixed",terms,frozen.sha256()));
         when(source.observe(subject,targets)).thenReturn(proofs);when(source.current(subject,targets,proofs)).thenReturn(true);
-        var window=QuoteWireWindow.paid(id,agent,group.digest(),book.sha256());
+        var privateKeys=List.of(java.util.UUID.randomUUID().toString(),java.util.UUID.randomUUID().toString());
+        var window=QuoteWireWindow.paid(id,agent,group.digest(),book.sha256(),privateKeys);
         TaskQuoteBatches.Result observedFirst=null,observedOther=null;
         try(var client=HttpClient.newHttpClient()){
             for(int i=0;i<32;i++){
-                String key=i==31?"fixture-0":"fixture-"+i;
+                String key=i==31?privateKeys.get(0):i<2?privateKeys.get(i):"fixture-"+i;
                 String rawBody="{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}";
                 var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/quotes")).header("Content-Type","application/json")
                     .header("X-Request-Id","quote-http").header("Authorization","Bearer "+token).header("Idempotency-Key",key)
@@ -1507,10 +1508,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
         if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile);
-        var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest("fixture-0"));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
+        if(window!=null){String export=Files.readString(window.directory.resolve("roster.json"))+Files.readString(window.directory.resolve("capture.json"));
+            for(String raw:privateKeys)assertFalse(export.contains(raw),"transport artifacts retain only key digests");}
+        var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest(privateKeys.get(0)));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
         var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
         var forecast=study.publishedOffer(key,intent,observedFirst,agent,"history-http",group,book,batches,quotes);
-        if(window!=null){var second=study.publishedOffer(new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest("fixture-1")),intent,observedOther,agent,"history-http",group,book,batches,quotes);
+        if(window!=null){var second=study.publishedOffer(new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest(privateKeys.get(1))),intent,observedOther,agent,"history-http",group,book,batches,quotes);
             for(var entry:Map.of("fixture-0",forecast,"fixture-1",second,"reference",book).entrySet())Files.writeString(window.directory.resolve(entry.getKey()+".json"),entry.getValue().json(),java.nio.file.StandardOpenOption.CREATE_NEW);}
         var other=observedOther;assertThrows(IllegalArgumentException.class,()->study.publishedOffer(key,intent,other,agent,"history-http",group,book,batches,quotes));
         assertThrows(IllegalArgumentException.class,()->study.publishedOffer(key,intent,null,agent,"history-http",group,book,batches,quotes));
@@ -2330,26 +2333,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         private final long originNanos = System.nanoTime();
         private static final long CUTOFF_MS = 10000;
         private final String rosterSha;
+        private final Map<String,String> refsByDigest=new java.util.HashMap<>();
         boolean sealed;
         static QuoteWireWindow open(String agent) throws Exception {
             String dir=System.getProperty("cyf.quoteWireFixture");
             return dir==null ? null : new QuoteWireWindow(Path.of(dir),TASK,agent,List.of("denied","same-intent","fresh-intent"),
-                    k->"d77-"+k,digest("fixture:cfg:fixture:1024;no-dispatch-config"),digest("fixture:no-price-book"));
+                    k->"d77-"+k,digest("fixture:cfg:fixture:1024;no-dispatch-config"),digest("fixture:no-price-book"),Map.of());
         }
-        static QuoteWireWindow paid(String task,String agent,String config,String reference) throws Exception {
+        static QuoteWireWindow paid(String task,String agent,String config,String reference,List<String> privateKeys) throws Exception {
             String dir=System.getProperty("cyf.quoteWireFixture");return dir==null?null:new QuoteWireWindow(Path.of(dir).resolveSibling("owned-priced-wire"),task,agent,
-                    List.of("fixture-0","fixture-1"),k->"quote-http",config,reference);
+                    List.of("fixture-0","fixture-1"),k->"quote-http",config,reference,Map.of("fixture-0",privateKeys.get(0),"fixture-1",privateKeys.get(1)));
         }
         private static String digest(String value) throws Exception {
             return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         }
-        private QuoteWireWindow(Path dir,String task,String agent,List<String> keys,java.util.function.Function<String,String> requestId,String config,String book) throws Exception {
+        private QuoteWireWindow(Path dir,String task,String agent,List<String> keys,java.util.function.Function<String,String> requestId,String config,String book,Map<String,String> privateKeys) throws Exception {
             Files.createDirectories(dir.getParent()); directory=Files.createDirectory(dir);
             var requests=new java.util.ArrayList<Map<String,Object>>();
             for(String key:keys) {
-                attempts.put(key,new java.util.ArrayList<>());
+                attempts.put(key,new java.util.ArrayList<>());String sha=digest(privateKeys.getOrDefault(key,key));assertNull(refsByDigest.put(sha,key));
                 requests.add(Map.of("intentRef",key,"taskId",task,"taskVersion","0","agentIds",List.of(key.equals("denied")?"not-visible":agent),
-                        "requestId",requestId.apply(key),"idempotencyKeySha256",digest(key)));
+                        "requestId",requestId.apply(key),"idempotencyKeySha256",sha));
             }
             var roster=json.writeValueAsString(Map.of("format","budget-roster-v1","configurationSha256",config,
                     "referenceSha256",book,"cutoffAtMs",CUTOFF_MS,"requests",requests));
@@ -2363,7 +2367,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals("127.0.0.1",req.uri().getHost());String key=req.headers().firstValue("Idempotency-Key").orElseThrow();
             var a=new java.util.LinkedHashMap<String,Object>();a.put("method",req.method());a.put("path",req.uri().getRawPath());a.put("sentAtMs",sent);a.put("receivedAtMs",seen);
             a.put("requestIdHeader",req.headers().firstValue("X-Request-Id").orElseThrow());a.put("idempotencyKeySha256",digest(key));a.put("requestBody",body);
-            a.put("httpStatus",res.statusCode());a.put("responseIdHeader",res.headers().firstValue("X-Request-Id").orElse(null));a.put("responseBody",res.body());attempts.get(key).add(a);
+            a.put("httpStatus",res.statusCode());a.put("responseIdHeader",res.headers().firstValue("X-Request-Id").orElse(null));a.put("responseBody",res.body());attempts.get(refsByDigest.get(digest(key))).add(a);
         }
         void seal() throws Exception {
             assertTrue(elapsed()<=CUTOFF_MS,"fixture did not complete its planned sends before cutoff");
