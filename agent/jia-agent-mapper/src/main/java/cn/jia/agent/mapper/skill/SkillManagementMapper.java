@@ -120,6 +120,19 @@ public interface SkillManagementMapper {
     SkillEntitlementEntity entitlement(@Param("tenantId") String t,@Param("clientId") String c,@Param("entitlementId") String id);
     @Select("SELECT p.* FROM agent_skill_product p WHERE "+S+" AND status='PUBLISHED' ORDER BY product_id")
     List<SkillProductEntity> products(@Param("tenantId") String t,@Param("clientId") String c);
+    /** Public labels for the installed approved version. A newer published version does not replace it. */
+    record RecommendationProduct(String installedVersionId,String productId,String currentProductVersionId,Long version,String name,String description) {}
+    @Select("""
+            <script>SELECT v.product_version_id,p.product_id,p.current_product_version_id,p.version,p.name,p.description
+              FROM agent_skill_product_version v JOIN agent_skill_product p
+                ON p.tenant_id=v.tenant_id AND p.client_id=v.client_id AND p.product_id=v.product_id
+               AND CAST(p.tenant_id AS BINARY)=CAST(v.tenant_id AS BINARY) AND CAST(p.client_id AS BINARY)=CAST(v.client_id AS BINARY)
+               AND CAST(p.product_id AS BINARY)=CAST(v.product_id AS BINARY)
+             WHERE v.tenant_id=#{tenantId} AND v.client_id=#{clientId} AND v.review_status='APPROVED' AND p.status='PUBLISHED'
+               AND CAST(v.tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY) AND CAST(v.client_id AS BINARY)=CAST(#{clientId} AS BINARY)
+               AND v.product_version_id IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>
+            </script>""")
+    List<RecommendationProduct> recommendationProducts(@Param("tenantId") String t,@Param("clientId") String c,@Param("ids") List<String> ids);
     String RECOMMENDATION_AGENT_IDS = "<foreach collection='agentIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>";
     @Select("<script>SELECT * FROM agent_skill_managed_state WHERE "+S+" AND active_installation_id IS NOT NULL AND agent_id IN "+RECOMMENDATION_AGENT_IDS+" ORDER BY agent_id,skill_key</script>")
     List<SkillManagedStateEntity> activeRecommendationStates(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentIds") List<String> agents);

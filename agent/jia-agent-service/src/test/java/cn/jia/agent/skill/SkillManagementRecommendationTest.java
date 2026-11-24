@@ -43,7 +43,9 @@ class SkillManagementRecommendationTest {
         final SkillManagementService service;
         final Map<String,SkillManagedStateEntity> states=new HashMap<>();
         final Map<String,SkillInstallationAuthorizationEntity> authorizations=new HashMap<>();
+        SkillManagementMapper.RecommendationProduct product=new SkillManagementMapper.RecommendationProduct("spv_vision","product",null,null,"识图","读取图片文字");
         Fixture() {
+            when(db.recommendationProducts(eq("0"),eq("client"),anyList())).thenAnswer(call->call.<List<String>>getArgument(2).contains(product.installedVersionId())?List.of(product):List.of());
             when(db.activeRecommendationStates(eq("0"),eq("client"),anyList())).thenAnswer(call ->
                     call.<List<String>>getArgument(2).stream().map(states::get).filter(Objects::nonNull).toList());
             when(db.activeRecommendationAuthorizations(eq("0"),eq("client"),anyList())).thenAnswer(call ->
@@ -66,8 +68,6 @@ class SkillManagementRecommendationTest {
             when(auth.currentRegisteredProof("0","client",agent)).thenReturn(proof);
             when(catalog.lookup(eq(new SkillCapabilityLookup.Scope("0","client","owner",agent)),any()))
                     .thenReturn(view(agent,1L,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE));
-            when(db.products("0","client")).thenReturn(List.of(new SkillProductEntity().setProductId("product").setName("识图").setDescription("读取图片文字")));
-            when(market.selectApprovedProductVersion("0","client","spv_vision")).thenReturn(new SkillProductVersionEntity().setProductId("product"));
         }
         SkillCapabilityLookup.View view(String agent,long at,SkillCapabilityLookup.Readiness state) {
             var fact=new SkillCapabilityLookup.RuntimeSkill("vision","1.0.0",HASH,null,null,state,null,null,null,
@@ -98,16 +98,26 @@ class SkillManagementRecommendationTest {
         assertEquals("识图",rows.get("a").getFirst().title());
         verify(f.db).activeRecommendationStates("0","client",List.of("a","b"));
         verify(f.db).activeRecommendationAuthorizations("0","client",List.of("a","b"));
-        verify(f.db).products("0","client");verify(f.market).selectApprovedProductVersion("0","client","spv_vision");
+        verify(f.db).recommendationProducts("0","client",List.of("spv_vision"));verify(f.db,never()).products(anyString(),anyString());verifyNoInteractions(f.market);
         verify(f.auth).currentRegisteredProof("0","client","a");verify(f.auth).currentRegisteredProof("0","client","b");
         verify(f.catalog,times(2)).lookup(any(),any());verify(f.db,never()).findAuthorization(anyString(),anyString(),anyString());
         verifyNoInteractions(f.packages,f.writer,f.sessions);
+    }
+    @Test void distinctInstalledVersionsArePagedWithoutQueryingTheUnrelatedCatalog() {
+        var f=new Fixture();var ids=new ArrayList<String>();var versions=new ArrayList<String>();
+        for(int i=0;i<129;i++){String agent="agent"+i,version="spv_"+i;ids.add(agent);versions.add(version);f.installed(agent);
+            var auth=f.authorizations.get(agent);auth.setPackageJson(auth.getPackageJson().replace("spv_vision",version));}
+        when(f.db.recommendationProducts(eq("0"),eq("client"),anyList())).thenAnswer(call->call.<List<String>>getArgument(2).stream().map(v->new SkillManagementMapper.RecommendationProduct(v,"product"+v,v,1L,"title"+v,"description")).toList());
+        var rows=f.service.recommendationSkills(ACTOR,candidates(ids.toArray(String[]::new)));
+        for(int i=0;i<ids.size();i++) assertEquals("title"+versions.get(i),rows.get(ids.get(i)).getFirst().title());
+        verify(f.db).recommendationProducts("0","client",versions.subList(0,128));verify(f.db).recommendationProducts("0","client",versions.subList(128,129));
+        verify(f.db,never()).products(anyString(),anyString());verifyNoInteractions(f.market);
     }
     @Test void stableInstallationKeyButNewFactDigestForCatalogEditOrPolicyRevision() {
         var f=new Fixture(); f.installed("a");
         var old=f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst();
         assertTrue(old.evidenceKey().matches("[0-9a-f]{64}"));
-        var current=f.db.products("0","client").getFirst(); current.setCurrentProductVersionId("new-catalog-version");
+        f.product=new SkillManagementMapper.RecommendationProduct("spv_vision","product","new-catalog-version",null,"识图","读取图片文字");
         var edited=f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst();
         assertEquals(old.evidenceKey(),edited.evidenceKey()); assertNotEquals(old.factDigest(),edited.factDigest());
         f.states.get("a").setActivePolicyRevision(2L);
@@ -122,7 +132,7 @@ class SkillManagementRecommendationTest {
         assertTrue(first.get("a").getFirst().available());
         assertEquals(first,f.service.recommendationSkills(ACTOR,candidates("a")));
         assertFalse(f.service.recommendationSkills(ACTOR,candidates("a")).get("a").getFirst().available());
-        verify(f.db,times(3)).products("0","client");verify(f.market,times(3)).selectApprovedProductVersion("0","client","spv_vision");
+        verify(f.db,times(3)).recommendationProducts("0","client",List.of("spv_vision"));verifyNoInteractions(f.market);
     }
     @Test void indexReadsOnlyCurrentProviderConfirmedPublicPurposesWithoutBorrowingAUser(){
         var f=new Fixture();f.installed("a");when(f.marketplace.available("0","client")).thenReturn(true);
@@ -142,7 +152,7 @@ class SkillManagementRecommendationTest {
 
     }
     @Test void withdrawnProductsRemainExcludedInBatchProjection() {
-        var f=new Fixture();f.installed("a");when(f.db.products("0","client")).thenReturn(List.of());
+        var f=new Fixture();f.installed("a");when(f.db.recommendationProducts("0","client",List.of("spv_vision"))).thenReturn(List.of());
         assertTrue(f.service.recommendationSkills(ACTOR,candidates("a")).get("a").isEmpty());
     }
     @Test void enabledConfirmedInstructionIsCitableWithoutOpeningExecutableAdmission() {

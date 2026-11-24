@@ -9,6 +9,17 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SkillRecommendationMapperH2Test {
+    @Test void onlySelectedApprovedVersionsOfStillPublishedProductsReturnPublicLabels() throws Exception {
+        var ds=new DriverManagerDataSource("jdbc:h2:mem:labels_"+java.util.UUID.randomUUID()+";MODE=MYSQL;DB_CLOSE_DELAY=-1","sa","");
+        var jdbc=new JdbcTemplate(ds);
+        jdbc.execute("CREATE TABLE agent_skill_product(tenant_id VARCHAR(50),client_id VARCHAR(50),product_id VARCHAR(100),current_product_version_id VARCHAR(100),version BIGINT,name VARCHAR(100),description VARCHAR(100),status VARCHAR(20))");
+        jdbc.execute("CREATE TABLE agent_skill_product_version(tenant_id VARCHAR(50),client_id VARCHAR(50),product_version_id VARCHAR(100),product_id VARCHAR(100),review_status VARCHAR(20))");
+        jdbc.execute("INSERT INTO agent_skill_product VALUES('t','c','p','new',7,'current-label','desc','PUBLISHED'),('t','c','gone','removed',2,'withdrawn','x','RETIRED'),('t','other','p','old',1,'private','x','PUBLISHED')");
+        jdbc.execute("INSERT INTO agent_skill_product_version VALUES('t','c','old','p','APPROVED'),('t','c','new','p','APPROVED'),('t','c','unapproved','p','PENDING'),('t','c','removed','gone','APPROVED'),('t','other','old','p','APPROVED')");
+        var bean=new SqlSessionFactoryBean();bean.setDataSource(ds);var config=new org.apache.ibatis.session.Configuration();config.setMapUnderscoreToCamelCase(true);config.addMapper(SkillManagementMapper.class);bean.setConfiguration(config);
+        var mapper=new SqlSessionTemplate(java.util.Objects.requireNonNull(bean.getObject())).getMapper(SkillManagementMapper.class);
+        assertEquals(java.util.List.of(new SkillManagementMapper.RecommendationProduct("old","p","new",7L,"current-label","desc")),mapper.recommendationProducts("t","c",java.util.List.of("old","unapproved","removed","missing")));
+    }
     @Test void activeNativeAndPurchasedAuthorizationsAreScopedWithoutMarketplaceInstallationDependency() throws Exception {
         var ds=new DriverManagerDataSource("jdbc:h2:mem:recommend_"+java.util.UUID.randomUUID()+";MODE=MYSQL;DB_CLOSE_DELAY=-1","sa","");
         var jdbc=new JdbcTemplate(ds);

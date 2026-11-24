@@ -747,21 +747,18 @@ public final class SkillManagementService {
                 for(var auth:db.activeRecommendationAuthorizations(tenant,client,batch))
                     authorizations.put(auth.getInstallationId(),auth);
             }
-            var products=new HashMap<String,SkillProductEntity>();
-            var approved=new HashMap<String,Optional<SkillProductVersionEntity>>();
+            // Only versions whose candidate, installation and visibility checks have passed can request a label.
+            record Pending(String agent,java.util.function.Function<SkillManagementMapper.RecommendationProduct,RecommendationSkill> withProduct) {}
+            var byVersion=new LinkedHashMap<String,List<Pending>>();
             var result=new LinkedHashMap<String,List<RecommendationSkill>>();
-            boolean productsLoaded=false;
             for(var candidate:agents) {
                 // Discovery owns task/opt-in authorization. This path only reads capability summaries,
                 // never impersonates the provider Actor or opens skill-management operations.
                 String agent=candidate.agent();
                 String providerOwner=candidate.owner();
                 var states=active.getOrDefault(agent,List.of());
-                if(states.isEmpty()){result.put(agent,List.of());continue;}
-                if(!productsLoaded){
-                    for(var product:db.products(tenant,client))products.put(product.getProductId(),product);
-                    productsLoaded=true;
-                }
+                result.put(agent,new ArrayList<>());
+                if(states.isEmpty())continue;
                 // The registry owns live session/fence isolation. Capture one coherent catalog,
                 // not two full catalogs whose timestamps/unrelated skills may differ.
                 SkillCapabilityLookup.View observed=null;
@@ -776,19 +773,13 @@ public final class SkillManagementService {
                     }
                 } catch(IllegalArgumentException absent) { /* No authenticated live catalog is positive evidence. */ }
                 // Do not advertise installations left behind by a different provider/binding.
-                if(!candidate.mine()&&!providerMatches){result.put(agent,List.of());continue;}
-                var rows=new ArrayList<RecommendationSkill>();
+                if(!candidate.mine()&&!providerMatches)continue;
                 var relationship=relationship(new SkillCapabilityLookup.Scope(tenant,client,providerOwner,agent));
                 for(var state:states) {
                     if(!candidate.mine()&&!Boolean.TRUE.equals(state.getDesiredEnabled()))continue;
                     var auth=authorizations.get(state.getActiveInstallationId());if(auth==null)continue;
                     var status=runtime(state,auth,observed,observed!=null,relationship);
                     var pkg=ref(auth);String versionId=text(pkg,"productVersionId");
-                    var installedVersion=approved.computeIfAbsent(versionId,id->Optional.ofNullable(
-                            market.selectApprovedProductVersion(tenant,client,id))).orElse(null);
-                    var product=installedVersion==null?null:products.get(installedVersion.getProductId());
-                    // Withdrawn discovery entries remain installed but are not advertised by recommendations.
-                    if(product==null)continue;
                     boolean ready=recommendationEvidenceAvailable(text(pkg,"kind"),Boolean.TRUE.equals(state.getDesiredEnabled()),
                             Boolean.TRUE.equals(state.getAdmissionEnabled()),text(status,"state"));
                     // Internal content-addressed source identity, never a display ordinal or a wire field.
@@ -796,18 +787,30 @@ public final class SkillManagementService {
                             providerOwner,auth.getInstallationId()));
                     var relation=relationship==null?null:Arrays.asList(Long.toString(relationship.bindingId()),
                             relationship.leaseId(),relationship.intentId(),relationship.captureTransactionId());
-                    var digest=hash("recommendation/installation-fact/v1",Arrays.asList(key,relation,
-                            auth.getChangeId(),auth.getEntitlementId(),auth.getPermissionsSha256(),
-                            auth.getRuntimeHostId(),auth.getRuntimeInstallationId(),text(pkg,"packageSha256"),
-                            state.getSkillKey(),Objects.toString(state.getSkillRevision(),null),
-                            Objects.toString(state.getActivePolicyRevision(),null),versionId,text(pkg,"skillVersion"),
-                            product.getProductId(),product.getCurrentProductVersionId(),Objects.toString(product.getVersion(),null),
-                            product.getName(),product.getDescription(),text(pkg,"kind"),text(status,"state"),ready));
-                    rows.add(new RecommendationSkill(auth.getInstallationId(),state.getSkillKey(),text(pkg,"skillVersion"),
-                            product.getName(),product.getDescription(),ready,text(status,"state"),text(pkg,"kind"),key,digest));
+                    byVersion.computeIfAbsent(versionId,ignored->new ArrayList<>()).add(new Pending(agent,product->{
+                        var digest=hash("recommendation/installation-fact/v1",Arrays.asList(key,relation,
+                                auth.getChangeId(),auth.getEntitlementId(),auth.getPermissionsSha256(),
+                                auth.getRuntimeHostId(),auth.getRuntimeInstallationId(),text(pkg,"packageSha256"),
+                                state.getSkillKey(),Objects.toString(state.getSkillRevision(),null),
+                                Objects.toString(state.getActivePolicyRevision(),null),versionId,text(pkg,"skillVersion"),
+                                product.productId(),product.currentProductVersionId(),Objects.toString(product.version(),null),
+                                product.name(),product.description(),text(pkg,"kind"),text(status,"state"),ready));
+                        return new RecommendationSkill(auth.getInstallationId(),state.getSkillKey(),text(pkg,"skillVersion"),
+                                product.name(),product.description(),ready,text(status,"state"),text(pkg,"kind"),key,digest);
+                    }));
                 }
-                rows.sort(Comparator.comparing(RecommendationSkill::installationId));result.put(agent,List.copyOf(rows));
             }
+            var requested=List.copyOf(byVersion.keySet());
+            for(int from=0;from<requested.size();from+=batchSize){
+                var batch=requested.subList(from,Math.min(from+batchSize,requested.size()));
+                for(var product:db.recommendationProducts(tenant,client,batch)){
+                    // SQL collation must not turn a near-match into a requested installation identity.
+                    var pending=byVersion.get(product.installedVersionId());
+                    if(pending!=null && batch.contains(product.installedVersionId()))
+                        for(var item:pending)result.get(item.agent()).add(item.withProduct().apply(product));
+                }
+            }
+            result.replaceAll((agent,rows)->rows.stream().sorted(Comparator.comparing(RecommendationSkill::installationId)).toList());
             return Map.copyOf(result);
         });
     }
