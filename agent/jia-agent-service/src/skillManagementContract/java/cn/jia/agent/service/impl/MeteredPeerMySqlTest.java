@@ -98,6 +98,29 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         try(var files=Files.walk(state)){for(var f:files.filter(Files::isRegularFile).toList())result.put(state.relativize(f),HexFormat.of().formatHex(hash.digest(Files.readAllBytes(f))));}
         return result;
     }
+    // Real loopback receiver is unavailable for the failed install window. The installer uses
+    // a synthetic archive/lifecycle, not a booted distribution. No change to session authority.
+    private void failedApiWindow(Path temp,InetSocketAddress address) throws Exception {
+        Path state=temp.resolve("cutover-inbox"),tests=Path.of(System.getProperty("ownedCutoverController"),"ops/ci/aliyun-flow/tests");
+        var before=retainedBytes(state);var work=Files.createDirectory(temp.resolve("api-disk-tmp"));
+        var pb=new ProcessBuilder("unshare","--mount","--propagation","private","/bin/sh","-ec",
+                "mount --bind \"$1\" /tmp; exec python3 -B -m unittest -v test_native_local_api.NativeLocalApiTest.test_forward_only_start_failure_never_restores_incompatible_jar",
+                "fixture",work.toString()).directory(tests.toFile());
+        pb.environment().put("CYF_TEST_PENDING_RECEIPT_WINDOW","1");
+        Path log=temp.resolve("api-install.log"),checkpoint=temp.resolve("api-checkpoint");
+        var child=pb.redirectError(log.toFile()).redirectOutput(checkpoint.toFile()).start();
+        try{
+            long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(25);
+            while(child.isAlive() && !Files.readString(checkpoint).contains("API_FORWARD_ONLY_FAILED_STOPPED") && System.nanoTime()<deadline)Thread.sleep(50);
+            assertTrue(Files.readString(checkpoint).contains("API_FORWARD_ONLY_FAILED_STOPPED"),Files.readString(log));
+            try(var socket=new java.net.Socket(java.net.Proxy.NO_PROXY)){assertThrows(java.net.ConnectException.class,()->socket.connect(address,2000));}
+            assertEquals(before,retainedBytes(state));assertEquals(5,count("economy_usage_capture_receipt"));
+            assertEquals(1,count("economy_usage_attempt"));assertEquals(1,count("economy_usage_revision"));
+            try(var in=child.getOutputStream()){in.write("REPAIR\n".getBytes(StandardCharsets.US_ASCII));}
+            assertTrue(child.waitFor(30,TimeUnit.SECONDS));assertEquals(0,child.exitValue(),Files.readString(log));
+            assertEquals(before,retainedBytes(state));
+        }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
+    }
     private void webCutoverWindow(Path temp,String receipt) throws Exception {
         var state=temp.resolve("cutover-inbox");var bytes=retainedBytes(state);
         var originals=bytes.keySet().stream().filter(p->p.getParent()!=null && p.getParent().getFileName().toString().startsWith("usage-capture-") && p.getFileName().toString().startsWith("response-")).toList();assertEquals(1,originals.size());
@@ -193,7 +216,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
         var rotated=new AtomicReference<cn.jia.agent.entity.AgentRuntimeV1SessionResponse>();var originalBody=new AtomicReference<byte[]>();
-        server.createContext("/",exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
+        com.sun.net.httpserver.HttpHandler handler=exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
             byte[] input=exchange.getRequestBody().readAllBytes();if(input.length>0)req.content(input);
             var response=mvc.perform(req).andReturn().getResponse();String kind=input.length==0?"GET":json.readTree(input).path("data").path("kind").asText();trace.add(kind);
             assertEquals(rotated.get()==null?200:401,response.getStatus(),kind+":"+response.getContentAsString());
@@ -209,7 +232,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             }
             if("GET".equals(kind))assertTrue(exchange.getRequestURI().getPath().endsWith("/receipts/"+cuts.get()));
             for(var h:response.getHeaderNames())exchange.getResponseHeaders().put(h,response.getHeaders(h));byte[] bytes=response.getContentAsByteArray();exchange.sendResponseHeaders(response.getStatus(),bytes.length);exchange.getResponseBody().write(bytes);
-        }catch(Throwable t){error.compareAndSet(null,t);}});server.start();
+        }catch(Throwable t){error.compareAndSet(null,t);}};server.createContext("/",handler);server.start();
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             for(String phase:cutover?List.of("stop","resume"):List.of("")){
@@ -218,13 +241,17 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             var pb=repaired?new ProcessBuilder("python3","-B",Path.of(System.getProperty("ownedCutoverController"),"ops/orchestration/tests/runtime_cutover_resume_probe.py").toString(),fixture,peer.toString(),temp.toString()):new ProcessBuilder("node",peer.toString());
             if(repaired)pb.redirectError(temp.resolve("runtime-repair.log").toFile());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
             try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("cutover",phase,"rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
-                assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());if(phase.equals("stop")){assertEquals(75,child.exitValue());assertNotNull(cuts.get());webCutoverWindow(temp,cuts.get());continue;}
+                assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());if(phase.equals("stop")){assertEquals(75,child.exitValue());assertNotNull(cuts.get());
+                    var address=server.getAddress();server.stop(0);server=null;
+                    failedApiWindow(temp,address);
+                    server=HttpServer.create(address,0);server.createContext("/",handler);server.start();
+                    webCutoverWindow(temp,cuts.get());continue;}
                 assertEquals(0,child.exitValue(),repaired?Files.readString(temp.resolve("runtime-repair.log")):"Runtime peer failed: "+trace);
                 if(repaired){var proof=json.readTree(Files.readAllBytes(temp.resolve("runtime-repair-proof.json")));assertEquals("forward_only_repair_required",proof.path("failure").asText());assertTrue(proof.path("pendingUnchanged").asBoolean());assertFalse(proof.required("donorStarted").asBoolean());}
                 var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(rotate?4:successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());if(rotate)assertEquals(1,report.path("pending").asInt());else assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
             }
-        }finally{server.stop(0);}
+        }finally{if(server!=null)server.stop(0);}
         if(rotate){
             assertEquals(List.of("PLAN","SOURCE","REQUEST","REQUEST","RESPONSE","GET","RESPONSE"),trace);
             var data=json.readTree(originalBody.get()).path("data");String id=cuts.get();assertEquals(id,data.path("receiptId").asText());
