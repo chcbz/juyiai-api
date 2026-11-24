@@ -2264,6 +2264,54 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var next=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,nextFence,epoch.profile());guard.report(TENANT,CLIENT,agent,OWNER,nextFence,epoch.profile());
         guard.retire(TENANT,CLIENT,agent,OWNER,fence);assertTrue(locked(()->guard.lock(TENANT,CLIENT,List.of(next))));
     }
+    /** Opt-in export of this loopback fixture only. No headers map, authentication, real model, or price book. */
+    private static final class QuoteWireWindow {
+        private final Path directory;
+        private final ObjectMapper json = new ObjectMapper();
+        private final Map<String,List<Map<String,Object>>> attempts = new java.util.LinkedHashMap<>();
+        private final long originNanos = System.nanoTime();
+        private static final long CUTOFF_MS = 10000;
+        private final String rosterSha;
+        boolean sealed;
+        static QuoteWireWindow open(String agent) throws Exception {
+            String dir=System.getProperty("cyf.quoteWireFixture");
+            return dir==null ? null : new QuoteWireWindow(Path.of(dir), agent);
+        }
+        private static String digest(String value) throws Exception {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        }
+        private QuoteWireWindow(Path dir,String agent) throws Exception {
+            Files.createDirectories(dir.getParent()); directory=Files.createDirectory(dir);
+            var requests=new java.util.ArrayList<Map<String,Object>>();
+            for(String key:List.of("denied","same-intent","fresh-intent")) {
+                attempts.put(key,new java.util.ArrayList<>());
+                requests.add(Map.of("intentRef",key,"taskId",TASK,"taskVersion","0","agentIds",List.of(key.equals("denied")?"not-visible":agent),
+                        "requestId","d77-"+key,"idempotencyKeySha256",digest(key)));
+            }
+            var roster=json.writeValueAsString(Map.of("format","budget-roster-v1","configurationSha256",digest("fixture:cfg:fixture:1024;no-dispatch-config"),
+                    "referenceSha256",digest("fixture:no-price-book"),"cutoffAtMs",CUTOFF_MS,"requests",requests));
+            Files.writeString(directory.resolve("roster.json"),roster,java.nio.file.StandardOpenOption.CREATE_NEW);
+            rosterSha=digest(roster);
+            System.out.println("OWNED_QUOTE_WIRE_ROSTER_SHA256="+rosterSha);
+        }
+        long elapsed(){return TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-originNanos);}
+        void received(HttpRequest req,String body,long sent,long seen,HttpResponse<String> res) throws Exception {
+            if(sealed)return;
+            assertEquals("127.0.0.1",req.uri().getHost());String key=req.headers().firstValue("Idempotency-Key").orElseThrow();
+            var a=new java.util.LinkedHashMap<String,Object>();a.put("method",req.method());a.put("path",req.uri().getRawPath());a.put("sentAtMs",sent);a.put("receivedAtMs",seen);
+            a.put("requestIdHeader",req.headers().firstValue("X-Request-Id").orElseThrow());a.put("idempotencyKeySha256",digest(key));a.put("requestBody",body);
+            a.put("httpStatus",res.statusCode());a.put("responseIdHeader",res.headers().firstValue("X-Request-Id").orElse(null));a.put("responseBody",res.body());attempts.get(key).add(a);
+        }
+        void seal() throws Exception {
+            assertTrue(elapsed()<=CUTOFF_MS,"fixture did not complete its planned sends before cutoff");
+            // The fixture is the only issuer; every send completed synchronously. No more sends until after cutoff.
+            while(elapsed()<=CUTOFF_MS)Thread.sleep(Math.max(1,CUTOFF_MS+1-elapsed()));
+            var intents=attempts.entrySet().stream().map(e->Map.of("intentRef",e.getKey(),"attempts",e.getValue())).toList();
+            var log=json.writeValueAsString(Map.of("format","budget-transport-export-v1","rosterSha256",rosterSha,"completeThroughMs",elapsed(),"intents",intents));
+            Files.writeString(directory.resolve("capture.json"),log,java.nio.file.StandardOpenOption.CREATE_NEW);sealed=true;
+            System.out.println("OWNED_QUOTE_WIRE_CAPTURE_SHA256="+digest(log));
+        }
+    }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
         ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
@@ -2290,10 +2338,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,encoder,null,estimates,billing);
         startHttp();int fixed=count("economy_task_quote"),batchCount=count("economy_task_quote_batch"),money=count("economy_transaction");long balance=wallet(jdbc);
         var json=new ObjectMapper();String token=httpToken();try(var client=HttpClient.newHttpClient()){
+            var window=QuoteWireWindow.open(agent);
             class Post {tools.jackson.databind.JsonNode post(String id,String key,int status,String code)throws Exception{
-                var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","d77","data",Map.of("expectedTaskVersion","0","agentIds",List.of(id))));
-                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","d77").header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
-                var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());return env.path("data");
+                var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","d77-"+key,"data",Map.of("expectedTaskVersion","0","agentIds",List.of(id))));
+                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","d77-"+key).header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                long sent=window==null?0:window.elapsed();var response=client.send(request,HttpResponse.BodyHandlers.ofString());
+                if(window!=null)window.received(request,body,sent,window.elapsed(),response);
+                assertEquals(status,response.statusCode());var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());return env.path("data");
             }}var http=new Post();String key="same-intent";
             http.post("not-visible","denied",404,"QUOTE_NOT_FOUND");assertEquals(0,calls.get());
             http.post(agent,key,503,"QUOTE_FEATURE_UNAVAILABLE");assertEquals(batchCount,count("economy_task_quote_batch"));
@@ -2303,6 +2354,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertFalse(item.path("amount").isObject());assertFalse(item.path("quoteId").isString());assertEquals(3,calls.get());
             assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
             assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
+            if(window!=null)window.seal();
             var intents=ReflectionTestUtils.getField(ReflectionTestUtils.getField(independentQuoteController,"quotes"),"intents");
             ReflectionTestUtils.setField(intents,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(true));
             assertEquals(original,http.post(agent,key,200,"E0"));

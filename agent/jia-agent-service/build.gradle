@@ -1143,6 +1143,9 @@ tasks.register('taskQuoteRegression', Test) {
         systemProperty 'cyf.ownedPickupCodex', providers.gradleProperty('ownedPickupCodex').get()
         systemProperty 'ownedMeteredRuntime', providers.gradleProperty('ownedMeteredRuntime').get()
     }
+    if (providers.gradleProperty('exportQuoteWireFixture').getOrElse('false') == 'true') {
+        systemProperty 'cyf.quoteWireFixture', layout.buildDirectory.dir('test-results/taskQuoteRegression/owned-quote-wire').get().asFile.absolutePath
+    }
     if (providers.gradleProperty('exportSelectedProbeFixture').getOrElse('false') == 'true') {
         systemProperty 'cyf.selectedProbeFixture', layout.buildDirectory.file('test-results/taskQuoteRegression/selected-answer-probe.json').get().asFile.absolutePath
     }
