@@ -1,0 +1,41 @@
+package cn.jia.agent.security;
+
+import cn.jia.agent.service.AgentManagedSessionLookup.SessionFence;
+import java.util.*;
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+/** Guards the *persisted epoch*, not authentication or live toolchain state. Never accepts a token or contacts a runtime.
+ * A task transaction can already hold the task/identity; runtime ingress can hold installation/runtime before a task.
+ * Do not wait on those latter locks in reverse order. Only MySQL NOWAIT conflict is a stale observation. */
+@Component
+public final class PreparedRuntimeEpochFence {
+    public record Epoch(String agent,String provider,long binding,SessionFence fence) {}
+    private final JdbcTemplate db;
+    public PreparedRuntimeEpochFence(JdbcTemplate db){this.db=db;}
+    public boolean lock(String tenant,String client,Collection<Epoch> epochs){
+        if(!TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
+        var expected=new TreeMap<String,Epoch>();for(var epoch:epochs)if(expected.putIfAbsent(epoch.agent(),epoch)!=null)return false;
+        var ids=List.copyOf(expected.keySet());
+        for(int i=0;i<ids.size();i+=128){var part=ids.subList(i,Math.min(i+128,ids.size()));
+            var args=new ArrayList<Object>(List.of(tenant,client));args.addAll(part);
+            try {
+                var observed=db.query("""
+                    SELECT r.agent_id,r.owner_jiacn,r.binding_id,r.runtime_installation_id,r.runtime_host_id,r.runtime_instance_id,r.runtime_session_generation
+                    FROM agent_runtime r JOIN agent_runtime_v1_installation n ON n.installation_id=r.runtime_installation_id
+                    AND BINARY n.installation_id=BINARY r.runtime_installation_id AND BINARY n.tenant_id=BINARY r.tenant_id
+                    AND BINARY n.client_id=BINARY r.client_id AND BINARY n.canonical_agent_id=BINARY r.agent_id
+                    WHERE BINARY r.tenant_id=BINARY ? AND BINARY r.client_id=BINARY ? AND BINARY n.status='ACTIVE'
+                    AND BINARY r.status IN ('online','busy') AND r.binding_id IS NOT NULL AND r.runtime_session_generation>0 AND r.agent_id IN (
+                    """+String.join(",",Collections.nCopies(part.size(),"?"))+") FOR SHARE NOWAIT",(rs,k)->new Epoch(rs.getString(1),rs.getString(2),rs.getLong(3),
+                        new SessionFence(rs.getString(4),rs.getString(5),rs.getString(6),rs.getLong(7))),args.toArray());
+                if(observed.size()!=part.size()||observed.stream().anyMatch(e->!e.equals(expected.get(e.agent()))))return false;
+            }catch(DataAccessException failure){
+                for(Throwable cause=failure;cause!=null;cause=cause.getCause())if(cause instanceof java.sql.SQLException sql&&sql.getErrorCode()==3572)return false;
+                throw failure;
+            }
+        }return true;
+    }
+}

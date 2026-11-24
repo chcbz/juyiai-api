@@ -1389,6 +1389,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
         assertThrows(InjectedFailure.class,()->locked(()->{service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);throw new InjectedFailure();}));
         assertTrue(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
+        // A reader pins the journal row. The concurrent writer has already taken the task root but cannot replace the ticket.
+        try(var pool=Executors.newSingleThreadExecutor()){
+            var readFirst=new TransactionTemplate(manager).execute(tx->{assertTrue(service.lockMeasurement(fresh.ticket(),frozen,measured));
+                var next=pool.submit(()->service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids));awaitPreparationRowWait(next);return next;});
+            var unmeasured=readFirst.get(5,TimeUnit.SECONDS);
+            // Writer goes first; a late publish on another pooled transaction waits, then sees the new ticket and loses.
+            var late=locked(()->{service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);var old=pool.submit(()->service.recordMeasurement(unmeasured,agent,measured));
+                awaitPreparationRowWait(old);return old;});assertFalse(late.get(5,TimeUnit.SECONDS));
+        }
+        verifyPreparedEpochLock(agent,binding,measured.fence());
         service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
         assertFalse(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
 
@@ -1397,6 +1407,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
         assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
+    }
+    private void awaitPreparationRowWait(java.util.concurrent.Future<?> writer){
+        long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+        do{if(admin.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME='agent_task_native_preparation'",Integer.class,database)>0)return;
+            java.util.concurrent.locks.LockSupport.parkNanos(5_000_000);
+        }while(!writer.isDone()&&System.nanoTime()<until);fail("expected a real preparation row lock wait");
+    }
+    private void verifyPreparedEpochLock(String agent,long binding,AgentManagedSessionLookup.SessionFence fence)throws Exception{
+        for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
+        jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'test',?,UNHEX(?),1,'ACTIVE',?,?)",fence.runtimeInstallationId(),agent,"a".repeat(64),"a".repeat(64),TENANT,CLIENT);
+        jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation) VALUES(?,'test',?,?,?,?,'online',?,?,?,?)",agent,TENANT,CLIENT,OWNER,binding,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
+        var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);var epoch=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence);
+        java.util.function.Supplier<Boolean> exact=()->guard.lock(TENANT,CLIENT,List.of(epoch));assertTrue(locked(exact));
+        assertFalse(locked(()->guard.lock(TENANT,CLIENT,List.of(new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding+1,fence)))));
+        try(var writer=independent.getDataSource().getConnection()){
+            writer.setAutoCommit(false);try{try(var p=writer.prepareStatement("UPDATE agent_runtime SET runtime_session_generation=runtime_session_generation+1 WHERE agent_id=?")){p.setString(1,agent);assertEquals(1,p.executeUpdate());}
+                assertFalse(locked(exact),"NOWAIT: cannot wait on a session writer under the task lock");writer.commit();
+            }finally{writer.rollback();}}
+        assertFalse(locked(exact));
+        jdbc.update("UPDATE agent_runtime SET runtime_session_generation=? WHERE agent_id=?",fence.sessionGeneration(),agent);
+        jdbc.update("UPDATE agent_runtime_v1_installation SET status='REVOKED' WHERE installation_id=?",fence.runtimeInstallationId());assertFalse(locked(exact));
     }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
