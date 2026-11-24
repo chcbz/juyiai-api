@@ -6,6 +6,7 @@ import cn.jia.agent.service.usage.NativeExecutionUsageCostRecorder;
 import cn.jia.agent.service.usage.NativeCaptureAuthority;
 import tools.jackson.databind.ObjectMapper;
 import java.util.Map;
+import cn.jia.agent.service.RuntimeCaptureIntake;
 import cn.jia.core.entity.JsonRequest;
 import cn.jia.core.entity.JsonResult;
 import cn.jia.economy.usage.UsageCostConflict;
@@ -24,9 +25,9 @@ public final class NativeExecutionUsageCostController {
     private final AgentRuntimeAuthenticationService authentication;
     private static final ObjectMapper JSON=new ObjectMapper();
     private final NativeCaptureAuthority authority;
-    private final RuntimeCaptureHttp capture;
+    private final RuntimeCaptureIntake capture;
     public NativeExecutionUsageCostController(NativeExecutionUsageCostRecorder recorder,AgentRuntimeAuthenticationService authentication,
-            NativeCaptureAuthority authority,RuntimeCaptureHttp capture) {
+            NativeCaptureAuthority authority,RuntimeCaptureIntake capture) {
         this.authority=authority;this.capture=capture;
         this.recorder = recorder; this.authentication = authentication;
     }
@@ -37,18 +38,18 @@ public final class NativeExecutionUsageCostController {
         var data=request==null?null:request.data();
         if(data!=null&&!data.containsKey("schemaVersion")&&(data.containsKey("captureId")||data.containsKey("sourceRevision")||data.containsKey("receiptId")))return error(400,"USAGE_CAPTURE_INVALID");
         if(data==null||!data.containsKey("schemaVersion")) return record(executionId,runId,request==null?null:new JsonRequest<>(request.protocolVersion(),request.requestId(),JSON.convertValue(data,Request.class)),principal);
-        return capture.submit(executionId,runId,request,key,fence(principal,executionId,runId),(binding,snapshot,obs)->authority.matchesPlan(binding,snapshot));
+        return wire(capture.submit(executionId,runId,request,key,fence(principal,executionId,runId),(binding,snapshot,obs)->authority.matchesPlan(binding,snapshot)));
     }
-    private RuntimeCaptureHttp.Fence fence(Authentication principal,String execution,String run){
+    private RuntimeCaptureIntake.Fence fence(Authentication principal,String execution,String run){
         return op->authentication.withNativeFence(principal,()->op.apply(authority.resolve(AgentRuntimeAuthenticationService.requireProof(principal).scope(),execution,run)));
     }
     @GetMapping(value="/{executionId}/runs/{runId}/usage/receipts/{receiptId}",produces="application/json")
     public ResponseEntity<?> receipt(@PathVariable String executionId,@PathVariable String runId,@PathVariable String receiptId,Authentication principal){
-        return capture.receipt(fence(principal,executionId,runId),receiptId);
+        return wire(capture.receipt(fence(principal,executionId,runId),receiptId));
     }
     @GetMapping(value="/{executionId}/runs/{runId}/usage/records/{recordId}",produces="application/json")
     public ResponseEntity<?> current(@PathVariable String executionId,@PathVariable String runId,@PathVariable String recordId,Authentication principal){
-        return capture.current(fence(principal,executionId,runId),recordId);
+        return wire(capture.current(fence(principal,executionId,runId),recordId));
     }
     public ResponseEntity<JsonResult<Receipt>> record(String executionId, String runId,
             JsonRequest<Request> protocolRequest, Authentication principal) {
@@ -69,6 +70,10 @@ public final class NativeExecutionUsageCostController {
                         receipt.status().name(), receipt.costYuan() == null ? null : receipt.costYuan().toPlainString())));
     }
 
+    private static ResponseEntity<?> wire(RuntimeCaptureIntake.Reply r){
+        return ResponseEntity.status(r.status()).header("Cache-Control","private, no-store").body(r.code()==null
+                ? JsonResult.success(JSON.readTree(r.ackJson())) : JsonResult.failure(r.code(),"Usage evidence could not be recorded"));
+    }
     @ExceptionHandler(PersonalWorkspaceExecutionService.Failure.class)
     public ResponseEntity<JsonResult<Void>> unavailable(PersonalWorkspaceExecutionService.Failure ignored) {
         return error(404, "NATIVE_USAGE_EXECUTION_NOT_FOUND");

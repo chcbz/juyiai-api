@@ -1635,16 +1635,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         try {
             var mapper=recommendationSql.getMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
             var journal=proxy(new cn.jia.economy.service.impl.UsageCaptureJournalImpl(mapper,event->{}),cn.jia.economy.usage.UsageCaptureJournal.class);
-            var controller=new cn.jia.chat.api.ChatDiscussionCaptureController(access,new cn.jia.agent.api.RuntimeCaptureHttp(journal,null,null));
+            var controller=new cn.jia.chat.api.ChatDiscussionCaptureController(access,new cn.jia.agent.service.usage.RuntimeCaptureIntakeService(journal,null,null));
             var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller)
                     .setControllerAdvice(new cn.jia.core.config.ApiEnvelopeAdvice(),new cn.jia.core.config.ApiRequestEnvelopeAdvice())
                     .addFilters(new cn.jia.core.filter.RequestIdFilter()).build();
             String ctx=hash.substring(7),path="/internal/agent/chat/dispatches/"+run+"/turns/"+turn+"/contexts/"+ctx+"/captures/"+cap+"/usage";
             var codec=new ObjectMapper();var digest=(java.util.function.Function<Object,String>)cn.jia.agent.service.usage.NativeCaptureEvidence::digest;
-            var obs=new LinkedHashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","snapshotSha256",ctx,"executionConfigSha256","f".repeat(64),"engineVersion","fixture","rootSourceId","discussion"));
+            var obs=new java.util.LinkedHashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","snapshotSha256",ctx,"executionConfigSha256","f".repeat(64),"engineVersion","fixture","rootSourceId","discussion"));
             String record=digest.apply(List.of("USAGE_RECORD_V2",cap,"PLAN",List.of()));String ack=null;
             for(String policy:List.of("TEXT_MODEL_ONLY_V1","CHAT_SOURCE_UNVERIFIED_V1","CHAT_SOURCE_UNVERIFIED_V1")){
-                obs.put("coveragePolicyVersion",policy);var e=new LinkedHashMap<String,Object>();
+                obs.put("coveragePolicyVersion",policy);var e=new java.util.LinkedHashMap<String,Object>();
                 e.put("schemaVersion",2);e.put("executionId",turn);e.put("runId",run);e.put("captureId",cap);e.put("kind","PLAN");e.put("recordId",record);
                 e.put("sourceRevision","1");e.put("previousEvidenceSha256",null);e.put("observedAt",1);e.put("observation",obs);
                 String sha=digest.apply(e),id=digest.apply(java.util.Arrays.asList("USAGE_RECEIPT_V2",sha,null));e.put("evidenceSha256",sha);e.put("receiptId",id);e.put("expectedRevision",null);

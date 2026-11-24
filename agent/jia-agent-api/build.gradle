@@ -1,5 +1,6 @@
 dependencies {
     api project(':agent:jia-agent-core')
+    api project(':economy:jia-economy-api')
     api project(':common:jia-common-api')
     api platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}")
     api 'io.projectreactor:reactor-core'

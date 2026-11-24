@@ -63,7 +63,7 @@ class NativeExecutionUsageCostControllerTest {
         principal.setDetails(new AgentRuntimeAuthenticationService.Proof(principal.getPrincipal(),"installation","host",1,"digest",1,1));
         when(auth.withNativeFence(eq(principal),any())).thenAnswer(i->((Supplier<?>)i.getArgument(1)).get());
         var snapshots=mock(cn.jia.agent.dao.SkillExecutionDao.class);
-        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions,snapshots),new cn.jia.agent.api.RuntimeCaptureHttp(journal,null,null));
+        var ctrl=new NativeExecutionUsageCostController(mock(NativeExecutionUsageCostRecorder.class),auth,new cn.jia.agent.service.usage.NativeCaptureAuthority(executions,snapshots),new cn.jia.agent.service.usage.RuntimeCaptureIntakeService(journal,null,null));
         var json=new ObjectMapper();try(var in=getClass().getResourceAsStream("/usage/usage-capture-v2-fixtures.json")){
             var m=json.readTree(in).get("cases").get(0).get("messages").get(0);var d=m.get("request").get("body").get("data");
             String exec=d.get("executionId").asText(),run=d.get("runId").asText(),receipt=d.get("receiptId").asText();

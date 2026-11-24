@@ -122,7 +122,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var cost=transactional(new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class),json),UsageCostService.class,manager);
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);
         var recovery=new NativeCaptureRecovery(journal,settle,scope,schedules,manager);
-        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions,skills),new cn.jia.agent.api.RuntimeCaptureHttp(journal,settle,recovery));
+        var ctrl=new NativeExecutionUsageCostController(null,auth,new NativeCaptureAuthority(executions,skills),new cn.jia.agent.service.usage.RuntimeCaptureIntakeService(journal,settle,recovery));
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
         var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         if(measured!=null){
