@@ -1871,12 +1871,14 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             return Map.of("inputRef",r.inputRef(),"sha256",r.sha256(),"carrier",r.carrier(),"delivery",r.delivery());
         }).toList());
         String digest=plainSha(skillJson(envelope));if(!same("manifest_"+digest,manifestId))throw failure(Reason.BAD_REQUEST);envelope.put("resultDigest",digest);envelope.put("manifestId",manifestId);
+        // MySQL JSON can reformat objects on read. Compare complete canonical envelopes, not storage spelling.
+        String canonicalEnvelope=skillJson(envelope);
         var preparation=withConversationRoot(scope,executionId,runId,true,true,false,execution->{
             if(!Objects.equals(6,execution.getExecutionProtocolVersion()))throw failure(Reason.NOT_FOUND);
             requireConversationFence(scope,execution,command.fence(),"RESULT_COMMITTED".equals(execution.getExecutionState()));
             var skill=skillRow(skillOwner(scope),execution.getExecutionId(),true);requireSkillSnapshot(skill,execution.getExecutionId(),command.snapshotDigest());
             if(skill.getResultManifestJson()!=null) {
-                if(!same(skill.getResultManifestJson(),skillJson(envelope)))throw failure(Reason.OUTPUT_CONFLICT);
+                if(!same(skillJson(skillMap(skill.getResultManifestJson())),canonicalEnvelope))throw failure(Reason.OUTPUT_CONFLICT);
                 return new ArrayList<PreparedNativeOutput>();
             }
             if(nativeTurnFailure(skill.getLastErrorCode())||!Set.of("RUNNING","WAITING_PROVIDER","RESULT_UNKNOWN","READY").contains(skill.getPhase()))throw failure(Reason.TASK_CONFLICT);
@@ -1912,7 +1914,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             requireConversationFence(scope,execution,command.fence(),"RESULT_COMMITTED".equals(execution.getExecutionState()));
             var skill=skillRow(skillOwner(scope),execution.getExecutionId(),true);requireSkillSnapshot(skill,execution.getExecutionId(),command.snapshotDigest());
             if(skill.getResultManifestJson()!=null) {
-                if(!same(skill.getResultManifestJson(),skillJson(envelope))||!"RESULT_COMMITTED".equals(execution.getExecutionState()))throw failure(Reason.OUTPUT_CONFLICT);
+                if(!same(skillJson(skillMap(skill.getResultManifestJson())),canonicalEnvelope)||!"RESULT_COMMITTED".equals(execution.getExecutionState()))throw failure(Reason.OUTPUT_CONFLICT);
                 return new cn.jia.agent.service.SkillExecutionService.ResultReceipt(manifestId,execution.getExecutionState(),skill.getPhase(),digest);
             }
             if(nativeTurnFailure(skill.getLastErrorCode())||!Set.of("RUNNING","WAITING_PROVIDER","RESULT_UNKNOWN","READY").contains(skill.getPhase()))throw failure(Reason.TASK_CONFLICT);
@@ -1926,7 +1928,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             }
             String phase=skill.getPhase();long version=skill.getVersion();
             if("READY".equals(phase))throw failure(Reason.TASK_CONFLICT);
-            skill.setPhase("RESULT_READY").setResultManifestJson(skillJson(envelope));skillCas(skill,phase,version);
+            skill.setPhase("RESULT_READY").setResultManifestJson(canonicalEnvelope);skillCas(skill,phase,version);
             skill.setPhase("ARCHIVING");skillCas(skill,"RESULT_READY",skill.getVersion());
             execution.setExecutionState("RESULT_COMMITTED");executions.update(execution);
             signalProjectionAfterCommit(execution);
