@@ -1131,11 +1131,42 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     es.index(TENANT,CLIENT,OWNER,id,ability);expected.add(id);
                 }
                 es.refresh();measureRecommendationHttp(task,expected,es.encodes);
+                if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
+                    assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
+                    checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
+                    jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('foreign-rec','different-owner',?,?)",TENANT,CLIENT);
+                    checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");assertEquals(before,es.encodes.get());
+                }
             }
         }
     }
     /** Called only inside the isolated loopback HTTP/MySQL/ES fixture. The initial query vector uses
      * the fixture encoder; cold refers to the API vector cache, not a real provider or cold OS. */
+    private void checkRecError(String task,int status,String code)throws Exception {
+        String id="rec-error";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend"))
+                .header("Authorization","Bearer "+httpToken()).header("X-Request-Id",id).header("Content-Type","application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"rec-error\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
+        try(var client=HttpClient.newHttpClient()) {var r=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,r.statusCode());var env=new ObjectMapper().readTree(r.body());assertEquals(code,env.path("code").asText());assertTrue(env.at("/data/recommendations").isMissingNode());}
+    }
+    // Test-owned mysqld only. Read counters from the admin schema outside each timed request group.
+    // No statement text, task data, individual event history, credentials or parameters are logged.
+    private record RecSql(long statements,long examined,long sent,long statementPicos,long roots,long waits,long waitMillis){
+        RecSql minus(RecSql old){return new RecSql(statements-old.statements,examined-old.examined,sent-old.sent,statementPicos-old.statementPicos,roots-old.roots,waits-old.waits,waitMillis-old.waitMillis);}
+    }
+    private RecSql readRecSql(){
+        assertEquals(1,admin.queryForObject("SELECT @@performance_schema",Integer.class));
+        var values=admin.queryForObject("""
+                SELECT COALESCE(SUM(COUNT_STAR),0),COALESCE(SUM(SUM_ROWS_EXAMINED),0),COALESCE(SUM(SUM_ROWS_SENT),0),
+                    COALESCE(SUM(SUM_TIMER_WAIT),0),COALESCE(SUM(CASE WHEN DIGEST_TEXT LIKE '%`agent_task_meta`%' AND DIGEST_TEXT LIKE '%FOR UPDATE%' THEN COUNT_STAR ELSE 0 END),0)
+                FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %'
+                """,(rs,n)->new long[]{rs.getLong(1),rs.getLong(2),rs.getLong(3),rs.getLong(4),rs.getLong(5)},database);
+        var lock=admin.queryForObject("""
+                SELECT MAX(CASE WHEN VARIABLE_NAME='INNODB_ROW_LOCK_WAITS' THEN CAST(VARIABLE_VALUE AS UNSIGNED) END),
+                       MAX(CASE WHEN VARIABLE_NAME='INNODB_ROW_LOCK_TIME' THEN CAST(VARIABLE_VALUE AS UNSIGNED) END)
+                FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('INNODB_ROW_LOCK_WAITS','INNODB_ROW_LOCK_TIME')
+                """,(rs,n)->{var count=rs.getObject(1);var millis=rs.getObject(2);assertNotNull(count);assertNotNull(millis);return new long[]{rs.getLong(1),rs.getLong(2)};});
+        return new RecSql(values[0],values[1],values[2],values[3],values[4],lock[0],lock[1]);
+    }
     private void measureRecommendationHttp(String task, java.util.Set<String> expected, java.util.concurrent.atomic.AtomicInteger encodes) throws Exception {
         int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
         try(var client=HttpClient.newHttpClient()){
@@ -1152,6 +1183,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
+                var sqlBefore=readRecSql();
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1162,6 +1194,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     }
                 }
                 times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
+                var delta=readRecSql().minus(sqlBefore);
+                System.out.printf(java.util.Locale.ROOT,"RECOMMEND_MYSQL candidates=%d concurrency=%d n=%d selects=%d rowsExamined=%d rowsSent=%d sumSelectMs=%.3f matchingRootLocks=%d rowWaits=%d sumRowWaitMs=%d%n",expected.size(),concurrency,times.size(),delta.statements(),delta.examined(),delta.sent(),delta.statementPicos()/1e9,delta.roots(),delta.waits(),delta.waitMillis());
+                assertTrue(delta.statements()>0 && delta.examined()>0 && delta.sent()>0 && delta.statementPicos()>0,"missing statement observations");assertTrue(delta.waits()>=0 && delta.waitMillis()>=0);
                 assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
             }
         }

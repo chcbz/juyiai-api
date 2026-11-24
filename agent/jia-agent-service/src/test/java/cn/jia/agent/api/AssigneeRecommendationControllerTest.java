@@ -120,6 +120,12 @@ class AssigneeRecommendationControllerTest {
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("BAD_REQUEST"));
         verifyNoInteractions(service);
     }
+    @Test void policyTaskLookupLossIsNotAnInfrastructureFailure() throws Exception {
+        when(service.recommend(any(),anyString(),any())).thenThrow(new cn.jia.agent.service.AgentTaskExecutionGrantException(
+                cn.jia.agent.service.AgentTaskExecutionGrantException.Reason.NOT_FOUND,"private"));
+        mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("RECOMMENDATION_NOT_FOUND")).andExpect(jsonPath("$.data.recommendations").doesNotExist());
+    }
     @Test void taskRootAccessLossIsNotDisclosedAsProviderFailure() throws Exception {
         when(service.recommend(any(), anyString(), any())).thenThrow(new cn.jia.agent.exception.AgentTaskCollaborationException(
                 cn.jia.agent.exception.AgentTaskCollaborationException.Reason.NOT_FOUND, "internal"));

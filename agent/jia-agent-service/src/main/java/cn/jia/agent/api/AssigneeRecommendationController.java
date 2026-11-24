@@ -52,7 +52,18 @@ public final class AssigneeRecommendationController {
     }
     @ExceptionHandler(AgentServiceImpl.AgentBizException.class)
     public ResponseEntity<JsonResult<Void>> task(AgentServiceImpl.AgentBizException error) {
-        return failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+        // Only the task's owner-scoped lookup proves it is absent/invisible. A candidate
+        // projection failure after that lookup must not be translated to a missing task.
+        return cn.jia.agent.common.AgentErrorConstants.TASK_NOT_FOUND.equals(error.getCode()) ? missing() : unavailable(error);
+    }
+    private ResponseEntity<JsonResult<Void>> missing() { return failure(new Failure(404,"RECOMMENDATION_NOT_FOUND")); }
+    @ExceptionHandler(cn.jia.agent.service.AgentTaskExecutionGrantException.class)
+    public ResponseEntity<JsonResult<Void>> policy(cn.jia.agent.service.AgentTaskExecutionGrantException error) {
+        return switch(error.reason()) {
+            case NOT_FOUND -> missing(); // candidate policy rechecks task ownership
+            case BAD_REQUEST -> failure(new Failure(400,"BAD_REQUEST"));
+            default -> unavailable(error);
+        };
     }
     @ExceptionHandler(cn.jia.agent.exception.AgentTaskCollaborationException.class)
     public ResponseEntity<JsonResult<Void>> lockedTask(cn.jia.agent.exception.AgentTaskCollaborationException error) {
