@@ -41,6 +41,12 @@ public final class TaskEstimateEvaluation {
         return totals.scores();
     }
 
+    /** Descriptive error only for independently paired, unique whole tasks. Not coverage or a calibration grant. */
+    public static Scores pairedErrors(Collection<Prediction> points){
+        var seen=new HashSet<String>();var totals=new Totals();
+        for(var point:points){if(point.predictedWen()==null||!seen.add(point.task()))throw new IllegalArgumentException("Expected one priced outcome per task");totals.add(point,1);}
+        return totals.scores();
+    }
     // A family drawn twice contributes each of its whole tasks twice; never materialize duplicate rows.
     static final class Totals {
         long eligible,quoted,under,zero;

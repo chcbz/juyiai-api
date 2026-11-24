@@ -144,6 +144,35 @@ public final class FrozenCalibrationStudy {
         return new ConfirmedPoint(new TaskEstimateEvaluation.Prediction(original.taskId(),actual.yuan(),offer.wen()),
                 new TaskCalibrationObservations.Frozen(artifact.sha256(),artifact.json()));
     }
+    public record ObservedRow(String intentRef,String taskId,String agentId,String offerSha256,String reason,String wholeTaskTruthSha256){}
+    public record ObservedRoster(String format,String observationsSha256,String truthSha256,String manifestSha256,String referenceSha256,List<ObservedRow> rows){}
+    private record Outcome(String schema,String forecastSha256,cn.jia.economy.usage.ConfirmedSampleEvidence.Assessment assessment,List<ProjectedTaskOperation> operations){}
+    public record ObservedErrors(long candidateRequests,long pricedRequests,long missingTruthRequests,long pairedRequests,TaskEstimateEvaluation.Scores uniqueTaskErrors){}
+    private static boolean pin(String value){return value!=null&&value.matches("[0-9a-f]{64}");}
+    /** Consume the complete reconciled roster, with externally trusted Economy outcome pins. No DB access, calibration or activation. */
+    public ObservedErrors scoreObserved(EconomyScope scope,String owner,String rosterSha,Function<String,String> objects){
+        var roster=read(objects,rosterSha,ObservedRoster.class);
+        if(!"budget-evaluation-roster-v1".equals(roster.format())||!pin(roster.observationsSha256())||!pin(roster.truthSha256())||!pin(roster.manifestSha256())||!pin(roster.referenceSha256())||roster.rows().isEmpty())throw new IllegalArgumentException("Invalid observation roster");
+        var book=reference(read(objects,roster.referenceSha256(),Book.class));var pairs=new HashMap<String,TaskEstimateEvaluation.Prediction>();
+        var origins=new HashMap<String,List<String>>();var rows=new HashSet<List<String>>();long quoted=0,missing=0,paired=0;
+        for(var row:roster.rows()){
+            if(!rows.add(List.of(row.intentRef(),row.agentId())))throw new IllegalArgumentException("Repeated observation row");
+            boolean measured="MEASURED".equals(row.reason());
+            if(measured?!pin(row.wholeTaskTruthSha256()):row.wholeTaskTruthSha256()!=null||!Set.of("NOT_EXECUTED","NOT_ACCEPTED","CANCELLED","USAGE_INCOMPLETE","REFERENCE_PRICE_MISSING","EVIDENCE_UNAVAILABLE").contains(row.reason()))throw new IllegalArgumentException("Ambiguous observation outcome");
+            if(!measured)missing++;if(row.offerSha256()==null)continue;quoted++;
+            var offer=read(objects,row.offerSha256(),OfferedHoldout.class);var task=new Task(scope,owner,row.taskId());
+            if(!task.equals(offer.original())||!row.agentId().equals(offer.agentId())||!roster.referenceSha256().equals(offer.referenceSha()))throw new IllegalArgumentException("Wrong observed offer");
+            if(!measured)continue;paired++;
+            var origin=List.of(row.offerSha256(),row.wholeTaskTruthSha256());var old=origins.putIfAbsent(task.taskId(),origin);
+            if(old!=null){if(!old.equals(origin))throw new IllegalArgumentException("Conflicting outcomes for one task");continue;}
+            var end=read(objects,row.wholeTaskTruthSha256(),Outcome.class);
+            if(!"confirmed-holdout-outcome-v1".equals(end.schema())||!row.offerSha256().equals(end.forecastSha256())||end.assessment().verdict()!=cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.MATCHED
+                    ||end.assessment().members()<=0||end.operations().stream().map(ProjectedTaskOperation::memberRevision).distinct().count()!=end.assessment().members())throw new IllegalArgumentException("Incomplete or foreign whole-task evidence");
+            var actual=MeasuredTaskRepricing.reprice(book,end.operations().stream().map(op->op.fact(json)).toList());
+            pairs.put(task.taskId(),new TaskEstimateEvaluation.Prediction(task.taskId(),actual.yuan(),offer.wen()));
+        }
+        return new ObservedErrors(rows.size(),quoted,missing,paired,TaskEstimateEvaluation.pairedErrors(pairs.values()));
+    }
     private MeasuredTaskRepricing.Reference reference(Book book){
         var rates=new HashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
         for(var r:book.rates()){

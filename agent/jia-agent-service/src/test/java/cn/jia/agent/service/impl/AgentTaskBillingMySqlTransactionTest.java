@@ -939,6 +939,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_usage_capture_dispatch_group SET route_sha256=REPEAT('3',64) WHERE capture_pk=(SELECT id FROM economy_usage_capture WHERE execution_id='exec64')");
         assertEquals("MIXED_EXECUTION_CONFIG",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());
         var independentPoint=study.outcomePoint(BILLING_TASK,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder);
+        var sealed=independentPoint.source();var pointObjects=new java.util.HashMap<>(artifacts);pointObjects.put(sealed.sha256(),sealed.json());
+        var rows=List.of(new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRow("original",TASK,AGENT,forecast.sha256(),"MEASURED",sealed.sha256()),
+                new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRow("duplicate-observation",TASK,AGENT,forecast.sha256(),"MEASURED",sealed.sha256()),
+                new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRow("no-response","unquoted",AGENT,null,"NOT_EXECUTED",null));
+        var roster=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.ObservedRoster("budget-evaluation-roster-v1","1".repeat(64),"2".repeat(64),"3".repeat(64),book.sha256(),rows));pointObjects.put(roster.sha256(),roster.json());
+        var errors=study.scoreObserved(BILLING_TASK.scope(),OWNER,roster.sha256(),pointObjects::get);assertEquals(3,errors.candidateRequests());assertEquals(1,errors.missingTruthRequests());assertEquals(2,errors.pairedRequests());
+        var metric=errors.uniqueTaskErrors();assertEquals(1,metric.positiveQuoted());assertEquals(1,metric.underestimates());
+        var ratio=new cn.jia.economy.pricing.TaskEstimateEvaluation.Ratio(new BigDecimal("0.40"),new BigDecimal("0.65"));assertEquals(0,ratio.compareTo(metric.wape()));assertEquals(0,ratio.compareTo(metric.p90Relative()));
+        assertThrows(IllegalArgumentException.class,()->study.scoreObserved(BILLING_TASK.scope(),"foreign",roster.sha256(),pointObjects::get));
         assertEquals(point.point(),independentPoint.point());assertEquals(65,new ObjectMapper().readTree(independentPoint.source().json()).path("operations").size());
         assertThrows(IllegalArgumentException.class,()->study.outcomePoint(query,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder));
         assertNull(sampleEvidence.measureOutcome(query,before.quoteId(),AGENT,group.digest(),before.featureSha(),fixtureDecoder));
