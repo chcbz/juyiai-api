@@ -18,6 +18,37 @@ class CapabilityIndexElasticsearchTest {
         return CapabilityDocuments.declared("0","isolated-client","owner",id,List.of(text),identity);
     }
     private static TaskFeatureEncoder.Vector vector(TaskFeatureEncoder.Identity identity,int dimension){float[] values=new float[1024];values[dimension]=1;return new TaskFeatureEncoder.Vector(identity,values);}
+    /** Component benchmark; no simulated gateway delay. Includes all retrieval outcomes, not HTTP/DB time. */
+    private static void measureSearch(CapabilitySearch search,CapabilityIndexWriter writer,ElasticsearchClient es) throws Exception {
+        var docs=new ArrayList<CapabilityDocuments.Doc>();var ids=new java.util.LinkedHashSet<String>();var v=vector(ID,0);
+        for(int i=0;i<108;i++){
+            String id="load-"+i;ids.add(id);var doc=abilities(id,ID,"合同审查 "+i).getFirst().doc();docs.add(doc);writer.publishVector(doc,v);
+        }
+        es.indices().refresh(b->b.index(CapabilityIndexWriter.GENERATION));
+        int invalid=0;
+        for(int n:List.of(1,108))for(int concurrency:List.of(1,5,10)){
+            var subset=List.copyOf(docs.subList(0,n));var allowed=Set.copyOf(ids.stream().limit(n).toList());
+            var samples=new ArrayList<Long>();int degraded=0,errors=0;int rounds=30/concurrency;
+            try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
+                for(int round=0;round<rounds;round++){
+                    var ready=new java.util.concurrent.CountDownLatch(concurrency);var go=new java.util.concurrent.CountDownLatch(1);
+                    record Sample(long nanos,boolean degraded,boolean error){}var pending=new ArrayList<java.util.concurrent.Future<Sample>>();
+                    for(int lane=0;lane<concurrency;lane++)pending.add(pool.submit(()->{
+                        ready.countDown();go.await();long start=System.nanoTime();try{
+                            var r=search.retrieve(allowed,subset,"合同审查",v);
+                            long elapsed=System.nanoTime()-start;
+                            return new Sample(elapsed,!"HYBRID".equals(r.mode()),r.rows().size()!=n || !allowed.equals(r.rows().stream().map(CandidateRankFusion.Ranked::agentId).collect(java.util.stream.Collectors.toSet())));
+                        }catch(RuntimeException failure){return new Sample(System.nanoTime()-start,false,true);}
+                    }));
+                    ready.await();go.countDown();for(var f:pending){var s=f.get();samples.add(s.nanos);if(s.degraded)degraded++;if(s.error)errors++;}
+                }
+            }
+            samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"CAPABILITY_ES_LOAD candidates=%d concurrency=%d count=%d degraded=%d errors=%d p50ms=%.3f p95ms=%.3f maxms=%.3f%n",
+                n,concurrency,samples.size(),degraded,errors,samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6);
+            invalid+=errors+degraded;
+        }
+        assertEquals(0,invalid,"see all six measured groups above");
+    }
     @Test void realPitRecallVersionCoverageAndWithdrawnAuthority() throws Exception {
         int port=Integer.parseInt(System.getProperty("cyf.capabilityEsPort"));String cluster=System.getProperty("cyf.capabilityEsCluster");
         assertTrue(port>=1024&&port<=65535&&port!=9200&&port!=9300);assertTrue(cluster.matches("cyf-rb-fixture-[a-f0-9]{32}"));
@@ -46,6 +77,7 @@ class CapabilityIndexElasticsearchTest {
             var next=new TaskFeatureEncoder.Identity("fixture-2",ID.model(),1024);var newDoc=abilities("a",next,"合同审查").getFirst().doc();
             assertFalse(writer.encoded(newDoc));assertEquals("UNAVAILABLE",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",vector(next,0)).mode());
             writer.publishText(newDoc);es.indices().refresh(b->b.index(index));assertEquals("LEXICAL_ONLY",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",vector(next,0)).mode());
+            if(Boolean.getBoolean("cyf.capabilityEsLoad"))measureSearch(search,writer,es);
         }
     }
 }
