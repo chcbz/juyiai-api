@@ -1580,9 +1580,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             const restored=new PersistentChatInbox(opts);assert.equal(restored.initialize().pending,1);assert.equal((await restored.accept(m)).duplicate,true);
             // Fixture at the model boundary, not at the action-final or dispatch boundary.
             const {runFastChat}=await import('./agent-client.mjs');const item=restored.claim(first.key);assert.ok(item);
+            const {measureCodexAppServerBinary}=await import('./app-server-adapter.mjs');const {skillDigest}=await import('./skill-executor.mjs');
+            const schema=measureCodexAppServerBinary({codexBin:process.env.CYF_CODEX_BIN,codexHome:process.env.TMPDIR});
+            let chatPhase;
             const frames=[];let turns=0;const result=await runFastChat({...profile,chatEngine:'app-server',chatSandbox:'read-only',chatToolPolicy:'read-only-constrained'},m,{
-              chatWorkdir:process.env.TMPDIR,adapter:{readback:{initialize:{},schema:{measured:true}},
-                startOrResumeThread:async()=>({threadId:'quote-thread'}),runTurn:async({threadId,policy,onAccepted})=>{
+              chatWorkdir:process.env.TMPDIR,adapter:{readback:{initialize:{},schema},
+                startOrResumeThread:async(prior,settings)=>{assert.equal(turns,0);assert.ok(settings.developerInstructions.length>0);assert.equal(settings.config.network,false);
+                  chatPhase={taskId:m.taskId,conversationId:m.conversationId,binarySha256:schema.binarySha256,instructionsSha256:skillDigest(settings.developerInstructions)};return {threadId:'quote-thread'};},runTurn:async({threadId,policy,onAccepted})=>{
                   assert.equal(threadId,'quote-thread');const actionSchema=policy.outputSchema.properties.action.anyOf;
                   assert.ok(actionSchema.some(v=>v.properties?.actionId?.enum?.includes(descriptor.actionId)));
                   turns++;onAccepted({threadId,turnId:'quote-turn'});return {threadId,turnId:'quote-turn',content:JSON.stringify(outcome),finishReason:'completed'};}},
@@ -1590,10 +1594,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
               sendProtocolFn:(type,payload)=>{frames.push(payload);return true;}});
             assert.equal(turns,1);assert.equal(result.serverPersistence,'unconfirmed');assert.equal(frames.length,1);
             fs.writeFileSync(process.env.TMPDIR+'/final.json',JSON.stringify(frames[0]));
-            const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId}));
-            """);pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString()));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId,chatPhase}));
+            """);pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString(),"CYF_CODEX_BIN",System.getProperty("cyf.ownedPickupCodex")));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(codec.writeValueAsBytes(frame));}assertTrue(proc.waitFor(20,TimeUnit.SECONDS));assertEquals(0,proc.exitValue());}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
             var file=temp.resolve("receipt.json");assertTrue(Files.size(file)<2048);var receipt=codec.readTree(Files.readAllBytes(file));var ack=receipt.path("ack");
+            quotedChatPhase=codec.convertValue(receipt.path("chatPhase"),Map.class);
             assertEquals(outgoing.turn().getContextDigest(),receipt.path("context").asText());assertEquals(row.getTurnId(),receipt.path("turn").asText());assertEquals(row.getDispatchId(),ack.path("dispatchId").asText());assertEquals(row.getEventId(),ack.path("messageId").asText());
             for(int i=0;i<2;i++)assertTrue(tx.execute(st->outbox.acknowledgeHostedDispatch(TENANT,outgoing.executorOwner(),CLIENT,ack.path("agentId").asText(),ack.path("dispatchId").asText(),ack.path("messageId").asText(),System.currentTimeMillis())).booleanValue());
             assertEquals("SENT",independent.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?",String.class,row.getEventId()));
@@ -1624,6 +1629,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));
     }
 
+    private Map<String,Object> quotedChatPhase; // This test instance owns one quoted discussion. No production log or store.
     private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
         for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
         String agent=created.targetAgentId(),install="rti_"+"2".repeat(32),host="pickup-host",boot="pickup-boot";
@@ -1658,9 +1664,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var peer=Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge/test/fixtures/quoted-native-pickup.mjs");assertTrue(Files.isRegularFile(peer));assertTrue(Files.isExecutable(Path.of(cli)));
                 var temp=Files.createTempDirectory("quoted-pickup-");var out=temp.resolve("result.json");
                 try{var pb=new ProcessBuilder("node",peer.toString());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString(),"CYF_CODEX_BIN",cli,"CYF_PICKUP_RESULT",out.toString()));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-                    var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(json.writeValueAsBytes(Map.of("wire",cmd,"snapshot",inputs,"leaseVersion",lease.path("version"),"agent",agent)));}
+                    var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(json.writeValueAsBytes(Map.of("wire",cmd,"snapshot",inputs,"leaseVersion",lease.path("version"),"agent",agent,"chatPhase",quotedChatPhase)));}
                         assertTrue(proc.waitFor(60,TimeUnit.SECONDS),"owned native pickup timed out");assertEquals(0,proc.exitValue(),"owned native pickup");}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
                     assertTrue(Files.size(out)<8192);var actual=json.readTree(Files.readAllBytes(out));assertEquals(created.executionId(),actual.path("executionId").asText());assertEquals(created.runId(),actual.path("runId").asText());assertEquals(created.snapshotDigest(),actual.path("snapshotSha256").asText());assertEquals(2,actual.path("calls").asInt());
+                    var phases=actual.path("phaseComparison");assertEquals(quotedChatPhase.get("binarySha256"),phases.path("binarySha256").asText());assertEquals(quotedChatPhase.get("instructionsSha256"),phases.path("chatInstructions").asText());
+                    assertTrue(phases.path("nativeInstructions").asText().matches("[a-f0-9]{64}"));assertNotEquals(phases.path("nativeInstructions"),phases.path("chatInstructions"));assertEquals(0,phases.path("preflightProviderCalls").asInt(-1));
+                    System.out.printf("QUOTED_PHASE_PROBE binary=%s chatInstructions=%s nativeInstructions=%s preflightProviderCalls=0%n",phases.path("binarySha256").asText(),phases.path("chatInstructions").asText(),phases.path("nativeInstructions").asText());
                     var body=(tools.jackson.databind.node.ObjectNode)actual.path("payload").deepCopy();body.remove("schemaVersion");body.put("snapshotSha256",created.snapshotDigest());body.set("fence",json.valueToTree(Map.of("version","1","token",lease.path("token").asText())));
                     String manifest=actual.path("manifestId").asText(),route=run+"/result-commits/"+manifest;var receipt=device.call(route,body,200);assertEquals(manifest,receipt.path("manifestId").asText());assertEquals("RESULT_COMMITTED",receipt.path("state").asText());assertEquals("ARCHIVING",receipt.path("phase").asText());
                     assertEquals("native pickup fixture",independent.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(result_manifest_json,'$.data.answer')) FROM agent_skill_execution WHERE execution_id=?",String.class,created.executionId()));assertEquals(receipt,device.call(route,body,200));
