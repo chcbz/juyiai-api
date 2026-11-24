@@ -1131,6 +1131,48 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         double ms(String name){return nanos.getOrDefault(name,new java.util.concurrent.atomic.LongAdder()).sum()/1e6;}
         void reset(){calls.clear();nanos.clear();}
     }
+    @Test void quoteCatalogueMeasuresRealLockedInputsAndRejectsConcurrentTrash() throws Exception {
+        for(String schema:List.of("agent-personal-workspace-v1.sql","agent-personal-workspace-v1_11-task-links.sql"))
+            new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+schema)).execute(jdbc.getDataSource());
+        var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
+        for(var m:List.of(PersonalWorkspaceFileMapper.class,PersonalWorkspaceVersionMapper.class,PersonalWorkspaceOperationMapper.class,PersonalWorkspaceTaskFileLinkMapper.class))config.addMapper(m);
+        var factory=new MybatisSqlSessionFactoryBean();factory.setDataSource(jdbc.getDataSource());factory.setConfiguration(config);
+        var sql=new SqlSessionTemplate(factory.getObject());
+        var files=new PersonalWorkspaceDaoImpl(sql.getMapper(PersonalWorkspaceFileMapper.class),sql.getMapper(PersonalWorkspaceVersionMapper.class),sql.getMapper(PersonalWorkspaceOperationMapper.class));
+        var links=new PersonalWorkspaceTaskLinkDaoImpl(sql.getMapper(PersonalWorkspaceTaskFileLinkMapper.class));var profile=new QuoteProfile();
+        ReflectionTestUtils.setField(assignment,"taskLinks",profile.wrap(PersonalWorkspaceTaskLinkDao.class,links,java.util.Set.of("list","lockBySelection")));
+        ReflectionTestUtils.setField(assignment,"workspace",profile.wrap(PersonalWorkspaceDao.class,files,java.util.Set.of("lockFile","findVersion")));
+        java.util.function.Supplier<AgentTaskExecutionGrantService.InputCatalogue> read=()->locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK));
+        for(int i=0;i<33;i++) {
+            String id="file-"+i;
+            jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,?,'UPLOAD',?,'DOCUMENT','ACTIVE',1,1,1,?,?)",id,OWNER,id,TENANT,CLIENT);
+            jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,1,?,'text/plain',7,?,'private:v',1,?,?)",id,OWNER,id,"b".repeat(64),TENANT,CLIENT);
+            jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",id,OWNER,TASK,id,TENANT,CLIENT);
+            if(i!=0 && i!=31) continue;
+            int n=i+1;var expected=read.get();assertEquals(n,expected.inputs().size());profile.reset();long[] ms=new long[30];
+            for(int k=0;k<ms.length;k++){long t=System.nanoTime();assertEquals(expected,read.get());ms[k]=System.nanoTime()-t;}
+            java.util.Arrays.sort(ms);for(String method:List.of("lockFile","findVersion","lockBySelection"))assertEquals(30L*n,profile.count(method));
+            assertEquals(30,profile.count("list"));
+            System.out.printf(java.util.Locale.ROOT,"D75 catalogue n=%d rounds=30 txnP95Ms=%.3f listMs=%.3f fileLockMs=%.3f relationLockMs=%.3f versionMs=%.3f%n",n,ms[28]/1e6,profile.ms("list"),profile.ms("lockFile"),profile.ms("lockBySelection"),profile.ms("findVersion"));
+        }
+        assertEquals(AgentTaskExecutionGrantException.Reason.BAD_REQUEST,assertThrows(AgentTaskExecutionGrantException.class,read::get).reason());
+        jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-32'");
+        try(var writer=independent.getDataSource().getConnection();var worker=Executors.newSingleThreadExecutor()) {
+            writer.setAutoCommit(false);
+            try {
+                try(var stmt=writer.createStatement()){assertEquals(1,stmt.executeUpdate("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));}
+                var pending=worker.submit(()->assertThrows(AgentTaskExecutionGrantException.class,read::get).reason());
+                long start=System.nanoTime();boolean waiting=false;
+                while(System.nanoTime()-start<TimeUnit.SECONDS.toNanos(5)) {
+                    if(admin.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME='agent_personal_workspace_file'",Integer.class,database)>0){waiting=true;break;}
+                    if(pending.isDone())break;Thread.sleep(5);
+                }
+                assertTrue(waiting,"no observed row-lock wait on this fixture's workspace file");writer.commit();
+                assertEquals(AgentTaskExecutionGrantException.Reason.NOT_FOUND,pending.get(5,TimeUnit.SECONDS));
+            } finally {writer.rollback();}
+        }
+        assertEquals(0,count("economy_transaction"));
+    }
     private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}
     private QuoteWrites readQuoteWrites(String task){
         var w=admin.queryForObject("""
