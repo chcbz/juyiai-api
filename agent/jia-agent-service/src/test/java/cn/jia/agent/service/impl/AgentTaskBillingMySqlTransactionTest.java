@@ -946,7 +946,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1,sample_state='WAITING_EVIDENCE'");
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='exec64'");
         assertEquals("USAGE_INCOMPLETE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
-        assertEquals("USAGE_INCOMPLETE",assertThrows(MeasuredTaskRepricing.Unavailable.class,()->study.outcomePoint(BILLING_TASK,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder)).getMessage());
+        assertEquals("USAGE_INCOMPLETE",assertThrows(cn.jia.economy.service.impl.FrozenCalibrationStudy.MissingOutcome.class,()->study.outcomePoint(BILLING_TASK,group,forecast.sha256(),artifacts::get,quotes,sampleEvidence,fixtureDecoder)).getMessage());
         assertEquals(sid,sampleProjection.pending(TENANT,null,"").getFirst().sampleId());
         assertTrue(sampleProjection.pending(TENANT,"other","").isEmpty());assertTrue(sampleProjection.pending(TENANT,CLIENT,sid).isEmpty());
         assertFalse(sampleProjection.refreshPending(TENANT,"other",sid,fixtureDecoder));

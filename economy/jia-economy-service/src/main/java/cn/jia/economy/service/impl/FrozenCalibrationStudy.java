@@ -101,6 +101,10 @@ public final class FrozenCalibrationStudy {
         var actual=MeasuredTaskRepricing.reprice(book,sample.facts());
         return new ConfirmedPoint(new TaskEstimateEvaluation.Prediction(original.taskId(),actual.yuan(),offer.wen()),frozen);
     }
+    /** Evidence absent is distinct from a pricing error or an invalid study binding. Never score it as zero. */
+    public static final class MissingOutcome extends RuntimeException {
+        MissingOutcome(cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict reason){super(reason.name());}
+    }
     /** Independent of READY/history selection. Scope and original offer bind the outcome, not its realized path. */
     public ConfirmedPoint outcomePoint(Task original,TaskHistoryCatalog.Group group,String forecastSha,Function<String,String> objects,
             cn.jia.economy.mapper.EconomyTaskBillingMapper quotes,cn.jia.economy.usage.ConfirmedSampleEvidence evidence,
@@ -115,7 +119,7 @@ public final class FrozenCalibrationStudy {
         var measured=evidence.measureOutcome(original,offer.quoteId(),offer.agentId(),offer.groupSha(),offer.featureSha(),decoder);
         if(measured==null)throw new IllegalArgumentException("Unbound outcome");
         if(measured.assessment().verdict()!=cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.MATCHED)
-            throw new MeasuredTaskRepricing.Unavailable(measured.assessment().verdict().name());
+            throw new MissingOutcome(measured.assessment().verdict());
         var actual=MeasuredTaskRepricing.reprice(book,measured.operations().stream().map(op->op.fact()).toList());
         var artifact=freeze(Map.of("schema","confirmed-holdout-outcome-v1","forecastSha256",forecastSha,"assessment",measured.assessment(),
                 "operations",measured.operations().stream().map(op->ProjectedTaskOperation.from(op,json)).toList()));
