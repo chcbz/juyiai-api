@@ -1073,8 +1073,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             public Identity identity(){return new Identity("cfg","fixture",1024);}
             public Vector encode(String text){calls.incrementAndGet();float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);}
         };
+        var profile=new QuoteProfile();boolean diagnostic=Boolean.getBoolean("cyf.measuredBatchQuoteLoad");
         independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
-                mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,estimator,billing);
+                mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasured")):billing);
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var hot=new java.util.ArrayList<Long>();String firstId=null;long cold=0,replay=0;
         String token=httpToken();try(var client=HttpClient.newHttpClient()){
@@ -1095,14 +1096,37 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(batchCount+31,count("economy_task_quote_batch"));assertEquals(fixed+31,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
-        if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls);
+        if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile);
     }
 
+    /** Test-scoped attribution only; no application counters, raw SQL/inputs, or per-row log lines. */
+    private static final class QuoteProfile {
+        final java.util.Map<String,java.util.concurrent.atomic.LongAdder> calls=new java.util.concurrent.ConcurrentHashMap<>(),nanos=new java.util.concurrent.ConcurrentHashMap<>();
+        <T>T wrap(Class<T> type,T delegate,java.util.Set<String> names){
+            var factory=new ProxyFactory();factory.setInterfaces(type);factory.setTarget(delegate);
+            factory.addAdvice((org.aopalliance.intercept.MethodInterceptor)i->{String name=i.getMethod().getName();if(!names.contains(name))return i.proceed();long t=System.nanoTime();try{return i.proceed();}finally{
+                nanos.computeIfAbsent(name,k->new java.util.concurrent.atomic.LongAdder()).add(System.nanoTime()-t);calls.computeIfAbsent(name,k->new java.util.concurrent.atomic.LongAdder()).increment();}});
+            return type.cast(factory.getProxy());
+        }
+        long count(String name){return calls.getOrDefault(name,new java.util.concurrent.atomic.LongAdder()).sum();}
+        double ms(String name){return nanos.getOrDefault(name,new java.util.concurrent.atomic.LongAdder()).sum()/1e6;}
+        void reset(){calls.clear();nanos.clear();}
+    }
+    private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}
+    private QuoteWrites readQuoteWrites(String task){
+        var w=admin.queryForObject("""
+            SELECT COALESCE(SUM(COUNT_STAR),0),COALESCE(SUM(SUM_ROWS_AFFECTED),0),COALESCE(SUM(SUM_TIMER_WAIT),0)
+            FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'INSERT INTO `economy_task_quote` %'
+            """,(r,n)->new long[]{r.getLong(1),r.getLong(2),r.getLong(3)},database);
+        long bytes=jdbc.queryForObject("SELECT COALESCE(SUM(OCTET_LENGTH(snapshot_json)),0) FROM economy_task_quote WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",Long.class,TENANT,CLIENT,OWNER,task);
+        return new QuoteWrites(w[0],w[1],w[2],bytes);
+    }
     // Same feature cache as the preceding single-candidate request. Terms and roster are fixture inputs;
     // estimation, reference repricing, individual bindings, atomic persistence and replay are not mocked.
     private void measureBatchQuoteHttp(String task,String token,cn.jia.agent.service.AgentExternalServicePolicyService agents,
             cn.jia.agent.service.recommendation.ProspectiveTaskExecution source,cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs subject,
-            cn.jia.economy.task.TaskBudgetEstimator.Terms terms,java.util.concurrent.atomic.AtomicInteger encodes)throws Exception{
+            cn.jia.economy.task.TaskBudgetEstimator.Terms terms,java.util.concurrent.atomic.AtomicInteger encodes,QuoteProfile profile)throws Exception{
+        profile.reset();var writes=readQuoteWrites(task);
         int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var roster=java.util.stream.IntStream.range(0,108).mapToObj(i->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(String.format(java.util.Locale.ROOT,"q-target-%03d",i),OWNER,100+i,0)).toList();
         var ids=roster.stream().map(c->c.agent()).toList();var noConfig=ids.getLast();var proofs=new java.util.HashMap<String,cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence>();
@@ -1122,6 +1146,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
             }
         }
+        var end=readQuoteWrites(task);long bytes=end.bytes()-writes.bytes();
+        System.out.printf(java.util.Locale.ROOT,"BATCH_QUOTE_COST batches=30 candidates=108 prepareCalls=%d prepareMs=%.3f lockSelectedCalls=%d lockSelectedMs=%.3f storeCalls=%d storeMs=%.3f insertCalls=%d rows=%d insertMs=%.3f snapshotBytes=%d%n",profile.count("prepare"),profile.ms("prepare"),profile.count("lockSelected"),profile.ms("lockSelected"),profile.count("storeMeasured"),profile.ms("storeMeasured"),end.calls()-writes.calls(),end.rows()-writes.rows(),(end.dbPicos()-writes.dbPicos())/1e9,bytes);
+        assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(3210,profile.count("storeMeasured"));assertEquals(3210,end.rows()-writes.rows());assertTrue(bytes>0);
         assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3210,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
         samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());
