@@ -42,6 +42,7 @@ import cn.jia.agent.entity.*;
 import cn.jia.agent.mapper.*;
 import cn.jia.agent.service.*;
 import cn.jia.economy.config.*;
+import cn.jia.economy.service.impl.EconomyHistoryFeatureBytes;
 import cn.jia.economy.mapper.EconomyLedgerMapper;
 import cn.jia.economy.mapper.EconomyTaskBillingMapper;
 import cn.jia.economy.pricing.*;
@@ -767,8 +768,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     // Research fixture only: no application schema, permission, cache or rollout change.
     private static final class ProbeSourceMiss extends IllegalStateException {}
-    private record ProbeMeta(String featureVersion,String templateVersion,String requirementSha256,String inputSnapshotSha256,
-            String textSha256,TaskEstimateFeatures.Identity embeddingIdentity,List<TaskEstimateFeatures.File> files,Integer requestedDeliverables){}
     private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query){
         var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         jdbc.execute("CREATE TABLE fixture_feature_probe(sid CHAR(64) PRIMARY KEY,rev BIGINT NOT NULL,qid VARCHAR(100) NOT NULL,raw_sha CHAR(64) NOT NULL,resolved_sha CHAR(64) NOT NULL,rec VARCHAR(100),prep CHAR(64),meta TEXT NOT NULL,v BLOB NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin");
@@ -781,9 +780,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long build=System.nanoTime();new TransactionTemplate(manager).executeWithoutResult(status->{String after="";
             while(true){var page=original.history(reader,groupSha,after,64);if(page.isEmpty())break;
                 for(var row:page){var f=json.readValue(row.featuresJson(),TaskEstimateFeatures.class);assertEquals(row.featureSha(),f.digest());
-                    var meta=new ProbeMeta(f.featureVersion(),f.templateVersion(),f.requirementSha256(),f.inputSnapshotSha256(),f.textSha256(),f.embeddingIdentity(),f.files(),f.requestedDeliverables());
-                    var binary=java.nio.ByteBuffer.allocate(4096);f.vector().forEach(binary::putFloat);
-                    assertEquals(1,jdbc.update(seal,json.writeValueAsString(meta),binary.array(),row.id(),row.revision(),row.featureSha()));
+                    var meta=EconomyHistoryFeatureBytes.metadata(f);
+                    assertEquals(1,jdbc.update(seal,json.writeValueAsString(meta),EconomyHistoryFeatureBytes.vector(f),row.id(),row.revision(),row.featureSha()));
                 }after=page.getLast().id();}
         });build=System.nanoTime()-build;
         String read="""
@@ -796,9 +794,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             WHERE
             """+cn.jia.economy.mapper.ConfirmedSampleMapper.HISTORY.replace("#{t.scope.tenantId}","?").replace("#{t.scope.clientId}","?").replace("#{t.ownerJiacn}","?").replace("#{group}","?").replace("#{t.taskId}","?")+" AND s.sample_id>? ORDER BY s.sample_id LIMIT 64";
         org.springframework.jdbc.core.RowMapper<cn.jia.economy.task.TaskHistoryCatalog.Entry> decode=(rs,n)->{if(!rs.getBoolean(7))throw new ProbeSourceMiss();
-            var m=json.readValue(rs.getString(5),ProbeMeta.class);var b=java.nio.ByteBuffer.wrap(rs.getBytes(6));assertEquals(4096,b.remaining());var floats=new java.util.ArrayList<Float>(1024);
-            while(b.hasRemaining())floats.add(b.getFloat());var f=new TaskEstimateFeatures(m.featureVersion(),m.templateVersion(),m.requirementSha256(),m.inputSnapshotSha256(),m.textSha256(),m.embeddingIdentity(),floats,m.files(),m.requestedDeliverables());
-            assertEquals(rs.getString(4),f.digest());assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),f));return new cn.jia.economy.task.TaskHistoryCatalog.Entry(new cn.jia.economy.task.TaskHistoryCatalog.Revision(rs.getString(1),rs.getLong(2)),rs.getString(3),f);};
+            TaskEstimateFeatures f;
+            try{var m=json.readValue(rs.getString(5),EconomyHistoryFeatureBytes.Metadata.class);f=EconomyHistoryFeatureBytes.restore(m,rs.getBytes(6),rs.getString(4));}
+            catch(IllegalArgumentException|tools.jackson.core.JacksonException invalid){throw new ProbeSourceMiss();}
+            assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),f));return new cn.jia.economy.task.TaskHistoryCatalog.Entry(new cn.jia.economy.task.TaskHistoryCatalog.Revision(rs.getString(1),rs.getLong(2)),rs.getString(3),f);};
         java.util.function.Function<String,List<cn.jia.economy.task.TaskHistoryCatalog.Entry>> entries=after->jdbc.query(read,decode,TENANT,CLIENT,OWNER,groupSha,reader.taskId(),after);
         java.util.function.Function<String,List<String>> page=after->entries.apply(after).stream().map(e->e.source().sampleId()).toList();
         for(int run=0;run<4;run++){long t=System.nanoTime();String after="";var seen=new java.util.ArrayList<String>();while(true){var chunk=page.apply(after);if(chunk.isEmpty())break;seen.addAll(chunk);after=chunk.getLast();}long ns=System.nanoTime()-t;assertEquals(ids,seen);
@@ -830,6 +829,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             jdbc.update("UPDATE fixture_feature_probe SET rec='wrong-binding' WHERE sid=?",sid);assertThrows(IllegalStateException.class,()->entries.apply(cursor));
             jdbc.update("UPDATE fixture_feature_probe SET rec=? WHERE sid=?",rec,sid);}
         assertEquals(sid,entries.apply(cursor).getFirst().source().sampleId());
+        byte[] vector=jdbc.queryForObject("SELECT v FROM fixture_feature_probe WHERE sid=?",byte[].class,sid);
+        for(byte[] broken:List.of(new byte[4095],new byte[4096],java.util.Arrays.copyOf(vector,4097),vector.clone())){
+            if(broken.length==vector.length && java.util.Arrays.equals(broken,vector))broken[3]^=1;
+            jdbc.update("UPDATE fixture_feature_probe SET v=? WHERE sid=?",broken,sid);
+            assertThrows(ProbeSourceMiss.class,()->entries.apply(cursor));assertEquals(control,engine.estimate(reader,group.execution(),query,pin,params,Map.of()));
+        }
+        jdbc.update("UPDATE fixture_feature_probe SET v=? WHERE sid=?",vector,sid);
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=2 WHERE sample_id=?",sid);assertFalse(page.apply(ids.get(at-1)).contains(sid));
         jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=1,quote_id='missing' WHERE sample_id=?",sid);assertThrows(ProbeSourceMiss.class,()->page.apply(ids.get(at-1)));assertThrows(IllegalStateException.class,()->engine.estimate(reader,group.execution(),query,pin,params,Map.of()));
     }
