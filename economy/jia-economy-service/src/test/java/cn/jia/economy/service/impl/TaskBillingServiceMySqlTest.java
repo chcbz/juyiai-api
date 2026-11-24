@@ -64,6 +64,7 @@ class TaskBillingServiceMySqlTest {
         var db = fixture.newDatabase("taskbilling");
         jdbc = db.jdbc();
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
         // Models the caller's existing task row, not a product billing lock table.
         jdbc.execute("CREATE TABLE test_task_root (id VARCHAR(100) PRIMARY KEY, state VARCHAR(24) NOT NULL) ENGINE=InnoDB");
         jdbc.update("INSERT INTO test_task_root VALUES ('task-1','OPEN'),('task-2','OPEN')");

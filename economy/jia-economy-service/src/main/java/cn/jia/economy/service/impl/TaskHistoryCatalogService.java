@@ -47,6 +47,7 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
         return db.history(query,group.digest(),after,PAGE).stream().map(r->entry(group,r)).toList();
     }
     private Entry entry(Group group,ConfirmedSampleMapper.HistoryRow r){
+            if(r.featuresJson()==null)throw new IllegalStateException("Unresolvable history quote features");
             var features=json.readValue(r.featuresJson(),TaskEstimateFeatures.class);
             if(!features.digest().equals(r.featureSha())||!Group.of(group.execution(),features).equals(group))
                 throw new IllegalStateException("History feature commitment mismatch");

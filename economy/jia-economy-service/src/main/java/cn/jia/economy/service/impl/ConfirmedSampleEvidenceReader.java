@@ -16,7 +16,12 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
     public ConfirmedSampleEvidenceReader(ConfirmedSampleMapper db,tools.jackson.databind.ObjectMapper json){this.db=db;this.json=json;}
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Assessment inspect(Task task,String id){
-        var h=db.confirmed(task,id);return h==null?null:assess(task,id,h);
+        var h=confirmedHeader(task,id);return h==null?null:assess(task,id,h);
+    }
+    private ConfirmedSampleMapper.Header confirmedHeader(Task task,String id){
+        var h=db.confirmed(task,id);
+        if(h!=null && h.agent()==null)throw new IllegalStateException("Unresolvable confirmed quote binding");
+        return h;
     }
     private Assessment assess(Task task,String id,ConfirmedSampleMapper.Header h){
         var verdict=ACTIVE;long count=0;
@@ -47,7 +52,7 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
     }
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measure(Task task,String id,Decoder decoder){
-        return measureHeader(task,id,decoder,db.confirmed(task,id));
+        return measureHeader(task,id,decoder,confirmedHeader(task,id));
     }
     @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measureReviewed(Task task,String caseId,String sha,String fact,String review,Decoder decoder){

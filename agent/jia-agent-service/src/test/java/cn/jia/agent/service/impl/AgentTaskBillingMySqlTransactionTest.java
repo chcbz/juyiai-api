@@ -155,6 +155,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc = new JdbcTemplate(source);
         independent = new JdbcTemplate(source(database));
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/agent-task-execution-members-v1.sql")).execute(source);
         // Read unchanged production definitions; no parallel hand-written table schema.
         String schema = Files.readString(DDL.resolve("schema.sql"));
@@ -655,7 +656,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
     }
     @Test void scopedQuotePreparationReadsExactBytesAndRejectsForeignOrDamagedReferences() throws Exception {
-        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
         var fixture=measuredOffer();String inline=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,fixture.offer().quoteId());
         assertEquals(inline,jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,fixture.offer().quoteId()));
         int split=inline.indexOf("\"preparation\":{");assertTrue(split>0);int start=split+14;
@@ -667,12 +667,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String insert="INSERT INTO economy_task_quote_preparation(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,recommendation_id,preparation_sha,preparation_json) VALUES(?,?,?,?,?,?,?,?)";
         String query="SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?";
         for(int i=0;i<scope.size();i++){var args=new java.util.ArrayList<String>(scope);args.set(i,args.get(i)+"-wrong");args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());}
-        assertTrue(jdbc.queryForList(query,String.class,id).isEmpty());
+        assertNull(jdbc.queryForObject(query,String.class,id));
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
         // Test-only corruption; the resolver must not return an unchecked object.
         jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND payer_user_id=? AND recommendation_id=? AND preparation_sha=?",args.subList(0,7).toArray());
-        assertTrue(jdbc.queryForList(query,String.class,id).isEmpty());
+        assertNull(jdbc.queryForObject(query,String.class,id));
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");
@@ -713,7 +713,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     private void confirmMeasured(){
-        var prepared=measuredOffer();assignment.assignForDeliberation(SCOPE,TASK,"assign-1",AGENT,0,1,
+        var prepared=measuredOffer();
+        if(conflictOnDiscussionRetry){ // Fixture only: exercise full confirmation/history/calibration before enabling the compact writer.
+            String raw=prepared.offer().snapshotJson();int start=raw.indexOf("\"preparation\":{")+14;
+            String body=raw.substring(start,raw.length()-1);String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,body);
+            jdbc.update("INSERT INTO economy_task_quote_preparation VALUES(?,?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,PAYER,prepared.binding().recommendationId(),sha,body);
+            jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",raw.substring(0,start)+"\""+sha+"\"}",prepared.offer().quoteId());
+        }
+        assignment.assignForDeliberation(SCOPE,TASK,"assign-1",AGENT,0,1,
                 new AgentTaskExecutionGrantService.Payment(PAYER,prepared.offer().quoteId(),prepared.binding().recommendationId()));
     }
     private void deliverTerminal(){

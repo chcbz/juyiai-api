@@ -35,7 +35,7 @@ public interface ConfirmedSampleMapper {
           AND r.sample_revision=s.projection_revision AND r.sample_state='READY'
         JOIN economy_task_charge ch ON ch.tenant_id=s.tenant_id AND ch.client_id=s.client_id AND ch.owner_jiacn=s.owner_jiacn
           AND ch.task_id=s.task_id AND ch.quote_id=s.quote_id
-        JOIN economy_task_quote q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn
+        JOIN economy_task_quote_resolved q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn
           AND q.task_id=ch.task_id AND q.quote_id=ch.quote_id AND q.payer_user_id=ch.payer_user_id WHERE
         """+ELIGIBLE_HISTORY+" AND s.task_id=#{t.taskId} AND s.sample_id=#{id} AND s.projection_revision=#{revision}")
     CalibrationRow selectedForCalibration(@Param("t") Task original,@Param("group") String group,@Param("id") String sampleId,@Param("revision") long revision);
@@ -44,7 +44,7 @@ public interface ConfirmedSampleMapper {
     record HistoryRow(String id,long revision,String taskId,String featureSha,String featuresJson){}
     @Select("""
         SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,JSON_EXTRACT(q.snapshot_json,'$.preparation.features')
-        FROM economy_task_cost_sample s JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+        FROM economy_task_cost_sample s JOIN economy_task_quote_resolved q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id
         AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id WHERE
         """+HISTORY+" AND s.sample_id>#{after} ORDER BY s.sample_id LIMIT #{limit}")
     List<HistoryRow> history(@Param("t") Task query,@Param("group") String group,@Param("after") String after,@Param("limit") int limit);
@@ -87,7 +87,7 @@ public interface ConfirmedSampleMapper {
           q.snapshot_json->>'$.preparation.group.capturePolicyVersion'
         FROM economy_task_cost_sample s JOIN economy_task_charge ch ON ch.tenant_id=s.tenant_id AND ch.client_id=s.client_id
           AND ch.owner_jiacn=s.owner_jiacn AND ch.task_id=s.task_id AND ch.quote_id=s.quote_id
-        JOIN economy_task_quote q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn
+        JOIN economy_task_quote_resolved q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn
           AND q.task_id=ch.task_id AND q.quote_id=ch.quote_id AND q.payer_user_id=ch.payer_user_id
         LEFT JOIN economy_task_membership_receipt r ON r.tenant_id=s.tenant_id AND r.client_id=s.client_id AND r.owner_jiacn=s.owner_jiacn AND r.task_id=s.task_id
         WHERE s.sample_id=#{id} AND s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn}

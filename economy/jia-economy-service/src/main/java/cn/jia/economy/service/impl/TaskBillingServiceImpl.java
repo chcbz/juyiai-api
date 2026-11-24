@@ -168,6 +168,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         EconomyTaskQuoteEntity quote = mapper.findQuote(task.scope().tenantId(), task.scope().clientId(),
                 task.ownerJiacn(), task.taskId(), quoteId);
         if (quote == null) throw new TaskBillingException(QUOTE_NOT_FOUND);
+        requireSnapshot(quote);
         // The task owner is a business identity, not the wallet principal. Check the immutable
         // payer before any write (and before returning an existing reservation).
         if (!quote.getPayerUserId().equals(payerUserId)) {
@@ -221,6 +222,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         EconomyTaskQuoteEntity quote = mapper.findQuote(task.scope().tenantId(), task.scope().clientId(),
                 task.ownerJiacn(), task.taskId(), quoteId);
         if (quote == null) throw new TaskBillingException(QUOTE_NOT_FOUND);
+        requireSnapshot(quote);
         String originalRecommendation = json.readTree(quote.getSnapshotJson())
                 .at("/binding/recommendationId").asText(null);
         if (recommendationId == null || !recommendationId.equals(originalRecommendation))
@@ -323,7 +325,12 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         if (changed != 1) throw new TaskBillingException(CHARGE_CONFLICT);
     }
 
+    private static void requireSnapshot(EconomyTaskQuoteEntity row) {
+        if (row.getSnapshotJson() == null) throw new IllegalStateException("Unresolvable frozen quote preparation");
+    }
+
     private static Quote receipt(EconomyTaskQuoteEntity row) {
+        requireSnapshot(row);
         return new Quote(row.getQuoteId(), row.getAmountWen(), row.getSnapshotJson());
     }
 
