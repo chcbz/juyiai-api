@@ -27,13 +27,17 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
             for(String name:List.of(CapabilityIndexWriter.GENERATION,CapabilityIndexWriter.GENERATION+"_write",CapabilitySearch.INDEX))assertFalse(client.indices().exists(b->b.index(name)).value());
             try(var mapping=Objects.requireNonNull(getClass().getResourceAsStream("/elasticsearch/agent-capability-evidence-v1.json"))){client.indices().create(b->b.index(CapabilityIndexWriter.GENERATION).withJson(mapping));}
             var factory=new DefaultListableBeanFactory();factory.registerSingleton("es",client);var clients=factory.getBeanProvider(ElasticsearchClient.class);writer=new CapabilityIndexWriter(clients);
-            var encoder=new TaskFeatureEncoder(){public Identity identity(){return id;}public Vector encode(String text){assertTrue(text.contains("file-"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));encodes.incrementAndGet();return vector();}};
+            var encoder=new TaskFeatureEncoder(){public Identity identity(){return id;}public Vector encode(String text){assertTrue(text.contains("原始文件名: pinned-v1-"));assertFalse(text.contains("unselected-v2"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));encodes.incrementAndGet();return vector();}};
             controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10)),new CapabilitySearch(clients),roots,new CandidateSuitability("","")));
         }catch(Exception|Error failure){try{client.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
     private TaskFeatureEncoder.Vector vector(){float[] v=new float[1024];v[0]=1;return new TaskFeatureEncoder.Vector(id,v);}
     public void index(String tenant,String clientId,String owner,String agent,List<String> abilities)throws Exception {
         var docs=CapabilityDocuments.declared(tenant,clientId,owner,agent,abilities,id);assertEquals(abilities.size(),docs.size());for(var citation:docs)writer.publishVector(citation.doc(),vector());
+    }
+    public void indexSkill(String tenant,String clientId,String agent,SkillManagementService skills)throws Exception {
+        var docs=CapabilityDocuments.purposes(tenant,clientId,agent,skills.citableSkillPurposes(tenant,clientId,agent),id);
+        assertEquals(1,docs.size());writer.publishVector(docs.getFirst().doc(),vector());
     }
     public long documentCount()throws Exception{return client.count(b->b.index(CapabilityIndexWriter.GENERATION)).count();}
     public void refresh()throws Exception{client.indices().refresh(b->b.index(CapabilityIndexWriter.GENERATION));}

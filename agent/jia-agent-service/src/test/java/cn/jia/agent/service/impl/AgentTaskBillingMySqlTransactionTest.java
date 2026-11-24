@@ -1293,8 +1293,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
     void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
         var authority=quoteAndRecommendationAuthority();var agents=authority.agents();var req=authority.req();
-        // Only installed skills and runtime readiness are fixture boundaries. Roster and abilities use production SQL.
-        var skills=mock(cn.jia.agent.skill.SkillManagementService.class);when(skills.recommendationSkills(any(),anyList())).thenAnswer(call->{var rows=call.<List<AgentTaskAssigneeCandidateDTO>>getArgument(1);return rows.stream().collect(java.util.stream.Collectors.toMap(r->r.target().agentId(),r->List.of()));});
+        var installed=new cn.jia.agent.skill.InstalledPurposeHttpFixture(jdbc,manager,TENANT,CLIENT,OWNER);
+        var skills=installed.skills;
         var workspace=quoteWorkspace();var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
         var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
         try(var es=new cn.jia.agent.service.recommendation.RecommendationHttpTestWiring(agents,skills,materials,roots)){
@@ -1302,17 +1302,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             for(int n:List.of(1,108)){
                 String task="rec-http-"+n;jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",task,OWNER,TENANT,CLIENT);
                 roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,task,r->req.captureOnCreate(SCOPE,task,"合同审查 "+n,"核对合同条款"));
-                attachQuoteFile(task,n);
+                attachQuoteFile(task,n);String file="file-"+n;
+                jdbc.update("UPDATE agent_personal_workspace_file_version SET original_filename=? WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND file_id=? AND version=1","pinned-v1-"+n,TENANT,CLIENT,OWNER,file);
+                jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,2,'unselected-v2','text/plain',8,?,'private:v2',2,?,?)",file,OWNER,"c".repeat(64),TENANT,CLIENT);
+                assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET latest_version=2,metadata_revision=2 WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND file_id=?",TENANT,CLIENT,OWNER,file));
                 for(int i=expected.size();i<n;i++){
                     String id="agt_"+String.format(java.util.Locale.ROOT,"%032x",i+1),ability="合同审查 "+i;
                     jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES (?,?,?,1,1,?,?)",OWNER,"rec"+i,id,TENANT,CLIENT);
                     long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,id);
                     jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'rec-http-fixture',1,1)",id,CLIENT,OWNER,TENANT,binding);
-                    jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability,"合同条款核对 "+i)));
-                    es.index(TENANT,CLIENT,OWNER,id,List.of(ability,"合同条款核对 "+i));expected.add(id);
+                    var abilities=i==1?List.<String>of():List.of(ability,"合同条款核对 "+i);
+                    jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(abilities));
+                    es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
-                es.refresh();assertEquals(2L*n,es.documentCount());measureRecommendationHttp(task,expected,es.encodes);
+                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es.encodes);
                 if(n==1){String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
                     String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
@@ -1322,6 +1326,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 org.mockito.Mockito.verifyNoInteractions(storage,writes);
                 if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
+                    String onlySkill=expected.stream().skip(1).findFirst().orElseThrow();assertInstalledHttp(task,onlySkill,true);
+                    installed.withdraw();assertInstalledHttp(task,onlySkill,false);assertEquals(228L,es.documentCount());
                     assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
                     jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('foreign-rec','different-owner',?,?)",TENANT,CLIENT);
@@ -1338,6 +1344,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"rec-error\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
         try(var client=HttpClient.newHttpClient()) {var r=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,r.statusCode());var env=new ObjectMapper().readTree(r.body());assertEquals(code,env.path("code").asText());assertTrue(env.at("/data/recommendations").isMissingNode());}
     }
+    private void assertInstalledHttp(String task,String agent,boolean visible)throws Exception {
+        String key=visible?"published":"withdrawn";
+        var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\""+key+"\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
+        try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var data=new ObjectMapper().readTree(res.body()).path("data");assertEquals("HYBRID",data.path("retrievalMode").asText());var rows=data.path("recommendations");assertEquals(108,rows.size());int matched=0;
+            for(var row:rows)if(agent.equals(row.at("/agent/agentId").asText())){matched++;var evidence=row.path("evidence");assertTrue(evidence.isArray());assertEquals(visible?1:0,evidence.size());if(visible){assertEquals("INSTALLED_SKILL",evidence.get(0).path("kind").asText());assertEquals("合同审查",evidence.get(0).path("label").asText());}else assertEquals("UNKNOWN",row.path("recommendationLevel").asText());}assertEquals(1,matched);}
+    }
+    private long paidInventorySelects(){return admin.queryForObject("SELECT COALESCE(SUM(COUNT_STAR),0) FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %' AND DIGEST_TEXT LIKE '%economy_hosting_lease%' AND DIGEST_TEXT LIKE '%inventory_snapshot_json%'",Long.class,database);}
     // Test-owned mysqld only. Read counters from the admin schema outside each timed request group.
     // No statement text, task data, individual event history, credentials or parameters are logged.
     private record RecSql(long statements,long examined,long sent,long statementPicos,long roots,long waits,long waitMillis){
@@ -1406,7 +1420,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}
             var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
             for(int concurrency:List.of(1,5,10)){
-                var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
+                long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
                     for(int round=0;round<30/concurrency;round++){
@@ -1416,6 +1430,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                         for(var f:pending){var s=f.get(25,java.util.concurrent.TimeUnit.SECONDS);times.add(s.nanos());if(s.invalid())invalid++;if(s.degraded())degraded++;}
                     }
                 }
+                long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
+                System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
                 var delta=readRecSql().minus(sqlBefore);if(shapes!=null)reportShapes(expected.size(),shapes);
                 System.out.printf(java.util.Locale.ROOT,"RECOMMEND_MYSQL candidates=%d concurrency=%d n=%d selects=%d rowsExamined=%d rowsSent=%d sumSelectMs=%.3f matchingRootLocks=%d rowWaits=%d sumRowWaitMs=%d%n",expected.size(),concurrency,times.size(),delta.statements(),delta.examined(),delta.sent(),delta.statementPicos()/1e9,delta.roots(),delta.waits(),delta.waitMillis());
