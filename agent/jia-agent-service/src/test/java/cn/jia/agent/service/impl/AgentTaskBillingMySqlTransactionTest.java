@@ -501,7 +501,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
         var cfg=recommendationSql.getConfiguration();cfg.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
         var json=new ObjectMapper();var svc=proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),json),cn.jia.economy.task.TaskBenchmarkAdmission.class);
-        var exec=new TaskBillingService.MeasuredGroup("v1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp");
+        var exec=new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp");
         var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture","a".repeat(64),"b".repeat(64),"c".repeat(64),new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),List.of(),null);
         var bench=new TaskBillingService.Task(BILLING_TASK.scope(),OWNER,"dedicated-benchmark");
         jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",bench.taskId(),OWNER,TENANT,CLIENT);
@@ -524,7 +524,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var closure=proxy(new cn.jia.economy.service.impl.TaskBenchmarkClosureService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkClosureMapper.class),recommendationSql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.task.TaskBenchmarkClosure.class);
         lock.apply(()->{for(int i=0;i<65;i++){
             var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(bench.taskId()).setOwnerJiacn(OWNER).setExecutionId("bench-exec"+i).setRunId("run").setRequestHash("a".repeat(64));
-            m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,null);}
+            m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(m.getExecutionId(),m.getRunId()));}
             executionRows.closeTaskMembers(TENANT,CLIENT,OWNER,bench.taskId(),cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,"fixture-reviewed",2,123);return "ok";});
         String fact=jdbc.queryForObject("SELECT terminal_fact_id FROM agent_task_execution_set WHERE task_id=?",String.class,bench.taskId());
         java.util.function.Supplier<String> step=()->closure.reconcile(bench,"case",sha,fact).name();
@@ -534,6 +534,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals("ACTIVE",jdbc.queryForObject("SELECT lifecycle_state FROM economy_task_cost_sample WHERE sample_id=?",String.class,sha));
         assertEquals("CLOSED",step.get());assertEquals("CLOSED",step.get());assertEquals(65,count("economy_task_cost_sample_member"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE sample_id=? AND lifecycle_state='ACCEPTED' AND sample_state='WAITING_EVIDENCE' AND evidence_revision=2",Integer.class,sha));
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-review-v1.sql")).execute(jdbc.getDataSource());
+        var evidence=proxy(new cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class)),cn.jia.economy.usage.BenchmarkSampleEvidence.class);
+        var decoder=textFixture(r->new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture",r.captureId()),"MODEL_RESPONSE","INFERENCE",r.evidenceSha(),new MeasuredTaskRepricing.Tokens("fixture",Map.of(ModelTokenPrice.Category.INPUT,1L))));
+        String digest=jdbc.queryForObject("SELECT set_digest FROM economy_task_membership_receipt WHERE fact_id=?",String.class,fact);
+        java.util.function.Function<String,String> registerReview=membership->{var review=new cn.jia.economy.usage.BenchmarkSampleEvidence.Review("benchmark-review-v1","case",sha,fact,membership,"ACCEPTED","fixture reviewer","fixture reviewed output");
+            String bytes=json.writeValueAsString(review);String key=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,bytes);jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,FALSE)",sha,key,bytes);return key;};
+        java.util.function.Function<String,cn.jia.economy.usage.ConfirmedSampleEvidence.Measured> measured=key->evidence.measureReviewed(bench,"case",sha,fact,key,decoder);
+        assertNull(measured.apply("0".repeat(64)));assertNull(measured.apply(registerReview.apply("0".repeat(64))));String key=registerReview.apply(digest);
+        assertEquals("USAGE_INCOMPLETE",measured.apply(key).assessment().verdict().name());
+        jdbc.update("INSERT INTO economy_usage_capture(tenant_id,client_id,owner_jiacn,task_id,agent_id,execution_id,run_id,capture_id,input_revision,projection_revision,coverage_state) SELECT ?,?,?,?,?,execution_id,run_id,capture_id,1,1,'COMPLETE' FROM economy_task_cost_sample_member",TENANT,CLIENT,OWNER,bench.taskId(),AGENT);
+        jdbc.update("INSERT INTO economy_usage_capture_dispatch_group SELECT id,1,'NATIVE_DISPATCH_GROUP_V1',REPEAT('c',64),REPEAT('f',64),REPEAT('d',64),'cp',REPEAT('9',64) FROM economy_usage_capture");
+        jdbc.update("INSERT INTO economy_usage_capture_record(capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,binding_sha256,evidence_json,is_associated_head,association_state) SELECT id,REPEAT('1',64),REPEAT('2',64),'1','RESPONSE',REPEAT('3',64),REPEAT('4',64),'{}',1,'APPLIED' FROM economy_usage_capture");
+        var match=measured.apply(key);assertEquals("MATCHED",match.assessment().verdict().name());assertEquals(65,match.operations().size());
+        assertNull(sampleEvidence.measure(bench,sha,decoder)); // cannot masquerade as confirmed history
+        jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");var stale=measured.apply(key);
+        assertEquals("USAGE_INCOMPLETE",stale.assessment().verdict().name());assertTrue(stale.operations().isEmpty());
+        jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=TRUE WHERE review_sha=?",key);assertNull(measured.apply(key));
         jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,step::get);assertThrows(denied,()->lock.apply(enroll));
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
     }

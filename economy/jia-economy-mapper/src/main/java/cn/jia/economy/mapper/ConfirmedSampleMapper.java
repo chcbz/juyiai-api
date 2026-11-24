@@ -71,6 +71,27 @@ public interface ConfirmedSampleMapper {
         WHERE s.sample_id=#{id} AND s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn}
           AND s.task_id=#{t.taskId} AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.benchmark_case_id IS NULL
         """) Header confirmed(@Param("t") Task task,@Param("id") String sampleId);
+    // Benchmark-only source of the header. Below it, all members and responses use the same actual-use checks as confirmed tasks.
+    @Select("""
+        SELECT s.lifecycle_state,s.evidence_revision,r.fact_id,r.outcome,r.membership_verified,r.member_count,
+          b.manifest_json->>'$.agentId',b.manifest_json->>'$.execution.dispatchGroupVersion',b.manifest_json->>'$.execution.executionConfigSha256',
+          b.manifest_json->>'$.execution.localRouteSha256',b.manifest_json->>'$.execution.routeVersion',b.manifest_json->>'$.execution.toolConfigSha256',b.manifest_json->>'$.execution.capturePolicyVersion'
+        FROM economy_task_cost_sample s JOIN economy_task_benchmark_case b ON b.tenant_id=s.tenant_id AND b.client_id=s.client_id
+          AND b.owner_jiacn=s.owner_jiacn AND b.task_id=s.task_id AND b.benchmark_case_id=s.benchmark_case_id
+          AND b.manifest_sha=s.sample_id AND SHA2(b.manifest_json,256)=b.manifest_sha AND NOT b.retired
+        JOIN economy_task_benchmark_closure x ON x.sample_id=s.sample_id AND x.completed AND x.terminal_fact_id=#{fact}
+        JOIN economy_task_membership_receipt r ON r.tenant_id=s.tenant_id AND r.client_id=s.client_id AND r.owner_jiacn=s.owner_jiacn AND r.task_id=s.task_id
+          AND r.fact_id=x.terminal_fact_id AND r.membership_verified AND r.outcome='ACCEPTED' AND r.member_count=x.attached_count AND r.membership_revision=x.after_revision
+        JOIN economy_task_benchmark_review v ON v.sample_id=s.sample_id AND v.review_sha=#{review} AND SHA2(v.review_json,256)=v.review_sha AND NOT v.withdrawn
+          AND v.review_json->>'$.schema'='benchmark-review-v1' AND v.review_json->>'$.decision'='ACCEPTED'
+          AND v.review_json->>'$.caseId'=b.benchmark_case_id AND v.review_json->>'$.manifestSha'=b.manifest_sha
+          AND v.review_json->>'$.terminalFactId'=r.fact_id AND v.review_json->>'$.membershipSha'=r.set_digest
+          AND JSON_TYPE(JSON_EXTRACT(v.review_json,'$.reviewerRef'))='STRING' AND LENGTH(TRIM(v.review_json->>'$.reviewerRef'))>0
+          AND JSON_TYPE(JSON_EXTRACT(v.review_json,'$.deliverableEvidenceRef'))='STRING' AND LENGTH(TRIM(v.review_json->>'$.deliverableEvidenceRef'))>0
+        WHERE s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn} AND s.task_id=#{t.taskId}
+          AND s.sample_id=#{sha} AND s.benchmark_case_id=#{id} AND s.quote_id IS NULL AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.lifecycle_state='ACCEPTED'
+          AND NOT EXISTS(SELECT 1 FROM economy_task_charge c WHERE c.tenant_id=s.tenant_id AND c.client_id=s.client_id AND c.owner_jiacn=s.owner_jiacn AND c.task_id=s.task_id)
+        """) Header reviewedBenchmark(@Param("t") Task task,@Param("id") String id,@Param("sha") String sha,@Param("fact") String fact,@Param("review") String review);
     @Update("""
         UPDATE economy_task_cost_sample SET projection_revision=#{rev},sample_state=#{state}
         WHERE sample_id=#{id} AND tenant_id=#{t.scope.tenantId} AND client_id=#{t.scope.clientId} AND owner_jiacn=#{t.ownerJiacn} AND task_id=#{t.taskId}

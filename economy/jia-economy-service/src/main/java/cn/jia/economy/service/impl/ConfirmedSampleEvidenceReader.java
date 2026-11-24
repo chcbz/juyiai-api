@@ -10,7 +10,7 @@ import static cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.*;
 
 /** Background read, one consistent MVCC snapshot, bounded keyset pages, no task-root lock or provider I/O. */
 @Service
-public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence {
+public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn.jia.economy.usage.BenchmarkSampleEvidence {
     private final ConfirmedSampleMapper db;
     public ConfirmedSampleEvidenceReader(ConfirmedSampleMapper db){this.db=db;}
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
@@ -46,7 +46,14 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence {
     }
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public Measured measure(Task task,String id,Decoder decoder){
-        var h=db.confirmed(task,id);if(h==null)return null;
+        return measureHeader(task,id,decoder,db.confirmed(task,id));
+    }
+    @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public Measured measureReviewed(Task task,String caseId,String sha,String fact,String review,Decoder decoder){
+        return measureHeader(task,sha,decoder,db.reviewedBenchmark(task,caseId,sha,fact,review));
+    }
+    private Measured measureHeader(Task task,String id,Decoder decoder,ConfirmedSampleMapper.Header h){
+        if(h==null)return null;
         var a=assess(task,id,h);if(a.verdict()!=MATCHED)return new Measured(a,java.util.List.of());
         if(!decoder.coversAllOperations(h.groupVersion(),h.policy()))return incomplete(a);
         var lines=new java.util.ArrayList<Operation>();long revision=0,seen=0;String after="";
