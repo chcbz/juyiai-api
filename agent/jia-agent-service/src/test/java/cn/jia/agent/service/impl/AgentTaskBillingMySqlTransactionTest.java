@@ -1352,8 +1352,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     });
                     assertFalse(escaped.get().matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
                     auth.observeRecommendationChannels(TENANT,CLIENT,java.util.Set.of(onlySkill),(proof,channel)->{
-                        auth.disconnect(socket); auth.bind(socket,proof,()->true);
+                        var original=auth.bind(socket,proof,()->true);
+                        assertTrue(channel.issued(original));
+                        auth.disconnect(socket);var replacement=auth.bind(socket,proof,()->true);
+                        assertEquals(original,replacement);assertFalse(channel.issued(replacement));
                         assertFalse(channel.matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
+                        auth.observeRecommendationChannels(TENANT,CLIENT,java.util.Set.of(onlySkill),(p2,next)->{
+                            assertFalse(next.issued(original));assertTrue(next.issued(replacement));
+                            assertTrue(next.matches(socket,TENANT,CLIENT,OWNER,onlySkill,"instance"));
+                        });
                     });
                     assertEquals(1,jdbc.update("UPDATE agent_persona_binding SET status=0 WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,onlySkill));
                     assertEquals(java.util.Set.of(other),auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
@@ -1465,7 +1472,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 var physical=proofSelects();physical.replaceAll((k,v)->v-proofBefore.get(k));
                 System.out.printf("RECOMMEND_PROOF_SQL candidates=%d concurrency=%d n=%d counts=%s%n",expected.size(),concurrency,times.size(),physical);
-                if(expected.size()==108){assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation")-physical.get("installationPoint"),"one installation batch for each observation");assertTrue(physical.get("installationPoint")>0,"real Chat directory must consult the native current-binding predicate");}
+                if(expected.size()==108){assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation")-physical.get("installationPoint"),"one installation batch for each observation");assertEquals(0L,physical.get("installationPoint"),"each matching Chat session uses the exact native batch observation, independently on both reads");}
                 long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");

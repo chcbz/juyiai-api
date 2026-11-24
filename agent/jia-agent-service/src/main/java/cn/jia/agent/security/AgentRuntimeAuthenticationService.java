@@ -221,6 +221,12 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
         private Binding observed;
         private RecommendationChannel(Binding observed) { this.observed = observed; }
 
+        // Object identity, never the equal public wire fields. A new bind after disconnect mints new receipts.
+        public boolean issued(Receipt receipt) {
+            if(Thread.currentThread()!=reader || observed==null || receipt==null)return false;
+            return receipt==observed.enabledReceipt() || receipt==observed.disabledReceipt();
+        }
+
         public boolean matches(String sessionId, String tenant, String client, String owner, String agent, String instance) {
             if (Thread.currentThread() != reader) return false;
             var b = observed;
@@ -277,13 +283,11 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
         validateCurrent(proof, true);
         // Repeated declarations on one authenticated socket retain their channel
         // identity. A new socket/proof still replaces and fences the previous one.
-        bindings.compute(proof.scope(), (scope, previous) -> previous != null
+        var binding=bindings.compute(proof.scope(), (scope, previous) -> previous != null
                 && previous.sessionId().equals(sessionId) && previous.proof().equals(proof)
                 ? previous : new Binding(sessionId, proof, connected));
         var scope = proof.scope();
-        return new Receipt("native-runtime-v1", scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId(),
-                scope.runtimeInstanceId(), proof.installationId(), proof.hostId(), proof.sessionGeneration(),
-                gate.allows(scope.tenantId(), scope.clientId()));
+        return gate.allows(scope.tenantId(),scope.clientId()) ? binding.enabledReceipt() : binding.disabledReceipt();
     }
 
     public void disconnect(String sessionId) {
@@ -388,7 +392,16 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     static boolean validAgentReference(String agent) { return agent != null && AGENT_REFERENCE.matcher(agent).matches(); }
     static boolean validToken(String token) { return token != null && token.matches("rts1_[0-9a-f]{64}"); }
     static IllegalArgumentException denied() { return new IllegalArgumentException("AGENT_RUNTIME_UNAUTHENTICATED"); }
-    private record Binding(String sessionId, Proof proof, BooleanSupplier connected) { }
+    private record Binding(String sessionId, Proof proof, BooleanSupplier connected, Receipt enabledReceipt, Receipt disabledReceipt) {
+        Binding(String sessionId,Proof proof,BooleanSupplier connected) {
+            this(sessionId,proof,connected,receipt(proof,true),receipt(proof,false));
+        }
+        private static Receipt receipt(Proof proof,boolean enabled) {
+            var scope=proof.scope();
+            return new Receipt("native-runtime-v1",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),scope.agentId(),
+                    scope.runtimeInstanceId(),proof.installationId(),proof.hostId(),proof.sessionGeneration(),enabled);
+        }
+    }
     public record Proof(AgentRuntimeAuthentication.Scope scope, String installationId, String hostId,
                         long sessionGeneration, String tokenDigest, long userId, long authEpoch) {
         @Override public String toString() { return "AgentRuntimeProof[sessionGeneration=" + sessionGeneration + ", verifier=REDACTED]"; }

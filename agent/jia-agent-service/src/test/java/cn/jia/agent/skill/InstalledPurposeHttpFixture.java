@@ -54,12 +54,12 @@ public final class InstalledPurposeHttpFixture {
     public void registerSession(String agent,long generation){
         String install="si_"+agent,rt="rt_"+agent;
         var proof=new AgentRuntimeAuthenticationService.Proof(new AgentRuntimeAuthentication.Scope(tenant,client,owner,agent,"instance"),rt,"host",generation,HASH,1L,1L);
-        auth.bind("fixture-session-"+generation+agent,proof,()->true);
+        var receipt=auth.bind("fixture-session-"+generation+agent,proof,()->true);
         var fence=new AgentManagedSessionLookup.SessionFence(rt,"host","instance",generation);
         var fact=new SkillCapabilityLookup.RuntimeSkill("rec-skill","1.0.0",HASH,null,null,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE,null,null,null,install,"rec-version","INSTRUCTION","1",true,1L);
         String socket="fixture-session-"+generation+agent;
-        catalog.register(socket,new SkillCapabilityLookup.Scope(tenant,client,owner,agent),fence,new SkillCapabilityLookup.Catalog("1",List.of(fact)),
-                ()->auth.isCurrentBinding(socket,tenant,client,owner,agent,"instance"));
+        catalog.registerObserved(socket,new SkillCapabilityLookup.Scope(tenant,client,owner,agent),fence,new SkillCapabilityLookup.Catalog("1",List.of(fact)),
+                receipt,channel->(channel!=null&&channel.matches(socket,tenant,client,owner,agent,"instance")) || auth.isCurrentBinding(socket,tenant,client,owner,agent,"instance"));
     }
     /** Synthetic settled rows exercise the read contract only; no money operations or historical pricing samples. */
     public void retained(String agent) throws Exception {

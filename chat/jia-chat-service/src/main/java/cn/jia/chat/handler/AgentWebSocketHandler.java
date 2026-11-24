@@ -1013,12 +1013,12 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
                             sessionClientId(session), sessionJiacn(session), result.getAgentId()),
                     payload.get("nativeTextFileExecution"),
                     () -> typedDeliberationSessionCurrent(session, result.getAgentId()));
-            if (skillExecutionSessions != null) skillExecutionSessions.register(session.getId(),
+            if (skillExecutionSessions != null) skillExecutionSessions.registerObserved(session.getId(),
                     new cn.jia.agent.service.SkillCapabilityLookup.Scope(proof.scope().tenantId(),
                             proof.scope().clientId(), proof.scope().ownerJiacn(), proof.scope().agentId()),
                     new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),
                             proof.hostId(), proof.scope().runtimeInstanceId(), proof.sessionGeneration()),
-                    skillExecution, () -> typedDeliberationSessionCurrent(session, result.getAgentId()));
+                    skillExecution, runtimeReceipt, observation -> typedDeliberationSessionCurrent(session, result.getAgentId(), observation));
             if(skillManagement!=null&&skillExecution!=null) {
                 try {skillManagement.capabilitiesChanged(proof);}
                 catch(RuntimeException unavailable) {log.warn("Skill catalog confirmation deferred: {}",unavailable.getClass().getSimpleName());}
@@ -1543,12 +1543,18 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     }
 
     private boolean typedDeliberationSessionCurrent(WebSocketSession session, String agentId) {
+        return typedDeliberationSessionCurrent(session,agentId,null);
+    }
+    private boolean typedDeliberationSessionCurrent(WebSocketSession session, String agentId,
+            cn.jia.agent.security.AgentRuntimeAuthenticationService.RecommendationChannel observation) {
         if (runtimeAuthentication == null || session == null || !session.isOpen()
                 || !successfullyRegisteredAgentIds(session.getId()).contains(agentId)
                 || !Boolean.TRUE.equals(sessionDurableStateHealthy.get(session.getId()))) return false;
         String runtime = sessionRuntimeInstanceId(session);
         if (runtime == null) return false;
         try {
+            if (observation != null && observation.matches(session.getId(),sessionTenantId(session),sessionClientId(session),
+                    sessionJiacn(session),agentId,runtime)) return true;
             return runtimeAuthentication.isCurrentBinding(session.getId(), sessionTenantId(session),
                     sessionClientId(session), sessionJiacn(session), agentId, runtime);
         } catch (RuntimeException unavailable) { return false; }

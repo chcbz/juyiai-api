@@ -754,7 +754,24 @@ public final class SkillManagementService {
             record Observed(RecommendationTarget candidate,SkillManagementMapper.InventoryKey key,SkillCapabilityLookup.View catalog) {}
             var eligible=new ArrayList<Observed>();
             var proofIds=agents.stream().filter(c->c.proof()==null && active.containsKey(c.agent())).map(RecommendationTarget::agent).collect(java.util.stream.Collectors.toSet());
-            var proofs=proofIds.size()>1?authentication.currentRegisteredProofs(tenant,client,proofIds):Map.<String,AgentRuntimeAuthenticationService.Proof>of();
+            var directory=capabilities.getIfAvailable();
+            var proofs=new HashMap<String,AgentRuntimeAuthenticationService.Proof>();
+            var catalogs=new HashMap<String,SkillCapabilityLookup.View>();
+            if(proofIds.size()>1){
+                if(directory instanceof RecommendationCatalogLookup scoped){
+                    var owners=new HashSet<SkillManagementMapper.InventoryKey>();
+                    for(var c:agents)owners.add(new SkillManagementMapper.InventoryKey(c.agent(),c.owner()));
+                    authentication.observeRecommendationChannels(tenant,client,proofIds,(proof,channel)->{
+                        var p=proof.scope(); proofs.put(p.agentId(),proof);
+                        if(!owners.contains(new SkillManagementMapper.InventoryKey(p.agentId(),p.ownerJiacn())))return;
+                        try {
+                            var view=scoped.forRecommendation(new SkillCapabilityLookup.Scope(tenant,client,p.ownerJiacn(),p.agentId()),
+                                    SkillMarketplaceService.sessionFence(proof),channel);
+                            if(view.state()==SkillCapabilityLookup.State.AVAILABLE)catalogs.put(p.agentId(),view);
+                        }catch(IllegalArgumentException unavailable){ /* no citable catalog */ }
+                    });
+                }else proofs.putAll(authentication.currentRegisteredProofs(tenant,client,proofIds));
+            }
             for(var candidate:agents) {
                 // Discovery owns task/opt-in authorization. This path only reads capability summaries,
                 // never impersonates the provider Actor or opens skill-management operations.
@@ -769,9 +786,11 @@ public final class SkillManagementService {
                 boolean providerMatches=false;
                 try {
                     var proof=candidate.proof()!=null?candidate.proof():proofIds.size()>1?proofs.get(agent):authentication.currentRegisteredProof(tenant,client,agent);
-                    var lookup=capabilities.getIfAvailable();
+                    var lookup=directory;
                     providerMatches=proof!=null && providerOwner.equals(proof.scope().ownerJiacn());
-                    if(providerMatches&&lookup!=null) {
+                    if(providerMatches && candidate.proof()==null && proofIds.size()>1 && lookup instanceof RecommendationCatalogLookup){
+                        observed=catalogs.get(agent);
+                    }else if(providerMatches&&lookup!=null) {
                         var view=lookup.lookup(new SkillCapabilityLookup.Scope(tenant,client,providerOwner,agent),SkillMarketplaceService.sessionFence(proof));
                         if(view.state()==SkillCapabilityLookup.State.AVAILABLE)observed=view;
                     }

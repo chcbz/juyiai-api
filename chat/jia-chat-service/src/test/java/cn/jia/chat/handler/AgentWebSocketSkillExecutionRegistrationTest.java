@@ -156,6 +156,24 @@ class AgentWebSocketSkillExecutionRegistrationTest {
         doThrow(new java.io.IOException("private")).when(f.session).sendMessage(any());
         register(f, SkillExecutionFixtures.catalog()); assertEquals(State.DISCONNECTED, registry.lookup(scope, fence).state());
     }
+    @Test void recommendationObservationIsNotOrdinaryAuthorityAndCannotHideAmbiguityOrUnhealthyRegistration() throws Exception {
+        var f=fixture();register(f,SkillExecutionFixtures.catalog());
+        var channel=mock(AgentRuntimeAuthenticationService.RecommendationChannel.class);
+        when(channel.issued(notNull())).thenReturn(true);
+        when(channel.matches("socket-a",TENANT,CLIENT,OWNER,AGENT,"runtime-a")).thenReturn(true);
+        when(f.auth.isCurrentBinding(any(),any(),any(),any(),any(),any())).thenReturn(false);
+        assertEquals(State.AVAILABLE,registry.forRecommendation(scope,fence,channel).state());
+        assertEquals(State.DISCONNECTED,registry.lookup(scope,fence).state());
+        registry.register("other-session",scope,fence,null,()->true);
+        assertEquals(State.AMBIGUOUS,registry.forRecommendation(scope,fence,channel).state());
+        registry.remove("other-session");
+        when(f.auth.isCurrentBinding(any(),any(),any(),any(),any(),any())).thenReturn(true);
+        var wrong=mock(AgentRuntimeAuthenticationService.RecommendationChannel.class);
+        assertEquals(State.FENCED,registry.forRecommendation(scope,fence,wrong).state());
+        String unhealthy=wire(f,SkillExecutionFixtures.catalog()).replace("\"durableStateHealthy\":true","\"durableStateHealthy\":false");
+        f.handler.handleTextMessage(f.session,new TextMessage(unhealthy));
+        assertEquals(State.DISCONNECTED,registry.forRecommendation(scope,fence,channel).state());
+    }
     @Test void disconnectUnhealthyStateAndRevokedBindingNeverReturnCachedFacts() throws Exception {
         var f = fixture(); register(f, SkillExecutionFixtures.catalog());
         when(f.auth.isCurrentBinding(any(), any(), any(), any(), any(), any())).thenReturn(false);
