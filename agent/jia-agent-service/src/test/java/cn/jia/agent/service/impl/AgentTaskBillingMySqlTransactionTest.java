@@ -100,7 +100,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private String database;
     private DataSourceTransactionManager manager;
     private AgentTaskMutationTransactionImpl roots;
-    private TaskBillingService billing;
+    private TaskBillingService billing,inlineBilling;
     private cn.jia.economy.task.TaskQuoteBatches batches;
     private AgentTaskExecutionGrantServiceImpl assignment;
     private AgentTaskFormalDeliveryDecisionService decisions;
@@ -220,10 +220,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 List.of(new ModelTokenPrice("fixture", "fixture-model", "standard", "1", "synthetic fixture",
                         Map.of(ModelTokenPrice.Category.INPUT, new BigDecimal("0.50")), null, Map.of())));
         batches=proxy(new cn.jia.economy.service.impl.TaskQuoteBatchStore(sql.getMapper(EconomyTaskBillingMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskQuoteBatches.class);
-        billing = proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class), ledger,
-                new EconomyPostingServiceImpl(ledger, manager, new EconomyPreviewGate(new EconomyPreviewProperties(
-                        true, List.of(new EconomyPreviewProperties.AllowedScope(TENANT, CLIENT))))),
-                new ObjectMapper(), pricing), TaskBillingService.class);
+        var posting=new EconomyPostingServiceImpl(ledger,manager,walletGate);
+        billing=proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class),ledger,posting,new ObjectMapper(),pricing,true),TaskBillingService.class);
+        inlineBilling=proxy(new TaskBillingServiceImpl(sql.getMapper(EconomyTaskBillingMapper.class),ledger,posting,new ObjectMapper(),pricing),TaskBillingService.class);
         var identities = mock(AgentIdentityService.class);
         when(identities.resolveAgentIdInScope(TENANT, CLIENT, OWNER, AGENT)).thenReturn(AGENT);
         when(identities.lockActiveCanonicalAgentIdsInScope(TENANT, CLIENT, OWNER, List.of(AGENT))).thenReturn(List.of(AGENT));
@@ -654,6 +653,50 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=TRUE WHERE review_sha=?",key);assertNull(measured.apply(key));
         jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,step::get);assertThrows(denied,()->lock.apply(enroll));
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+    }
+    @Test void disablingSharedWritesKeepsOutstandingReferenceConfirmable(){
+        var f=measuredOffer();var p=f.preparation();var writes=new java.util.ArrayList<TaskBillingService.MeasuredWrite>();
+        for(String a:List.of("selected","alternate"))writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"before-switch"),p));
+        var old=locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes));assertEquals(1,count("economy_task_quote_preparation"));
+        var after=writes.stream().map(w->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,w.binding().requirementSha256(),w.binding().inputSnapshotDigest(),w.binding().agentId(),"after-switch"),p)).toList();
+        var next=locked(()->inlineBilling.storeMeasuredBatch(BILLING_TASK,PAYER,after));assertEquals(1,count("economy_task_quote_preparation"));
+        assertEquals("OBJECT",jdbc.queryForObject("SELECT JSON_TYPE(snapshot_json->'$.preparation') FROM economy_task_quote WHERE quote_id=?",String.class,next.getFirst().quoteId()));
+        assertEquals("STRING",jdbc.queryForObject("SELECT JSON_TYPE(snapshot_json->'$.preparation') FROM economy_task_quote WHERE quote_id=?",String.class,old.getFirst().quoteId()));
+        var held=locked(()->inlineBilling.reserve(BILLING_TASK,old.getFirst().quoteId(),writes.getFirst().binding(),PAYER));
+        assertEquals(held,locked(()->inlineBilling.reservation(BILLING_TASK,old.getFirst().quoteId(),PAYER,"before-switch")));
+        assertEquals(1,count("economy_transaction"));assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void historyPagesMeasureInlineQuotes(){profileHistoryPages(false);}
+    @Test void historyPagesMeasureSharedQuotes(){profileHistoryPages(true);}
+    private void profileHistoryPages(boolean shared){
+        // Synthetic READY rows for deterministic read cost only, never accuracy/quality evidence.
+        var f=measuredOffer();var prep=f.preparation();var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(prep.group(),prep.features());
+        var reader=BILLING_TASK;var writer=shared?billing:inlineBilling;int n=257;
+        var ids=new java.util.ArrayList<String>();new org.springframework.transaction.support.TransactionTemplate(manager).executeWithoutResult(status->{
+            for(int i=0;i<n;i++){
+                String sid=String.format(java.util.Locale.ROOT,"%064x",i+1);ids.add(sid);
+                var task=new TaskBillingService.Task(reader.scope(),OWNER,"history-"+i);
+                var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"batch-"+task.taskId()),prep)).toList();
+                var stored=writer.storeMeasuredBatch(task,PAYER,writes);
+                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),prep.features().digest(),group.digest());
+            }
+        });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
+        var ticks=new java.util.ArrayList<Long>();long examined=0,statements=0,sent=0;int samples=0;
+        for(int run=0;run<=5;run++){
+            int pos=0;String cursor="";var before=recShapes();
+            while(true){long start=System.nanoTime();var page=historyCatalog.page(reader,group,cursor);long elapsed=System.nanoTime()-start;
+                if(run>0 && page.size()==64)ticks.add(elapsed);if(page.isEmpty())break;
+                assertEquals(Math.min(64,n-pos),page.size());for(var row:page){assertEquals(ids.get(pos),row.source().sampleId());assertEquals("history-"+pos,row.sourceTaskId());pos++;}
+                cursor=page.getLast().source().sampleId();
+            }assertEquals(n,pos);if(run==0)continue;
+            for(var e:recShapes().entrySet()){var v=e.getValue();var prev=before.getOrDefault(e.getKey(),new Shape(0,0,0,0));long calls=v.calls()-prev.calls();if(calls==0)continue;
+                statements+=calls;examined+=v.examined()-prev.examined();sent+=v.sent()-prev.sent();}samples+=pos;
+        }
+        assertEquals(30,statements,"one query per keyset page, including terminal empty page");assertEquals(samples,sent);
+        ticks.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"QUOTE_HISTORY_PAGES shared=%s histories=%d fullPages=%d p50ms=%.3f p95ms=%.3f statements=%d rowsExamined=%d rowsSent=%d%n",shared,n,ticks.size(),ticks.get(9)/1e6,ticks.get(18)/1e6,statements,examined,sent);
+        // A READY sample still exists. Lost or wrongly scoped source quote must not silently shorten its page.
+        jdbc.update("UPDATE economy_task_cost_sample SET quote_id='missing' WHERE sample_id=?",ids.get(80));
+        assertThrows(IllegalStateException.class,()->historyCatalog.page(reader,group,ids.get(63)));
     }
     @Test void scopedQuotePreparationReadsExactBytesAndRejectsForeignOrDamagedReferences() throws Exception {
         var fixture=measuredOffer();String inline=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,fixture.offer().quoteId());

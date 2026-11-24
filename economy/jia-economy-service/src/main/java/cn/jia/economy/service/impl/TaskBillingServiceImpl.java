@@ -56,6 +56,15 @@ public class TaskBillingServiceImpl implements TaskBillingService {
 
     public TaskBillingServiceImpl(EconomyTaskBillingMapper mapper, EconomyLedgerMapper ledger,
             EconomyPostingService posting, ObjectMapper json, TaskPricingService pricing) {
+        this(mapper,ledger,posting,json,pricing,false);
+    }
+
+    private final boolean sharedPreparationWrites;
+    @org.springframework.beans.factory.annotation.Autowired
+    public TaskBillingServiceImpl(EconomyTaskBillingMapper mapper, EconomyLedgerMapper ledger,
+            EconomyPostingService posting, ObjectMapper json, TaskPricingService pricing,
+            @org.springframework.beans.factory.annotation.Value("${jia.economy.task-quotes.shared-preparation-writes:false}") boolean sharedPreparationWrites) {
+        this.sharedPreparationWrites=sharedPreparationWrites;
         this.mapper = mapper;
         this.ledger = ledger;
         this.posting = posting;
@@ -139,7 +148,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         // Exact text equality (including numeric representation) precedes digest addressing in the DB.
         record Content(String batch,String json) {}
         var counts = new java.util.LinkedHashMap<Content,Integer>();
-        if(writes.size()>1) for(var write:writes){
+        if(sharedPreparationWrites && writes.size()>1) for(var write:writes){
             var body=cache.computeIfAbsent(write.prepared(),this::freeze).json();
             counts.merge(new Content(write.binding().recommendationId(),body),1,Integer::sum);
         }

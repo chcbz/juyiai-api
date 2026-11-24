@@ -116,4 +116,4 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 
 单承办 CHAT 原派发来源：新 relay 安装前显式执行 `chat/jia-chat-mapper/src/main/resources/db/chat-task-dispatch-origin-v1.sql`（依赖 `chat_dispatch_outbox`）。空表即可，不根据现有设备回填。仅记录一次派发的候选来源与冲突标记，不是已发送、逐调用计量或报价授权。
 
-**整事项报价读取候选**：基础 Economy 七表之后，须显式安装 `economy/jia-economy-mapper/src/main/resources/db/economy-task-quote-preparation-v1.sql` 的专用表与 SQL SECURITY INVOKER 视图，然后安装读取新视图的 API。未授权不改生产；先读后写，本批不生成引用、不回填、不清除原报价。写入候选启用后，禁止删除共享依据或直接回退到不认识引用的读取端。
+**整事项报价读取候选**：基础 Economy 七表之后，须显式安装 `economy/jia-economy-mapper/src/main/resources/db/economy-task-quote-preparation-v1.sql` 的专用表与 SQL SECURITY INVOKER 视图，然后安装读取新视图的 API。未授权不改生产；先读后写，`jia.economy.task-quotes.shared-preparation-writes` 默认 false，仅控制新批次引用写入；开启须先核实完整表/视图及两条不可变触发器、读路径与回退版本，无回填。关闭写入后保留原视图、依据和触发器；新批次改写内嵌依据，旧批次重放、确认和校准继续解析原引用。这是配置回退，不是数据库降级；迁移只在显式维护窗口执行，部分DDL成功时核对目录后只补缺失对象，不盲重跑触发器。写入候选启用后，禁止删除共享依据或直接回退到不认识引用的读取端。
