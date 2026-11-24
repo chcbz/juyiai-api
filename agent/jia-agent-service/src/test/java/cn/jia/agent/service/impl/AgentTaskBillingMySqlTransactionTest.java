@@ -672,6 +672,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(json.readTree(json.writeValueAsString(expected.binding())),tree.path("binding"));
             if(i==0)assertFalse(tree.has("initialIntentSha256"));else assertEquals(expected.initialIntentSha256(),tree.path("initialIntentSha256").asText());
         }
+        profileFrozenPayload(TASK,"mixed",40,2);
         assertEquals(before+40,count("economy_task_quote"));assertEquals(0,count("economy_transaction"));
         var selected=writes.get(1);String target=selected.binding().agentId();assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
         locked(()->billing.reserve(BILLING_TASK,receipts.get(1).quoteId(),selected.binding(),PAYER));
@@ -2162,6 +2163,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
+    // Diagnostic on test-owned committed rows, outside request timing. MySQL JSON text lengths,
+    // not InnoDB allocation. Emit counts only; no task vectors, samples, prices or digests.
+    private void profileFrozenPayload(String task,String batch,int quotes,int expectedGroups){
+        var groups=jdbc.query("""
+            SELECT COUNT(*),COUNT(DISTINCT binding_sha256),SUM(total_bytes),SUM(prep_bytes),MAX(prep_bytes)
+            FROM (SELECT binding_sha256,OCTET_LENGTH(snapshot_json) total_bytes,
+              OCTET_LENGTH(JSON_EXTRACT(snapshot_json,'$.preparation')) prep_bytes,
+              SHA2(JSON_EXTRACT(snapshot_json,'$.preparation'),256) fingerprint
+              FROM economy_task_quote WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
+                AND BINARY JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.recommendationId'))=BINARY ?
+            ) payload GROUP BY fingerprint
+            """,(rs,n)->new long[]{rs.getLong(1),rs.getLong(2),rs.getLong(3),rs.getLong(4),rs.getLong(5)},TENANT,CLIENT,OWNER,task,batch);
+        assertEquals(expectedGroups,groups.size());long rows=0,total=0,preparations=0,unique=0;
+        for(var g:groups){assertEquals(g[0],g[1]);assertTrue(g[4]>0);assertEquals(g[0]*g[4],g[3]);rows+=g[0];total+=g[2];preparations+=g[3];unique+=g[4];}
+        assertEquals(quotes,rows);assertTrue(total>preparations);
+        System.out.printf("QUOTE_FROZEN_PAYLOAD rows=%d groups=%d logicalBytes=%d preparationBytes=%d distinctPreparationBytes=%d repeatedPreparationBytes=%d%n",rows,groups.size(),total,preparations,unique,preparations-unique);
+    }
     private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}
     private QuoteWrites readQuoteWrites(String task){
         var w=admin.queryForObject("""
@@ -2201,6 +2219,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertTrue(end.calls()-writes.calls()<3210);assertEquals(3210,end.rows()-writes.rows());assertTrue(bytes>0);
         assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3210,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
+        profileFrozenPayload(task,first.path("quotes").get(0).path("recommendationId").asText(),107,1);
         samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());
     }
 
