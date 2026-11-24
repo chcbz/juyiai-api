@@ -1481,9 +1481,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var outgoing=dispatch.outgoing(row);assertEquals(OWNER,outgoing.executorOwner());
         assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
         assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
+        verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
+
+    }
+
+    private void verifyDiscussionOrigin(TransactionTemplate tx,ChatDeliberationOutboxService relay,ChatDeliberationOutboxService.Claim claim,
+            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,cn.jia.chat.deliberation.ChatDispatchOutboxEntity draft,String context,long now){
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(jdbc.getDataSource());
         var origins=new ChatTaskDispatchOriginService(relay,new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc));
-        var host=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation","host","boot",1);String context=outgoing.turn().getContextDigest();
+        var host=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
         assertThrows(InjectedFailure.class,()->tx.executeWithoutResult(st->{origins.beforeSend(claim,context,host);throw new InjectedFailure();}));
         assertEquals(0,count("chat_task_dispatch_origin"));
         tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
@@ -1494,8 +1501,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         tx.executeWithoutResult(st->origins.beforeSend(later,context,new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation-2","host-2","boot-2",2)));
         tx.executeWithoutResult(st->origins.beforeSend(later,context,host));
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));
-        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
-
     }
 
     private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
