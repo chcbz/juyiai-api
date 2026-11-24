@@ -6,7 +6,12 @@ import java.util.function.Function;
 
 /** Quote-only intent journal. All methods require the caller to have authorized access to this task. */
 public interface TaskQuoteBatches {
-    record Key(TaskBillingService.Task task,String payer,String idempotencyKey){public Key{
+    interface ScopeKey {TaskBillingService.Task task();String payer();}
+    /** Offline correlation of the private capture roster. Not a capability to replay an HTTP request. */
+    record ObservationKey(TaskBillingService.Task task,String payer,String idempotencyKeySha256) implements ScopeKey {public ObservationKey{
+        Objects.requireNonNull(task);if(payer==null||payer.isBlank()||idempotencyKeySha256==null||!idempotencyKeySha256.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid capture binding");
+    }}
+    record Key(TaskBillingService.Task task,String payer,String idempotencyKey) implements ScopeKey {public Key{
         Objects.requireNonNull(task);if(payer==null||payer.isBlank()||idempotencyKey==null||idempotencyKey.isBlank())throw new IllegalArgumentException("Missing quote intent");
     }}
     record Intent(String expectedTaskVersion,List<String> agentIds){public Intent{
@@ -23,6 +28,7 @@ public interface TaskQuoteBatches {
     record Result(String taskId,String taskVersion,long observedAt,List<Item> quotes){public Result{quotes=List.copyOf(quotes);}}
     final class IntentConflict extends RuntimeException {public IntentConflict(){super("QUOTE_IDEMPOTENCY_CONFLICT");}}
     Result replay(Key key,Intent intent);
+    Result observed(ObservationKey key,Intent intent);
     /** Caller holds the original task root. Callback persists prepared items in this transaction, never does I/O to a provider.
      * It runs only for the winning new intent, and receives the batch recommendationId for binding all candidate quotes. */
     Result commit(Key key,Intent intent,Function<String,List<Item>> persistPrepared);

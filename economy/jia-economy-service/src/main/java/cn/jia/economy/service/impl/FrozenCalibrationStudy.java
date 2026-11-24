@@ -83,10 +83,10 @@ public final class FrozenCalibrationStudy {
     public record OfferedHoldout(Task original,String family,String groupSha,String featureSha,String quoteId,String agentId,long wen,String referenceSha){
         @Override public String toString(){return "OfferedHoldout[private]";}}
     /** Offline join, after transport cutoff and before opening outcomes. Replay is corroboration, never a replacement for an observed reply. */
-    public Artifact publishedOffer(cn.jia.economy.task.TaskQuoteBatches.Key key,cn.jia.economy.task.TaskQuoteBatches.Intent intent,
+    public Artifact publishedOffer(cn.jia.economy.task.TaskQuoteBatches.ObservationKey key,cn.jia.economy.task.TaskQuoteBatches.Intent intent,
             cn.jia.economy.task.TaskQuoteBatches.Result observed,String agent,String family,TaskHistoryCatalog.Group group,Artifact priceBook,
             cn.jia.economy.task.TaskQuoteBatches batches,cn.jia.economy.mapper.EconomyTaskBillingMapper quotes){
-        if(observed==null||!observed.equals(batches.replay(key,intent)))throw new IllegalArgumentException("Observed forecast differs from original batch");
+        if(observed==null||!observed.equals(batches.observed(key,intent)))throw new IllegalArgumentException("Observed forecast differs from original batch");
         var item=observed.quotes().stream().filter(i->i.agentId().equals(agent)).findFirst().orElseThrow();
         if(item.state()!=cn.jia.economy.task.TaskQuoteBatches.State.AVAILABLE)throw new IllegalArgumentException("No observed price");
         var t=key.task();var q=quotes.findQuote(t.scope().tenantId(),t.scope().clientId(),t.ownerJiacn(),t.taskId(),item.quoteId());

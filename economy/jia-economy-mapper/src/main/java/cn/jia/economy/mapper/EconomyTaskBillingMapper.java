@@ -14,7 +14,7 @@ public interface EconomyTaskBillingMapper {
     record Batch(String inputSha,String responseJson) {}
     String BATCH_KEY="tenant_id=#{k.task.scope.tenantId} AND client_id=#{k.task.scope.clientId} AND owner_jiacn=#{k.task.ownerJiacn} AND task_id=#{k.task.taskId} AND payer_user_id=#{k.payer} AND key_sha256=#{keySha}";
     @Select("SELECT input_sha256,response_json FROM economy_task_quote_batch WHERE "+BATCH_KEY)
-    Batch readBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.Key key,@Param("keySha") String keySha);
+    Batch readBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.ScopeKey key,@Param("keySha") String keySha);
     @Select("SELECT input_sha256,response_json FROM economy_task_quote_batch WHERE "+BATCH_KEY+" FOR UPDATE")
     Batch lockBatch(@Param("k") cn.jia.economy.task.TaskQuoteBatches.Key key,@Param("keySha") String keySha);
     @Insert("""

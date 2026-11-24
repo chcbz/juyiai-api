@@ -1504,7 +1504,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         hot.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_QUOTE_HTTP coldFixtureMs=%.3f hotCount=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f fixtureEncodes=%d%n",
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
         if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureBatchQuoteHttp(id,token,agents,source,subject,terms,calls,profile);
-        var key=new TaskQuoteBatches.Key(newTask,PAYER,"fixture-0");var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
+        var key=new TaskQuoteBatches.ObservationKey(newTask,PAYER,QuoteWireWindow.digest("fixture-0"));var intent=new TaskQuoteBatches.Intent("0",List.of(agent));
         var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
         var forecast=study.publishedOffer(key,intent,observedFirst,agent,"history-http",group,book,batches,quotes);
         var other=observedOther;assertThrows(IllegalArgumentException.class,()->study.publishedOffer(key,intent,other,agent,"history-http",group,book,batches,quotes));

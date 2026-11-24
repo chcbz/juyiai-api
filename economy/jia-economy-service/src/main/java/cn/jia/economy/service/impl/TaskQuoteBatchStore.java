@@ -18,6 +18,7 @@ public class TaskQuoteBatchStore implements TaskQuoteBatches {
     private static String sha(String text){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));}catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
     private String input(Intent intent){return sha(json.writeValueAsString(List.of("TASK_QUOTE_BATCH_V1",intent.expectedTaskVersion(),intent.agentIds())));}
     private Result unpack(EconomyTaskBillingMapper.Batch row,String hash){if(row==null)return null;if(!hash.equals(row.inputSha()))throw new IntentConflict();return json.readValue(row.responseJson(),Result.class);}
+    public Result observed(ObservationKey key,Intent intent){return unpack(db.readBatch(key,key.idempotencyKeySha256()),input(intent));}
     public Result replay(Key key,Intent intent){return unpack(db.readBatch(key,sha(key.idempotencyKey())),input(intent));}
     @Transactional(propagation=Propagation.MANDATORY,rollbackFor=Exception.class)
     public Result commit(Key key,Intent intent,Function<String,List<Item>> persistPrepared){
