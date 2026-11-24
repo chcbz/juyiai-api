@@ -1361,7 +1361,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(receipt.path("assignmentRevision").asLong(), discussion.assignmentRevision());
                 assertNull(relaySource.claimNext(SCOPE, "second-chat-fixture", claimTime));
                 var chat = bindQuotedDiscussion(discussion, req,actualAuthority,authority.identities());
-                // Execution action is still supplied by this fixture, not the typed discussion dispatcher.
+                // Preserve the independent negative command check; the full Runtime path below uses the committed Chat event.
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
                 prepareNativeExecutionSchema();
                 new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-skill-application.sql"),new org.springframework.core.io.ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(jdbc.getDataSource());
@@ -1377,8 +1377,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var wrong=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
                 assertEquals(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT,assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->nativeActions.create(ownerScope,wrong)).getReason());
                 assertNull(consumed.get());assertEquals(executions,count("agent_personal_workspace_execution"));assertEquals(members,count("agent_task_execution_member"));
-                snapshot.put("outputs",pending.commandOutputs());var right=new SkillExecutionService.Create("history-first",scope,agent,snapshot);
-                var created=nativeActions.create(ownerScope,right);assertEquals("QUEUED",created.state());assertEquals(created,nativeActions.create(ownerScope,right));
+                final SkillExecutionService.Creation created;
+                if(chat.action()!=null)created=chat.action().consume(nativeActions,admission);
+                else { // Component-only run without the fixed Runtime source cannot produce a Chat final.
+                    assertNull(System.getProperty("ownedMeteredRuntime"));snapshot.put("outputs",pending.commandOutputs());
+                    var right=new SkillExecutionService.Create("history-first",scope,agent,snapshot);created=nativeActions.create(ownerScope,right);assertEquals(created,nativeActions.create(ownerScope,right));
+                }
+                assertEquals("QUEUED",created.state());
                 assertEquals(executions+1,count("agent_personal_workspace_execution"));assertEquals(members+1,count("agent_task_execution_member"));assertEquals(created.executionId(),consumed.get());
                 assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
                 verifyNativePickup(authority,service,created,pending);
@@ -1388,8 +1393,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     /** Same committed execution: authenticated MVC filter, controller, service, MySQL lease. Socket liveness is a fixture. */
+    private interface QuotedAction {SkillExecutionService.Creation consume(SkillExecutionService executions,TaskInitialActionOutput outputs);}
     private record BoundBountyChat(ChatBountyConversationService.Discussion discussion,
-                                  WorkspaceConversationAccessService access) {}
+                                  WorkspaceConversationAccessService access,QuotedAction action) {}
 
     /** Real Chat binding and ACL against the same committed assignment. No synthetic conversation ID. */
     private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService actualAuthority,AgentIdentityService identities) throws Exception {
@@ -1416,13 +1422,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.taskId(), view.taskId()); assertEquals(List.of(intent.targetAgentId()), view.targetAgentIds());
         assertThrows(IllegalStateException.class, () -> access.requireAccessible(
                 new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,"other-owner"), discussion.conversationId()));
-        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx,actualAuthority,identities);
-        return new BoundBountyChat(discussion, access);
+        var action=verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx,actualAuthority,identities);
+        return new BoundBountyChat(discussion, access,action);
     }
 
     /** Chat owns all request/turn/message/outbox writes. Device capabilities and the task display DTO
      * are fixtures here, not a claim of executing the discussion or accepting its eventual answer. */
-    private void verifyBootstrapRequest(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,
+    private QuotedAction verifyBootstrapRequest(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,
             ChatBountyConversationService discussions, cn.jia.chat.dao.ChatConversationDao conversations,
             ChatBountyConversationService.Discussion bound, TransactionTemplate tx,TaskAssigneeAuthorityService actualAuthority,AgentIdentityService identities) throws Exception {
         createTable(Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql"), "chat_message", false);
@@ -1441,9 +1447,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         deliberation.setDispatchAuthority(dispatch);
         deliberation.setContextHistory(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
         quoteWorkspace(); // Real empty task-linked input catalog for this new task.
-        var context=quotedActionContext(intent,requirements,actualAuthority,identities,dispatch);
+        var fixture=quotedActionContext(intent,requirements,actualAuthority,identities,dispatch);
         var typed = new ChatTypedDiscussionAdmissionService(roots,new cn.jia.chat.deliberation.ChatBountyBindingStore(jdbc),
-                conversations,new JuyitingConversationScopeService(new BuiltinHallAgentSupport(agents),agents),deliberation,dao,context,
+                conversations,new JuyitingConversationScopeService(new BuiltinHallAgentSupport(agents),agents),deliberation,dao,fixture.context(),
                 new ChatTypedDeliberationService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc)), mock(ChatActionFinalService.class));
         typed.setSkillGrants(assignment);
         var entry = new ChatBountyBootstrapAdmissionService(requirements,discussions,conversations,messages,dao,
@@ -1481,19 +1487,47 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
         assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
         verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
+        QuotedAction selected=null;
         if(System.getProperty("ownedMeteredRuntime")!=null){
             relay.setDispatchAuthority(dispatch);
             var finals=new ChatActionFinalService(new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc),dao,new cn.jia.chat.handler.TypedInspectionSessionRegistry());
             deliberation.setActionFinals(finals);
             verifyDiscussionInbox(tx,relay,row,outgoing,deliberation);
+            selected=(executions,outputs)->{
+                var store=new cn.jia.chat.deliberation.JdbcChatTypedDeliberationStore(jdbc);
+                var observed=new java.util.concurrent.atomic.AtomicReference<SkillExecutionService.Creation>();
+                var observer=mock(SkillExecutionService.class);
+                when(observer.create(any(),any())).thenAnswer(inv->{var created=executions.create(inv.getArgument(0),inv.getArgument(1));assertTrue(observed.compareAndSet(null,created));return created;});
+                var exec=new ChatActionExecutionService(deliberation,dao,store,new cn.jia.chat.deliberation.ChatInteractionStepStore(jdbc),assignment,
+                        observer,fixture.installed(),fixture.live(),fixture.policy());exec.setNativeCapabilities(fixture.caps(),fixture.sessions());exec.setInitialOutputs(outputs);
+                var provider=new org.springframework.beans.factory.support.StaticListableBeanFactory(Map.of("executor",exec)).getBeanProvider(ChatActionDispatchService.Executor.class);
+                var consumer=new ChatActionDispatchService(proxy(finals,ChatActionFinalService.class),roots,new cn.jia.chat.deliberation.ChatBountyBindingStore(jdbc),conversations,
+                        new JuyitingConversationScopeService(new BuiltinHallAgentSupport(agents),agents),store,null,deliberation,dao,relay,provider);
+                long time=System.currentTimeMillis();var events=relay.discover(time,32).stream().filter(e->ChatActionFinalService.ACTION_EVENT.equals(e.getEventType())&&row.getTurnId().equals(e.getTurnId())).toList();
+                assertEquals(1,events.size());var actionClaim=tx.execute(st->relay.claim(events.getFirst(),"quote-action",time,60000));assertNotNull(actionClaim);
+                var action=tx.execute(st->finals.loadAction(actionClaim.row()));assertNotNull(action);
+                // Scoped, rollback-only revocation fixture at admission, not a forged action or terminal execution.
+                tx.executeWithoutResult(st->{assertEquals(1,jdbc.update("UPDATE agent_task_execution_grant SET state='REVOKED' WHERE grant_id=? AND state='ACTIVE'",intent.grantId()));
+                    assertThrows(ChatActionDispatchService.Rejected.class,()->exec.admit(action));st.setRollbackOnly();});
+                assertNull(observed.get());assertEquals(0,count("chat_step_execution_link"));
+                consumer.consume(actionClaim);assertNotNull(observed.get());
+                assertEquals("SENT",independent.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?",String.class,events.getFirst().getEventId()));
+                assertThrows(IllegalStateException.class,()->consumer.consume(actionClaim));
+                var replay=tx.execute(st->exec.admit(action));assertNotNull(replay);
+                assertEquals(1,count("chat_step_execution_link"));assertEquals(observed.get().executionId(),independent.queryForObject("SELECT execution_id FROM chat_step_execution_link",String.class));
+                verify(observer,times(1)).create(any(),any());return observed.get();
+            };
         }
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
 
+        return selected;
     }
 
     /** Real task policy, grant and action compiler. Only current device observations and
      * the enabled native-file capability are controlled inputs, not prebuilt action facts. */
-    private ChatTypedDeliberationContextService quotedActionContext(AgentTaskBountyBootstrapClaimDTO intent,
+    private record QuotedActionContext(ChatTypedDeliberationContextService context,ChatActionCapabilityService caps,cn.jia.chat.handler.TypedDeliberationSessionRegistry sessions,
+            InstalledSkillDescriptorLookup installed,SkillCapabilityLookup live,TaskSkillPolicyService policy) {}
+    private QuotedActionContext quotedActionContext(AgentTaskBountyBootstrapClaimDTO intent,
             AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService authority,
             AgentIdentityService identities,ChatDispatchAuthorityService dispatch){
         String agent=intent.targetAgentId(),session="quote-chat-session";
@@ -1510,13 +1544,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         policies.setAssigneeAuthority(authority);
         var scope=new SkillCapabilityLookup.Scope(TENANT,CLIENT,OWNER,agent);
         var fence=new AgentManagedSessionLookup.SessionFence("installation","host","boot",1);
-        var caps=new ChatActionCapabilityService(key->{assertEquals(scope,key);return new InstalledSkillDescriptorLookup.Snapshot(List.of());},
-                (key,observed)->{assertEquals(scope,key);assertEquals(fence,observed);return new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,session,fence,new SkillCapabilityLookup.Catalog("1",List.of()));},policies);
+        InstalledSkillDescriptorLookup installed=key->{assertEquals(scope,key);return new InstalledSkillDescriptorLookup.Snapshot(List.of());};
+        SkillCapabilityLookup live=(key,observed)->{assertEquals(scope,key);assertEquals(fence,observed);return new SkillCapabilityLookup.View(SkillCapabilityLookup.State.AVAILABLE,session,fence,new SkillCapabilityLookup.Catalog("1",List.of()));};
+        var caps=new ChatActionCapabilityService(installed,live,policies);
         var nativeFiles=mock(PersonalWorkspaceExecutionService.class);
         when(nativeFiles.nativeLocalFileCapabilities()).thenReturn(new PersonalWorkspaceExecutionService.ExecutionCapabilities(List.of("text/plain"),List.of(),true));
         caps.setNativeExecutions(nativeFiles);caps.setNativeSessions(sessions);
         var context=new ChatTypedDeliberationContextService(jdbc,sessions,()->cn.jia.chat.config.ChatTypedDeliberationReadiness.Readiness.READY,caps,true);
-        context.setDispatchAuthority(dispatch);return context;
+        context.setDispatchAuthority(dispatch);return new QuotedActionContext(context,caps,sessions,installed,live,policies);
     }
 
     /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for
