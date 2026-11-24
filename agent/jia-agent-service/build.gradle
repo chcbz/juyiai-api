@@ -1127,6 +1127,7 @@ configurations.named(taskQuoteRegressionSourceSet.runtimeOnlyConfigurationName) 
 // Align Spring/Servlet dependencies locally using the application's Boot version.
 // Resolving starter's configuration from this project's parallel task is unsafe.
 dependencies {
+    add(taskQuoteRegressionSourceSet.implementationConfigurationName, 'com.zaxxer:HikariCP')
     add(taskQuoteRegressionSourceSet.implementationConfigurationName,
         platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
 }
@@ -1138,6 +1139,7 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    systemProperty 'cyf.pooledHistoryComparison', providers.gradleProperty('pooledHistoryComparison').getOrElse('false')
     systemProperty 'cyf.denseQuoteConcurrency', providers.gradleProperty('denseQuoteConcurrency').getOrElse('false')
     systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
     if (providers.gradleProperty('ownedPickupCodex').isPresent()) {
