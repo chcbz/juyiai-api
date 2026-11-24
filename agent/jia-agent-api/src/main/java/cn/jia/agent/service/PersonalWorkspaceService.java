@@ -17,6 +17,7 @@ public interface PersonalWorkspaceService {
     FileDetailView get(Scope scope, String fileId);
     /** Internal scoped observation, not download authority. File state is returned even when trashed. */
     record SelectedVersions(FileView file, List<VersionView> versions) { }
+    java.util.Map<String,SelectedVersions> selectedVersionsBatch(Scope scope, java.util.Map<String,List<Integer>> picks);
     SelectedVersions selectedVersions(Scope scope, String fileId, List<Integer> numbers);
     List<VersionView> versions(Scope scope, String fileId);
     /** Exact active-file metadata only; no latest substitution or content conversion. */

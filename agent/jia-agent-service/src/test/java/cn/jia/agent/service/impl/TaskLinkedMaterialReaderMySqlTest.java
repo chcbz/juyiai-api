@@ -200,6 +200,57 @@ class TaskLinkedMaterialReaderMySqlTest {
     @AfterEach void cleanup() {
         if(admin!=null&&database!=null&&database.startsWith(namespace))admin.execute("DROP DATABASE IF EXISTS `"+database+"`");
     }
+    @org.apache.ibatis.plugin.Intercepts(@org.apache.ibatis.plugin.Signature(type=org.apache.ibatis.executor.statement.StatementHandler.class,
+            method="prepare", args={java.sql.Connection.class,Integer.class}))
+    private static class SelectCounter implements org.apache.ibatis.plugin.Interceptor {
+        int headers, versions;
+        @Override public Object intercept(org.apache.ibatis.plugin.Invocation call) throws Throwable {
+            String sql=((org.apache.ibatis.executor.statement.StatementHandler)call.getTarget()).getBoundSql().getSql().toLowerCase(java.util.Locale.ROOT);
+            if(sql.contains("from agent_personal_workspace_file_version")) { versions++; assertFalse(sql.contains("storage_uri")); }
+            else if(sql.contains("from agent_personal_workspace_file")) headers++;
+            return call.proceed();
+        }
+    }
+    @Test void selectedMetadataAcrossFilesUsesBoundedScopedStatements() throws Exception {
+        installCanonicalWorkspaceSchema();
+        var configuration = new MybatisConfiguration(); configuration.setMapUnderscoreToCamelCase(true);
+        var counter = new SelectCounter(); configuration.addInterceptor(counter);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceFileMapper.class);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceVersionMapper.class);
+        configuration.addMapper(cn.jia.agent.mapper.PersonalWorkspaceOperationMapper.class);
+        var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(jdbc.getDataSource());
+        factory.setConfiguration(configuration);
+        var session = new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
+        var dao = spy(new cn.jia.agent.dao.impl.PersonalWorkspaceDaoImpl(
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceFileMapper.class),
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceVersionMapper.class),
+                session.getMapper(cn.jia.agent.mapper.PersonalWorkspaceOperationMapper.class)));
+        var writes = mock(PersonalWorkspaceWriteService.class);
+        var service = new PersonalWorkspaceServiceImpl(dao,storage,writes);
+        var scope = new cn.jia.agent.service.PersonalWorkspaceService.Scope("0","client","owner");
+        var picks = new java.util.LinkedHashMap<String,java.util.List<Integer>>();
+        for (int i=0;i<101;i++) {
+            String id="file-"+i; int n=1+i%2; picks.put(id,java.util.List.of(n,n));
+            jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,'owner','UPLOAD',?,'DOCUMENT','ACTIVE',1,2,1,'0','client')",id,id);
+            for(int v=1;v<=2;v++) jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,'owner',?,?,'text/plain',7,?,'private:v',1,'0','client')",id,v,id+":"+v,metadata.sha256());
+        }
+        assertTrue(service.selectedVersionsBatch(scope,java.util.Map.of()).isEmpty());
+        assertEquals(0,counter.headers+counter.versions);
+        var result=service.selectedVersionsBatch(scope,picks); assertEquals(101,result.size());
+        picks.forEach((id,ns) -> assertEquals(java.util.List.of(id+":"+ns.getFirst()),result.get(id).versions().stream().map(v -> v.originalFilename()).toList()));
+        assertEquals(2,counter.headers); assertEquals(2,counter.versions);
+        jdbc.update("UPDATE agent_personal_workspace_file SET metadata_revision=2 WHERE file_id='file-100'");
+        assertEquals(2L,service.selectedVersionsBatch(scope,picks).get("file-100").file().metadataRevision());
+        assertEquals(4,counter.headers); assertEquals(4,counter.versions);
+        var missing=assertThrows(cn.jia.agent.exception.PersonalWorkspaceException.class,() -> service.selectedVersionsBatch(scope,java.util.Map.of("FILE-0",java.util.List.of(1))));
+        assertEquals("NOT_FOUND",missing.getReason().name());
+        var conflict=assertThrows(cn.jia.agent.exception.PersonalWorkspaceException.class,() -> service.selectedVersionsBatch(scope,java.util.Map.of("file-0",java.util.List.of(3))));
+        assertEquals("VERSION_CONFLICT",conflict.getReason().name());
+        var foreign=new cn.jia.agent.service.PersonalWorkspaceService.Scope("0","client","other");
+        assertEquals("NOT_FOUND",assertThrows(cn.jia.agent.exception.PersonalWorkspaceException.class,() -> service.selectedVersionsBatch(foreign,picks)).getReason().name());
+        verifyNoInteractions(writes,storage);
+    }
+
     @Test void selectedMetadataQueryCountDependsOnSelectedVersionsNotAge() throws Exception {
         installCanonicalWorkspaceSchema();
         var configuration = new MybatisConfiguration(); configuration.setMapUnderscoreToCamelCase(true);

@@ -54,9 +54,13 @@ public final class RecommendationMaterials {
             }
             cursor = page.nextCursor();
         } while (cursor != null);
+        if (byFile.isEmpty()) return List.of();
+        var picks = new LinkedHashMap<String,List<Integer>>();
+        byFile.forEach((id, selected) -> picks.put(id, selected.stream().map(LinkView::version).distinct().toList()));
+        var details = files.selectedVersionsBatch(fileScope, picks);
         for (var selection : byFile.entrySet()) {
-            var detail = files.selectedVersions(fileScope, selection.getKey(),
-                    selection.getValue().stream().map(LinkView::version).distinct().toList());
+            var detail = details.get(selection.getKey());
+            if (detail == null) throw new Failure(409, "RECOMMENDATION_STALE");
             var versions = new HashMap<Integer,VersionView>();
             for (var version : detail.versions()) versions.put(version.version(), version);
             for (var link : selection.getValue()) {

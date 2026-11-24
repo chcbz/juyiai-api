@@ -20,6 +20,9 @@ public interface PersonalWorkspaceDao {
     PersonalWorkspaceVersionEntity findVersion(String tenantId, String clientId, String ownerJiacn,
             String fileId, int version);
     /** Scoped metadata projection for explicit immutable versions; no storage location. */
+    record VersionPick(String fileId, int version) {}
+    List<PersonalWorkspaceFileEntity> selectedHeaders(String tenant, String client, String owner, List<String> ids);
+    List<PersonalWorkspaceVersionEntity> selectedMetadata(String tenant, String client, String owner, List<VersionPick> picks);
     List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId, String clientId, String ownerJiacn,
             String fileId, List<Integer> numbers);
     List<PersonalWorkspaceVersionEntity> listVersions(String tenantId, String clientId, String ownerJiacn,

@@ -72,6 +72,34 @@ public class PersonalWorkspaceDaoImpl implements PersonalWorkspaceDao {
                 .eq(PersonalWorkspaceVersionEntity::getVersion, version);
         exact(q, "file_id", fileId); return versions.selectOne(q.last("limit 1"));
     }
+    @Override public List<PersonalWorkspaceFileEntity> selectedHeaders(String tenant, String client, String owner, List<String> ids) {
+        requireScope(tenant, client, owner);
+        if (ids.isEmpty()) return List.of();
+        ids.forEach(id -> requireId(id, "fileId", 100));
+        var q = fileScope(tenant, client, owner).in(PersonalWorkspaceFileEntity::getFileId, ids);
+        q.and(group -> ids.forEach(id -> group.or(item -> exact(item, "file_id", id))));
+        return files.selectList(q.select(PersonalWorkspaceFileEntity::getFileId, PersonalWorkspaceFileEntity::getSourceKind,
+                PersonalWorkspaceFileEntity::getOriginKind, PersonalWorkspaceFileEntity::getDisplayName,
+                PersonalWorkspaceFileEntity::getMediaFamily, PersonalWorkspaceFileEntity::getState,
+                PersonalWorkspaceFileEntity::getMetadataRevision, PersonalWorkspaceFileEntity::getLatestVersion,
+                PersonalWorkspaceFileEntity::getCreatedAt));
+    }
+    @Override public List<PersonalWorkspaceVersionEntity> selectedMetadata(String tenant, String client, String owner, List<VersionPick> picks) {
+        requireScope(tenant, client, owner);
+        if (picks.isEmpty()) return List.of();
+        var grouped = new java.util.LinkedHashMap<String,List<Integer>>();
+        for (var pick : picks) {
+            requireId(pick.fileId(), "fileId", 100); requireVersion(pick.version());
+            grouped.computeIfAbsent(pick.fileId(), ignored -> new java.util.ArrayList<>()).add(pick.version());
+        }
+        var q = versionScope(tenant, client, owner);
+        q.and(group -> grouped.forEach((id, numbers) -> group.or(item -> exact(item.eq(PersonalWorkspaceVersionEntity::getFileId, id), "file_id", id)
+                .in(PersonalWorkspaceVersionEntity::getVersion, numbers))));
+        return versions.selectList(q.select(PersonalWorkspaceVersionEntity::getFileId, PersonalWorkspaceVersionEntity::getVersion,
+                PersonalWorkspaceVersionEntity::getContentHash, PersonalWorkspaceVersionEntity::getByteLength,
+                PersonalWorkspaceVersionEntity::getOriginalFilename, PersonalWorkspaceVersionEntity::getContentMimeType,
+                PersonalWorkspaceVersionEntity::getCreatedAt));
+    }
     @Override public List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId, String clientId,
             String ownerJiacn, String fileId, List<Integer> numbers) {
         requireScope(tenantId, clientId, ownerJiacn); requireId(fileId, "fileId", 100);
