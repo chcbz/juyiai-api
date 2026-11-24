@@ -790,8 +790,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
         assertEquals(inline,jdbc.queryForObject(query,String.class,id));
         var catalog=new EconomySchemaInitializer(jdbc);
-        var failure=assertThrows(IllegalStateException.class,catalog::afterPropertiesSet);
-        assertEquals("ECO-V0 trigger trg_economy_quote_preparation_no_delete is incompatible",failure.getMessage());
+        catalog.afterPropertiesSet();
+        assertEquals(inline,jdbc.queryForObject(query,String.class,id));
         assertEquals(jdbc.queryForObject(features,String.class,fixture.offer().quoteId()),jdbc.queryForObject(features,String.class,id));
         // A single matching token in a nested object is not proof that the canonical replacement is top-level.
         String misplaced=ref.replace("\"preparation\":\""+sha+"\"","\"preparation\" : \""+sha+"\",\"decoy\":{\"preparation\":\""+sha+"\"}");assertNotEquals(ref,misplaced);
@@ -803,6 +803,25 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_quote SET snapshot_json=? WHERE quote_id=?",ref.replace(sha,damaged),id);
         assertTrue(jdbc.queryForObject(query,String.class,id)==null,"Unresolved compact quote must not expose a snapshot");
         assertNull(jdbc.queryForObject(features,String.class,id));
+    }
+    @Test void quoteTriggerMaintenanceRejectsIncompleteOrForeignGuards() {
+        var catalog=new EconomySchemaInitializer(jdbc);
+        String table="economy_task_quote_preparation", guard="trg_economy_quote_preparation_no_delete";
+        String body=" FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Frozen quote preparation is immutable'";
+        jdbc.execute("CREATE TRIGGER trg_economy_unexpected_guard BEFORE DELETE ON "+table+body);
+        assertTrue(assertThrows(IllegalStateException.class,catalog::afterPropertiesSet).getMessage().contains("trg_economy_unexpected_guard"));
+        jdbc.execute("DROP TRIGGER trg_economy_unexpected_guard");
+        jdbc.execute("DROP TRIGGER "+guard);
+        String rejected="Quote preparation trigger "+guard+" is missing or incompatible";
+        assertEquals(rejected,assertThrows(IllegalStateException.class,catalog::afterPropertiesSet).getMessage());
+        for(String ddl:List.of("BEFORE DELETE ON economy_task_quote"+body,"BEFORE UPDATE ON "+table+body,
+                "BEFORE DELETE ON "+table+" FOR EACH ROW SET @ineffective_guard=1")) {
+            jdbc.execute("CREATE TRIGGER "+guard+" "+ddl);
+            assertEquals(rejected,assertThrows(IllegalStateException.class,catalog::afterPropertiesSet).getMessage());
+            jdbc.execute("DROP TRIGGER "+guard);
+        }
+        jdbc.execute("CREATE TRIGGER "+guard+" BEFORE DELETE ON "+table+body);
+        catalog.afterPropertiesSet();
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");

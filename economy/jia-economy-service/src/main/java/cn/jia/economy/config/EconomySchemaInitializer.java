@@ -262,6 +262,22 @@ public final class EconomySchemaInitializer implements InitializingBean {
                 throw new IllegalStateException("ECO-V0 trigger catalog is ambiguous");
             }
         }
+        // The explicit quote migration owns these triggers. Never install or repair them here.
+        // Only a complete, exact pair on its own table can be excluded from the V0 namespace.
+        if (Boolean.TRUE.equals(jdbcTemplate.queryForObject("""
+                SELECT EXISTS(SELECT 1 FROM information_schema.tables
+                              WHERE table_schema=DATABASE() AND table_name='economy_task_quote_preparation')
+                """, Boolean.class))) {
+            for (String event : List.of("DELETE", "UPDATE")) {
+                String name = "trg_economy_quote_preparation_no_" + event.toLowerCase(Locale.ROOT);
+                TriggerDefinition owned = new TriggerDefinition(name, "economy_task_quote_preparation", "BEFORE", event,
+                        "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Frozen quote preparation is immutable'");
+                TriggerDefinition found = result.remove(name);
+                if (found == null || !triggerMatches(owned, found)) {
+                    throw new IllegalStateException("Quote preparation trigger " + name + " is missing or incompatible");
+                }
+            }
+        }
         return result;
     }
 
