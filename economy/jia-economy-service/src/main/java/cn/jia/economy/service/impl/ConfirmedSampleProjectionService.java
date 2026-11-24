@@ -29,6 +29,7 @@ public class ConfirmedSampleProjectionService implements ConfirmedSampleProjecti
     private PreparedFeature prepareFeature(Task task,String id,long revision){
         var row=db.featureSource(task,id,revision);if(row==null || row.resolvedSha()==null || row.features()==null)return null;
         try{var features=json.readValue(row.features(),cn.jia.economy.pricing.TaskEstimateFeatures.class);
+        if(features==null)return null; // A JSON null from the canonical source is not derivable.
         var meta=EconomyHistoryFeatureBytes.metadata(features);
         if(!features.digest().equals(row.featureSha()))return null; // never seal data not committed by the sample
         return new PreparedFeature(row,json.writeValueAsString(meta),EconomyHistoryFeatureBytes.vector(features));

@@ -42,7 +42,6 @@ import cn.jia.agent.entity.*;
 import cn.jia.agent.mapper.*;
 import cn.jia.agent.service.*;
 import cn.jia.economy.config.*;
-import cn.jia.economy.service.impl.EconomyHistoryFeatureBytes;
 import cn.jia.economy.mapper.EconomyLedgerMapper;
 import cn.jia.economy.mapper.EconomyTaskBillingMapper;
 import cn.jia.economy.pricing.*;
@@ -705,7 +704,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var storedPrep=dense?new TaskBillingService.MeasuredPreparation(source,prep.group(),prep.estimatorVersion(),prep.calibrationVersion(),prep.qualityStatus(),prep.estimate()):prep;
                 var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"batch-"+task.taskId()),storedPrep)).toList();
                 var stored=writer.storeMeasuredBatch(task,PAYER,writes);
-                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),group.digest());
+                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,?,?,?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),dense?null:1,dense?"WAITING_EVIDENCE":"READY",group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
         if(dense){
@@ -714,7 +713,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             long start=System.nanoTime();applyHistoryFeatures();System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_UPGRADE rows=%d shared=%s elapsedMs=%.3f%n",prior.size(),shared,(System.nanoTime()-start)/1e6);
             assertEquals(prior,jdbc.queryForList(oldRows));
         }
-        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);if(dense){profileFeatureRead(reader,group,ids,shared);profileProjection(reader,group,ids,shared,prep.features());}return;}
+        if(n>257){long build=dense?publishDenseFeatures(reader,ids,shared):0;
+            profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);
+            if(dense){profileFeatureRead(reader,group,ids,shared);profileProjection(reader,group,ids,shared,prep.features(),build);}return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
         assertEquals(1,matches.size());var pageDigest=matches.getFirst();var cfg=recommendationSql.getConfiguration();
@@ -767,22 +768,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             System.out.printf(java.util.Locale.ROOT,"QUOTE_FEATURE_READ shared=%s run=%d rows=%d pages=%d chars=%d mapperFetchMs=%.3f jsonDecodeMs=%.3f featureVerifyMs=%.3f%n",shared,run,pos,pages,chars,fetch/1e6,decode/1e6,verify/1e6);
         }
     }
-    private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query){
-        var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+    private long publishDenseFeatures(TaskBillingService.Task reader,List<String> ids,boolean shared){
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-history-feature-projection-v1.sql")).execute(jdbc.getDataSource());
-        String seal="""
-            INSERT INTO economy_history_feature_projection SELECT s.sample_id,s.projection_revision,q.quote_id,SHA2(q.snapshot_json,256),SHA2(r.snapshot_json,256),
-            q.snapshot_json->>'$.binding.recommendationId',IF(JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.preparation'))='STRING',q.snapshot_json->>'$.preparation',NULL),?,?
-            FROM economy_task_cost_sample s JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id AND q.quote_id=s.quote_id
-            JOIN economy_task_quote_resolved r ON r.id=q.id WHERE s.sample_id=? AND s.projection_revision=? AND s.initial_feature_sha256=?
-            """;
-        long build=System.nanoTime();new TransactionTemplate(manager).executeWithoutResult(status->{String after="";
-            while(true){var page=original.history(reader,groupSha,after,64);if(page.isEmpty())break;
-                for(var row:page){var f=json.readValue(row.featuresJson(),TaskEstimateFeatures.class);assertEquals(row.featureSha(),f.digest());
-                    var meta=EconomyHistoryFeatureBytes.metadata(f);
-                    assertEquals(1,jdbc.update(seal,json.writeValueAsString(meta),EconomyHistoryFeatureBytes.vector(f),row.id(),row.revision(),row.featureSha()));
-                }after=page.getLast().id();}
-        });build=System.nanoTime()-build;
+        // Only the measured operation is synthetic: every READY revision and vector is sealed by the real Economy writer, one transaction per sample.
+        var evidence=mock(cn.jia.economy.usage.ConfirmedSampleEvidence.class);var json=new ObjectMapper();
+        var decoder=textFixture(r->{throw new AssertionError("Dense fixture supplies a measured operation");});
+        when(evidence.measure(any(),anyString(),same(decoder))).thenAnswer(call->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            TaskBillingService.Task task=call.getArgument(0);String id=call.getArgument(1);int idx=Integer.parseInt(task.taskId().substring("history-".length()));assertEquals(ids.get(idx),id);
+            assertEquals(reader.scope(),task.scope());assertEquals(reader.ownerJiacn(),task.ownerJiacn());
+            var a=new cn.jia.economy.usage.ConfirmedSampleEvidence.Assessment(id,1,id,1,cn.jia.economy.usage.ConfirmedSampleEvidence.Verdict.MATCHED);
+            var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture",id),"draw","frame",id,new MeasuredTaskRepricing.Units(new TaskQuoteCalculator.ToolKey("test","draw","frame"),BigDecimal.ONE));
+            return new cn.jia.economy.usage.ConfirmedSampleEvidence.Measured(a,List.of(new cn.jia.economy.usage.ConfirmedSampleEvidence.Operation(1,id,1,id,"1",fact)));
+        });
+        var writer=proxy(new cn.jia.economy.service.impl.ConfirmedSampleProjectionService(evidence,recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),json,manager,true),cn.jia.economy.usage.ConfirmedSampleProjection.class);
+        var samples=new java.util.ArrayList<Long>();long start=System.nanoTime();
+        for(int i=0;i<ids.size();i++){long t=System.nanoTime();assertTrue(writer.refresh(new TaskBillingService.Task(reader.scope(),reader.ownerJiacn(),"history-"+i),ids.get(i),decoder));samples.add(System.nanoTime()-t);}
+        long elapsed=System.nanoTime()-start;samples.sort(Long::compare);assertEquals(ids.size(),count("economy_history_feature_projection"));assertEquals(ids.size(),count("economy_task_cost_sample_revision"));
+        System.out.printf(java.util.Locale.ROOT,"QUOTE_READY_PUBLISH shared=%s rows=%d totalMs=%.3f p50ms=%.3f p95ms=%.3f maxms=%.3f%n",shared,ids.size(),elapsed/1e6,samples.get((ids.size()-1)/2)/1e6,samples.get((95*ids.size()+99)/100-1)/1e6,samples.getLast()/1e6);return elapsed;
+    }
+    private void profileProjection(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared,TaskEstimateFeatures query,long build){
+        var json=new ObjectMapper();var groupSha=group.digest();var original=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         int[] miss={0};var mapperClass=cn.jia.economy.mapper.ConfirmedSampleMapper.class;
         var counted=mapperClass.cast(java.lang.reflect.Proxy.newProxyInstance(mapperClass.getClassLoader(),new Class<?>[]{mapperClass},(proxy,method,args)->{
             if(method.getName().equals("history"))miss[0]++;
@@ -861,7 +867,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String ops="""
             [{"memberRevision":1,"captureId":"fixture","captureRevision":1,"recordId":"fixture","sourceRevision":"1","evidenceSha256":"test-proof","operation":{"namespace":"fixture","externalId":"operation"},"kind":"draw","component":"frame","basis":"UNIT","quantity":{"unit":{"channel":"test","tool":"draw","unit":"frame"},"decimalCount":"1"}}]
             """;
-        assertEquals(ids.size(),jdbc.update("INSERT INTO economy_task_cost_sample_revision(sample_id,sample_revision,sample_state,reason_code,member_count,operation_refs) SELECT sample_id,1,'READY','FIXTURE',1,? FROM economy_task_cost_sample WHERE history_group_sha256=?",ops,group.digest()));
+        if(!dense)assertEquals(ids.size(),jdbc.update("INSERT INTO economy_task_cost_sample_revision(sample_id,sample_revision,sample_state,reason_code,member_count,operation_refs) SELECT sample_id,1,'READY','FIXTURE',1,? FROM economy_task_cost_sample WHERE history_group_sha256=?",ops,group.digest()));
         var scal=cn.jia.economy.pricing.TaskNeighborSearch.trainingScales(List.of(features));var params=new cn.jia.economy.pricing.TaskNeighborSearch.Parameters(scal,1,1,1,1,1,0.1,0.2,3,1,1,1);
         var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),1,"0".repeat(64));long[] phase=new long[4];
         var type=cn.jia.economy.task.TaskHistoryCatalog.class;
@@ -1051,6 +1057,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var firstLine=new java.util.concurrent.atomic.AtomicBoolean(true);
         assertFalse(sampleProjection.refresh(BILLING_TASK,sid,textFixture(r->{if(firstLine.getAndSet(false)) independent.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1 WHERE sample_id=?",sid);return fixtureDecoder.decode(r);})));
         assertEquals(0,count("economy_task_cost_sample_revision"));assertEquals(0,count("economy_history_feature_projection"));
+        jdbc.execute("CREATE TRIGGER fixture_reject_projection BEFORE INSERT ON economy_history_feature_projection FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Fixture write failure'");
+        try{assertThrows(org.springframework.dao.DataAccessException.class,()->sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));
+            assertEquals(0,count("economy_task_cost_sample_revision"));assertEquals(0,count("economy_history_feature_projection"));
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE sample_id=? AND projection_pending=1",Integer.class,sid));
+        }finally{jdbc.execute("DROP TRIGGER fixture_reject_projection");}
         assertTrue(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));assertFalse(sampleProjection.refresh(BILLING_TASK,sid,fixtureDecoder));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_history_feature_projection x JOIN economy_task_cost_sample s ON x.sample_id=s.sample_id AND x.sample_revision=s.evidence_revision WHERE s.sample_state='READY' AND OCTET_LENGTH(x.vector_bytes)=4096",Integer.class));
         var group=new cn.jia.economy.task.TaskHistoryCatalog.Group(new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp"),TaskEstimateFeatures.VERSION,cn.jia.agent.service.recommendation.QuoteHttpTestWiring.template(),new TaskEstimateFeatures.Identity("cfg","fixture",1024));
