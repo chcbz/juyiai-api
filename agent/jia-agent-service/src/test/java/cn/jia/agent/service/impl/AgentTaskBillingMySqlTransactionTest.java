@@ -1379,8 +1379,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var frozen=service.freeze(intent);assertEquals(frozen,service.freeze(intent));assertEquals(frozen,service.find(bindingKey));
         assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),bindingKey,new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ANSWER,List.of()))));
         var wrong=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,new AgentExternalServicePolicyService.QuoteTarget(agent,target.provider(),target.binding()+1,target.externalPolicyRevision()));
+        var ids=List.of(agent,"agt_00000000000000000000000000000002",agent);
+        assertEquals(Map.of(agent,frozen),service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids));
+        assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion()+1,ids).isEmpty());
         assertNull(service.find(wrong));assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),wrong,output)));
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
+        assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
+        assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
         assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
     }
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {

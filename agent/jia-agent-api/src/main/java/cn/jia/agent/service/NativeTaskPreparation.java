@@ -22,4 +22,7 @@ public interface NativeTaskPreparation {
     Frozen freeze(Intent intent);
     /** Internal exact-input lookup, not a browser capability. Absence is not an empty skill decision. */
     Frozen find(Binding binding);
+    /** Prepare inputs for background comparisons. Read current authorized candidates and exact persisted decisions
+     * at one task-root revision. Missing/stale/undecided candidates have no entry. No network or quote authority. */
+    Map<String,Frozen> currentForProbes(AgentTaskExecutionGrantService.Scope scope,String task,long expectedVersion,List<String> agentIds);
 }
