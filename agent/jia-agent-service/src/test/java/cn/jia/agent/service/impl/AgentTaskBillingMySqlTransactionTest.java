@@ -553,6 +553,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var frozen=freeze.get();var body=json.readTree(frozen.json());assertEquals(65,body.path("operations").size());assertEquals(raw,body.path("manifest").asText());
         assertEquals(jdbc.queryForObject("SELECT review_json FROM economy_task_benchmark_review WHERE review_sha=?",String.class,key),body.path("review").asText());
         assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->evidence.freezeReviewed(bench,group,new cn.jia.economy.task.TaskHistoryCatalog.Revision(sha,selected.revision()+1),pin,"bench-family",held,decoder));
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-use-v1.sql")).execute(jdbc.getDataSource());
+        String publish=new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-materialize.sql").getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        var train=evidence.freezeReviewed(bench,group,selected,pin,"bench-family",cn.jia.economy.pricing.TaskEstimateEvaluation.Split.TRAIN,decoder);
+        var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,null);
+        var roster=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.TrainingBenchmarks(group.privateCalibrationGroup(bench),new cn.jia.economy.service.impl.FrozenCalibrationStudy.Pins("s","d","r","p"),List.of(new cn.jia.economy.service.impl.FrozenCalibrationStudy.Member(bench.taskId(),selected,train.sha256(),pin))));
+        String receipt=json.writeValueAsString(Map.of("trainingBenchmarksSha256",roster.sha256())); // commitment fixture only, not qualified for pricing
+        jdbc.update("INSERT INTO economy_task_estimator_evidence VALUES(?,?,?,?,SHA2(?,256),?)",TENANT,CLIENT,OWNER,group.digest(),receipt,receipt);
+        jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,group.digest(),receipt);
+        assertEquals(0,jdbc.update(publish,roster.json(),train.json(),1));
+        jdbc.update("INSERT INTO economy_task_benchmark_use_grant VALUES(?,?,?,?,1,SHA2(?,256),?,?,?)",TENANT,CLIENT,OWNER,group.digest(),receipt,sha,train.sha256(),"test-purpose");
+        assertEquals(0,jdbc.update(publish,roster.json(),frozen.json(),1));assertEquals(0,jdbc.update(publish,roster.json()+" ",train.json(),1));
+        assertEquals(0,jdbc.update(publish,roster.json(),train.json(),2));assertEquals(1,jdbc.update(publish,roster.json(),train.json(),1));
+        assertEquals(65,jdbc.queryForObject("SELECT JSON_LENGTH(operations) FROM economy_task_benchmark_use_projection",Integer.class));
+        jdbc.update("INSERT INTO economy_task_benchmark_use_stop VALUES(?,?,?,?,1,?)",TENANT,CLIENT,OWNER,group.digest(),sha);
+        assertEquals(0,jdbc.update(publish,roster.json(),train.json(),1));
         assertNull(sampleEvidence.measure(bench,sha,decoder)); // cannot masquerade as confirmed history
         jdbc.update("UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='bench-exec64'");var stale=measured.apply(key);
         assertEquals("USAGE_INCOMPLETE",stale.assessment().verdict().name());assertTrue(stale.operations().isEmpty());assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,freeze::get);
