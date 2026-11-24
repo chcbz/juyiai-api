@@ -1141,7 +1141,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var files=new PersonalWorkspaceDaoImpl(sql.getMapper(PersonalWorkspaceFileMapper.class),sql.getMapper(PersonalWorkspaceVersionMapper.class),sql.getMapper(PersonalWorkspaceOperationMapper.class));
         var links=new PersonalWorkspaceTaskLinkDaoImpl(sql.getMapper(PersonalWorkspaceTaskFileLinkMapper.class));var profile=new QuoteProfile();
         ReflectionTestUtils.setField(assignment,"taskLinks",profile.wrap(PersonalWorkspaceTaskLinkDao.class,links,java.util.Set.of("list","lockBySelection")));
-        ReflectionTestUtils.setField(assignment,"workspace",profile.wrap(PersonalWorkspaceDao.class,files,java.util.Set.of("lockFile","findVersion")));
+        ReflectionTestUtils.setField(assignment,"workspace",profile.wrap(PersonalWorkspaceDao.class,files,java.util.Set.of("lockFile","selectedMetadata")));
         java.util.function.Supplier<AgentTaskExecutionGrantService.InputCatalogue> read=()->locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK));
         for(int i=0;i<33;i++) {
             String id="file-"+i;
@@ -1151,12 +1151,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             if(i!=0 && i!=31) continue;
             int n=i+1;var expected=read.get();assertEquals(n,expected.inputs().size());profile.reset();long[] ms=new long[30];
             for(int k=0;k<ms.length;k++){long t=System.nanoTime();assertEquals(expected,read.get());ms[k]=System.nanoTime()-t;}
-            java.util.Arrays.sort(ms);for(String method:List.of("lockFile","findVersion","lockBySelection"))assertEquals(30L*n,profile.count(method));
-            assertEquals(30,profile.count("list"));
-            System.out.printf(java.util.Locale.ROOT,"D75 catalogue n=%d rounds=30 txnP95Ms=%.3f listMs=%.3f fileLockMs=%.3f relationLockMs=%.3f versionMs=%.3f%n",n,ms[28]/1e6,profile.ms("list"),profile.ms("lockFile"),profile.ms("lockBySelection"),profile.ms("findVersion"));
+            java.util.Arrays.sort(ms);for(String method:List.of("lockFile","lockBySelection"))assertEquals(30L*n,profile.count(method));
+            assertEquals(30,profile.count("list"));assertEquals(30,profile.count("selectedMetadata"));
+            System.out.printf(java.util.Locale.ROOT,"D76 catalogue n=%d rounds=30 txnP95Ms=%.3f listMs=%.3f fileLockMs=%.3f relationLockMs=%.3f versionMs=%.3f%n",n,ms[28]/1e6,profile.ms("list"),profile.ms("lockFile"),profile.ms("lockBySelection"),profile.ms("selectedMetadata"));
         }
         assertEquals(AgentTaskExecutionGrantException.Reason.BAD_REQUEST,assertThrows(AgentTaskExecutionGrantException.class,read::get).reason());
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-32'");
+        var beforeMissing=read.get();
+        jdbc.update("UPDATE agent_personal_workspace_task_file_link SET file_version=2 WHERE file_id='file-30'");
+        assertEquals(AgentTaskExecutionGrantException.Reason.NOT_FOUND,assertThrows(AgentTaskExecutionGrantException.class,read::get).reason());
+        jdbc.update("UPDATE agent_personal_workspace_task_file_link SET file_version=1 WHERE file_id='file-30'");
+        assertEquals(beforeMissing,read.get());
         try(var writer=independent.getDataSource().getConnection();var worker=Executors.newSingleThreadExecutor()) {
             writer.setAutoCommit(false);
             try {

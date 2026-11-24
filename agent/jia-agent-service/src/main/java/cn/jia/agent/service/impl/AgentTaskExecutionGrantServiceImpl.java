@@ -1070,7 +1070,10 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
 
     private List<InputSnapshot> validateAndSnapshotInputs(Scope scope,String taskId,
             List<ValidInput> inputs) {
-        List<InputSnapshot> result=new ArrayList<>();
+        if (inputs.isEmpty()) return List.of();
+        // Lock each file then relation in the existing canonical order. Only immutable version
+        // metadata is read together, after authorization, inside this same task transaction.
+        var picks=new java.util.LinkedHashSet<PersonalWorkspaceDao.VersionPick>();
         for (ValidInput input:inputs) {
             PersonalWorkspaceFileEntity file=workspace.lockFile(scope.tenantId(),scope.clientId(),
                     scope.ownerJiacn(),input.fileId());
@@ -1078,8 +1081,15 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                     scope.clientId(),scope.ownerJiacn(),taskId,input.fileId(),input.version(),input.purpose());
             if (link==null || !"ACTIVE".equals(link.getLinkState())) throw notFound();
             if (file==null || !"ACTIVE".equals(file.getState())) throw notFound();
-            PersonalWorkspaceVersionEntity version=workspace.findVersion(scope.tenantId(),
-                    scope.clientId(),scope.ownerJiacn(),input.fileId(),input.version());
+            picks.add(new PersonalWorkspaceDao.VersionPick(input.fileId(),input.version()));
+        }
+        // canonicalInputs bounds the selection to MAX_INPUTS before this method is called.
+        var metadata=new java.util.HashMap<PersonalWorkspaceDao.VersionPick,PersonalWorkspaceVersionEntity>();
+        for (var row:workspace.selectedMetadata(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),List.copyOf(picks)))
+            metadata.put(new PersonalWorkspaceDao.VersionPick(row.getFileId(),row.getVersion()),row);
+        List<InputSnapshot> result=new ArrayList<>(inputs.size());
+        for (ValidInput input:inputs) {
+            var version=metadata.get(new PersonalWorkspaceDao.VersionPick(input.fileId(),input.version()));
             if (version==null || version.getContentHash()==null
                     || !version.getContentHash().matches("[0-9a-f]{64}")
                     || version.getContentMimeType()==null || version.getContentMimeType().isBlank()
