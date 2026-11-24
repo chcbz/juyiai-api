@@ -72,6 +72,16 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
     public Frozen freezeConfirmed(Task original,Group group,Revision selected,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split partition){
         var row=db.selectedForCalibration(original,group.digest(),selected.sampleId(),selected.revision());
         if(row==null)throw new NotEligible();
+        return capsule(original,group,selected,family,partition,row);
+    }
+    @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public QuotedObservation freezeConfirmedQuote(Task original,Group group,Revision selected,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split partition,String expectedQuoteId,String expectedAgentId){
+        var row=db.selectedForCalibration(original,group.digest(),selected.sampleId(),selected.revision());
+        if(row==null||expectedQuoteId==null||expectedQuoteId.isBlank()||!expectedQuoteId.equals(row.quoteId())
+                ||expectedAgentId==null||expectedAgentId.isBlank()||!expectedAgentId.equals(row.agentId()))throw new NotEligible();
+        return new QuotedObservation(row.quoteId(),row.agentId(),capsule(original,group,selected,family,partition,row));
+    }
+    private Frozen capsule(Task original,Group group,Revision selected,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split partition,ConfirmedSampleMapper.CalibrationRow row){
         var roster=new cn.jia.economy.pricing.TaskEstimateEvaluation.Case(original.taskId(),family,row.featuresAt(),db.observedByMillis(),partition);
         var snapshot=new Snapshot("confirmed-observation-v1",group.privateCalibrationGroup(original),original.taskId(),selected,roster,
                 row.requirementSha(),row.inputSha(),row.featureSha(),row.features(),row.execution(),row.operations());

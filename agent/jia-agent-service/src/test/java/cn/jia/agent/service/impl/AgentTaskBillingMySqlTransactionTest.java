@@ -880,7 +880,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
-        var frozen=observations.freezeConfirmed(BILLING_TASK,group,selected,"frozen-family",held);
+        String confirmedQuote=jdbc.queryForObject("SELECT quote_id FROM economy_task_charge WHERE task_id=?",String.class,TASK);
+        var joined=observations.freezeConfirmedQuote(BILLING_TASK,group,selected,"frozen-family",held,confirmedQuote,AGENT);
+        assertEquals(confirmedQuote,joined.quoteId());assertEquals(AGENT,joined.agentId());
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.freezeConfirmedQuote(BILLING_TASK,group,selected,"frozen-family",held,"other-quote",AGENT));
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->observations.freezeConfirmedQuote(BILLING_TASK,group,selected,"frozen-family",held,confirmedQuote,"other-agent"));
+        var frozen=joined.observation();
         var observation=observations.replay(BILLING_TASK,group,selected,"frozen-family",held,frozen.sha256(),frozen.json());
         assertThrows(IllegalArgumentException.class,()->observations.replay(BILLING_TASK,group,selected,"frozen-family",held,frozen.sha256(),frozen.json()+" "));
         assertThrows(IllegalArgumentException.class,()->observations.replay(BILLING_TASK,group,selected,"other-family",held,frozen.sha256(),frozen.json()));
