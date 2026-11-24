@@ -681,17 +681,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),prep.features().digest(),group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
+        var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
+        recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
+        assertEquals(1,matches.size());var pageDigest=matches.getFirst();var cfg=recommendationSql.getConfiguration();
+        var stmt=cfg.getMappedStatement(cn.jia.economy.mapper.ConfirmedSampleMapper.class.getName()+".history");
+        var params=Map.of("t",reader,"group",group.digest(),"after",ids.get(127),"limit",64);var bound=stmt.getBoundSql(params);
+        try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement("EXPLAIN FORMAT=JSON "+bound.getSql())){
+            cfg.newParameterHandler(stmt,params,bound).setParameters(ps);try(var rs=ps.executeQuery()){assertTrue(rs.next());reportPlan(pageDigest,shared?"sharedHistoryNext":"inlineHistoryNext",new ObjectMapper().readTree(rs.getString(1)));}
+        }catch(java.sql.SQLException sql){throw new AssertionError("history page EXPLAIN failed",sql);}
+        var auxiliary=new java.util.TreeMap<String,Long>();var windows=new java.util.ArrayList<Long>();
         var ticks=new java.util.ArrayList<Long>();long examined=0,statements=0,sent=0;int samples=0;
         for(int run=0;run<=5;run++){
-            int pos=0;String cursor="";var before=recShapes();
+            int pos=0;long walk=0;String cursor="";var before=recShapes();
             while(true){long start=System.nanoTime();var page=historyCatalog.page(reader,group,cursor);long elapsed=System.nanoTime()-start;
-                if(run>0 && page.size()==64)ticks.add(elapsed);if(page.isEmpty())break;
+                walk+=elapsed;if(run>0 && page.size()==64)ticks.add(elapsed);if(page.isEmpty())break;
                 assertEquals(Math.min(64,n-pos),page.size());for(var row:page){assertEquals(ids.get(pos),row.source().sampleId());assertEquals("history-"+pos,row.sourceTaskId());pos++;}
                 cursor=page.getLast().source().sampleId();
-            }assertEquals(n,pos);if(run==0)continue;
+            }assertEquals(n,pos);if(run==0)continue;windows.add(walk);
             for(var e:recShapes().entrySet()){var v=e.getValue();var prev=before.getOrDefault(e.getKey(),new Shape(0,0,0,0));long calls=v.calls()-prev.calls();if(calls==0)continue;
+                if(!pageDigest.equals(e.getKey())){auxiliary.merge(e.getKey(),calls,Long::sum);continue;}
                 statements+=calls;examined+=v.examined()-prev.examined();sent+=v.sent()-prev.sent();}samples+=pos;
         }
+        for(var e:auxiliary.entrySet()){
+            // DIGEST_TEXT is server-normalized; emit only category, SHA and count. Never account another table read as connection setup.
+            var shape=admin.queryForObject("SELECT DIGEST_TEXT FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST=?",String.class,database,e.getKey()).toUpperCase(java.util.Locale.ROOT);
+            assertFalse(shape.matches("(?s).*\\b(FROM|JOIN|UNION|CALL)\\b.*"),"Unexpected additional table SELECT digest="+e.getKey());
+            System.out.printf("QUOTE_HISTORY_NO_TABLE_SELECT shared=%s digest=%s calls=%d%n",shared,e.getKey(),e.getValue());
+        }
+        windows.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"QUOTE_HISTORY_WALK shared=%s warmN=5 medianMs=%.3f maxMs=%.3f%n",shared,windows.get(2)/1e6,windows.getLast()/1e6);
         assertEquals(30,statements,"one query per keyset page, including terminal empty page");assertEquals(samples,sent);
         ticks.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"QUOTE_HISTORY_PAGES shared=%s histories=%d fullPages=%d p50ms=%.3f p95ms=%.3f statements=%d rowsExamined=%d rowsSent=%d%n",shared,n,ticks.size(),ticks.get(9)/1e6,ticks.get(18)/1e6,statements,examined,sent);
         // A READY sample still exists. Lost or wrongly scoped source quote must not silently shorten its page.
