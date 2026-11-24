@@ -482,7 +482,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(2, count("economy_transaction")); assertEquals("CAPTURED", charge());
     }
 
-    private record PreparedFixture(TaskBillingService.Binding binding,TaskEstimateFeatures features,TaskBillingService.Quote offer) {}
+    private record PreparedFixture(TaskBillingService.Binding binding,TaskEstimateFeatures features,TaskBillingService.Quote offer,TaskBillingService.MeasuredPreparation preparation) {}
     private PreparedFixture measuredOffer(){
         String inputs=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK).digest());
         var binding=new TaskBillingService.Binding(1,"a".repeat(64),inputs,AGENT,"measured-batch");
@@ -495,7 +495,26 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var estimate=MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
         var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
-        return new PreparedFixture(binding,features,offer);
+        return new PreparedFixture(binding,features,offer,prepared);
+    }
+    @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
+        var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");
+        var g=p.group();var group=new TaskBillingService.MeasuredGroup(g.dispatchGroupVersion(),"e".repeat(64),g.localRouteSha256(),g.routeVersion(),g.toolConfigSha256(),g.capturePolicyVersion());
+        var price=new MeasuredNeighborEstimate.Estimate(p.estimate().contributions(),new BigDecimal("0.50"),BigDecimal.ONE,50L);
+        var second=new TaskBillingService.MeasuredPreparation(p.features(),group,p.estimatorVersion(),p.calibrationVersion(),p.qualityStatus(),price);
+        var writes=new java.util.ArrayList<TaskBillingService.MeasuredWrite>();
+        for(int i=0;i<40;i++)writes.add(new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),"multi-"+i,"mixed"),i%2==0?p:second));
+        writes.add(writes.getFirst()); // database unique binding fails after at least one successful INSERT
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes)));
+        assertEquals(before,count("economy_task_quote"));writes.removeLast();
+        var receipts=locked(()->billing.storeMeasuredBatch(BILLING_TASK,PAYER,writes));assertEquals(40,receipts.size());
+        var json=new ObjectMapper();for(int i=0;i<40;i++){
+            var q=receipts.get(i);assertEquals(i%2==0?25L:50L,q.amountWen());var expected=writes.get(i);
+            var raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,q.quoteId());
+            var tree=json.readTree(raw);assertEquals(json.readTree(json.writeValueAsString(expected.prepared())),tree.path("preparation"));
+            assertEquals(json.readTree(json.writeValueAsString(expected.binding())),tree.path("binding"));
+        }
+        assertEquals(before+40,count("economy_task_quote"));assertEquals(0,count("economy_transaction"));
     }
     @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
         var fixture=measuredOffer();var offer=fixture.offer();var features=fixture.features();var binding=fixture.binding();var inputs=binding.inputSnapshotDigest();
@@ -1075,7 +1094,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         };
         var profile=new QuoteProfile();boolean diagnostic=Boolean.getBoolean("cyf.measuredBatchQuoteLoad");
         independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
-                mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasured")):billing);
+                mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var hot=new java.util.ArrayList<Long>();String firstId=null;long cold=0,replay=0;
         String token=httpToken();try(var client=HttpClient.newHttpClient()){
@@ -1147,8 +1166,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }
         }
         var end=readQuoteWrites(task);long bytes=end.bytes()-writes.bytes();
-        System.out.printf(java.util.Locale.ROOT,"BATCH_QUOTE_COST batches=30 candidates=108 prepareCalls=%d prepareMs=%.3f lockSelectedCalls=%d lockSelectedMs=%.3f storeCalls=%d storeMs=%.3f insertCalls=%d rows=%d insertMs=%.3f snapshotBytes=%d%n",profile.count("prepare"),profile.ms("prepare"),profile.count("lockSelected"),profile.ms("lockSelected"),profile.count("storeMeasured"),profile.ms("storeMeasured"),end.calls()-writes.calls(),end.rows()-writes.rows(),(end.dbPicos()-writes.dbPicos())/1e9,bytes);
-        assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(3210,profile.count("storeMeasured"));assertEquals(3210,end.rows()-writes.rows());assertTrue(bytes>0);
+        System.out.printf(java.util.Locale.ROOT,"BATCH_QUOTE_COST batches=30 candidates=108 prepareCalls=%d prepareMs=%.3f lockSelectedCalls=%d lockSelectedMs=%.3f storeCalls=%d storeMs=%.3f insertCalls=%d rows=%d insertMs=%.3f snapshotBytes=%d%n",profile.count("prepare"),profile.ms("prepare"),profile.count("lockSelected"),profile.ms("lockSelected"),profile.count("storeMeasuredBatch"),profile.ms("storeMeasuredBatch"),end.calls()-writes.calls(),end.rows()-writes.rows(),(end.dbPicos()-writes.dbPicos())/1e9,bytes);
+        assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertTrue(end.calls()-writes.calls()<3210);assertEquals(3210,end.rows()-writes.rows());assertTrue(bytes>0);
         assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3210,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
         samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());

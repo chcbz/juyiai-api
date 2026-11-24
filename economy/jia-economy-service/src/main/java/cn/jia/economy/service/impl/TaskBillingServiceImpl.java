@@ -98,26 +98,64 @@ public class TaskBillingServiceImpl implements TaskBillingService {
 
     private static final String MEASURED_PREFIX = "tq_m1_";
     private static final String MEASURED_SCHEMA = "MEASURED_TASK_QUOTE_V1";
-    private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, String historyGroupSha256, MeasuredPreparation preparation) { }
+    // Only locally encoded, typed preparation may be embedded as JSON. Never accept raw JSON from the caller.
+    private record FrozenPreparation(String featureSha, String groupSha, String json) {}
+    private record MeasuredSnapshot(String schema, Binding binding, String featureSha256, String historyGroupSha256,
+            @com.fasterxml.jackson.annotation.JsonRawValue String preparation) {}
 
-    @Override public Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared) {
-        Objects.requireNonNull(payerUserId);
-        if (!binding.requirementSha256().equals(prepared.features().requirementSha256())
-                || !binding.inputSnapshotDigest().equals(prepared.features().inputSnapshotSha256()))
+    private FrozenPreparation freeze(MeasuredPreparation p) {
+        return new FrozenPreparation(p.features().digest(),
+                cn.jia.economy.task.TaskHistoryCatalog.Group.of(p.group(),p.features()).digest(), encode(p));
+    }
+
+    private EconomyTaskQuoteEntity measuredRow(Task task, String payer, MeasuredWrite write,
+            Map<MeasuredPreparation,FrozenPreparation> cache) {
+        var p = write.prepared(); var binding = write.binding();
+        if (!binding.requirementSha256().equals(p.features().requirementSha256())
+                || !binding.inputSnapshotDigest().equals(p.features().inputSnapshotSha256()))
             throw new TaskBillingException(QUOTE_BINDING_CHANGED);
-        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, prepared.features().digest(),
-                cn.jia.economy.task.TaskHistoryCatalog.Group.of(prepared.group(),prepared.features()).digest(), prepared);
-        return insertQuote(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payerUserId,
-                prepared.estimate().wen(), encode(snapshot));
+        var frozen = cache.computeIfAbsent(p, this::freeze);
+        var snapshot = new MeasuredSnapshot(MEASURED_SCHEMA, binding, frozen.featureSha(), frozen.groupSha(), frozen.json());
+        return quoteRow(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payer, p.estimate().wen(), encode(snapshot));
+    }
+
+    @Override public Quote storeMeasured(Task task, Binding binding, String payer, MeasuredPreparation p) {
+        var row = measuredRow(task, Objects.requireNonNull(payer), new MeasuredWrite(binding,p), new java.util.IdentityHashMap<>());
+        mapper.insertQuote(row);
+        return receipt(row);
+    }
+
+    // Bound multi-value statement size; a single pre-existing large quote is sent alone, never truncated.
+    private static final int CHUNK_ROWS = 32, CHUNK_SNAPSHOT_BYTES = 1024 * 1024;
+    @Override public List<StoredQuote> storeMeasuredBatch(Task task, String payer, List<MeasuredWrite> writes) {
+        Objects.requireNonNull(payer);
+        var cache = new java.util.IdentityHashMap<MeasuredPreparation,FrozenPreparation>();
+        var result = new java.util.ArrayList<StoredQuote>(writes.size());
+        var chunk = new java.util.ArrayList<EconomyTaskQuoteEntity>(CHUNK_ROWS);
+        long bytes = 0;
+        for (var write : writes) {
+            var row = measuredRow(task,payer,write,cache);
+            int size = row.getSnapshotJson().getBytes(StandardCharsets.UTF_8).length;
+            if (!chunk.isEmpty() && (chunk.size() >= CHUNK_ROWS || bytes + size > CHUNK_SNAPSHOT_BYTES)) {
+                mapper.insertQuotes(chunk); chunk.clear(); bytes = 0;
+            }
+            chunk.add(row); bytes += size;
+            result.add(new StoredQuote(row.getQuoteId(),row.getAmountWen()));
+        }
+        if (!chunk.isEmpty()) mapper.insertQuotes(chunk);
+        return List.copyOf(result);
     }
 
     private Quote insertQuote(String id, Task task, String bindingHash, String payerUserId, long amountWen, String snapshot) {
-        EconomyTaskQuoteEntity row = new EconomyTaskQuoteEntity().setQuoteId(id)
+        var row = quoteRow(id,task,bindingHash,payerUserId,amountWen,snapshot);
+        mapper.insertQuote(row);
+        return receipt(row);
+    }
+    private EconomyTaskQuoteEntity quoteRow(String id, Task task, String bindingHash, String payerUserId, long amountWen, String snapshot) {
+        return new EconomyTaskQuoteEntity().setQuoteId(id)
                 .setBindingSha256(bindingHash).setTenantId(task.scope().tenantId()).setClientId(task.scope().clientId())
                 .setOwnerJiacn(task.ownerJiacn()).setTaskId(task.taskId()).setPayerUserId(payerUserId)
                 .setAmountWen(amountWen).setSnapshotJson(snapshot).setCreatedAt(System.currentTimeMillis());
-        mapper.insertQuote(row);
-        return receipt(row);
     }
 
     @Override

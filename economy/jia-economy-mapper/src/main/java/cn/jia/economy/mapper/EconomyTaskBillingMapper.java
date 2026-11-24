@@ -38,6 +38,18 @@ public interface EconomyTaskBillingMapper {
             """)
     int insertQuote(EconomyTaskQuoteEntity quote);
 
+    @Insert("""
+            <script>
+            INSERT INTO economy_task_quote(quote_id,binding_sha256,tenant_id,client_id,owner_jiacn,task_id,
+                payer_user_id,amount_wen,snapshot_json,created_at) VALUES
+            <foreach collection="rows" item="r" separator=",">
+                (#{r.quoteId},#{r.bindingSha256},#{r.tenantId},#{r.clientId},#{r.ownerJiacn},#{r.taskId},
+                 #{r.payerUserId},#{r.amountWen},#{r.snapshotJson},#{r.createdAt})
+            </foreach>
+            </script>
+            """)
+    int insertQuotes(@Param("rows") java.util.List<EconomyTaskQuoteEntity> rows);
+
     // Full features/configuration and repricing proof remain on the immutable quote; the sample references it.
     @Insert("""
         INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,

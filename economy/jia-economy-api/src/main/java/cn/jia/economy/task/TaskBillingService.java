@@ -49,6 +49,10 @@ public interface TaskBillingService {
     }
     /** Called once by the winning quote-batch writer, only after version revalidation. Never reserves funds. */
     Quote storeMeasured(Task task, Binding binding, String payerUserId, MeasuredPreparation prepared);
+    record MeasuredWrite(Binding binding, MeasuredPreparation prepared) {}
+    record StoredQuote(String quoteId, long amountWen) {}
+    /** Persist in input order in the existing transaction. Each receipt names a separate immutable quote. */
+    java.util.List<StoredQuote> storeMeasuredBatch(Task task, String payerUserId, java.util.List<MeasuredWrite> writes);
     /** Reserve exactly the selected quote, or replay the same reservation; never top up/reprice.
      * payerUserId comes from the caller's authenticated actor, never the request body or ownerJiacn.
      * Matching the quote payer is required even for zero-price quotes and reservation replays.

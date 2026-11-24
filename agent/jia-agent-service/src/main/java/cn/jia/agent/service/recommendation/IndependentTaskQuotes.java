@@ -47,10 +47,18 @@ public final class IndependentTaskQuotes {
         return intents.finish(actor,fresh,batch->{
             if(execution.isPresent()&&!execution.get().current(inputs,fresh.candidates(),terms))throw new Changed();
             estimates.lockSelected(task,available);var result=new ArrayList<TaskQuoteBatches.Item>();
+            var writes = new ArrayList<TaskBillingService.MeasuredWrite>();
+            prepared.forEach((agent,outcome)->{
+                if (outcome instanceof TaskBudgetEstimator.Available ready) {
+                    var binding = new TaskBillingService.Binding(fresh.requirementRevision(),f.requirementSha256(),f.inputSnapshotSha256(),agent,batch);
+                    writes.add(new TaskBillingService.MeasuredWrite(binding,ready.preparation()));
+                }
+            });
+            var stored = (writes.isEmpty() ? List.<TaskBillingService.StoredQuote>of() : billing.storeMeasuredBatch(task,actor.actorId(),writes)).iterator();
             prepared.forEach((agent,outcome)->{if(outcome instanceof TaskBudgetEstimator.Unavailable unavailable){
                 result.add(new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.UNAVAILABLE,null,batch,null,unavailable.reason(),null));return;}
-                var p=((TaskBudgetEstimator.Available)outcome).preparation();var binding=new TaskBillingService.Binding(fresh.requirementRevision(),f.requirementSha256(),f.inputSnapshotSha256(),agent,batch);
-                var quote=billing.storeMeasured(task,binding,actor.actorId(),p);var summary=new TaskQuoteBatches.Summary("MEASURED_NEIGHBORS",p.estimatorVersion(),p.estimate().contributions().size(),p.qualityStatus());
+                var p=((TaskBudgetEstimator.Available)outcome).preparation();
+                var quote=stored.next();var summary=new TaskQuoteBatches.Summary("MEASURED_NEIGHBORS",p.estimatorVersion(),p.estimate().contributions().size(),p.qualityStatus());
                 result.add(new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.AVAILABLE,quote.quoteId(),batch,Money.wen(quote.amountWen()),null,summary));});return result;
         });
     }
