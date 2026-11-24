@@ -1624,6 +1624,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var target=new ObjectMapper().readTree(row.getPayloadJson()).path("targetAgentId").asText();
         var subject=new AuthenticatedRuntimeOperation.Scope(TENANT,CLIENT,OWNER,target);var device=new AuthenticatedRuntimeOperation.Device(subject,host);
         java.util.function.BooleanSupplier matches=()->authority.matchesTaskSource(device,row.getTurnId(),row.getDispatchId(),context);
+        assertThrows(ChatDeliberationException.class, matches::getAsBoolean);
+        // Supply only the original executor binding. No live session or device proof is fabricated here.
+        assertEquals(1,jdbc.update("""
+                INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status)
+                SELECT agent_id,'quoted-chat-source',tenant_id,client_id,jiacn,id,'offline'
+                FROM agent_persona_binding WHERE tenant_id=? AND client_id=? AND jiacn=? AND agent_id=? AND status=1
+                """,TENANT,CLIENT,OWNER,target));
         assertFalse(matches.getAsBoolean());
         tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
         assertTrue(matches.getAsBoolean());assertFalse(authority.matchesTaskSource(device,"other-turn",row.getDispatchId(),context));
