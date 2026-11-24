@@ -44,7 +44,9 @@ class SkillManagementRecommendationTest {
         final Map<String,SkillManagedStateEntity> states=new HashMap<>();
         final Map<String,SkillInstallationAuthorizationEntity> authorizations=new HashMap<>();
         SkillManagementMapper.RecommendationProduct product=new SkillManagementMapper.RecommendationProduct("spv_vision","product",null,null,"识图","读取图片文字");
+        final Map<String,AgentRuntimeAuthenticationService.Proof> proofs=new HashMap<>();
         Fixture() {
+            when(auth.currentRegisteredProofs(eq("0"),eq("client"),anySet())).thenAnswer(c->{var result=new HashMap<>(proofs);result.keySet().retainAll(c.<Set<String>>getArgument(2));return result;});
             when(db.recommendationProducts(eq("0"),eq("client"),anyList())).thenAnswer(call->call.<List<String>>getArgument(2).contains(product.installedVersionId())?List.of(product):List.of());
             when(db.activeRecommendationStates(eq("0"),eq("client"),anyList())).thenAnswer(call ->
                     call.<List<String>>getArgument(2).stream().map(states::get).filter(Objects::nonNull).toList());
@@ -65,7 +67,7 @@ class SkillManagementRecommendationTest {
                     .setPackageJson("{\"skillInstallationId\":\"si_"+agent+"\",\"productVersionId\":\"spv_vision\",\"skillVersion\":\"1.0.0\",\"packageSha256\":\""+HASH+"\",\"manifestSha256\":null,\"byteLength\":\"1\",\"kind\":\"INSTRUCTION\"}");
             authorizations.put(agent,authorization);
             var proof=new AgentRuntimeAuthenticationService.Proof(new AgentRuntimeAuthentication.Scope("0","client","owner",agent,"instance"),"rt_"+agent,"host",1L,HASH,1L,1L);
-            when(auth.currentRegisteredProof("0","client",agent)).thenReturn(proof);
+            proofs.put(agent,proof);when(auth.currentRegisteredProof("0","client",agent)).thenReturn(proof);
             when(catalog.lookup(eq(new SkillCapabilityLookup.Scope("0","client","owner",agent)),any()))
                     .thenReturn(view(agent,1L,SkillCapabilityLookup.Readiness.NOT_EXECUTABLE));
         }
@@ -99,7 +101,7 @@ class SkillManagementRecommendationTest {
         verify(f.db).activeRecommendationStates("0","client",List.of("a","b"));
         verify(f.db).activeRecommendationAuthorizations("0","client",List.of("a","b"));
         verify(f.db).recommendationProducts("0","client",List.of("spv_vision"));verify(f.db,never()).products(anyString(),anyString());verifyNoInteractions(f.market);
-        verify(f.auth).currentRegisteredProof("0","client","a");verify(f.auth).currentRegisteredProof("0","client","b");
+        verify(f.auth).currentRegisteredProofs("0","client",Set.of("a","b"));verify(f.auth,never()).currentRegisteredProof(anyString(),anyString(),anyString());
         verify(f.catalog,times(2)).lookup(any(),any());verify(f.db,never()).findAuthorization(anyString(),anyString(),anyString());
         verifyNoInteractions(f.packages,f.writer,f.sessions);
     }

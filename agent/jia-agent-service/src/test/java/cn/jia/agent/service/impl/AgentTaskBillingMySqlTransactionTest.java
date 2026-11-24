@@ -1338,6 +1338,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
                     jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('foreign-rec','different-owner',?,?)",TENANT,CLIENT);
                     checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");assertEquals(before,es.encodes.get());
+                    String other=expected.stream().skip(9).findFirst().orElseThrow();var ids=java.util.Set.of(onlySkill,other);
+                    assertEquals(ids,auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
+                    assertEquals(1,jdbc.update("UPDATE agent_persona_binding SET status=0 WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,onlySkill));
+                    assertEquals(java.util.Set.of(other),auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
                 }
             }
         }
@@ -1445,7 +1449,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 var physical=proofSelects();physical.replaceAll((k,v)->v-proofBefore.get(k));
                 System.out.printf("RECOMMEND_PROOF_SQL candidates=%d concurrency=%d n=%d counts=%s%n",expected.size(),concurrency,times.size(),physical);
-                if(expected.size()==108)assertTrue(physical.get("agent_runtime_v1_installation")>0,"missing persistent installation SQL observations");
+                if(expected.size()==108)assertEquals(2L*times.size(),physical.get("agent_runtime_v1_installation").longValue(),"one installation batch for each observation");
                 long inventory=paidInventorySelects()-inventoryBefore;int installs=expected.size()==1?0:14;
                 System.out.printf("RECOMMEND_INVENTORY installations=%d concurrency=%d n=%d selects=%d%n",installs,concurrency,times.size(),inventory);
                 assertEquals(installs==0?0L:2L*times.size(),inventory,"two independent observations, not two queries per installation");

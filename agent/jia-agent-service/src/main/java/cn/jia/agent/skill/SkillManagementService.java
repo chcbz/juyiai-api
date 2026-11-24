@@ -753,6 +753,8 @@ public final class SkillManagementService {
             var result=new LinkedHashMap<String,List<RecommendationSkill>>();
             record Observed(RecommendationTarget candidate,SkillManagementMapper.InventoryKey key,SkillCapabilityLookup.View catalog) {}
             var eligible=new ArrayList<Observed>();
+            var proofIds=agents.stream().filter(c->c.proof()==null && active.containsKey(c.agent())).map(RecommendationTarget::agent).collect(java.util.stream.Collectors.toSet());
+            var proofs=proofIds.size()>1?authentication.currentRegisteredProofs(tenant,client,proofIds):Map.<String,AgentRuntimeAuthenticationService.Proof>of();
             for(var candidate:agents) {
                 // Discovery owns task/opt-in authorization. This path only reads capability summaries,
                 // never impersonates the provider Actor or opens skill-management operations.
@@ -766,9 +768,9 @@ public final class SkillManagementService {
                 SkillCapabilityLookup.View observed=null;
                 boolean providerMatches=false;
                 try {
-                    var proof=candidate.proof()!=null?candidate.proof():authentication.currentRegisteredProof(tenant,client,agent);
+                    var proof=candidate.proof()!=null?candidate.proof():proofIds.size()>1?proofs.get(agent):authentication.currentRegisteredProof(tenant,client,agent);
                     var lookup=capabilities.getIfAvailable();
-                    providerMatches=providerOwner.equals(proof.scope().ownerJiacn());
+                    providerMatches=proof!=null && providerOwner.equals(proof.scope().ownerJiacn());
                     if(providerMatches&&lookup!=null) {
                         var view=lookup.lookup(new SkillCapabilityLookup.Scope(tenant,client,providerOwner,agent),SkillMarketplaceService.sessionFence(proof));
                         if(view.state()==SkillCapabilityLookup.State.AVAILABLE)observed=view;

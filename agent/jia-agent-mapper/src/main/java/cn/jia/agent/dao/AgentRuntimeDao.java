@@ -15,6 +15,7 @@ public interface AgentRuntimeDao extends IBaseDao<AgentRuntimeEntity> {
 
     AgentRuntimeEntity findByAgentId(String agentId);
 
+    java.util.List<AgentRuntimeEntity> registeredProofRows(String tenant,String client,java.util.Set<String> ids);
     AgentRuntimeEntity findInScope(String tenantId, String clientId, String agentId);
 
     AgentRuntimeEntity lockInScope(String tenantId, String clientId, String agentId);

@@ -9,6 +9,10 @@ import org.apache.ibatis.annotations.Update;
 
 /** Exact-scope, compare-and-set persistence for Runtime v1 installations. */
 public interface AgentRuntimeV1InstallationMapper extends BaseMapper<AgentRuntimeV1InstallationEntity> {
+    /** Liveness observation only. Restrict by exact partition, and return no enrollment credentials or catalog bodies. */
+    @Select("<script>SELECT tenant_id,client_id,installation_id,canonical_agent_id,status FROM agent_runtime_v1_installation WHERE tenant_id=#{t} AND client_id=#{c} AND BINARY tenant_id=BINARY #{t} AND BINARY client_id=BINARY #{c} AND installation_id IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>BINARY #{id}</foreach></script>")
+    java.util.List<AgentRuntimeV1InstallationEntity> registeredProofRows(@Param("t") String tenant,@Param("c") String client,@Param("ids") java.util.Set<String> ids);
+
     /** Unique installation ID serializes concurrent retries; never overwrites the winner's authority. */
     @Insert("""
             INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,

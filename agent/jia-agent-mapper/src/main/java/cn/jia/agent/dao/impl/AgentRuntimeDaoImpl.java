@@ -25,6 +25,7 @@ public class AgentRuntimeDaoImpl extends BaseDaoImpl<AgentRuntimeMapper, AgentRu
         return query;
     }
 
+    @Override public java.util.List<AgentRuntimeEntity> registeredProofRows(String tenant,String client,java.util.Set<String> ids) {return ids.isEmpty()?java.util.List.of():baseMapper.registeredProofRows(tenant,client,ids);}
     @Override
     public java.util.List<AgentRuntimeEntity> findOwnedCapabilityRows(String tenant, String client, String owner, java.util.Set<String> ids) {
 

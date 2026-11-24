@@ -34,6 +34,9 @@ public interface AgentIdentityService {
     /** Read-only active owner proofs; not a reservation or execution grant. */
     java.util.Map<String,Long> activeBindingsForCandidates(String tenantId,String clientId,String ownerJiacn,java.util.Set<String> ids);
 
+    /** Current read-only observation: a revoked sibling yields no proof of its own, not a grant or denial for others. */
+    java.util.Map<String,Long> observedActiveBindings(String tenant,String client,String owner,java.util.Map<String,Long> expected);
+
     String requireCanonicalAgentIdInScope(
             String tenantId, String clientId, String ownerJiacn, String canonicalAgentId);
 

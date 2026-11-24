@@ -206,6 +206,42 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
         return result;
     }
 
+    /** Read-only observation for multiple discovered candidates. Persistent rows and account snapshots
+     * are shared only within this call. New work and money admission still use their original fences. */
+    public Map<String,Proof> currentRegisteredProofs(String tenant,String client,Set<String> requested) {
+        requireAdmitted(tenant,client);
+        var live=new java.util.ArrayList<Binding>();
+        for(var entry:bindings.values()){
+            var scope=entry.proof().scope();
+            if(tenant.equals(scope.tenantId())&&client.equals(scope.clientId())&&requested.contains(scope.agentId())
+                    &&entry.connected().getAsBoolean())live.add(entry);
+        }
+        var accepted=new java.util.HashMap<String,Binding>();var ambiguous=new java.util.HashSet<String>();
+        for(int from=0;from<live.size();from+=128){
+            var batch=live.subList(from,Math.min(from+128,live.size()));
+            var agents=new java.util.HashSet<String>();var installs=new java.util.HashSet<String>();
+            for(var b:batch){agents.add(b.proof().scope().agentId());installs.add(b.proof().installationId());}
+            var installRows=installations.registeredProofRows(tenant,client,installs).stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeV1InstallationEntity::getInstallationId,x->x));
+            var runtimeRows=runtimes.registeredProofRows(tenant,client,agents).stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeEntity::getAgentId,x->x));
+            var owners=new java.util.HashMap<String,java.util.Map<String,Long>>();var eligible=new java.util.ArrayList<Binding>();
+            var accountsHere=new java.util.HashMap<String,AccountSecuritySnapshot>();
+            for(var b:batch){var p=b.proof();var scope=p.scope();var row=runtimeRows.get(scope.agentId());
+                try{validateSubject(p,installRows.get(p.installationId()),row,true,()->accountsHere.computeIfAbsent(scope.ownerJiacn(),this::account));}
+                catch(IllegalArgumentException stale){continue;}
+                owners.computeIfAbsent(scope.ownerJiacn(),k->new java.util.HashMap<>()).put(scope.agentId(),row.getBindingId());eligible.add(b);
+            }
+            owners.replaceAll((owner,expected)->identities.observedActiveBindings(tenant,client,owner,expected));
+            for(var b:eligible){var p=b.proof();var scope=p.scope();var id=scope.agentId();
+                if(!Objects.equals(runtimeRows.get(id).getBindingId(),owners.get(scope.ownerJiacn()).get(id))
+                        || !b.connected().getAsBoolean() || bindings.get(scope)!=b)continue;
+                if(accepted.putIfAbsent(id,b)!=null)ambiguous.add(id);
+            }
+        }
+        var result=new java.util.HashMap<String,Proof>();
+        accepted.forEach((id,b)->{if(!ambiguous.contains(id)&&b.connected().getAsBoolean()&&bindings.get(b.proof().scope())==b)result.put(id,b.proof());});
+        return Map.copyOf(result);
+    }
+
     /** No secret is retained in WS attributes or the registry. */
     public Receipt bind(String sessionId, Proof proof, BooleanSupplier connected) {
         if (!exact(sessionId, 128) || proof == null || connected == null || !connected.getAsBoolean()) throw denied();
@@ -273,6 +309,19 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     }
 
     private void validateRow(Proof proof, AgentRuntimeV1InstallationEntity installation, AgentRuntimeEntity row, boolean registered) {
+        var scope=proof.scope();validateSubject(proof,installation,row,registered,()->account(scope.ownerJiacn()));
+        try {
+            var identity = registered ? identities.requireActiveIdentityForBinding(scope.tenantId(), scope.clientId(),
+                    scope.ownerJiacn(), row.getBindingId(), scope.agentId())
+                    : identities.requireRegistrationIdentityInScope(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId());
+            if (identity == null || !scope.agentId().equals(identity.getCanonicalAgentId())
+                    || !Objects.equals(identity.getBindingId(), row.getBindingId())
+                    || identities.requireActiveBinding(identity, null) == null) throw denied();
+        } catch (DataAccessException unavailable) { throw unavailable; }
+        catch (RuntimeException invalidIdentity) { throw denied(); }
+    }
+
+    private void validateSubject(Proof proof,AgentRuntimeV1InstallationEntity installation,AgentRuntimeEntity row,boolean registered,Supplier<AccountSecuritySnapshot> account) {
         var scope = proof.scope();
         requireAdmitted(scope.tenantId(), scope.clientId());
         String verifier = "urs1:" + proof.tokenDigest() + ":" + proof.userId() + ":" + proof.authEpoch();
@@ -287,16 +336,7 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
                 || !Objects.equals(proof.sessionGeneration(), row.getRuntimeSessionGeneration())
                 || row.getBindingId() == null || !verifier.equals(row.getTokenHash())
                 || (registered && !Set.of("online", "busy").contains(row.getStatus()))
-                || !account(scope.ownerJiacn()).matches(proof.userId(), scope.ownerJiacn(), proof.authEpoch())) throw denied();
-        try {
-            var identity = registered ? identities.requireActiveIdentityForBinding(scope.tenantId(), scope.clientId(),
-                    scope.ownerJiacn(), row.getBindingId(), scope.agentId())
-                    : identities.requireRegistrationIdentityInScope(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId());
-            if (identity == null || !scope.agentId().equals(identity.getCanonicalAgentId())
-                    || !Objects.equals(identity.getBindingId(), row.getBindingId())
-                    || identities.requireActiveBinding(identity, null) == null) throw denied();
-        } catch (DataAccessException unavailable) { throw unavailable; }
-        catch (RuntimeException invalidIdentity) { throw denied(); }
+                || !account.get().matches(proof.userId(), scope.ownerJiacn(), proof.authEpoch())) throw denied();
     }
 
     private void requireAdmitted(String tenantId, String clientId) {

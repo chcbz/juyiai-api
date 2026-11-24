@@ -291,6 +291,23 @@ public class AgentIdentityServiceImpl implements AgentIdentityService {
     }
 
     @Override
+    @Transactional(readOnly=true)
+    public java.util.Map<String,Long> observedActiveBindings(String tenant,String client,String owner,java.util.Map<String,Long> expected) {
+        try {
+            var verified=new java.util.HashMap<>(activeBindingsForCandidates(tenant,client,owner,expected.keySet()));
+            verified.entrySet().removeIf(e->!Objects.equals(expected.get(e.getKey()),e.getValue()));return java.util.Map.copyOf(verified);
+        }
+        catch(AgentServiceImpl.AgentBizException mixed) {
+            // Registration is advisory per Agent. Preserve individual failure isolation on stale/invalid rows.
+            var current=new java.util.HashMap<String,Long>();
+            for(var e:expected.entrySet())try{
+                var row=requireActiveIdentityForBinding(tenant,client,owner,e.getValue(),e.getKey());current.put(e.getKey(),row.getBindingId());
+            }catch(AgentServiceImpl.AgentBizException notActive){ /* no positive observation */ }
+            return java.util.Map.copyOf(current);
+        }
+    }
+
+    @Override
     public String requireCanonicalAgentIdInScope(
             String tenantId, String clientId, String ownerJiacn, String canonicalAgentId) {
         requireScope(tenantId, clientId, ownerJiacn);
