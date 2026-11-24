@@ -36,7 +36,7 @@ public final class ChatDiscussionCaptureController {
     }
     private static ResponseEntity<?> wire(RuntimeCaptureIntake.Reply r){
         return ResponseEntity.status(r.status()).header("Cache-Control","private, no-store").body(r.code()==null
-                ? JsonResult.success(JSON.readTree(r.ackJson())) : JsonResult.failure(r.code(),"Usage evidence could not be recorded"));
+                ? JsonResult.success(JSON.readValue(r.ackJson(),Map.class)) : JsonResult.failure(r.code(),"Usage evidence could not be recorded"));
     }
     @ExceptionHandler(ChatDeliberationException.class)
     public ResponseEntity<JsonResult<Void>> unavailable(ChatDeliberationException ignored){

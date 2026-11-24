@@ -197,7 +197,8 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
                     new RuntimeCaptureIntakeService(journal,settle,recovery));
         }
         var principal=new SecurityContextHolderAwareRequestFilter();principal.afterPropertiesSet();
-        var mvc=MockMvcBuilders.standaloneSetup(receiver).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
+        var mvc=MockMvcBuilders.standaloneSetup(receiver).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice(),
+                new cn.jia.core.security.SensitiveResponseBodyAdvice(new cn.jia.core.security.SensitiveResponseProperties())).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         if(measured!=null){
             // Original, unchanged wire records from an isolated CLI + loopback TLS run. Independent pin predated PLAN.
             var scenario=confirmTestTask(measured,sql,manager,schema,retry,discussion);
