@@ -654,6 +654,26 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,step::get);assertThrows(denied,()->lock.apply(enroll));
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
     }
+    @Test void scopedQuotePreparationReadsExactBytesAndRejectsForeignOrDamagedReferences() throws Exception {
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql")).execute(jdbc.getDataSource());
+        var fixture=measuredOffer();String inline=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,fixture.offer().quoteId());
+        assertEquals(inline,jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,fixture.offer().quoteId()));
+        int split=inline.indexOf("\"preparation\":{");assertTrue(split>0);int start=split+14;
+        String preparation=inline.substring(start,inline.length()-1);assertTrue(preparation.startsWith("{"));
+        String sha=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(preparation.getBytes(StandardCharsets.UTF_8)));
+        String ref=inline.substring(0,start)+"\""+sha+"\"}";String id="tq_m1_scopeprobe";
+        jdbc.update("INSERT INTO economy_task_quote(quote_id,binding_sha256,tenant_id,client_id,owner_jiacn,task_id,payer_user_id,amount_wen,snapshot_json,created_at) SELECT ?,?,tenant_id,client_id,owner_jiacn,task_id,payer_user_id,amount_wen,?,created_at FROM economy_task_quote WHERE quote_id=?",id,"7".repeat(64),ref,fixture.offer().quoteId());
+        var scope=List.of(TENANT,CLIENT,OWNER,TASK,PAYER,fixture.binding().recommendationId());
+        String insert="INSERT INTO economy_task_quote_preparation(tenant_id,client_id,owner_jiacn,task_id,payer_user_id,recommendation_id,preparation_sha,preparation_json) VALUES(?,?,?,?,?,?,?,?)";
+        String query="SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?";
+        for(int i=0;i<scope.size();i++){var args=new java.util.ArrayList<String>(scope);args.set(i,args.get(i)+"-wrong");args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());}
+        assertTrue(jdbc.queryForList(query,String.class,id).isEmpty());
+        var args=new java.util.ArrayList<String>(scope);args.add(sha);args.add(preparation);jdbc.update(insert,args.toArray());
+        assertEquals(inline,jdbc.queryForObject(query,String.class,id));
+        // Test-only corruption; the resolver must not return an unchecked object.
+        jdbc.update("UPDATE economy_task_quote_preparation SET preparation_json='{}' WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND payer_user_id=? AND recommendation_id=? AND preparation_sha=?",args.subList(0,7).toArray());
+        assertTrue(jdbc.queryForList(query,String.class,id).isEmpty());
+    }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
         var f=measuredOffer(); var p=f.preparation(); int before=count("economy_task_quote");
         var g=p.group();var group=new TaskBillingService.MeasuredGroup(g.dispatchGroupVersion(),"e".repeat(64),g.localRouteSha256(),g.routeVersion(),g.toolConfigSha256(),g.capturePolicyVersion());
