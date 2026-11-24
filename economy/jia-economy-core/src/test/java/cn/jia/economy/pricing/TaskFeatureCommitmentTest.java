@@ -5,6 +5,21 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class TaskFeatureCommitmentTest {
+    @Test void packedBinary32ValidationMatchesFloatOracleEvenForTheLastComponent(){
+        var id=new TaskEstimateFeatures.Identity("cfg","model",1024);
+        var bytes=new byte[4096];var view=java.nio.ByteBuffer.wrap(bytes);
+        // Test both signs, all 256 exponent values, zero and nonzero mantissas. Signed zero fills the prefix.
+        for(int i=0;i<1024;i++)view.putInt(i*4,0x80000000);
+        for(int sign:new int[]{0,0x80000000})for(int exp=0;exp<256;exp++)for(int mant:new int[]{0,1,0x400000,0x7fffff}){
+            int bits=sign|(exp<<23)|mant;view.putInt(4092,bits);float value=Float.intBitsToFloat(bits);
+            var vec=TaskEstimateFeatures.vectorFromBytes(bytes);
+            java.util.function.Supplier<TaskEstimateFeatures> make=()->new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"t","r","i","s",id,vec,List.of(),null);
+            if(Float.isFinite(value) && value!=0)assertEquals(bits,Float.floatToRawIntBits(make.get().component(1023)));
+            else assertThrows(IllegalArgumentException.class,make::get);
+        }
+        view.putFloat(0,1f);view.putFloat(4092,Float.NEGATIVE_INFINITY);
+        assertThrows(IllegalArgumentException.class,()->new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"t","r","i","s",id,TaskEstimateFeatures.vectorFromBytes(bytes),List.of(),null));
+    }
     @Test void canonicalV1BytesRemainIdenticalForOldCommitments(){
         var vector=new ArrayList<Float>(Collections.nCopies(1024,0f));
         vector.set(0,-0f);vector.set(1,Float.MIN_VALUE);vector.set(2,Float.MAX_VALUE);vector.set(3,-0.5f);

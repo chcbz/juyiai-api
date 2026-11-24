@@ -15,7 +15,9 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
         if(!(vector instanceof PackedVector))vector=List.copyOf(vector);
         files=List.copyOf(files);
         if(!VERSION.equals(featureVersion)||embeddingIdentity.dimensions()!=1024||vector.size()!=embeddingIdentity.dimensions())throw new IllegalArgumentException("Unexpected task feature identity");
-        boolean nonzero=false;for(int i=0;i<vector.size();i++){float f=component(vector,i);if(!Float.isFinite(f))throw new IllegalArgumentException("Invalid task vector");nonzero|=f!=0;}
+        boolean nonzero=false;
+        if(vector instanceof PackedVector packed)nonzero=packed.validateAndFindNonzero();
+        else for(float f:vector){if(!Float.isFinite(f))throw new IllegalArgumentException("Invalid task vector");nonzero|=f!=0;}
         if(!nonzero)throw new IllegalArgumentException("Undefined cosine");
     }
     /** Immutable list view of an owned V1 byte block; keep the JSON/list contract at the boundary. */
@@ -23,6 +25,17 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
         private final byte[] bytes;
         private final java.nio.ByteBuffer view;
         private PackedVector(byte[] source){bytes=source.clone();view=java.nio.ByteBuffer.wrap(bytes);}
+        /** For big-endian binary32, exponent bits are the low seven of byte 0 and the high bit of byte 1.
+         * Ignore the sign for zero, but check the exponent of every component even after a nonzero is found. */
+        private boolean validateAndFindNonzero(){
+            boolean nonzero=false;
+            for(int i=0;i<bytes.length;i+=Float.BYTES){
+                int high=bytes[i]&0x7f;
+                if(high==0x7f && bytes[i+1]<0)throw new IllegalArgumentException("Invalid task vector");
+                if(!nonzero)nonzero=(high|bytes[i+1]|bytes[i+2]|bytes[i+3])!=0;
+            }
+            return nonzero;
+        }
         @Override public int size(){return bytes.length/Float.BYTES;}
         @Override public Float get(int index){return value(index);}
         private float value(int index){return view.getFloat(Objects.checkIndex(index,size())*Float.BYTES);}
