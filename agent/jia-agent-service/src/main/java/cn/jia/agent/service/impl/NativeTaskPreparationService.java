@@ -10,7 +10,7 @@ import tools.jackson.databind.ObjectMapper;
 
 /** The task root serializes first registration with edits and assignment. This service never creates an execution or quote. */
 @Service
-public class NativeTaskPreparationService implements NativeTaskPreparation {
+public class NativeTaskPreparationService implements NativeTaskPreparation,TaskInitialActionSelection {
     // A new observation must be obtained within the existing service liveness horizon. Heartbeats do not renew a ticket.
     @org.springframework.beans.factory.annotation.Value("${jia.agent.status.heartbeat-timeout-seconds:60}")
     private long probeLifetimeSeconds=60;
@@ -113,12 +113,33 @@ public class NativeTaskPreparationService implements NativeTaskPreparation {
             ||!localOnly||!intent.output().commandOutputs().equals(outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
         if(row[1]==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+where+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
     }
+    private org.springframework.context.ApplicationEventPublisher events;
+    @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}
+    private static Output output(Choice c){return switch(c){case LOCAL_ANSWER->new Output(Mode.ANSWER,List.of());case LOCAL_TEXT_FILE->new Output(Mode.ARTIFACTS,List.of("text/plain"));};}
+    public View view(AgentTaskExecutionGrantService.Scope scope,String task,String agent){return selection(scope,task,agent,null,null);}
+    public View choose(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice){return selection(scope,task,agent,Objects.requireNonNull(version),Objects.requireNonNull(choice));}
+    private View selection(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice){
+        return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
+            var targets=candidates.quoteTargets(scope,task,List.of(agent),choice!=null);if(targets.size()!=1||!agent.equals(targets.getFirst().agent()))throw new Missing();
+            if(!"open".equals(root.getRewardStatus()))throw new Changed();var req=requirements.readCurrentWithinLockedTask(scope,task,root);
+            var b=new Binding(scope,task,root.getTaskVersion(),req.requirementRevision(),req.sha256(),grants.snapshotTaskInputsWithinLockedTask(scope,task).digest(),targets.getFirst());
+            String stamp=key(b);if(choice!=null&&!stamp.equals(version))throw new Changed();var prior=find(b);
+            if(choice!=null){var decision=new Intent("TASK_NATIVE_LOCAL_FILES_V1",b,output(choice));
+                if(prior!=null&&!prior.intent().equals(decision))throw new Changed();
+                if(prior==null){prior=insert(decision);events.publishEvent(new Selected(scope,task,b.taskVersion(),agent));}
+            }
+            String selected=null;if(prior!=null){selected="OTHER_FIXED";for(var c:Choice.values())if(output(c).equals(prior.intent().output()))selected=c.name();}
+            return new View(Long.toString(b.taskVersion()),agent,stamp,selected);
+        });
+    }
     public Frozen freeze(Intent intent){var b=intent.binding();var scope=b.scope();return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),root->{
         if(!"open".equals(root.getRewardStatus())||root.getTaskVersion()!=b.taskVersion())throw new IllegalStateException("Task is no longer open at the selected version");
         var req=requirements.readCurrentWithinLockedTask(scope,b.task(),root);
         if(req.requirementRevision()!=b.requirementRevision()||!req.sha256().equals(b.requirementSha())||!grants.snapshotTaskInputsWithinLockedTask(scope,b.task()).digest().equals(b.inputSha())
            ||!List.of(b.target()).equals(candidates.quoteTargets(scope,b.task(),List.of(b.target().agent()),true)))throw new IllegalStateException("Stale dispatch inputs or candidate");
         var prior=find(b);if(prior!=null){if(!intent.equals(prior.intent()))throw new IllegalStateException("Different initial execution already fixed");return prior;}
-        String body=json.writeValueAsString(intent),sha=hash(body);db.update("INSERT INTO "+TABLE+" (tenant_id,client_id,owner_jiacn,task_id,binding_sha,intent_sha,intent_json) VALUES(?,?,?,?,?,?,?)",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),key(b),sha,body);return new Frozen(sha,intent);
+        return insert(intent);
     });}
+    private Frozen insert(Intent intent){var b=intent.binding();var scope=b.scope();String body=json.writeValueAsString(intent),sha=hash(body);db.update("INSERT INTO "+TABLE+" (tenant_id,client_id,owner_jiacn,task_id,binding_sha,intent_sha,intent_json) VALUES(?,?,?,?,?,?,?)",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),key(b),sha,body);return new Frozen(sha,intent);
+    }
 }

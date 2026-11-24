@@ -1384,6 +1384,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(output.comparisonOutputs().containsKey("dataSchema"));assertNull(output.comparisonOutputs().get("dataSchema"));assertFalse(output.commandOutputs().containsKey("dataSchema"));
         assertEquals(List.of("text/plain"),output.mimeTypes());int quotes=count("economy_task_quote"),executions=count("agent_personal_workspace_execution");
         assertThrows(InjectedFailure.class,()->locked(()->{service.freeze(intent);throw new InjectedFailure();}));assertNull(service.find(bindingKey));
+        var events=mock(org.springframework.context.ApplicationEventPublisher.class);service.setSelectionEvents(events);
+        var view=service.view(SCOPE,TASK,agent);assertNull(view.choice());verifyNoInteractions(events);
+        var choice=TaskInitialActionSelection.Choice.LOCAL_TEXT_FILE;
+        assertThrows(TaskInitialActionSelection.Missing.class,()->service.view(SCOPE,TASK,"unknown"));
+        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,"0".repeat(64),choice));
+        var selected=service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice);assertEquals("LOCAL_TEXT_FILE",selected.choice());
+        assertEquals(selected,service.choose(SCOPE,TASK,agent,view.selectionVersion(),choice));
+        assertThrows(TaskInitialActionSelection.Changed.class,()->service.choose(SCOPE,TASK,agent,view.selectionVersion(),TaskInitialActionSelection.Choice.LOCAL_ANSWER));
+        verify(events).publishEvent(new TaskInitialActionSelection.Selected(SCOPE,TASK,req.taskVersion(),agent));verifyNoMoreInteractions(events);
         var frozen=service.freeze(intent);assertEquals(frozen,service.freeze(intent));assertEquals(frozen,service.find(bindingKey));
         assertThrows(IllegalStateException.class,()->service.freeze(new NativeTaskPreparation.Intent(intent.schema(),bindingKey,new NativeTaskPreparation.Output(NativeTaskPreparation.Mode.ANSWER,List.of()))));
         var wrong=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,new AgentExternalServicePolicyService.QuoteTarget(agent,target.provider(),target.binding()+1,target.externalPolicyRevision()));
