@@ -62,6 +62,7 @@ public class SkillExecutionServiceTest {
         root=new AgentTaskMetaEntity().setTaskId("task").setAssignedAgentId("agent").setTaskVersion(7L).setOwnerJiacn("owner");root.setTenantId("0");root.setClientId("client");
         var transactions=mock(AgentTaskMutationTransaction.class);
         when(transactions.executeWithLockedTaskRootInOwnerScope(eq("0"),eq("client"),eq("owner"),eq("task"),any())).thenAnswer(i->((AgentTaskMutationTransaction.LockedTaskMutation<?>)i.getArgument(4)).apply(root));
+        service.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         service.setConversationAdmission(grants,transactions);
         service.setTaskExecutionDependencies(conversations,mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
         when(conversations.requireAccessible(any(),eq("42"))).thenReturn(new WorkspaceConversationAccessService.ConversationView("42","bounty","task:task","task",List.of("agent"),1,1));
@@ -186,12 +187,14 @@ public class SkillExecutionServiceTest {
     @Test void projectionRequiresCommittedMacroState(){assertThrows(Failure.class,()->service.markProjected(owner,"exec",HASH));}
     @Test void resultReadNeedsCurrentConversationAcl(){when(conversations.requireAccessible(any(),eq("42"))).thenReturn(null);assertThrows(Failure.class,()->service.result(owner,"exec"));}
     @Test void skillCreationPinsAuthorityAndChargesNothing(){
+        var initial=mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class);service.setInitialActions(initial);
         var hints=mock(NativeConversationWorkDiscovery.class);service.setNativeWorkDiscovery(hints);
         doAnswer(i->{execution=i.getArgument(0);return null;}).when(pwe).insert(any());
         doAnswer(i->{skill=i.getArgument(0);skill.setPhase("READY").setVersion(0L).setEffectsJson("{}");return null;}).when(attachments).insertReady(any());
         var result=service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot()));
         var ordering=inOrder(pwe,attachments,hints);
         ordering.verify(pwe).insert(any());ordering.verify(attachments).insertReady(any());
+        verify(initial).admit(eq(new AgentTaskExecutionGrantService.Scope("0","client","owner")),eq("task"),any(),eq(result.executionId()),eq(false),eq(outputs));
         ordering.verify(pwe).registerTaskMember(same(execution),isNull());
         ordering.verify(hints).afterCommit(new NativeConversationWorkAvailable("0","client","agent"));
         assertTrue(result.executionId().matches("pwe_[a-f0-9]{60}"));assertTrue(result.runId().matches("pwe_run_[a-f0-9]{64}"));assertEquals("READY",skill.getPhase());assertNull(execution.getControlledConsentId());assertEquals(6,execution.getExecutionProtocolVersion());assertNull(execution.getOutputContentMimeType());

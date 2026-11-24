@@ -112,6 +112,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx");
+    private QuotedInitialActionAdmission initialActions;
+    @Autowired public void setInitialActions(QuotedInitialActionAdmission value){initialActions=Objects.requireNonNull(value);}
     private cn.jia.agent.service.NativeConversationWorkDiscovery workDiscovery;
     @Autowired
     public void setNativeWorkDiscovery(cn.jia.agent.service.NativeConversationWorkDiscovery workDiscovery) {
@@ -1556,9 +1558,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             }
             // A replay above reads an existing member; only a new registration is fenced.
             if(lockedTask!=null && "completed".equals(lockedTask.getRewardStatus())) throw failure(Reason.GRANT_REVOKED);
-            if(task!=null) assigneeAuthority.requireGrantTarget(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
+            var grantTarget=task==null?null:assigneeAuthority.requireGrantTarget(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
                     task.taskId(),task.taskGrantId(),task.taskGrantVersion());
-            else requirePrivateAgent(scope,command.targetAgentId());
+            if(task==null)requirePrivateAgent(scope,command.targetAgentId());
             var row=new PersonalWorkspaceExecutionEntity().setExecutionId(executionId).setOwnerJiacn(scope.ownerJiacn()).setTaskId(expectedScope.taskId()).setRunId(runId)
                 .setExecutionMode("CONVERSATION").setBusinessScope(expectedScope.kind()).setConversationId(expectedScope.conversationId()).setTargetAgentId(command.targetAgentId()).setInstruction(instruction)
                 .setOutputContentMimeType(null).setExecutionState("QUEUED").setExecutionProtocolVersion(6).setGrantRevision(1L)
@@ -1582,6 +1584,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             // Rollout controls observation only, never the permitted tools or the dispatch itself.
             if(meteredCaptureEnabled && task!=null && selections.isEmpty() && localArtifactMeteringProfile!=null
                     && localArtifactMeteringProfile.matches("[a-f0-9]{64}"))row.setCaptureProfileSha256(localArtifactMeteringProfile);
+            if(task!=null)initialActions.admit(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),task.taskId(),grantTarget,executionId,selections.isEmpty(),skillObject(snapshot.get("outputs")));
             executions.insert(row);skillExecutions.insertReady(skill);
             if(task!=null) executions.registerTaskMember(row,row.getCaptureProtocol()==null?null:
                     cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(executionId,runId));

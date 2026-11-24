@@ -379,6 +379,7 @@ class ChatBountyExecutionTerminationMySqlTest extends cn.jia.agent.skill.SkillMa
         var grants=mock(AgentTaskExecutionGrantService.class);
         when(grants.admit(any(),eq("task"),eq("grant"),eq(1L),eq(1L),eq("agent"),eq("GENERATE_IMAGE"),eq(true)))
                 .thenReturn(new AgentTaskExecutionGrantService.Admission("grant",1,1,"agent","GENERATE_IMAGE",true));
+        runtime.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         runtime.setConversationAdmission(grants,roots);
         runtime.setTaskExecutionDependencies(access,mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
         ReflectionTestUtils.setField(runtime,"conversationExecutionEnabled",true);

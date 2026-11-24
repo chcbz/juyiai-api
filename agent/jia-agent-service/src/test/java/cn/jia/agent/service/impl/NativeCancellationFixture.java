@@ -47,6 +47,7 @@ final class NativeCancellationFixture {
         var service=new PersonalWorkspaceExecutionServiceImpl(executions,mock(PersonalWorkspaceDao.class),
                 mock(PersonalWorkspaceTaskLinkDao.class),mock(AgentRuntimeDao.class),mock(PersonalWorkspaceStorage.class),
                 mock(PersonalWorkspaceWriteService.class),new PersonalWorkspaceExecutionProperties(List.of("text/plain")));
+        service.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         service.setConversationAdmission(mock(AgentTaskExecutionGrantService.class),roots);
         service.setTaskExecutionDependencies(conversations,mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
         service.setSkillExecutionDependencies(skills,mock(InstalledSkillDescriptorLookup.class),mock(SkillCapabilityLookup.class),mock(TaskSkillPolicyService.class));

@@ -100,6 +100,19 @@ public class NativeTaskPreparationService implements NativeTaskPreparation {
                     result.put(binding,new Recorded(rs.getString(4),decision,m));},args.toArray());
         }return Map.copyOf(result);
     }
+    /** The caller owns the task root, authorized grant and execution transaction. No current quote/probe read here. */
+    void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,boolean localOnly,Map<String,Object> outputs){
+        if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing native admission transaction");
+        String where=" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND intent_sha=?";
+        Object[] args={scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha};
+        var rows=db.query("SELECT intent_json,initial_execution_id FROM "+TABLE+where+" FOR UPDATE",(rs,n)->new String[]{rs.getString(1),rs.getString(2)},args);
+        if(rows.size()!=1||!hash(rows.getFirst()[0]).equals(sha))throw new IllegalStateException("Missing or changed quoted initial intent");
+        var row=rows.getFirst();if(row[1]!=null&&!row[1].equals(execution))return; // a committed first execution exists; later actions use their own contract
+        var intent=json.readValue(row[0],Intent.class);var b=intent.binding();var t=b.target();
+        if(!scope.equals(b.scope())||!task.equals(b.task())||!t.agent().equals(target.agentId())||!t.provider().equals(target.ownerJiacn())||t.binding()!=target.bindingId()
+            ||!localOnly||!intent.output().commandOutputs().equals(outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
+        if(row[1]==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+where+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
+    }
     public Frozen freeze(Intent intent){var b=intent.binding();var scope=b.scope();return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),root->{
         if(!"open".equals(root.getRewardStatus())||root.getTaskVersion()!=b.taskVersion())throw new IllegalStateException("Task is no longer open at the selected version");
         var req=requirements.readCurrentWithinLockedTask(scope,b.task(),root);

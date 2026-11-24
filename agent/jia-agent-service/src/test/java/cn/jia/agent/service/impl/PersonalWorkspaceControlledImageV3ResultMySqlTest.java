@@ -241,6 +241,7 @@ class PersonalWorkspaceControlledImageV3ResultMySqlTest {
             root.setTenantId("0");root.setClientId("client");root.setOwnerJiacn("owner");
             return transactions.execute(status->mutation.apply(root));
         });
+        service.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         service.setConversationAdmission(mock(cn.jia.agent.service.AgentTaskExecutionGrantService.class),
                 taskTransactions);
         service.setTaskExecutionDependencies(conversation,mock(cn.jia.agent.dao.AgentTaskWorkItemDao.class),
