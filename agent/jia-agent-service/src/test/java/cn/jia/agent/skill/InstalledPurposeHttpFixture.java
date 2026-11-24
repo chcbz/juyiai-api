@@ -22,17 +22,18 @@ import static org.mockito.Mockito.*;
 public final class InstalledPurposeHttpFixture {
     private static final String HASH="a".repeat(64);
     @org.apache.ibatis.plugin.Intercepts(@org.apache.ibatis.plugin.Signature(type=org.apache.ibatis.executor.statement.StatementHandler.class,method="query",args={java.sql.Statement.class,org.apache.ibatis.session.ResultHandler.class}))
-    public static final class InventoryExecutions implements org.apache.ibatis.plugin.Interceptor {
-        private final java.util.concurrent.atomic.AtomicLong completed=new java.util.concurrent.atomic.AtomicLong();
+    public static final class CompletedReads implements org.apache.ibatis.plugin.Interceptor {
+        private final java.util.function.Consumer<String> observed;
+        public CompletedReads(java.util.function.Consumer<String> observed){this.observed=observed;}
         public Object intercept(org.apache.ibatis.plugin.Invocation invocation) throws Throwable {
             String sql=((org.apache.ibatis.executor.statement.StatementHandler)invocation.getTarget()).getBoundSql().getSql();
             Object result=invocation.proceed();
-            if(sql.contains("q.inventory_snapshot_json") && sql.contains("JOIN economy_hosting_lease"))completed.incrementAndGet();
+            observed.accept(sql);
             return result;
         }
     }
-    private final InventoryExecutions inventory=new InventoryExecutions();
-    public long inventoryExecutions(){return inventory.completed.get();}
+    private final java.util.concurrent.atomic.AtomicLong inventory=new java.util.concurrent.atomic.AtomicLong();
+    public long inventoryExecutions(){return inventory.get();}
     public final SkillManagementService skills;
     private final SkillRelationshipAuthorizations relationships;
     private final JdbcTemplate db;
@@ -43,7 +44,7 @@ public final class InstalledPurposeHttpFixture {
         this.db=db;this.tenant=tenant;this.client=client;this.owner=owner;this.auth=auth;
         for(String ddl:List.of("agent-runtime-session-fence-v1","agent-runtime-v1-schema","economy-v0-skill-marketplace","economy-v0-skill-application","economy-skill-management-sm-c1"))
             new ResourceDatabasePopulator(new ClassPathResource("db/"+ddl+".sql")).execute(db.getDataSource());
-        var conf=new com.baomidou.mybatisplus.core.MybatisConfiguration();conf.setMapUnderscoreToCamelCase(true);conf.addMapper(SkillManagementMapper.class);conf.addInterceptor(inventory);
+        var conf=new com.baomidou.mybatisplus.core.MybatisConfiguration();conf.setMapUnderscoreToCamelCase(true);conf.addMapper(SkillManagementMapper.class);conf.addInterceptor(new CompletedReads(sql->{if(sql.contains("q.inventory_snapshot_json") && sql.contains("JOIN economy_hosting_lease"))inventory.incrementAndGet();}));
         var factory=new com.baomidou.mybatisplus.extension.spring.MybatisSqlSessionFactoryBean();factory.setDataSource(db.getDataSource());factory.setConfiguration(conf);
         var mapper=new SqlSessionTemplate(factory.getObject()).getMapper(SkillManagementMapper.class);
         var marketplace=mock(SkillMarketplaceService.class);when(marketplace.available(any(HostingRentHttp.Actor.class))).thenReturn(true);when(marketplace.available(tenant,client)).thenReturn(true);
