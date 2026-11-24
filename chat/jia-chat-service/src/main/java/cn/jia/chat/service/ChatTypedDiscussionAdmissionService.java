@@ -27,6 +27,8 @@ import java.util.Objects;
 /** Task-root-first admission for natural typed discussion and durable clarification replies. */
 @Service
 public class ChatTypedDiscussionAdmissionService {
+    @org.springframework.beans.factory.annotation.Value("${jia.chat.discussion.text-bootstrap-capture-enabled:false}")
+    private boolean textBootstrapCaptureEnabled;
     private cn.jia.chat.service.ChatDispatchAuthorityService dispatchAuthority;
     @org.springframework.beans.factory.annotation.Autowired
     public void setDispatchAuthority(cn.jia.chat.service.ChatDispatchAuthorityService value) { dispatchAuthority=value; }
@@ -169,8 +171,14 @@ public class ChatTypedDiscussionAdmissionService {
             input.setContent(command.content());input.setRequestId(requestId);input.setRequestRevision(1L);
             input.setTargetAgentId(targets.getFirst());input.setTargetAgentIds(List.copyOf(targets));
             var scope=new JuyitingConversationScope("bounty","task:"+command.taskId(),command.taskId(),targets.getFirst(),List.copyOf(targets),List.copyOf(targets));
-            var admitted=deliberation.admit(tenantId,sender,conversationId,generation,scope,
-                    InteractionRoute.CHAT,input,null,context.facts(),nativeAdmissionFacts(command,context,deliveryBasis,deliveryTargets));
+            var admissionFacts = nativeAdmissionFacts(command,context,deliveryBasis,deliveryTargets);
+            // Only the prepared initial bounty turn. Device support is from the selected current registration,
+            // not discussion input. No package, retained output or attached source is covered by this route.
+            boolean capture = !preparePackages && textBootstrapCaptureEnabled && context.selectors().isEmpty()
+                    && deliveryTargets.isEmpty() && ChatTypedDeliberationContextService.parseCatalog(context.sourceCatalogJson()).isEmpty()
+                    && cn.jia.chat.handler.TypedDeliberationDeclaration.TEXT_BOOTSTRAP_CAPTURE.equals(context.frozenDeclaration().get("discussionCaptureRoute"));
+            var admitted = capture ? deliberation.admitTextBootstrap(tenantId,sender,conversationId,generation,scope,input,context.facts(),admissionFacts)
+                    : deliberation.admit(tenantId,sender,conversationId,generation,scope,InteractionRoute.CHAT,input,null,context.facts(),admissionFacts);
             List<String> turnIds=admitted.dispatches().stream().map(ChatDeliberationService.Dispatch::turnId).toList();
             if(turnIds.size()!=1)throw unavailable();
             long now=System.currentTimeMillis();

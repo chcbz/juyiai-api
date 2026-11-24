@@ -199,7 +199,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var prepared=new TaskBillingService.MeasuredPreparation(features,group,"fixture","test-calibration","test-only",estimate);
         tx.executeWithoutResult(st->{lockTask();var q=billing.storeMeasured(task,binding,"payer",prepared);assertEquals(10,q.amountWen());billing.reserve(task,q.quoteId(),binding,"payer");
             var member=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setOwnerJiacn("owner").setTaskId("task").setExecutionId("exec1").setRunId("run-exec1").setRequestHash("a".repeat(64));member.setTenantId("0");member.setClientId("client");executions.registerTaskMember(member,fixture.at("/records/plan/captureId").asText());
-            if(discussion){new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","initial-turn","initial-dispatch","d".repeat(64));}
+            if(discussion){new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","initial-turn","initial-dispatch","d".repeat(64),false);}
             if(retry){row("retry","owner","task","CONVERSATION","RESULT_COMMITTED",6);member.setExecutionId("retry").setRunId("run-retry");executions.registerTaskMember(member,null);}});
         return new Scenario(task,billing,reference,jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class));
     }

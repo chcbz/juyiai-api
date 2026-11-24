@@ -13,10 +13,12 @@ public class TaskDiscussionMembershipService implements TaskDiscussionMembership
     public TaskDiscussionMembershipService(PersonalWorkspaceExecutionDao executions) {this.executions=executions;}
 
     @Override @Transactional(propagation=Propagation.MANDATORY, rollbackFor=Exception.class)
-    public void admit(Scope owner,String taskId,String turnId,String initialDispatchId,String requestDigest) {
+    public String admit(Scope owner,String taskId,String turnId,String initialDispatchId,String requestDigest,boolean captureTextBootstrap) {
         // Keep Chat's original IDs, not a fabricated workspace execution or a zero-usage capture.
         var member = new PersonalWorkspaceExecutionDao.MemberIdentity(owner.tenantId(),owner.clientId(),owner.ownerJiacn(),
                 taskId,turnId,initialDispatchId,requestDigest);
-        executions.appendMember(member,null);
+        String capture = captureTextBootstrap ? NativeCaptureEvidence.captureIdentity(turnId, initialDispatchId) : null;
+        executions.appendMember(member,capture);
+        return capture;
     }
 }

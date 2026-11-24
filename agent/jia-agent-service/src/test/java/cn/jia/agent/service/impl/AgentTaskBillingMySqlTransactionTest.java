@@ -1464,11 +1464,28 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var entry = new ChatBountyBootstrapAdmissionService(requirements,discussions,conversations,messages,dao,
                 new cn.jia.chat.deliberation.ChatInteractionStepStore(jdbc),mock(ChatConversationEventBroker.class),new ObjectMapper(),typed);
         var membership = new cn.jia.agent.service.usage.TaskDiscussionMembershipService(executionRows);
-        deliberation.setTaskMembers((owner,task,turn,attempt,hash) -> {membership.admit(owner,task,turn,attempt,hash); throw new InjectedFailure();});
+        deliberation.setTaskMembers((owner,task,turn,attempt,hash,capture) -> {membership.admit(owner,task,turn,attempt,hash,capture); throw new InjectedFailure();});
         assertThrows(InjectedFailure.class,() -> tx.execute(status -> entry.admit(intent)));
         for(String table:List.of("chat_request","chat_message","chat_turn","chat_dispatch_outbox","chat_context_snapshot","chat_typed_admission")) assertEquals(0,count(table),table);
         assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
         deliberation.setTaskMembers(membership);
+        // Exercise explicit enrollment in a rollback-only copy of this new admission. Baseline flow stays unmetered.
+        ReflectionTestUtils.setField(typed,"textBootstrapCaptureEnabled",true);
+        tx.executeWithoutResult(status -> {
+            var admitted=entry.admit(intent);assertFalse(admitted.replay());
+            var data=new ObjectMapper().readTree(jdbc.queryForObject("SELECT payload_json FROM chat_dispatch_outbox WHERE event_type='DISPATCH'",String.class));
+            var capture=data.at("/factsManifest/taskUsageCapture");
+            if(conflictOnDiscussionRetry) assertTrue(capture.isMissingNode()); // registration has no matching route
+            else {
+                String expected=cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(data.path("turnId").asText(),data.path("dispatchId").asText());
+                assertEquals(expected,capture.path("captureId").asText());assertEquals("METERED_CAPTURE_V2",capture.path("protocol").asText());
+                assertEquals(expected,jdbc.queryForObject("SELECT capture_id FROM agent_task_execution_member WHERE task_id=?",String.class,intent.taskId()));
+            }
+            ReflectionTestUtils.setField(typed,"textBootstrapCaptureEnabled",false);
+            assertTrue(entry.admit(intent).replay());assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
+            status.setRollbackOnly();
+        });
+        assertEquals(0,count("chat_dispatch_outbox"));assertEquals(0,count("chat_turn"));
         var first = tx.execute(status -> entry.admit(intent));
         assertNotNull(first); assertFalse(first.replay()); assertNull(first.stepId()); assertEquals(bound.conversationId(),first.conversationId());
         var again = tx.execute(status -> entry.admit(intent));
@@ -1544,6 +1561,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         sessions.register(session,TENANT,OWNER,CLIENT,agent,Map.of("schemaVersion",5,"state","READY","carrier","CHAT_MESSAGE_FINAL_SIDECAR_V5",
                 "referenceModes",List.of("NONE","AVAILABLE"),"outcomeKinds",List.of("ANSWER","CLARIFY","ACTION_REQUEST","REVISION_REQUEST","SUBMISSION_REQUEST"),
                 "engine","CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA","strictNoToolsVerified",false,"toolPolicy","read-only-constrained",
+                "discussionCaptureRoute",conflictOnDiscussionRetry?"UNAVAILABLE":"SINGLE_BOUNTY_CHAT_TEXT_BOOTSTRAP_V1",
                 "nativeExecution",Map.of("schemaVersion",1,"executionProtocolVersion",6,"toolPolicyRef","NATIVE_LOCAL_FILES_V1","outputMimeTypes",List.of("text/plain"))));
         var auth=mock(cn.jia.agent.security.AgentRuntimeAuthenticationService.class);
         var proof=new cn.jia.agent.security.AgentRuntimeAuthenticationService.Proof(new cn.jia.agent.security.AgentRuntimeAuthentication.Scope(TENANT,CLIENT,OWNER,agent,"boot"),"installation","host",1,"fixture",1,1);

@@ -17,13 +17,15 @@ public final class TypedDeliberationDeclaration {
     private static final String ENGINE = "CODEX_APP_SERVER_NATIVE_OUTPUT_SCHEMA";
     private static final String TOOL_POLICY = "read-only-constrained";
 
+    public static final String TEXT_BOOTSTRAP_CAPTURE = "SINGLE_BOUNTY_CHAT_TEXT_BOOTSTRAP_V1";
+    private final boolean textBootstrapCapture;
     private final State state;
     private final Map<String,Object> materials;
     private final Map<String,Object> nativeExecution;
 
-    private TypedDeliberationDeclaration(State state) { this(state,null,null); }
+    private TypedDeliberationDeclaration(State state) { this(state,null,null,false); }
 
-    private TypedDeliberationDeclaration(State state,Map<String,Object> materials,Map<String,Object> nativeExecution) {this.state=state;this.materials=materials;this.nativeExecution=nativeExecution;}
+    private TypedDeliberationDeclaration(State state,Map<String,Object> materials,Map<String,Object> nativeExecution,boolean textBootstrapCapture) {this.textBootstrapCapture=textBootstrapCapture;this.state=state;this.materials=materials;this.nativeExecution=nativeExecution;}
 
     public static TypedDeliberationDeclaration parse(Object raw) {
         if (raw == null) return new TypedDeliberationDeclaration(State.UNDECLARED);
@@ -42,7 +44,7 @@ public final class TypedDeliberationDeclaration {
             if (!(value.get("strictNoToolsVerified") instanceof Boolean verified) || verified) throw invalid();
             exact(value.get("toolPolicy"), TOOL_POLICY);
             return new TypedDeliberationDeclaration(State.valueOf(state),value.containsKey("materialsInput")?cn.jia.chat.service.ChatMaterialsInputContract.declaration(value.get("materialsInput")):null,
-                    value.containsKey("nativeExecution")?nativeExecution(value.get("nativeExecution")):null);
+                    value.containsKey("nativeExecution")?nativeExecution(value.get("nativeExecution")):null, TEXT_BOOTSTRAP_CAPTURE.equals(value.get("discussionCaptureRoute")));
         } catch (RuntimeException invalid) {
             return new TypedDeliberationDeclaration(State.UNSUPPORTED);
         }
@@ -63,6 +65,7 @@ public final class TypedDeliberationDeclaration {
         value.put("engine", ENGINE);
         value.put("strictNoToolsVerified", false);
         value.put("toolPolicy", TOOL_POLICY);
+        if(textBootstrapCapture)value.put("discussionCaptureRoute",TEXT_BOOTSTRAP_CAPTURE);
         if(materials!=null)value.put("materialsInput",materials);
         if(nativeExecution!=null)value.put("nativeExecution",nativeExecution);
         return Map.copyOf(value);
