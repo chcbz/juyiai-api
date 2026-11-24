@@ -82,6 +82,24 @@ public final class FrozenCalibrationStudy {
     /** Private input pinned before confirmation/outcome, from the published forecast and the evaluation book. */
     public record OfferedHoldout(Task original,String family,String groupSha,String featureSha,String quoteId,String agentId,long wen,String referenceSha){
         @Override public String toString(){return "OfferedHoldout[private]";}}
+    /** Offline join, after transport cutoff and before opening outcomes. Replay is corroboration, never a replacement for an observed reply. */
+    public Artifact publishedOffer(cn.jia.economy.task.TaskQuoteBatches.Key key,cn.jia.economy.task.TaskQuoteBatches.Intent intent,
+            cn.jia.economy.task.TaskQuoteBatches.Result observed,String agent,String family,TaskHistoryCatalog.Group group,Artifact priceBook,
+            cn.jia.economy.task.TaskQuoteBatches batches,cn.jia.economy.mapper.EconomyTaskBillingMapper quotes){
+        if(observed==null||!observed.equals(batches.replay(key,intent)))throw new IllegalArgumentException("Observed forecast differs from original batch");
+        var item=observed.quotes().stream().filter(i->i.agentId().equals(agent)).findFirst().orElseThrow();
+        if(item.state()!=cn.jia.economy.task.TaskQuoteBatches.State.AVAILABLE)throw new IllegalArgumentException("No observed price");
+        var t=key.task();var q=quotes.findQuote(t.scope().tenantId(),t.scope().clientId(),t.ownerJiacn(),t.taskId(),item.quoteId());
+        if(q==null||!key.payer().equals(q.getPayerUserId())||q.getAmountWen()!=item.amount().minorUnits())throw new IllegalArgumentException("Wrong published quote");
+        var root=json.readTree(q.getSnapshotJson());var feature=root.path("featureSha256").asString();
+        if(feature==null||!feature.matches("[0-9a-f]{64}")||!group.digest().equals(root.path("historyGroupSha256").asString())
+                ||!agent.equals(root.at("/binding/agentId").asString())||!item.recommendationId().equals(root.at("/binding/recommendationId").asString()))
+            throw new IllegalArgumentException("Wrong published binding");
+        var book=reference(read(k->priceBook.json(),priceBook.sha256(),Book.class));
+        if(!group.execution().routeVersion().equals(book.version()))throw new IllegalArgumentException("Wrong reference version");
+        verifyQuoteRates(q.getSnapshotJson(),book);
+        return freeze(new OfferedHoldout(t,family,group.digest(),feature,q.getQuoteId(),agent,q.getAmountWen(),priceBook.sha256()));
+    }
     public record ConfirmedPoint(TaskEstimateEvaluation.Prediction point,TaskCalibrationObservations.Frozen source) {
         @Override public String toString(){return "ConfirmedPoint[private]";}}
     /** Single compatible confirmed case, NOT the eligible population or a fallback for missing whole-task truth. */
