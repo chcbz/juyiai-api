@@ -751,6 +751,8 @@ public final class SkillManagementService {
             record Pending(String agent,java.util.function.Function<SkillManagementMapper.RecommendationProduct,RecommendationSkill> withProduct) {}
             var byVersion=new LinkedHashMap<String,List<Pending>>();
             var result=new LinkedHashMap<String,List<RecommendationSkill>>();
+            record Observed(RecommendationTarget candidate,SkillManagementMapper.InventoryKey key,SkillCapabilityLookup.View catalog) {}
+            var eligible=new ArrayList<Observed>();
             for(var candidate:agents) {
                 // Discovery owns task/opt-in authorization. This path only reads capability summaries,
                 // never impersonates the provider Actor or opens skill-management operations.
@@ -774,7 +776,13 @@ public final class SkillManagementService {
                 } catch(IllegalArgumentException absent) { /* No authenticated live catalog is positive evidence. */ }
                 // Do not advertise installations left behind by a different provider/binding.
                 if(!candidate.mine()&&!providerMatches)continue;
-                var relationship=relationship(new SkillCapabilityLookup.Scope(tenant,client,providerOwner,agent));
+                eligible.add(new Observed(candidate,new SkillManagementMapper.InventoryKey(agent,providerOwner),observed));
+            }
+            var relationships=relationshipAuthorizations==null?Map.<SkillManagementMapper.InventoryKey,SkillRelationshipAuthorizations.Relationship>of():
+                    relationshipAuthorizations.readMany(tenant,client,eligible.stream().map(Observed::key).toList());
+            for(var item:eligible){
+                var candidate=item.candidate();var agent=candidate.agent();var providerOwner=candidate.owner();
+                var observed=item.catalog();var states=active.get(agent);var relationship=relationships.get(item.key());
                 for(var state:states) {
                     if(!candidate.mine()&&!Boolean.TRUE.equals(state.getDesiredEnabled()))continue;
                     var auth=authorizations.get(state.getActiveInstallationId());if(auth==null)continue;

@@ -7,6 +7,7 @@ import lombok.experimental.Accessors;
 @Data
 @Accessors(chain = true)
 public class PaidSkillInventoryEntity {
+    private String agentId;
     private String principalId;
     private String ownerJiacn;
     private Long bindingId;

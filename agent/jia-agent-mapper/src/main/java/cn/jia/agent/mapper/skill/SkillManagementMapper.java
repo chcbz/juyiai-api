@@ -9,8 +9,8 @@ public interface SkillManagementMapper {
     int insertState(SkillManagedStateEntity row);
     /** Current relationship only. A frozen quote or reserved funds alone never grant skill use.
      * Original INITIAL capture remains the source after ordinary rent renewals/reprovision. */
-    @Select("""
-            SELECT l.principal_id, r.owner_jiacn, r.binding_id, l.lease_id, i.intent_id,
+    String PAID_INVENTORY = """
+            SELECT r.agent_id, l.principal_id, r.owner_jiacn, r.binding_id, l.lease_id, i.intent_id,
                    i.capture_transaction_id, r.runtime_installation_id, r.runtime_host_id, q.inventory_snapshot_json
             FROM agent_runtime r
             JOIN agent_persona_binding b ON b.tenant_id=r.tenant_id AND b.client_id=r.client_id AND b.id=r.binding_id
@@ -23,9 +23,14 @@ public interface SkillManagementMapper {
                  AND i.settlement_kind='PAID' AND i.capture_transaction_id IS NOT NULL
             JOIN economy_hosting_rent_quote q ON q.tenant_id=i.tenant_id AND q.client_id=i.client_id
                  AND q.quote_id=i.quote_id
-            WHERE r.tenant_id=#{tenantId} AND r.client_id=#{clientId} AND r.agent_id=#{agentId}
-              AND BINARY r.owner_jiacn=BINARY #{ownerJiacn} AND r.runtime_installation_id IS NOT NULL AND r.runtime_host_id IS NOT NULL
-            """)
+            WHERE r.tenant_id=#{tenantId} AND r.client_id=#{clientId}
+              AND r.runtime_installation_id IS NOT NULL AND r.runtime_host_id IS NOT NULL
+            """;
+    record InventoryKey(String agentId,String ownerJiacn) {}
+    @Select("<script>"+PAID_INVENTORY+" AND (r.agent_id,BINARY r.owner_jiacn) IN "
+            +"<foreach collection='keys' item='k' open='(' separator=',' close=')'>(#{k.agentId},BINARY #{k.ownerJiacn})</foreach></script>")
+    List<PaidSkillInventoryEntity> paidInventories(@Param("tenantId") String t,@Param("clientId") String c,@Param("keys") List<InventoryKey> keys);
+    @Select(PAID_INVENTORY+" AND r.agent_id=#{agentId} AND BINARY r.owner_jiacn=BINARY #{ownerJiacn}")
     PaidSkillInventoryEntity paidInventory(@Param("tenantId") String tenantId, @Param("clientId") String clientId,
             @Param("agentId") String agentId, @Param("ownerJiacn") String ownerJiacn);
     @Select("SELECT * FROM agent_skill_managed_state WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND agent_id=#{agentId} AND skill_key=#{skillKey}")

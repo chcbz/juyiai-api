@@ -30,6 +30,28 @@ public final class SkillRelationshipAuthorizations {
     public Relationship read(SkillCapabilityLookup.Scope scope) {
         if (!schemaEnabled) return null;
         var row = mapper.paidInventory(scope.tenantId(), scope.clientId(), scope.agentId(), scope.ownerJiacn());
+        return decode(row);
+    }
+
+    /** Current paid relationship per exact candidate/provider, never a cross-operation cache.
+     * Use the single-key path unchanged for management and single-candidate index observations. */
+    Map<SkillManagementMapper.InventoryKey,Relationship> readMany(String tenant,String client,List<SkillManagementMapper.InventoryKey> requested) {
+        if (!schemaEnabled || requested.isEmpty()) return Map.of();
+        var keys=requested.stream().distinct().toList();
+        if(keys.size()==1){var key=keys.getFirst();var value=read(new SkillCapabilityLookup.Scope(tenant,client,key.ownerJiacn(),key.agentId()));return value==null?Map.of():Map.of(key,value);}
+        var result=new LinkedHashMap<SkillManagementMapper.InventoryKey,Relationship>();
+        for(int i=0;i<keys.size();i+=128){
+            var batch=keys.subList(i,Math.min(i+128,keys.size()));var expected=java.util.Set.copyOf(batch);
+            for(var row:mapper.paidInventories(tenant,client,batch)){
+                var key=new SkillManagementMapper.InventoryKey(row.getAgentId(),row.getOwnerJiacn());
+                // Do not share a paid inventory across owners, nor silently choose one of two live relationships.
+                if(!expected.contains(key)||result.putIfAbsent(key,decode(row))!=null)throw new SkillMarketplaceException(503,"SKILL_STATE_UNAVAILABLE");
+            }
+        }
+        return Map.copyOf(result);
+    }
+
+    private Relationship decode(cn.jia.agent.entity.skill.PaidSkillInventoryEntity row) {
         if (row == null) return null;
         try {
             var skills = JSON.readValue(row.getInventorySnapshotJson(), new TypeReference<List<ManagedHostingProvisioner.InstalledSkill>>() { });
