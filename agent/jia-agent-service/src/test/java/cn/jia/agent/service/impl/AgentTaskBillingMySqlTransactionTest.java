@@ -184,6 +184,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);
+        config.addMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
         config.addMapper(cn.jia.chat.mapper.ChatMessageMapper.class);
         config.addMapper(cn.jia.chat.mapper.ChatConversationMapper.class);
         config.addMapper(cn.jia.chat.mapper.AgentTaskThreadMapper.class);
@@ -1358,7 +1359,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(receipt.path("grantVersion").asLong(), discussion.grantVersion());
                 assertEquals(receipt.path("assignmentRevision").asLong(), discussion.assignmentRevision());
                 assertNull(relaySource.claimNext(SCOPE, "second-chat-fixture", claimTime));
-                var chat = bindQuotedDiscussion(discussion, req);
+                var chat = bindQuotedDiscussion(discussion, req,actualAuthority);
                 // Execution action is still supplied by this fixture, not the typed discussion dispatcher.
                 var admission=new QuotedInitialActionAdmission(billing,decisions);
                 prepareNativeExecutionSchema();
@@ -1390,7 +1391,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                                   WorkspaceConversationAccessService access) {}
 
     /** Real Chat binding and ACL against the same committed assignment. No synthetic conversation ID. */
-    private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements) throws Exception {
+    private BoundBountyChat bindQuotedDiscussion(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,TaskAssigneeAuthorityService actualAuthority) throws Exception {
         Path chat = Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql");
         createTable(chat, "chat_conversation", false);
         createTable(chat, "agent_task_thread", false);
@@ -1414,7 +1415,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.taskId(), view.taskId()); assertEquals(List.of(intent.targetAgentId()), view.targetAgentIds());
         assertThrows(IllegalStateException.class, () -> access.requireAccessible(
                 new WorkspaceConversationAccessService.Scope(TENANT,CLIENT,"other-owner"), discussion.conversationId()));
-        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx);
+        verifyBootstrapRequest(intent, requirements, bindings, conversations, discussion, tx,actualAuthority);
         return new BoundBountyChat(discussion, access);
     }
 
@@ -1422,7 +1423,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
      * are fixtures here, not a claim of executing the discussion or accepting its eventual answer. */
     private void verifyBootstrapRequest(AgentTaskBountyBootstrapClaimDTO intent, AgentTaskRequirementSnapshotService requirements,
             ChatBountyConversationService discussions, cn.jia.chat.dao.ChatConversationDao conversations,
-            ChatBountyConversationService.Discussion bound, TransactionTemplate tx) throws Exception {
+            ChatBountyConversationService.Discussion bound, TransactionTemplate tx,TaskAssigneeAuthorityService actualAuthority) throws Exception {
         createTable(Path.of("../../chat/jia-chat-mapper/src/test/resources/db/schema.sql"), "chat_message", false);
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-native-execution-v6.sql"),new org.springframework.core.io.ClassPathResource("db/chat-typed-deliberation-schema-v1.sql")).execute(jdbc.getDataSource());
         var dao = new cn.jia.chat.deliberation.ChatDeliberationDaoImpl(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class));
@@ -1435,8 +1436,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(agents.getTask(intent.taskId())).thenReturn(dto);
         var deliberation = new ChatDeliberationService(dao, conversations, messages, agents);
         var dispatch = new ChatDispatchAuthorityService(mock(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class), dao,
-                mock(TaskAssigneeAuthorityService.class), assignment, roots);
+                actualAuthority, assignment, roots);
         deliberation.setDispatchAuthority(dispatch);
+        deliberation.setContextHistory(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
         var context = mock(ChatTypedDeliberationContextService.class);
         var locator = new ChatTypedDeliberationContextService.Scope(TENANT,OWNER,CLIENT,bound.conversationId(),bound.generation());
         when(context.resolve(locator,intent.taskId(),intent.targetAgentId(),List.of())).thenReturn(
@@ -1466,6 +1468,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1,registered);
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member m JOIN chat_turn t ON BINARY t.turn_id=BINARY m.execution_id AND BINARY t.dispatch_id=BINARY m.run_id JOIN chat_request r ON r.request_id=t.request_id WHERE m.task_id=? AND m.capture_id IS NULL AND BINARY m.admission_sha256=BINARY SUBSTRING(r.request_digest,8) AND r.request_id=?",Integer.class,intent.taskId(),first.requestId()));
         assertEquals(requirement.title()+"\n\n"+requirement.description(),saved);
+        // Actual dispatch claim, not a hand-made context hash or an outbox row assumed delivered.
+        var relay=new ChatDeliberationOutboxService(dao,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
+        relay.setDeliberation(deliberation);long now=System.currentTimeMillis();var due=relay.discover(now,2);
+        assertEquals(1,due.size());var draft=due.getFirst();var codec=new ObjectMapper();
+        assertEquals("PENDING",codec.readTree(draft.getPayloadJson()).path("contextPreparation").asText());
+        var claim=tx.execute(st->relay.claim(draft,"owned-chat-relay",now,60000));assertNotNull(claim);
+        var row=claim.row();assertEquals("CLAIMED",row.getStatus());assertEquals(draft.getDispatchId(),row.getDispatchId());
+        assertNull(tx.execute(st->relay.claim(draft,"other-relay",now,60000)));
+        var payload=codec.readTree(row.getPayloadJson());assertFalse(payload.has("contextPreparation"));
+        assertEquals("BOOTSTRAP",payload.at("/factsManifest/contextDelivery/mode").asText());
+        var outgoing=dispatch.outgoing(row);assertEquals(OWNER,outgoing.executorOwner());
+        assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
+        assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
+
     }
 
     private void verifyNativePickup(Authority authority,PersonalWorkspaceExecutionServiceImpl service,SkillExecutionService.Creation created,NativeTaskPreparation.Output expected)throws Exception{
