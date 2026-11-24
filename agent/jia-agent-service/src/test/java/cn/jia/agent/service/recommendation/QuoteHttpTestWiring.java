@@ -22,6 +22,6 @@ public final class QuoteHttpTestWiring {
             TaskBudgetEstimator estimator,TaskBillingService billing){
         var vectors=new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10));
         var intents=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials,new QuoteFeaturePreparation(vectors));
-        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,Optional.of(source),estimator,billing));
+        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,Optional.ofNullable(source),estimator,billing));
     }
 }

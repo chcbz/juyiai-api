@@ -1131,7 +1131,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         double ms(String name){return nanos.getOrDefault(name,new java.util.concurrent.atomic.LongAdder()).sum()/1e6;}
         void reset(){calls.clear();nanos.clear();}
     }
-    @Test void quoteCatalogueMeasuresRealLockedInputsAndRejectsConcurrentTrash() throws Exception {
+    private record WorkspaceRows(PersonalWorkspaceDao files,PersonalWorkspaceTaskLinkDao links) {}
+    private WorkspaceRows quoteWorkspace() throws Exception {
         for(String schema:List.of("agent-personal-workspace-v1.sql","agent-personal-workspace-v1_11-task-links.sql"))
             new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+schema)).execute(jdbc.getDataSource());
         var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
@@ -1139,15 +1140,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var factory=new MybatisSqlSessionFactoryBean();factory.setDataSource(jdbc.getDataSource());factory.setConfiguration(config);
         var sql=new SqlSessionTemplate(factory.getObject());
         var files=new PersonalWorkspaceDaoImpl(sql.getMapper(PersonalWorkspaceFileMapper.class),sql.getMapper(PersonalWorkspaceVersionMapper.class),sql.getMapper(PersonalWorkspaceOperationMapper.class));
-        var links=new PersonalWorkspaceTaskLinkDaoImpl(sql.getMapper(PersonalWorkspaceTaskFileLinkMapper.class));var profile=new QuoteProfile();
+        var links=new PersonalWorkspaceTaskLinkDaoImpl(sql.getMapper(PersonalWorkspaceTaskFileLinkMapper.class));
+        return new WorkspaceRows(files,links);
+    }
+    private void attachQuoteFile(int i) {
+        String id="file-"+i;
+        jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,?,'UPLOAD',?,'DOCUMENT','ACTIVE',1,1,1,?,?)",id,OWNER,id,TENANT,CLIENT);
+        jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,1,?,'text/plain',7,?,'private:v',1,?,?)",id,OWNER,id,"b".repeat(64),TENANT,CLIENT);
+        jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",id,OWNER,TASK,id,TENANT,CLIENT);
+    }
+    @Test void quoteCatalogueMeasuresRealLockedInputsAndRejectsConcurrentTrash() throws Exception {
+        var workspace=quoteWorkspace();var links=workspace.links();var files=workspace.files();var profile=new QuoteProfile();
         ReflectionTestUtils.setField(assignment,"taskLinks",profile.wrap(PersonalWorkspaceTaskLinkDao.class,links,java.util.Set.of("list","lockBySelection")));
         ReflectionTestUtils.setField(assignment,"workspace",profile.wrap(PersonalWorkspaceDao.class,files,java.util.Set.of("lockFile","selectedMetadata")));
         java.util.function.Supplier<AgentTaskExecutionGrantService.InputCatalogue> read=()->locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK));
         for(int i=0;i<33;i++) {
-            String id="file-"+i;
-            jdbc.update("INSERT INTO agent_personal_workspace_file(file_id,owner_jiacn,source_kind,display_name,media_family,state,metadata_revision,latest_version,created_at,tenant_id,client_id) VALUES(?,?,'UPLOAD',?,'DOCUMENT','ACTIVE',1,1,1,?,?)",id,OWNER,id,TENANT,CLIENT);
-            jdbc.update("INSERT INTO agent_personal_workspace_file_version(file_id,owner_jiacn,version,original_filename,content_mime_type,byte_length,content_hash,storage_uri,created_at,tenant_id,client_id) VALUES(?,?,1,?,'text/plain',7,?,'private:v',1,?,?)",id,OWNER,id,"b".repeat(64),TENANT,CLIENT);
-            jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",id,OWNER,TASK,id,TENANT,CLIENT);
+            attachQuoteFile(i);
             if(i!=0 && i!=31) continue;
             int n=i+1;var expected=read.get();assertEquals(n,expected.inputs().size());profile.reset();long[] ms=new long[30];
             for(int k=0;k<ms.length;k++){long t=System.nanoTime();assertEquals(expected,read.get());ms[k]=System.nanoTime()-t;}
@@ -1177,6 +1185,48 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             } finally {writer.rollback();}
         }
         assertEquals(0,count("economy_transaction"));
+    }
+    @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
+        var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
+        ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
+        for(int i=0;i<32;i++) attachQuoteFile(i);
+        String agent="agt_00000000000000000000000000000001";
+        jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-fixture",agent,TENANT,CLIENT);
+        long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
+        jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
+        locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
+        var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
+        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
+        var calls=new java.util.concurrent.atomic.AtomicInteger();var encoder=new TaskFeatureEncoder(){
+            public Identity identity(){return new Identity("cfg","fixture",1024);}
+            public Vector encode(String text){
+                assertTrue(text.contains("file-31"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));
+                int n=calls.incrementAndGet();if(n==1)throw new Unavailable();
+                if(n==2)assertEquals(1,independent.update("UPDATE agent_personal_workspace_file SET display_name='修订后的名称',metadata_revision=2 WHERE file_id='file-0'"));
+                if(n==3)assertTrue(text.contains("修订后的名称"));
+                float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);
+            }
+        };
+        var engine=mock(cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
+        var estimates=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,encoder,null,estimates,billing);
+        startHttp();int fixed=count("economy_task_quote"),batchCount=count("economy_task_quote_batch"),money=count("economy_transaction");long balance=wallet(jdbc);
+        var json=new ObjectMapper();String token=httpToken();try(var client=HttpClient.newHttpClient()){
+            class Post {tools.jackson.databind.JsonNode post(String id,String key,int status,String code)throws Exception{
+                var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","d77","data",Map.of("expectedTaskVersion","0","agentIds",List.of(id))));
+                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","d77").header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());return env.path("data");
+            }}var http=new Post();String key="same-intent";
+            http.post("not-visible","denied",404,"QUOTE_NOT_FOUND");assertEquals(0,calls.get());
+            http.post(agent,key,503,"QUOTE_FEATURE_UNAVAILABLE");assertEquals(batchCount,count("economy_task_quote_batch"));
+            http.post(agent,key,409,"QUOTE_STALE");assertEquals(batchCount,count("economy_task_quote_batch"));
+            var original=http.post(agent,key,200,"E0");var item=original.path("quotes").get(0);assertEquals(agent,item.path("agentId").asText());
+            assertEquals("UNAVAILABLE",item.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",item.path("unavailableReason").asText());
+            assertFalse(item.path("amount").isObject());assertFalse(item.path("quoteId").isString());assertEquals(3,calls.get());
+            assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
+            assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
+        }
+        assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
     private record QuoteWrites(long calls,long rows,long dbPicos,long bytes){}
     private QuoteWrites readQuoteWrites(String task){
@@ -1223,8 +1273,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private SqlSessionTemplate recommendationSql;
     private cn.jia.agent.api.AssigneeRecommendationController recommendationController;
     private <T> T withMapper(T dao,Class<?> mapper){ReflectionTestUtils.setField(dao,"baseMapper",recommendationSql.getMapper(mapper));return dao;}
-    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
-    void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
+    private record Authority(AgentServiceImpl agents,AgentExternalServicePolicyService policies,AgentTaskRequirementSnapshotServiceImpl req) {}
+    private Authority quoteAndRecommendationAuthority() throws Exception {
         var ds=jdbc.getDataSource();String schema=Files.readString(DDL.resolve("schema.sql"));int start=schema.indexOf("CREATE TABLE IF NOT EXISTS agent_runtime (");assertTrue(start>=0);jdbc.execute(schema.substring(start,schema.indexOf(";\n",start)));
         var identityDdl=Files.readString(DDL.resolve("agent-identity-schema.sql"));int boundary=identityDdl.indexOf("-- A02 uses a temporary assertion procedure");assertTrue(boundary>0);
         new ResourceDatabasePopulator(new org.springframework.core.io.ByteArrayResource(identityDdl.substring(0,boundary).getBytes(StandardCharsets.UTF_8))).execute(ds);
@@ -1237,6 +1287,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var policies=proxy(new AgentExternalServicePolicyServiceImpl(new AgentExternalServicePolicyDaoImpl(recommendationSql.getMapper(AgentExternalServicePolicyMapper.class)),identities,meta,new AgentTaskExecutionGrantDaoImpl(recommendationSql.getMapper(AgentTaskExecutionGrantMapper.class)),runtimes),AgentExternalServicePolicyService.class);
         var agents=new AgentServiceImpl(runtimes,identities,null,bindings,meta,null,null,null,null,null,null,null,null,null,null,roots,null,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
         var req=new AgentTaskRequirementSnapshotServiceImpl(jdbc,roots);agents.setRequirementSnapshots(req);agents.setExternalServicePolicies(policies);
+        return new Authority(agents,policies,req);
+    }
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
+    void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
+        var authority=quoteAndRecommendationAuthority();var agents=authority.agents();var req=authority.req();
         // Only installed skills, attached materials and runtime readiness are fixture boundaries. Roster and abilities use production SQL.
         var skills=mock(cn.jia.agent.skill.SkillManagementService.class);when(skills.recommendationSkills(any(),anyList())).thenAnswer(call->{var rows=call.<List<AgentTaskAssigneeCandidateDTO>>getArgument(1);return rows.stream().collect(java.util.stream.Collectors.toMap(r->r.target().agentId(),r->List.of()));});
         var materials=mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class);
