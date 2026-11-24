@@ -1138,6 +1138,10 @@ tasks.register('taskQuoteRegression', Test) {
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
     systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
+    if (providers.gradleProperty('ownedPickupCodex').isPresent()) {
+        systemProperty 'cyf.ownedPickupCodex', providers.gradleProperty('ownedPickupCodex').get()
+        systemProperty 'ownedMeteredRuntime', providers.gradleProperty('ownedMeteredRuntime').get()
+    }
     if (providers.gradleProperty('exportSelectedProbeFixture').getOrElse('false') == 'true') {
         systemProperty 'cyf.selectedProbeFixture', layout.buildDirectory.file('test-results/taskQuoteRegression/selected-answer-probe.json').get().asFile.absolutePath
     }

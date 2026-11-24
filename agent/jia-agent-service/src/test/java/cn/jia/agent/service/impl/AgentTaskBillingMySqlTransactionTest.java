@@ -1338,7 +1338,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 prepareNativeExecutionSchema();
                 new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-skill-application.sql"),new org.springframework.core.io.ClassPathResource("db/agent-personal-workspace-skill-v1.sql")).execute(jdbc.getDataSource());
                 var service=NativeCancellationFixture.create(jdbc,executionRows,new SkillExecutionDaoImpl(recommendationSql.getMapper(SkillExecutionMapper.class)),mock(org.springframework.context.ApplicationEventPublisher.class),TENANT,CLIENT,OWNER,id,agent,roots);
-                ReflectionTestUtils.setField(service,"conversationExecutionEnabled",true);service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
+                ReflectionTestUtils.setField(service,"conversationExecutionEnabled",true);if(System.getProperty("cyf.ownedPickupCodex")!=null)ReflectionTestUtils.setField(service,"meteredCaptureEnabled",true);service.setAssigneeAuthority(actualAuthority);service.setInitialActions(admission);service.setConversationAdmission(assignment,roots);
                 var nativeActions=proxy(service,SkillExecutionService.class);var ownerScope=new PersonalWorkspaceExecutionService.OwnerScope(TENANT,CLIENT,OWNER);
                 var scope=new SkillExecutionService.TaskScope("42",1,id,receipt.path("grantId").asText(),Long.parseLong(receipt.path("grantVersion").asText()),Long.parseLong(receipt.path("assignmentRevision").asText()));
                 var pending=frozen.intent().output();java.util.function.Supplier<String> consumed=()->independent.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256());assertNull(consumed.get());
@@ -1389,6 +1389,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var replay=device.call(run+"/lease",claim,200);assertTrue(lease.equals(replay),"same live lease without exposing its token");
             var inputs=device.call(run+"/inputs",Map.of("version","1","token",lease.path("token").asText()),200);assertEquals(created.snapshotDigest(),inputs.path("snapshotSha256").asText());assertTrue(inputs.path("noReferencedMaterials").asBoolean());
             assertTrue(device.call(queue,null,200).path("items").isEmpty());assertEquals("RUNNING",independent.queryForObject("SELECT phase FROM agent_skill_execution WHERE execution_id=?",String.class,created.executionId()));
+            String cli=System.getProperty("cyf.ownedPickupCodex");if(cli!=null){
+                var peer=Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge/test/fixtures/quoted-native-pickup.mjs");assertTrue(Files.isRegularFile(peer));assertTrue(Files.isExecutable(Path.of(cli)));
+                var temp=Files.createTempDirectory("quoted-pickup-");var out=temp.resolve("result.json");
+                try{var pb=new ProcessBuilder("node",peer.toString());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString(),"CYF_CODEX_BIN",cli));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(out.toFile());
+                    var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(json.writeValueAsBytes(Map.of("wire",cmd,"snapshot",inputs,"leaseVersion",lease.path("version"),"agent",agent)));}
+                        assertTrue(proc.waitFor(60,TimeUnit.SECONDS),"owned native pickup timed out");assertEquals(0,proc.exitValue(),"owned native pickup");}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
+                    assertTrue(Files.size(out)<8192);var actual=json.readTree(Files.readAllBytes(out));assertEquals(created.executionId(),actual.path("executionId").asText());assertEquals(created.runId(),actual.path("runId").asText());assertEquals(created.snapshotDigest(),actual.path("snapshotSha256").asText());assertEquals(2,actual.path("calls").asInt());
+                    var body=(tools.jackson.databind.node.ObjectNode)actual.path("payload").deepCopy();body.remove("schemaVersion");body.put("snapshotSha256",created.snapshotDigest());body.set("fence",json.valueToTree(Map.of("version","1","token",lease.path("token").asText())));
+                    String manifest=actual.path("manifestId").asText(),route=run+"/result-commits/"+manifest;var receipt=device.call(route,body,200);assertEquals(manifest,receipt.path("manifestId").asText());assertEquals("RESULT_COMMITTED",receipt.path("state").asText());assertEquals("ARCHIVING",receipt.path("phase").asText());
+                    assertEquals("native pickup fixture",independent.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(result_manifest_json,'$.data.answer')) FROM agent_skill_execution WHERE execution_id=?",String.class,created.executionId()));assertEquals(receipt,device.call(route,body,200));
+                    System.out.println("QUOTED_NATIVE_PICKUP requests=2 artifacts=0 result=RESULT_COMMITTED replay=confirmed");
+                }finally{org.springframework.util.FileSystemUtils.deleteRecursively(temp);}
+            }
         }finally{auth.disconnect("pickup-socket");}assertFalse(device.call(queue,null,401).has("items"));
     }
 
