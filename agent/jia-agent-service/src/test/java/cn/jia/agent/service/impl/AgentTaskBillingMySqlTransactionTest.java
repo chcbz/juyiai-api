@@ -1378,7 +1378,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     /** Independent listeners and admission services; SQL, signing authority and external test observations are shared. */
-    private final class DirectNode implements AutoCloseable {
+    private final class AssignmentNode implements AutoCloseable {
         final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
         String base;
         void start(String name,boolean paused) throws Exception {
@@ -1389,7 +1389,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             app.register(HttpApp.class,TaskAssigneeAdmission.class);
             var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
             var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
-            app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);});
+            app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);
+                f.registerSingleton("point",new AgentTaskDeliberationOperationController(operationReads,service));
+                f.registerSingleton("cancel",new AgentTaskCancellationController(cancellation));});
             app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
@@ -1399,15 +1401,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
         var params=Map.of("workflowVersion",2,"businessAction","assign_and_start","expectedTaskVersion",0,"requirementRevision",1,"agentId",AGENT,"quoteId",quoteId,"recommendationId","recommendation-1","requestedOperations",List.of("DELIBERATE","EXECUTE_SKILL"),"initialOperation","DELIBERATE","inputRefs",List.of());
         String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","node-cutover","data",params));
-        try(var a=new DirectNode();var client=HttpClient.newHttpClient()) {
-            class Send {tools.jackson.databind.JsonNode post(DirectNode node,String key,int status,String code)throws Exception {
+        try(var a=new AssignmentNode();var client=HttpClient.newHttpClient()) {
+            class Send {tools.jackson.databind.JsonNode post(AssignmentNode node,String key,int status,String code)throws Exception {
                 var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+TASK+"/assign")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","node-cutover").POST(HttpRequest.BodyPublishers.ofString(body)).build();
                 var res=client.send(req,HttpResponse.BodyHandlers.ofString());assertEquals(status,res.statusCode(),res.body());var env=json.readTree(res.body());assertEquals(code,env.path("code").asText());assertEquals("node-cutover",env.path("requestId").asText());return env.path("data");
             }}var send=new Send();String paused="TASK_ASSIGNEE_ADMISSION_PAUSED";a.start("a",true);tools.jackson.databind.JsonNode first;
-            try(var b=new DirectNode()){b.start("b",false);assertNotEquals(a.base,b.base);send.post(a,"original",503,paused);assertAssignmentAbsent();first=send.post(b,"original",200,"E0");assertFalse(first.path("grantId").asText().isBlank());}
-            try(var replacement=new DirectNode()){replacement.start("replacement",true);assertNotEquals(a.base,replacement.base);
+            try(var b=new AssignmentNode()){b.start("b",false);assertNotEquals(a.base,b.base);send.post(a,"original",503,paused);assertAssignmentAbsent();first=send.post(b,"original",200,"E0");assertFalse(first.path("grantId").asText().isBlank());}
+            try(var replacement=new AssignmentNode()){replacement.start("replacement",true);assertNotEquals(a.base,replacement.base);
                 for(var node:List.of(a,replacement)){send.post(node,"new-intent",503,paused);assertEquals(first,send.post(node,"original",200,"E0"));}}
             assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        }
+    }
+
+    @Test void pointAssignmentStoppedNodesReplayReadAndCancelOriginalGrant() throws Exception {
+        prepareCancellation();signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
+        String point="/point-and-deliberate", paused="TASK_ASSIGNEE_ADMISSION_PAUSED";
+        try(var client=HttpClient.newHttpClient();var a=new AssignmentNode()) {
+            class Wire {tools.jackson.databind.JsonNode send(AssignmentNode node,String route,String key,String data,int status,String code)throws Exception {
+                var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+TASK+route)).header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","point-cutover");
+                if(data!=null)req.header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("protocolVersion",1,"requestId","point-cutover","data",json.readTree(data)))));
+                var res=client.send(req.build(),HttpResponse.BodyHandlers.ofString());assertEquals(status,res.statusCode(),res.body());var env=json.readTree(res.body());assertEquals(code,env.path("code").asText());assertEquals("point-cutover",env.path("requestId").asText());
+                if(status==503){var cache=String.join(",",res.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);}return env.path("data");
+            }}var wire=new Wire();a.start("a",true);tools.jackson.databind.JsonNode original;
+            try(var open=new AssignmentNode()){open.start("open",false);wire.send(a,point,"point",pointBody(),503,paused);assertAssignmentAbsent();original=wire.send(open,point,"point",pointBody(),200,"E0");assertFalse(original.path("grantId").asText().isBlank());}
+            try(var b=new AssignmentNode()){b.start("b",true);for(var node:List.of(a,b)){
+                wire.send(node,point,"fresh",pointBody(),503,paused);assertEquals(original,wire.send(node,point,"point",pointBody(),200,"E0"));assertEquals(original,wire.send(node,point+"/request","point",null,200,"E0"));}
+                assertEquals(50,wallet(independent));assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+                prepareRetry();for(var node:List.of(b,a)){wire.send(node,"/cancel","cancel-point","{\"expectedTaskVersion\":\"1\"}",200,"E0");assertCancelled();}
+            }
         }
     }
 
