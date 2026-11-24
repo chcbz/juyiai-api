@@ -1160,7 +1160,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability)));
                     es.index(TENANT,CLIENT,OWNER,id,ability);expected.add(id);
                 }
-                if(n==108){explainRecPage("");explainRecPage(expected.stream().skip(99).findFirst().orElseThrow());}
+                if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);probePageLookup(cursor);}}
                 es.refresh();measureRecommendationHttp(task,expected,es.encodes);
                 if(n==108){int before=es.encodes.get();String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("DELETE FROM agent_runtime WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND agent_id=?",TENANT,CLIENT,OWNER,agent));
@@ -1192,6 +1192,28 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     // Link performance_schema's server-generated digest to the actual mapper query. Prepared parameters
     // are the same synthetic scope/cursor as the measured fixture; nothing from EXPLAIN is logged except access metadata.
+    // Development experiment on this test's isolated schema only. SQL alternatives are compile-time
+    // constants. Never substitute values, use EXPLAIN on production, or log candidate display text.
+    private void probePageLookup(String cursor)throws Exception {
+        var cfg=recommendationSql.getConfiguration();var stmt=cfg.getMappedStatement(AgentExternalServicePolicyMapper.class.getName()+".candidates");
+        var args=Map.of("tenant",TENANT,"client",CLIENT,"owner",OWNER,"after",cursor,"limit",101);var bound=stmt.getBoundSql(args);
+        String original=bound.getSql(),lookup="r.agent_id=i.canonical_agent_id";assertTrue(original.contains(lookup));
+        var baseline=recommendationSql.getMapper(AgentExternalServicePolicyMapper.class).candidates(TENANT,CLIENT,OWNER,cursor,101);
+        var alternatives=new java.util.LinkedHashMap<String,String>();alternatives.put("original",lookup);
+        alternatives.put("binary_lookup","r.agent_id=BINARY i.canonical_agent_id");
+        alternatives.put("utf8_lookup","r.agent_id=CAST(i.canonical_agent_id AS CHAR CHARACTER SET utf8mb4)");
+        for(var option:alternatives.entrySet()){
+            String sql=original.replace(lookup,option.getValue());var before=recShapes();
+            try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement(sql)){
+                cfg.newParameterHandler(stmt,args,bound).setParameters(ps);
+                for(int i=0;i<5;i++)try(var r=ps.executeQuery()){
+                    var actual=new java.util.ArrayList<cn.jia.agent.dao.AgentExternalServicePolicyDao.CandidateRow>();while(r.next())actual.add(new cn.jia.agent.dao.AgentExternalServicePolicyDao.CandidateRow(r.getString(1),r.getString(2),r.getString(3),r.getString(4)));assertEquals(baseline,actual);
+                }
+            }
+            var matches=new java.util.ArrayList<Shape>();recShapes().forEach((key,now)->{var prior=before.getOrDefault(key,new Shape(0,0,0,0));long n=now.calls()-prior.calls(),sent=now.sent()-prior.sent();if(n==5 && sent==5L*baseline.size())matches.add(new Shape(n,now.examined()-prior.examined(),sent,now.picos()-prior.picos()));});assertEquals(1,matches.size());var s=matches.getFirst();
+            System.out.printf(java.util.Locale.ROOT,"RECOMMEND_SQL_LOOKUP strategy=%s page=%s calls=%d rowsExamined=%d rowsSent=%d sumMs=%.3f%n",option.getKey(),cursor.isEmpty()?"first":"next",s.calls(),s.examined(),s.sent(),s.picos()/1e9);
+        }
+    }
     private void explainRecPage(String cursor)throws Exception{
         var cfg=recommendationSql.getConfiguration();var stmt=cfg.getMappedStatement(AgentExternalServicePolicyMapper.class.getName()+".candidates");
         var params=java.util.Map.of("tenant",TENANT,"client",CLIENT,"owner",OWNER,"after",cursor,"limit",101);var bound=stmt.getBoundSql(params);
