@@ -19,12 +19,28 @@ public interface ConfirmedSampleMapper {
     Target target(@Param("tenant") String tenant,@Param("client") String client,@Param("id") String id);
     // Accepted confirmed rows only. A new task may use another agent's same-config history under this owner,
     // but cannot train on its own record, previous READY revisions, benchmark rows or another namespace.
-    String HISTORY="""
+    String ELIGIBLE_HISTORY="""
         s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn}
-        AND s.history_group_sha256=#{group} AND s.task_id<>#{t.taskId} AND s.sample_state='READY'
+        AND s.history_group_sha256=#{group} AND s.sample_state='READY'
         AND s.lifecycle_state='ACCEPTED' AND s.evidence_revision=s.projection_revision
         AND s.benchmark_case_id IS NULL AND s.sample_definition_version='TASK_LIFECYCLE_V1'
         """;
+    String HISTORY=ELIGIBLE_HISTORY+" AND s.task_id<>#{t.taskId} ";
+    record CalibrationRow(long featuresAt,String requirementSha,String inputSha,String featureSha,String features,String execution,String operations) { }
+    // One explicitly selected original task/revision. No fallback to newer evidence, another owner, or an unapproved benchmark.
+    @Select("""
+        SELECT q.created_at,s.initial_requirement_sha256,s.initial_input_snapshot_sha256,s.initial_feature_sha256,
+          JSON_EXTRACT(q.snapshot_json,'$.preparation.features'),JSON_EXTRACT(q.snapshot_json,'$.preparation.group'),r.operation_refs
+        FROM economy_task_cost_sample s JOIN economy_task_cost_sample_revision r ON r.sample_id=s.sample_id
+          AND r.sample_revision=s.projection_revision AND r.sample_state='READY'
+        JOIN economy_task_charge ch ON ch.tenant_id=s.tenant_id AND ch.client_id=s.client_id AND ch.owner_jiacn=s.owner_jiacn
+          AND ch.task_id=s.task_id AND ch.quote_id=s.quote_id
+        JOIN economy_task_quote q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn
+          AND q.task_id=ch.task_id AND q.quote_id=ch.quote_id AND q.payer_user_id=ch.payer_user_id WHERE
+        """+ELIGIBLE_HISTORY+" AND s.task_id=#{t.taskId} AND s.sample_id=#{id} AND s.projection_revision=#{revision}")
+    CalibrationRow selectedForCalibration(@Param("t") Task original,@Param("group") String group,@Param("id") String sampleId,@Param("revision") long revision);
+    // Separate statement AFTER the evidence read: an observation upper bound, not an invented historical completion time.
+    @Select("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)+1") long observedByMillis();
     record HistoryRow(String id,long revision,String taskId,String featureSha,String featuresJson){}
     @Select("""
         SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,JSON_EXTRACT(q.snapshot_json,'$.preparation.features')
