@@ -82,6 +82,26 @@ class AssigneeRecommendationServiceTest {
             var bytes=bad.getBytes(java.nio.charset.StandardCharsets.UTF_8);java.nio.file.Files.write(file,bytes);String pin=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
             assertEquals(CandidateRankFusion.VERSION,new CandidateSuitability(file.toString(),pin).rankingVersion());}
     }
+    @Test void candidateReadMeasuresOnlyActualReadsIncludingEmptyAndAuthorityFailure(){
+        var registry=io.micrometer.observation.ObservationRegistry.create();
+        var events=new ArrayList<String>();
+        registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+            public boolean supportsContext(io.micrometer.observation.Observation.Context context){return true;}
+            public void onStop(io.micrometer.observation.Observation.Context context){
+                assertEquals("cyf.task.recommendation.candidate.read",context.getName());
+                var tags=new HashMap<String,String>();context.getLowCardinalityKeyValues().forEach(k->tags.put(k.getKey(),k.getValue()));
+                assertEquals(Set.of("phase","outcome"),tags.keySet());assertFalse(context.getHighCardinalityKeyValues().iterator().hasNext());
+                events.add(tags.get("phase")+":"+tags.get("outcome"));
+            }
+        });
+        var active=new AssigneeRecommendationService(agents,skills,materials,vectors,search,tx,new CandidateSuitability("",""),Optional.of(registry));
+        assertThrows(Failure.class,()->active.recommend(actor,"task",new Request("wrong-version")));assertTrue(events.isEmpty());
+        active.recommend(actor,"task",new Request("7"));assertEquals(List.of("initial:ok","recheck:ok"),events);events.clear();
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of());active.recommend(actor,"task",new Request("7"));
+        assertEquals(List.of("initial:empty","recheck:empty"),events);events.clear();
+        when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row));when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of());
+        assertThrows(Failure.class,()->active.recommend(actor,"task",new Request("7")));assertEquals(List.of("initial:error"),events);
+    }
     @Test void projectionUsesTheVerifiedSnapshotAfterReleasingTheTaskLock(){
         var policy=mock(CandidateSuitability.class);
         when(policy.level(anyString(),any(),any(),any(),any())).thenAnswer(i->{assertFalse(locked);return "UNKNOWN";});

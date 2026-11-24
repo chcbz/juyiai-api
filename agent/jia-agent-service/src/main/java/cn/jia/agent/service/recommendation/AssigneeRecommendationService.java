@@ -7,6 +7,8 @@ import cn.jia.agent.service.AgentTaskRootObservation;
 import cn.jia.agent.service.TaskFeatureEncoder;
 import cn.jia.agent.skill.SkillManagementService;
 import org.springframework.stereotype.Service;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import java.util.*;
 import static cn.jia.agent.entity.AssigneeRecommendation.*;
 
@@ -24,8 +26,15 @@ public final class AssigneeRecommendationService {
     private final TaskQueryVectors vectors;
     private final CapabilitySearch search;
     private final AgentTaskRootObservation transactions;
+    private final ObservationRegistry observations;
     AssigneeRecommendationService(AgentService agents, SkillManagementService skills, RecommendationMaterials materials,
                                  TaskQueryVectors vectors, CapabilitySearch search, AgentTaskRootObservation transactions, CandidateSuitability suitability) {
+        this(agents,skills,materials,vectors,search,transactions,suitability,Optional.empty());
+    }
+    @org.springframework.beans.factory.annotation.Autowired
+    AssigneeRecommendationService(AgentService agents, SkillManagementService skills, RecommendationMaterials materials,
+                                 TaskQueryVectors vectors, CapabilitySearch search, AgentTaskRootObservation transactions, CandidateSuitability suitability, Optional<ObservationRegistry> registry) {
+        this.observations=registry.orElse(ObservationRegistry.NOOP);
         this.suitability=suitability;
         this.agents=agents; this.skills=skills; this.materials=materials; this.vectors=vectors;
         this.search=search; this.transactions=transactions;
@@ -38,7 +47,7 @@ public final class AssigneeRecommendationService {
                     admission.requireOpen();
                     return task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
                 });
-        var observed = observe(actor, taskId);
+        var observed = observe(actor, taskId,"initial");
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();
         CapabilitySearch.Result found;
@@ -62,7 +71,7 @@ public final class AssigneeRecommendationService {
             var current=task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
             if(!Objects.equals(task.getTitle(),current.getTitle()) || !Objects.equals(task.getDescription(),current.getDescription())
                     || !Objects.equals(task.getRequiredAbilities(),current.getRequiredAbilities())) throw stale();
-            var after=observe(actor,taskId);
+            var after=observe(actor,taskId,"recheck");
             if(!observed.keySet().equals(after.keySet())) throw stale();
             for(var id:observed.keySet()) if(!observed.get(id).sameFacts(after.get(id))) throw stale();
             if(!after.isEmpty()) materials.verifyUnchanged(actor,taskId,inputs);
@@ -85,7 +94,17 @@ public final class AssigneeRecommendationService {
                     });
         }
     }
-    private Map<String,CandidateFacts> observe(Actor actor,String taskId) {
+    private Map<String,CandidateFacts> observe(Actor actor,String taskId,String phase) {
+        var span=Observation.createNotStarted("cyf.task.recommendation.candidate.read",observations)
+                .lowCardinalityKeyValue("phase",phase).start();
+        String outcome="error";
+        try {
+            var facts=readCandidates(actor,taskId);
+            outcome=facts.isEmpty()?"empty":"ok";
+            return facts;
+        } finally { span.lowCardinalityKeyValue("outcome",outcome).stop(); }
+    }
+    private Map<String,CandidateFacts> readCandidates(Actor actor,String taskId) {
         var rows=agents.listTaskAssigneeCandidates(taskId);
         if(rows.isEmpty()) return Map.of();
         var facts=skills.recommendationSkills(actor,rows);
