@@ -1291,6 +1291,32 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(50, wallet(independent)); assertEquals(2, count("economy_transaction"));
     }
 
+    private cn.jia.agent.api.AgentController directController;
+    @Test void directAssignmentPausePreservesSignedReplayAndSingleHold() throws Exception {
+        directController=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));
+        directController.setTaskExecutionGrants(assignment);startHttp();
+        var params=new java.util.LinkedHashMap<String,Object>();params.put("workflowVersion",2);params.put("businessAction","assign_and_start");
+        params.put("expectedTaskVersion",0);params.put("requirementRevision",1);params.put("agentId",AGENT);params.put("quoteId",quoteId);
+        params.put("recommendationId","recommendation-1");params.put("requestedOperations",List.of("DELIBERATE","EXECUTE_SKILL"));
+        params.put("initialOperation","DELIBERATE");params.put("inputRefs",List.of());
+        var json=new ObjectMapper();String token=httpToken();
+        try(var beans=new AnnotationConfigApplicationContext();var client=HttpClient.newHttpClient()){
+            beans.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("cutover",Map.of("jia.agent.task-assignee.pause-new-admission","true")));
+            beans.register(TaskAssigneeAdmission.class);beans.refresh();var paused=beans.getBean(TaskAssigneeAdmission.class);assertTrue(paused.paused());
+            class Send {tools.jackson.databind.JsonNode post(String key,int status,String code)throws Exception{
+                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/assign")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","direct-assign").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("protocolVersion",1,"requestId","direct-assign","data",params)))).build();
+                var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());
+                assertTrue(response.headers().allValues("Cache-Control").stream().anyMatch(v->v.contains("no-store")));
+                var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());assertEquals("direct-assign",env.path("requestId").asText());return env.path("data");
+            }}var send=new Send();ReflectionTestUtils.setField(assignment,"admission",paused);
+            httpPost("/assign",json.writeValueAsString(params),"direct",false,401);send.post("direct",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");assertAssignmentAbsent();
+            ReflectionTestUtils.setField(assignment,"admission",new TaskAssigneeAdmission(false));var first=send.post("direct",200,"E0");assertFalse(first.path("grantId").asText().isBlank());
+            ReflectionTestUtils.setField(assignment,"admission",paused);assertEquals(first,send.post("direct",200,"E0"));send.post("different-key",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+            params.put("initialOperation","EXECUTE_SKILL");send.post("direct",409,"AGENT_GRANT_IDEMPOTENCY_CONFLICT");
+            assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        }
+    }
+
     @Test void pausedAssignmentRejectsNewIntentButPreservesReplayAndCancellation() throws Exception {
         prepareCancellation(); startHttp();
         var pause = new cn.jia.agent.service.TaskAssigneeAdmission(true);
@@ -2639,6 +2665,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         httpContext.register(HttpApp.class);
         httpContext.addBeanFactoryPostProcessor(factory -> {
             factory.registerSingleton("jwtDecoder", decoder);
+            if(directController!=null)factory.registerSingleton("directAssignmentController",directController);
             if(recommendationController!=null)factory.registerSingleton("recommendationController",recommendationController);
             if(initialSelectionController!=null)factory.registerSingleton("initialSelectionController",initialSelectionController);
             if(independentQuoteController!=null)factory.registerSingleton("independentQuoteController",independentQuoteController);
