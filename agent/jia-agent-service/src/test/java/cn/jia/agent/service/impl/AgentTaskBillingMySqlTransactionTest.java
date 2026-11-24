@@ -802,18 +802,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var db=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var json=new ObjectMapper();String groupSha=group.digest();
         var known=new java.util.HashMap<String,String>();
         for(int run=0;run<4;run++){
-            long mapper=0,decode=0,restore=0;int pos=0,pages=0;String after="";
+            long mapper=0,decode=0,restore=0,construct=0,commitment=0;int pos=0,pages=0;String after="";
             while(true){long t=System.nanoTime();var rows=db.compactHistory(reader,groupSha,after,64,known.getOrDefault(after,""));mapper+=System.nanoTime()-t;pages++;
                 var learned=new java.util.StringJoiner(",");
                 for(var row:rows){assertEquals(ids.get(pos++),row.id());assertEquals(Integer.valueOf(1),row.sourceValid());
                     t=System.nanoTime();var meta=json.readValue(row.metadata(),cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.Metadata.class);decode+=System.nanoTime()-t;
                     t=System.nanoTime();var feature=cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());restore+=System.nanoTime()-t;
+                    // Independent timed replay of the same two core operations. Timers are not nested in restore.
+                    // Compare to the real production restore above; never substitute a cheaper checksum.
+                    t=System.nanoTime();var unpacked=new TaskEstimateFeatures(meta.featureVersion(),meta.templateVersion(),meta.requirementSha256(),meta.inputSnapshotSha256(),meta.textSha256(),meta.embeddingIdentity(),TaskEstimateFeatures.vectorFromBytes(row.vector()),meta.files(),meta.requestedDeliverables());construct+=System.nanoTime()-t;
+                    t=System.nanoTime();String sha=unpacked.digest();commitment+=System.nanoTime()-t;assertEquals(row.featureSha(),sha);
                     assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),feature));if(row.inlineSha()!=null)learned.add(row.inlineSha());
                 }
                 if(learned.length()>0)known.put(after,learned.toString());if(rows.size()<64)break;after=rows.getLast().id();
             }
             assertEquals(ids.size(),pos);assertEquals(17,pages);
-            System.out.printf(java.util.Locale.ROOT,"DENSE_COMPACT_STAGES shared=%s run=%d rows=%d mapperMs=%.3f metadataDecodeMs=%.3f vectorRestoreAndDigestMs=%.3f%n",shared,run,pos,mapper/1e6,decode/1e6,restore/1e6);
+            System.out.printf(java.util.Locale.ROOT,"DENSE_COMPACT_STAGES shared=%s run=%d rows=%d mapperMs=%.3f metadataDecodeMs=%.3f vectorRestoreAndDigestMs=%.3f replayConstructValidateMs=%.3f replayCommitmentMs=%.3f%n",shared,run,pos,mapper/1e6,decode/1e6,restore/1e6,construct/1e6,commitment/1e6);
         }
     }
     private final QuoteProfile denseCalls=new QuoteProfile();
