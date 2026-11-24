@@ -75,7 +75,7 @@ class AgentRuntimePersistentSessionFenceTest {
         var session = auth.issue(installation, request("host", "boot"), 1000);
         var filter = new AgentRuntimeAuthenticationFilter(auth);
         for (String path : List.of("/internal/agent/skill-management/results", "/internal/agent/chat/dispatches/dispatch/usage",
-                "/internal/agent/tasks/task/runs/run/conversation/usage", "/internal/agent/tasks/task/runs/run/conversation/provider-usage")) {
+                "/internal/agent/executions/execution/runs/run/usage", "/internal/agent/executions/execution/runs/run/provider-usage")) {
             var called = new AtomicBoolean(); var response = new org.springframework.mock.web.MockHttpServletResponse();
             filter.doFilter(http(session, "POST", path), response, (a,b) -> {
                 called.set(true);
@@ -83,13 +83,16 @@ class AgentRuntimePersistentSessionFenceTest {
             });
             assertTrue(called.get(), path); assertEquals(200, response.getStatus());
         }
-        for (String path : List.of("/internal/agent/skill-installations/si/package", "/internal/agent/tasks/conversation-executions/commands",
-                "/internal/agent/tasks/task/runs/run/conversation/lease", "/internal/agent/tasks/task/runs/run/conversation/result-commits/result")) {
+        for (String path : List.of("/internal/agent/skill-installations/si/package", "/internal/agent/executions/commands",
+                "/internal/agent/executions/execution/runs/run/lease", "/internal/agent/executions/execution/runs/run/result-commits/result")) {
             var response = new org.springframework.mock.web.MockHttpServletResponse();
             filter.doFilter(http(session, path.endsWith("package") || path.endsWith("commands") ? "GET" : "POST", path), response,
                     (a,b) -> fail("offline session admitted new work: " + path));
             assertEquals(401, response.getStatus());
         }
+        var retired=new org.springframework.mock.web.MockHttpServletResponse();
+        filter.doFilter(http(session,"POST","/internal/agent/tasks/task/runs/run/conversation/usage"),retired,(a,b)->fail("retired route admitted"));
+        assertEquals(403,retired.getStatus());
         var successor = auth.issue(installation, request("host", "new-boot"), 1001);
         var stale = new org.springframework.mock.web.MockHttpServletResponse();
         filter.doFilter(http(session, "POST", "/internal/agent/skill-management/results"), stale, (a,b) -> fail("stale proof"));
