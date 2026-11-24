@@ -2528,7 +2528,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);if(i==1)installed.retained(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
-                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es.encodes,installed);
+                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es,installed);
                 if(n==1){String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
                     String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
@@ -2676,8 +2676,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 """,(rs,n)->{var count=rs.getObject(1);var millis=rs.getObject(2);assertNotNull(count);assertNotNull(millis);return new long[]{rs.getLong(1),rs.getLong(2)};});
         return new RecSql(values[0],values[1],values[2],values[3],values[4],lock[0],lock[1]);
     }
-    private void measureRecommendationHttp(String task, java.util.Set<String> expected, java.util.concurrent.atomic.AtomicInteger encodes,cn.jia.agent.skill.InstalledPurposeHttpFixture installed) throws Exception {
-        int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
+    private void measureRecommendationHttp(String task, java.util.Set<String> expected, cn.jia.agent.service.recommendation.RecommendationHttpTestWiring es,cn.jia.agent.skill.InstalledPurposeHttpFixture installed) throws Exception {
+        var encodes=es.encodes;int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
         try(var client=HttpClient.newHttpClient()){
             record Observation(long nanos,boolean degraded,boolean invalid){}
             class Probe { Observation run(String id)throws Exception{
@@ -2688,9 +2688,24 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var env=mapper.readTree(res.body());var data=env.path("data");var rows=data.path("recommendations");var seen=new java.util.HashSet<String>();
                 boolean bad=res.statusCode()!=200||!"E0".equals(env.path("code").asText())||!id.equals(env.path("requestId").asText())||!task.equals(data.path("taskId").asText())||!"0".equals(data.path("taskVersion").asText())||!data.path("candidateSetComplete").asBoolean()||!rows.isArray();
                 for(var row:rows)if(!seen.add(row.at("/agent/agentId").asText())||row.path("evidence").size()==0||!"UNKNOWN".equals(row.path("recommendationLevel").asText()))bad=true;
+                if(id.startsWith("rec-slow-fail-"))bad|=!"DEGRADED".equals(data.path("state").asText())||!"LEXICAL_ONLY".equals(data.path("retrievalMode").asText())||!data.path("degradedReasons").equals(mapper.valueToTree(List.of("QUERY_VECTOR_UNAVAILABLE")));
                 return new Observation(elapsed,!"HYBRID".equals(data.path("retrievalMode").asText()),bad||!seen.equals(expected));
             }}
-            var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
+            var probe=new Probe();
+            if(Boolean.getBoolean("cyf.capabilityPitWindow")){
+                long baseline=es.openContexts(),peak=baseline;assertEquals(0,baseline);var latencies=new java.util.ArrayList<Long>();
+                es.slowQuery=true;es.failQuery=true;
+                try(var pool=java.util.concurrent.Executors.newFixedThreadPool(10)){
+                    var barrier=new java.util.concurrent.CyclicBarrier(10);var pending=new java.util.ArrayList<java.util.concurrent.Future<Observation>>();
+                    for(int i=0;i<10;i++){String key="rec-slow-fail-"+expected.size()+"-"+i;pending.add(pool.submit(()->{barrier.await(10,java.util.concurrent.TimeUnit.SECONDS);return probe.run(key);}));}
+                    long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(25);
+                    while(pending.stream().anyMatch(f->!f.isDone())){assertTrue(System.nanoTime()<deadline);peak=Math.max(peak,es.openContexts());Thread.sleep(100);}
+                    for(var future:pending){var sample=future.get();assertFalse(sample.invalid());assertTrue(sample.degraded());latencies.add(sample.nanos());}
+                }finally{es.failQuery=false;}
+                long after=es.openContexts();assertEquals(0,after);assertTrue(peak>baseline);assertEquals(before+1,encodes.get(),"joined one slow producer");before=encodes.get();
+                latencies.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_SLOW_FAILURE candidates=%d requests=%d delayMs=4000 encodes=1 baseline=%d peak=%d after=%d p50ms=%.3f p95ms=%.3f%n",expected.size(),latencies.size(),baseline,peak,after,latencies.get(4)/1e6,latencies.get(9)/1e6);
+            }
+            var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());es.slowQuery=false;
             for(int concurrency:List.of(1,5,10)){
                 long execBefore=installed.inventoryExecutions();long sharedBefore=sharedTaskRootSelects();var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();

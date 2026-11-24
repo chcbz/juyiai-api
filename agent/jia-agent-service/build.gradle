@@ -1153,6 +1153,7 @@ tasks.register('taskQuoteRegression', Test) {
     if (providers.gradleProperty('ownedCapabilityEsPort').isPresent()) {
         systemProperty 'cyf.capabilityEsPort', providers.gradleProperty('ownedCapabilityEsPort').get()
         systemProperty 'cyf.capabilityEsLoad', providers.gradleProperty('ownedCapabilityEsLoad').getOrElse('false')
+        systemProperty 'cyf.capabilityPitWindow', providers.gradleProperty('ownedCapabilityPitWindow').getOrElse('false')
         systemProperty 'cyf.capabilityEsCluster', providers.gradleProperty('ownedCapabilityEsCluster').get()
     } else {
         filter { excludeTestsMatching 'cn.jia.agent.service.recommendation.CapabilityIndexElasticsearchTest' }
