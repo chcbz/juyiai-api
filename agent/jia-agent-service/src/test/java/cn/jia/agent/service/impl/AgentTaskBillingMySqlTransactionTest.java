@@ -1405,6 +1405,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var tooLate=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);
         jdbc.update("UPDATE agent_task_native_preparation SET probe_valid_until=NULL WHERE probe_ticket=?",tooLate.ticket());assertFalse(service.recordMeasurement(tooLate,agent,measured));
         verifyPreparedEpochLock(agent,binding,measured.fence());
+        var nextFence=new AgentManagedSessionLookup.SessionFence("install","host","next-boot",3);
+        var m=new NativeTaskConfigurationProbe.Measurement(frozen.sha256(),nextFence,measured.version(),measured.executionConfigSha256(),measured.routeSha256(),measured.toolConfigSha256(),measured.capturePolicyVersion(),measured.profile());
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(new TaskBillingService.MeasuredGroup(m.version(),m.executionConfigSha256(),m.routeSha256(),"fixture",m.toolConfigSha256(),m.capturePolicyVersion()),Map.of());
+        var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);
+        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,(task,config)->terms);
+        var inputs=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),Long.toString(req.taskVersion()),req.requirementRevision(),req.sha256(),input);
+        var targets=List.of(target,new AgentExternalServicePolicyService.QuoteTarget(ids.get(1),OWNER,binding+1,target.externalPolicyRevision()));
+        var missing=source.observe(inputs,targets);assertTrue(missing.isEmpty());assertTrue(locked(()->source.current(inputs,targets,missing)));
+        var nextTicket=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids);assertTrue(service.recordMeasurement(nextTicket,agent,m));
+        var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms)),ready);
+        assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
+        guard.retire(TENANT,CLIENT,agent,OWNER,nextFence);assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
+
         service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
         assertFalse(locked(()->service.lockMeasurement(fresh.ticket(),frozen,measured)));
 
