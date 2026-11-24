@@ -102,6 +102,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private AgentTaskMutationTransactionImpl roots;
     private TaskBillingService billing,inlineBilling;
     private cn.jia.economy.task.TaskQuoteBatches batches;
+    private java.util.function.Supplier<AgentTaskExecutionGrantServiceImpl> newAssignment;
     private AgentTaskExecutionGrantServiceImpl assignment;
     private AgentTaskFormalDeliveryDecisionService decisions;
     private AgentTaskCancellationService cancellation;
@@ -243,10 +244,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }).when(outbox).insert(any());
         bootstrap = new AgentTaskBountyBootstrapOutboxServiceImpl(outbox, new ObjectMapper(), manager,
                 requirements, new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT, null));
-        assignment = new AgentTaskExecutionGrantServiceImpl(
-                new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)),
-                outbox, links, mock(PersonalWorkspaceDao.class), legacy, identities, roots,
-                new ObjectMapper(), requirements, billing, meta, mock(cn.jia.agent.service.AgentHostingWorkAdmission.class));
         operationReads = new AgentTaskDeliberationOperationReadServiceImpl(
                 new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)), outbox,
                 new ControlledImageBridgeOperationDaoImpl(sql.getMapper(ControlledImageBridgeOperationMapper.class)),
@@ -256,12 +253,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(authority.lockForAssignment(TENANT, CLIENT, OWNER, AGENT)).thenReturn(target);
         when(authority.requireGrantTarget(eq(TENANT), eq(CLIENT), eq(OWNER), anyString(), anyString(), anyLong()))
                 .thenReturn(target);
-        assignment.setAssigneeAuthority(authority);
-        // Live Agent transport is an external observation; SQL/money remains real here.
-        assignment.setDeliberationRuntime(executor -> {
-            assertEquals(new TaskDeliberationRuntimeLookup.Scope(TENANT, CLIENT, OWNER, AGENT), executor);
-            return true;
-        });
+        newAssignment = () -> {
+            var service = new AgentTaskExecutionGrantServiceImpl(
+                    new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)),
+                    outbox, links, mock(PersonalWorkspaceDao.class), legacy, identities, roots,
+                    new ObjectMapper(), requirements, billing, meta, mock(cn.jia.agent.service.AgentHostingWorkAdmission.class));
+            service.setAssigneeAuthority(authority);
+            // Live Agent transport is an external observation; SQL/money remains real here.
+            service.setDeliberationRuntime(executor -> {
+                assertEquals(new TaskDeliberationRuntimeLookup.Scope(TENANT, CLIENT, OWNER, AGENT), executor);
+                return true;
+            });
+            return service;
+        };
+        assignment = newAssignment.get();
         deliveryReads = proxy(new AgentTaskFormalDeliveryReadServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)), meta),
                 AgentTaskFormalDeliveryReadService.class);
@@ -1368,6 +1373,40 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             ReflectionTestUtils.setField(assignment,"admission",new TaskAssigneeAdmission(false));var first=send.post("direct",200,"E0");assertFalse(first.path("grantId").asText().isBlank());
             ReflectionTestUtils.setField(assignment,"admission",paused);assertEquals(first,send.post("direct",200,"E0"));send.post("different-key",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
             params.put("initialOperation","EXECUTE_SKILL");send.post("direct",409,"AGENT_GRANT_IDEMPOTENCY_CONFLICT");
+            assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        }
+    }
+
+    /** Independent listeners and admission services; SQL, signing authority and external test observations are shared. */
+    private final class DirectNode implements AutoCloseable {
+        final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
+        String base;
+        void start(String name,boolean paused) throws Exception {
+            Path dir=Files.createDirectory(httpDirectory.resolve(name));server.setBaseDir(dir.toString());server.setPort(0);
+            server.getConnector().setProperty("address","127.0.0.1");
+            var context=server.addContext("",Files.createDirectory(dir.resolve("webroot")).toString());context.setParentClassLoader(getClass().getClassLoader());
+            app.setServletContext(context.getServletContext());app.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("node",Map.of("jia.agent.task-assignee.pause-new-admission",Boolean.toString(paused))));
+            app.register(HttpApp.class,TaskAssigneeAdmission.class);
+            var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
+            var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
+            app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);});
+            app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
+            installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
+        }
+        public void close() throws Exception {try {if(base!=null)server.stop();}finally{try{server.destroy();}finally{app.close();}}}
+    }
+    @Test void directAssignmentMixedAdmissionNodesRequireWithdrawalOfOpenListener() throws Exception {
+        signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
+        var params=Map.of("workflowVersion",2,"businessAction","assign_and_start","expectedTaskVersion",0,"requirementRevision",1,"agentId",AGENT,"quoteId",quoteId,"recommendationId","recommendation-1","requestedOperations",List.of("DELIBERATE","EXECUTE_SKILL"),"initialOperation","DELIBERATE","inputRefs",List.of());
+        String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","node-cutover","data",params));
+        try(var a=new DirectNode();var client=HttpClient.newHttpClient()) {
+            class Send {tools.jackson.databind.JsonNode post(DirectNode node,String key,int status,String code)throws Exception {
+                var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+TASK+"/assign")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","node-cutover").POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                var res=client.send(req,HttpResponse.BodyHandlers.ofString());assertEquals(status,res.statusCode(),res.body());var env=json.readTree(res.body());assertEquals(code,env.path("code").asText());assertEquals("node-cutover",env.path("requestId").asText());return env.path("data");
+            }}var send=new Send();String paused="TASK_ASSIGNEE_ADMISSION_PAUSED";a.start("a",true);tools.jackson.databind.JsonNode first;
+            try(var b=new DirectNode()){b.start("b",false);assertNotEquals(a.base,b.base);send.post(a,"original",503,paused);assertAssignmentAbsent();first=send.post(b,"original",200,"E0");assertFalse(first.path("grantId").asText().isBlank());}
+            try(var replacement=new DirectNode()){replacement.start("replacement",true);assertNotEquals(a.base,replacement.base);
+                for(var node:List.of(a,replacement)){send.post(node,"new-intent",503,paused);assertEquals(first,send.post(node,"original",200,"E0"));}}
             assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
         }
     }
@@ -2832,6 +2871,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     new TenantScopeResolver(), reviewSources));
         });
         httpContext.refresh();
+        installDispatcher(context,httpContext);
+        httpServer.start(); origin = "http://127.0.0.1:" + httpServer.getConnector().getLocalPort();
+    }
+    private static void installDispatcher(org.apache.catalina.Context context, AnnotationConfigWebApplicationContext httpContext) {
         Tomcat.addServlet(context, "dispatcher", new DispatcherServlet(httpContext)).setLoadOnStartup(1);
         context.addServletMappingDecoded("/", "dispatcher");
         addHttpFilter(context, "requestId", new RequestIdFilter());
@@ -2839,7 +2882,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         addHttpFilter(context, "security", new DelegatingFilterProxy("springSecurityFilterChain", httpContext));
         addHttpFilter(context, "authenticatedContext", new cn.jia.oauth.filter.EsSecurityContextFilter(
                 new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT, CLIENT)));
-        httpServer.start(); origin = "http://127.0.0.1:" + httpServer.getConnector().getLocalPort();
     }
     private static void addHttpFilter(org.apache.catalina.Context context, String name, jakarta.servlet.Filter filter) {
         var def = new FilterDef(); def.setFilterName(name); def.setFilter(filter); context.addFilterDef(def);
