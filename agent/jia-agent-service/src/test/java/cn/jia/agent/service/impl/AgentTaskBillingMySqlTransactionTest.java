@@ -1481,6 +1481,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var outgoing=dispatch.outgoing(row);assertEquals(OWNER,outgoing.executorOwner());
         assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
         assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(jdbc.getDataSource());
+        var origins=new ChatTaskDispatchOriginService(relay,new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc));
+        var host=new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation","host","boot",1);String context=outgoing.turn().getContextDigest();
+        assertThrows(InjectedFailure.class,()->tx.executeWithoutResult(st->{origins.beforeSend(claim,context,host);throw new InjectedFailure();}));
+        assertEquals(0,count("chat_task_dispatch_origin"));
+        tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));tx.executeWithoutResult(st->origins.beforeSend(claim,context,host));
+        assertEquals(1,count("chat_task_dispatch_origin"));assertEquals(0,independent.queryForObject("SELECT mixed_origin FROM chat_task_dispatch_origin",Integer.class));
+        assertTrue(tx.execute(st->relay.retry(claim,"TEST_LOST_SEND",now)).booleanValue());
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(st->origins.beforeSend(claim,context,host)));
+        var later=tx.execute(st->relay.claim(draft,"next-relay",now+2000,60000));assertNotNull(later);
+        tx.executeWithoutResult(st->origins.beforeSend(later,context,new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("installation-2","host-2","boot-2",2)));
+        tx.executeWithoutResult(st->origins.beforeSend(later,context,host));
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM chat_task_dispatch_origin WHERE event_id=? AND context_hash=? AND installation_id='installation' AND host_id='host' AND runtime_instance_id='boot' AND session_generation=1 AND mixed_origin=1",Integer.class,row.getEventId(),context));
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
 
     }

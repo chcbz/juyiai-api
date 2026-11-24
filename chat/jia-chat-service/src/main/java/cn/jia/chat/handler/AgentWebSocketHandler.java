@@ -2603,15 +2603,17 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
     public CapabilityDispatchResult sendNegotiatedChatMessageToAgent(
             String tenantId, String ownerJiacn, String clientId, String agentId,
             InteractionRoute route, Map<String, ?> payload) {
-        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,route,payload,false);
+        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,route,payload,null);
     }
 
     /** Only the relay's original grant-bound CHAT branch selects this lane. No caller wire field enables it. */
-    public CapabilityDispatchResult sendSingleTaskChat(String tenantId,String ownerJiacn,String clientId,String agentId,Map<String,?> payload) {
-        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,InteractionRoute.CHAT,payload,true);
+    public CapabilityDispatchResult sendSingleTaskChat(String tenantId,String ownerJiacn,String clientId,String agentId,Map<String,?> payload,
+            java.util.function.Consumer<cn.jia.agent.service.AgentManagedSessionLookup.SessionFence> beforeSend) {
+        return negotiatedChat(tenantId,ownerJiacn,clientId,agentId,InteractionRoute.CHAT,payload,java.util.Objects.requireNonNull(beforeSend));
     }
     private CapabilityDispatchResult negotiatedChat(String tenantId,String ownerJiacn,String clientId,String agentId,
-            InteractionRoute route, Map<String, ?> payload, boolean singleTask) {
+            InteractionRoute route, Map<String, ?> payload, java.util.function.Consumer<cn.jia.agent.service.AgentManagedSessionLookup.SessionFence> beforeSend) {
+        boolean singleTask=beforeSend!=null;
         requireNoActiveTransactionForChatDelivery();
         if (!validExactDispatchId(tenantId, 50) || !validExactDispatchId(ownerJiacn, 50)
                 || !validExactDispatchId(clientId, 50) || !validExactDispatchId(agentId, 100)
@@ -2685,6 +2687,13 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             Map<String, Object> wire = new LinkedHashMap<>(outbound);
             negotiated = entry.getValue().negotiatedProfile(route, decision);
             wire.put("targetCapability", negotiated);
+            if(singleTask){
+                var proof=sessionProof(session);
+                beforeSend.accept(new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),proof.scope().runtimeInstanceId(),proof.sessionGeneration()));
+                // The callback committed the candidate before any network write. Do not send on a
+                // replaced socket. A lost write or ACK cannot promote the observation to usage.
+                if(sessions.get(entry.getKey())!=session || !typedDeliberationSessionCurrent(session,agentId)) continue;
+            }
             delivered = sendEvent(session, AgentProtocolConstants.TYPE_CHAT_MESSAGE, wire) || delivered;
         }
         CapabilityDispatchStatus status = eligible.values().stream().allMatch(AgentRuntimeCapabilities::modern)

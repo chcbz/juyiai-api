@@ -87,6 +87,8 @@ public class ChatDeliberationOutboxRelay implements SmartLifecycle, AutoCloseabl
     private static final long DEFAULT_HEARTBEAT_MILLIS = 30_000L;
     private static final long HOSTED_ACK_TIMEOUT_MILLIS = 30_000L;
     private static final int DEFAULT_MAX_CONCURRENT_DELIVERIES = 4;
+    private ChatTaskDispatchOriginService taskOrigins;
+    @Autowired public void setTaskOrigins(ChatTaskDispatchOriginService value){taskOrigins=value;}
     private final ChatDeliberationOutboxService outbox;
     private final ChatDeliberationService deliberation;
     private final AgentWebSocketHandler sockets;
@@ -398,7 +400,8 @@ public class ChatDeliberationOutboxRelay implements SmartLifecycle, AutoCloseabl
                 () -> {
                     var wire=hostedWire(row,p);
                     dispatch.set(route==InteractionRoute.CHAT && binding.dispatch().getTaskGrantId()!=null
-                            ? sockets.sendSingleTaskChat(row.getTenantId(),binding.executorOwner(),row.getClientId(),agentId,wire)
+                            ? sockets.sendSingleTaskChat(row.getTenantId(),binding.executorOwner(),row.getClientId(),agentId,wire,
+                                    fence->taskOrigins.beforeSend(claim,binding.turn().getContextDigest(),fence))
                             : sockets.sendNegotiatedChatMessageToAgent(row.getTenantId(),binding.executorOwner(),row.getClientId(),agentId,route,wire));
                 });
         if (!live) {
