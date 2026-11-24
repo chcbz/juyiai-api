@@ -20,7 +20,7 @@ public final class SelectedProbeTestPeer {
             var sent=new java.util.concurrent.atomic.AtomicReference<TextMessage>();
             doAnswer(call->{assertTrue(sent.compareAndSet(null,call.getArgument(0)));return null;}).when(socket).sendMessage(any());
             var pending=channel.send(frozen,fence,()->socket,mapper);var text=sent.get().getPayload();
-            var event=AgentMessageWire.decode(mapper.readValue(text,Map.class));var data=event.data();
+            var event=AgentMessageWire.decode(mapper.readValue(text,new tools.jackson.core.type.TypeReference<Map<String,Object>>(){}));var data=event.data();
             assertEquals("runtime.task.configuration.probe",event.messageType());
             assertEquals(Set.of("tenantId","clientId","agentId","runtimeInstallationId","hostId","runtimeInstanceId","sessionGeneration","intentSha256","preparationKind","outputs"),data.keySet());
             assertEquals(frozen.sha256(),data.get("intentSha256"));assertEquals(frozen.intent().output().comparisonOutputs(),data.get("outputs"));
