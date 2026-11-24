@@ -1470,6 +1470,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
         deliberation.setTaskMembers(membership);
         // Exercise explicit enrollment in a rollback-only copy of this new admission. Baseline flow stays unmetered.
+        var enrolledWire = new java.util.concurrent.atomic.AtomicReference<byte[]>();
         ReflectionTestUtils.setField(typed,"textBootstrapCaptureEnabled",true);
         tx.executeWithoutResult(status -> {
             var admitted=entry.admit(intent);assertFalse(admitted.replay());
@@ -1480,12 +1481,24 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 String expected=cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(data.path("turnId").asText(),data.path("dispatchId").asText());
                 assertEquals(expected,capture.path("captureId").asText());assertEquals("METERED_CAPTURE_V2",capture.path("protocol").asText());
                 assertEquals(expected,jdbc.queryForObject("SELECT capture_id FROM agent_task_execution_member WHERE task_id=?",String.class,intent.taskId()));
+                var codec=new ObjectMapper();var relay=new ChatDeliberationOutboxService(dao,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
+                relay.setDeliberation(deliberation);long now=System.currentTimeMillis();var rows=relay.discover(now,2);assertEquals(1,rows.size());
+                var claimed=relay.claim(rows.getFirst(),"enrolled-chat-probe",now,60000);assertNotNull(claimed);
+                var frozen=claimed.row();var bytes=codec.readTree(frozen.getPayloadJson());assertEquals("BOOTSTRAP",bytes.at("/factsManifest/contextDelivery/mode").asText());
+                assertEquals(expected,bytes.at("/factsManifest/taskUsageCapture/captureId").asText());
+                var builder=mock(ChatDeliberationOutboxRelay.class,org.mockito.Mockito.CALLS_REAL_METHODS);
+                Map<String,Object> wire=ReflectionTestUtils.invokeMethod(builder,"hostedWire",frozen,codec.readValue(frozen.getPayloadJson(),Map.class));
+                enrolledWire.set(codec.writeValueAsBytes(cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null)));
+                var request=dao.findRequest(TENANT,OWNER,CLIENT,admitted.requestId());var history=recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
+                assertFalse(history.hasEarlierRequest(request));request.setId(request.getId()+1);assertTrue(history.hasEarlierRequest(request));
+
             }
             ReflectionTestUtils.setField(typed,"textBootstrapCaptureEnabled",false);
             assertTrue(entry.admit(intent).replay());assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
             status.setRollbackOnly();
         });
         assertEquals(0,count("chat_dispatch_outbox"));assertEquals(0,count("chat_turn"));
+        if(enrolledWire.get()!=null && System.getProperty("ownedMeteredRuntime")!=null)verifyEnrolledDiscussionFrame(enrolledWire.get());
         var first = tx.execute(status -> entry.admit(intent));
         assertNotNull(first); assertFalse(first.replay()); assertNull(first.stepId()); assertEquals(bound.conversationId(),first.conversationId());
         var again = tx.execute(status -> entry.admit(intent));
@@ -1579,6 +1592,29 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         caps.setNativeExecutions(nativeFiles);caps.setNativeSessions(sessions);
         var context=new ChatTypedDeliberationContextService(jdbc,sessions,()->cn.jia.chat.config.ChatTypedDeliberationReadiness.Readiness.READY,caps,true);
         context.setDispatchAuthority(dispatch);return new QuotedActionContext(context,caps,sessions,installed,live,policies);
+    }
+
+    // Runs outside the database transaction. This probe has no provider, API receiver, or wallet writer.
+    private void verifyEnrolledDiscussionFrame(byte[] frame) throws Exception {
+        var temp=Files.createTempDirectory("quoted-enrolled-chat-");
+        try {
+            var pb=new ProcessBuilder("node","--input-type=module","-e","""
+                import fs from 'node:fs';import assert from 'node:assert/strict';
+                import {fromAgentWire} from './agent-message-wire.mjs';import {normalizeInboundMessage} from './agent-client.mjs';
+                import {PersistentChatInbox} from './chat-runtime.mjs';import {startDiscussionCapture,recoverStoppedDiscussionCapture} from './metered-request-capture.mjs';
+                const m=normalizeInboundMessage(fromAgentWire(fs.readFileSync(0,'utf8')));
+                const opts={rootDir:process.env.TMPDIR,profile:{agentId:m.targetAgentId}},inbox=new PersistentChatInbox(opts);inbox.initialize();
+                const {key}=await inbox.accept(m);assert.ok(inbox.claim(key));const cap=await startDiscussionCapture(inbox,key,{
+                  executionConfigSha256:'a'.repeat(64),engineVersion:'fixture',adapterVersion:'FIXTURE',rootSourceId:'discussion',channelNamespace:'fixture',checkActive(){}});
+                assert.equal(cap.captureId,m.contextSnapshot.facts.taskUsageCapture.captureId);assert.equal(cap.executionId,m.turnId);assert.equal(cap.runId,m.dispatchId);
+                await cap.markStopped(()=>{});const restored=new PersistentChatInbox(opts);restored.initialize();
+                assert.equal((await recoverStoppedDiscussionCapture(restored,key,()=>{})).closeState,'SEALED_INCOMPLETE');
+                """);
+            pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");
+            pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString()));pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(frame);}assertTrue(proc.waitFor(20,TimeUnit.SECONDS));assertEquals(0,proc.exitValue());}
+            finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
+        } finally {org.springframework.util.FileSystemUtils.deleteRecursively(temp);}
     }
 
     /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for

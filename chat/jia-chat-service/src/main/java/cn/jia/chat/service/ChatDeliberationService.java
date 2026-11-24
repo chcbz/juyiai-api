@@ -689,7 +689,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             if (taskGrant != null) {
                 var boundFacts = new LinkedHashMap<>(facts);
                 boolean capture = captureTextBootstrap && contextDraft && List.of(targetAgentId).equals(facts.get("participantAgentIds"))
-                        && !facts.containsKey("materialsInput");
+                        && !facts.containsKey("materialsInput") && contextHistory != null && !contextHistory.hasEarlierRequest(request);
                 // The task root and Chat admission share this transaction. Persist once, before hashing the snapshot.
                 var captureId = taskMembers.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(tenantId,clientId,ownerJiacn),
                         scope.taskId(),turnId,dispatchId,requestDigest.substring("sha256:".length()),capture);
