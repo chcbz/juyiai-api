@@ -185,6 +185,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
+        config.addMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class);
         config.addMapper(cn.jia.chat.mapper.ChatMessageMapper.class);
         config.addMapper(cn.jia.chat.mapper.ChatConversationMapper.class);
         config.addMapper(cn.jia.chat.mapper.AgentTaskThreadMapper.class);
@@ -1435,7 +1436,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         dto.setAssignedAgentId(intent.targetAgentId()); dto.setTaskVersion(Long.toString(intent.assignmentRevision()));
         when(agents.getTask(intent.taskId())).thenReturn(dto);
         var deliberation = new ChatDeliberationService(dao, conversations, messages, agents);
-        var dispatch = new ChatDispatchAuthorityService(mock(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class), dao,
+        var dispatch = new ChatDispatchAuthorityService(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class), dao,
                 actualAuthority, assignment, roots);
         deliberation.setDispatchAuthority(dispatch);
         deliberation.setContextHistory(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
@@ -1482,8 +1483,39 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(intent.targetAgentId(),outgoing.turn().getTargetAgentId());assertEquals(row.getTurnId(),outgoing.turn().getTurnId());
         assertEquals(outgoing.turn().getContextDigest(),payload.path("contextHash").asText());
         verifyDiscussionOrigin(tx,relay,claim,row,draft,outgoing.turn().getContextDigest(),now);
+        if(System.getProperty("ownedMeteredRuntime")!=null){
+            relay.setDispatchAuthority(dispatch);
+            verifyDiscussionInbox(tx,relay,row,outgoing);
+        }
         assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=? AND execution_id=? AND run_id=? AND capture_id IS NULL",Integer.class,intent.taskId(),row.getTurnId(),row.getDispatchId()));
 
+    }
+
+    /** Actual frozen Chat payload, public API/Runtime codecs and disk inbox. Stdin stands in for
+     * network transport here; device selection and authentication are separate tests. No model call. */
+    private void verifyDiscussionInbox(TransactionTemplate tx,ChatDeliberationOutboxService outbox,
+            cn.jia.chat.deliberation.ChatDispatchOutboxEntity row,ChatDispatchAuthorityService.Binding outgoing) throws Exception {
+        var codec=new ObjectMapper();var builder=mock(ChatDeliberationOutboxRelay.class,org.mockito.Mockito.CALLS_REAL_METHODS);
+        Map<String,Object> wire=ReflectionTestUtils.invokeMethod(builder,"hostedWire",row,codec.readValue(row.getPayloadJson(),Map.class));
+        var frame=cn.jia.agent.common.AgentMessageWire.event("chat.message",wire,null);
+        var temp=Files.createTempDirectory("quoted-discussion-inbox-");
+        try{var pb=new ProcessBuilder("node","--input-type=module","-e","""
+            import fs from 'node:fs';import assert from 'node:assert/strict';
+            import {fromAgentWire} from './agent-message-wire.mjs';import {normalizeInboundMessage} from './agent-client.mjs';
+            import {PersistentChatInbox,buildChatDispatchAck} from './chat-runtime.mjs';
+            const m=normalizeInboundMessage(fromAgentWire(fs.readFileSync(0,'utf8')));
+            assert.equal(m.durable,true);assert.equal(m.route,'CHAT');
+            const profile={profileId:'owned',agentId:m.targetAgentId};const opts={rootDir:process.env.TMPDIR,profile};
+            const inbox=new PersistentChatInbox(opts);inbox.initialize();const first=await inbox.accept(m);assert.equal(first.accepted,true);
+            const restored=new PersistentChatInbox(opts);assert.equal(restored.initialize().pending,1);assert.equal((await restored.accept(m)).duplicate,true);
+            const ack=buildChatDispatchAck(profile,m);fs.writeFileSync(process.env.TMPDIR+'/receipt.json',JSON.stringify({ack,context:m.contextHash,turn:m.turnId}));
+            """);pb.directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile());String path=System.getenv("PATH");pb.environment().clear();pb.environment().putAll(Map.of("PATH",path,"HOME",temp.toString(),"TMPDIR",temp.toString()));pb.redirectError(ProcessBuilder.Redirect.INHERIT);pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            var proc=pb.start();try{try(var stdin=proc.getOutputStream()){stdin.write(codec.writeValueAsBytes(frame));}assertTrue(proc.waitFor(20,TimeUnit.SECONDS));assertEquals(0,proc.exitValue());}finally{if(proc.isAlive()){proc.destroyForcibly();proc.waitFor();}}
+            var file=temp.resolve("receipt.json");assertTrue(Files.size(file)<2048);var receipt=codec.readTree(Files.readAllBytes(file));var ack=receipt.path("ack");
+            assertEquals(outgoing.turn().getContextDigest(),receipt.path("context").asText());assertEquals(row.getTurnId(),receipt.path("turn").asText());assertEquals(row.getDispatchId(),ack.path("dispatchId").asText());assertEquals(row.getEventId(),ack.path("messageId").asText());
+            for(int i=0;i<2;i++)assertTrue(tx.execute(st->outbox.acknowledgeHostedDispatch(TENANT,outgoing.executorOwner(),CLIENT,ack.path("agentId").asText(),ack.path("dispatchId").asText(),ack.path("messageId").asText(),System.currentTimeMillis())).booleanValue());
+            assertEquals("SENT",independent.queryForObject("SELECT status FROM chat_dispatch_outbox WHERE event_id=?",String.class,row.getEventId()));
+        }finally{org.springframework.util.FileSystemUtils.deleteRecursively(temp);}
     }
 
     private void verifyDiscussionOrigin(TransactionTemplate tx,ChatDeliberationOutboxService relay,ChatDeliberationOutboxService.Claim claim,
