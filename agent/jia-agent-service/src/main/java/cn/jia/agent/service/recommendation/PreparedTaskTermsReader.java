@@ -2,8 +2,6 @@ package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.security.AgentRuntimeAuthenticationService;
 import cn.jia.agent.service.*;
-import cn.jia.economy.service.EconomyScope;
-import cn.jia.economy.task.*;
 import java.util.*;
 import java.util.concurrent.*;
 import org.springframework.beans.factory.ObjectProvider;
@@ -14,39 +12,31 @@ import org.springframework.transaction.annotation.*;
 @Service
 public class PreparedTaskTermsReader {
     private final NativeTaskPreparation decisions;private final AgentRuntimeAuthenticationService sessions;
-    private final ObjectProvider<NativeTaskConfigurationProbe> transport;private final PreparedReferenceRoutes routes;
-    public PreparedTaskTermsReader(NativeTaskPreparation decisions,AgentRuntimeAuthenticationService sessions,ObjectProvider<NativeTaskConfigurationProbe> transport,PreparedReferenceRoutes routes){
-        this.decisions=decisions;this.sessions=sessions;this.transport=transport;this.routes=routes;
-    }
-    public record Observation(String ticket,NativeTaskPreparation.Frozen decision,NativeTaskConfigurationProbe.Measurement measurement,TaskBudgetEstimator.Terms reference) {}
-    /** Only explicitly chosen candidates. No socket send under the task root; authentication proof never leaves Agent. */
-    @Transactional(propagation=Propagation.NEVER)
-    public Map<String,Observation> refresh(AgentTaskExecutionGrantService.Scope scope,String task,long version,List<String> candidates){
-        return compare(scope,task,decisions.reserveComparisons(scope,task,version,candidates));
+    private final ObjectProvider<NativeTaskConfigurationProbe> transport;
+    public PreparedTaskTermsReader(NativeTaskPreparation decisions,AgentRuntimeAuthenticationService sessions,ObjectProvider<NativeTaskConfigurationProbe> transport){
+        this.decisions=decisions;this.sessions=sessions;this.transport=transport;
     }
     @Transactional(propagation=Propagation.NEVER)
-    public Map<String,Observation> refreshDue(Set<NativeTaskPreparation.Binding> bindings){
-        if(bindings.isEmpty())return Map.of();var b=bindings.iterator().next();return compare(b.scope(),b.task(),decisions.reserveDue(b,bindings));
+    @Transactional(propagation=Propagation.NEVER)
+    public void refreshDue(Set<NativeTaskPreparation.Binding> bindings){
+        if(bindings.isEmpty())return;var b=bindings.iterator().next();compare(b.scope(),decisions.reserveDue(b,bindings));
     }
-    private Map<String,Observation> compare(AgentTaskExecutionGrantService.Scope scope,String task,NativeTaskPreparation.Comparison reservation){var selected=reservation.decisions();if(selected.isEmpty())return Map.of();
-        var channel=transport.getIfAvailable();if(channel==null)return Map.of();
+    private void compare(AgentTaskExecutionGrantService.Scope scope,NativeTaskPreparation.Comparison reservation){var selected=reservation.decisions();if(selected.isEmpty())return;
+        var channel=transport.getIfAvailable();if(channel==null)return;
         var current=sessions.currentRegisteredProofs(scope.tenantId(),scope.clientId(),selected.keySet());
-        var result=new HashMap<String,CompletionStage<Observation>>();
-        var subject=new TaskBillingService.Task(new EconomyScope(scope.tenantId(),scope.clientId()),scope.ownerJiacn(),task);
+        var result=new HashMap<String,CompletionStage<NativeTaskConfigurationProbe.Measurement>>();
         selected.forEach((agent,decision)->{
             var p=current.get(agent);var target=decision.intent().binding().target();
             if(p==null||!target.provider().equals(p.scope().ownerJiacn())||!agent.equals(p.scope().agentId())||!scope.tenantId().equals(p.scope().tenantId())||!scope.clientId().equals(p.scope().clientId()))return;
             var fence=new AgentManagedSessionLookup.SessionFence(p.installationId(),p.hostId(),p.scope().runtimeInstanceId(),p.sessionGeneration());
-            result.put(agent,channel.measure(decision,fence).thenApply(m->{
-                if(m==null||!fence.equals(m.fence())||!decision.sha256().equals(m.intentSha256()))return null;
-                var terms=routes.resolve(subject,new PreparedReferenceRoutes.Configuration(m.version(),m.executionConfigSha256(),m.routeSha256(),m.toolConfigSha256(),m.capturePolicyVersion()));
-                return terms==null?null:new Observation(reservation.ticket(),decision,m,terms);
-            }));
+            result.put(agent,channel.measure(decision,fence).thenApply(m->m!=null&&fence.equals(m.fence())&&decision.sha256().equals(m.intentSha256())?m:null));
         });
-        // Join on the invoking background worker. No database write or block on a socket callback thread.
-        var published=new HashMap<String,Observation>();
-        result.forEach((agent,pending)->{var observed=pending.toCompletableFuture().join();
-            if(observed!=null&&decisions.recordMeasurement(reservation,agent,observed.measurement()))published.put(agent,observed);
-        });return Map.copyOf(published);
+        // A valid configuration is an Agent fact even without an Economy reference route.
+        // Persist on this background worker, never on the socket callback.
+        result.forEach((agent,pending)->{
+            NativeTaskConfigurationProbe.Measurement observed;
+            try{observed=pending.toCompletableFuture().join();}catch(CompletionException|CancellationException unavailable){return;}
+            if(observed!=null)decisions.recordMeasurement(reservation,agent,observed);
+        });
     }
 }

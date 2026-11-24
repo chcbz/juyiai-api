@@ -491,13 +491,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var vec=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));vec.set(0,1f);
         var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,cn.jia.agent.service.recommendation.QuoteHttpTestWiring.template(),binding.requirementSha256(),inputs,"b".repeat(64),
                 new TaskEstimateFeatures.Identity("cfg","fixture",1024),vec,List.of(),null);
-        var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
-        var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"draw","frame","fixture-proof",new MeasuredTaskRepricing.Units(unit,BigDecimal.ONE));
-        var reference=new MeasuredTaskRepricing.Reference("book",Map.of("draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
-        var estimate=MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
+        var estimate=fixtureNeighborEstimate();
         var prepared=new TaskBillingService.MeasuredPreparation(features,new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp"),"v1","fixture-holdout","fixture",estimate);
         var offer=locked(()->billing.storeMeasured(BILLING_TASK,binding,PAYER,prepared));
         return new PreparedFixture(binding,features,offer,prepared);
+    }
+    private MeasuredNeighborEstimate.Estimate fixtureNeighborEstimate(){
+        var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
+        var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"draw","frame","fixture-proof",new MeasuredTaskRepricing.Units(unit,BigDecimal.ONE));
+        var reference=new MeasuredTaskRepricing.Reference("book",Map.of("draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
+        return MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
     }
     @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {benchmarkOfferFence("stop-first");}
     @Test void benchmarkCaseQuoteFirstKeepsItsFixedPriceAfterRevocation() throws Exception {benchmarkOfferFence("quote-first");}
@@ -1449,8 +1452,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertTrue(service.reserveDue(bindingKey,Set.of(bindingKey)).decisions().isEmpty());
         var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms,frozen.sha256())),ready);
         assertFalse(locked(()->source.current(inputs,targets,missing)));assertTrue(locked(()->source.current(inputs,targets,ready)));
-        var held=mock(TaskBillingService.class);when(held.heldInitialIntent(inputs.task(),agent)).thenReturn(frozen.sha256());
-        var admit=new QuotedInitialActionAdmission(held,service);var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,OWNER,agent,binding,null);
+        // This fixture supplies a deterministic neighbor valuation, not a calibration or an accuracy claim.
+        var selectedProof=ready.get(agent);var vec=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));vec.set(0,1f);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,cn.jia.agent.service.recommendation.QuoteHttpTestWiring.template(),req.sha256(),input,"b".repeat(64),new TaskEstimateFeatures.Identity("cfg","fixture",1024),vec,List.of(),null);
+        var preparation=new TaskBillingService.MeasuredPreparation(features,selectedProof.terms().execution(),"v1","fixture","fixture",fixtureNeighborEstimate());
+        var quoteBinding=new TaskBillingService.Binding(req.requirementRevision(),req.sha256(),input,agent,"prepared-hold");
+        var offer=locked(()->billing.storeMeasuredBatch(inputs.task(),PAYER,List.of(new TaskBillingService.MeasuredWrite(quoteBinding,preparation,selectedProof.initialIntentSha256())))).getFirst();
+        assertNull(locked(()->billing.heldInitialIntent(inputs.task(),agent)));
+        var reservation=locked(()->billing.reserve(inputs.task(),offer.quoteId(),quoteBinding,PAYER));
+        assertEquals(reservation,locked(()->billing.reserve(inputs.task(),offer.quoteId(),quoteBinding,PAYER)));
+        assertEquals(1,count("economy_transaction"));assertEquals(75,wallet(independent));
+        var admit=new QuotedInitialActionAdmission(billing,service);var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,OWNER,agent,binding,null);
         assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent)));assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent))); // projection never consumes
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",false,output.commandOutputs());return null;}));
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,Map.of());return null;}));
@@ -1470,10 +1482,30 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
-        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
-        verifySignedSelectionReplay(ids.get(1));
+        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
+        verifySignedSelectionWorker(service,ids.get(1));
     }
-    private void verifySignedSelectionReplay(String agent)throws Exception{
+    private void verifySignedSelectionWorker(NativeTaskPreparationService service,String agent)throws Exception{
+        var sessions=mock(cn.jia.agent.security.AgentRuntimeAuthenticationService.class);
+        var proof=new cn.jia.agent.security.AgentRuntimeAuthenticationService.Proof(new cn.jia.agent.security.AgentRuntimeAuthentication.Scope(TENANT,CLIENT,OWNER,agent,"boot"),"inst","host",1,"fixture",1,1);
+        when(sessions.currentRegisteredProofs(TENANT,CLIENT,Set.of(agent))).thenReturn(Map.of(agent,proof));
+        var sends=new java.util.concurrent.atomic.AtomicInteger();
+        NativeTaskConfigurationProbe probe=(decision,fence)->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            assertEquals(NativeTaskPreparation.Mode.ANSWER,decision.intent().output().mode());assertEquals(decision,service.find(decision.intent().binding()));sends.incrementAndGet();
+            return java.util.concurrent.CompletableFuture.completedFuture(new NativeTaskConfigurationProbe.Measurement(decision.sha256(),fence,"NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64))));};
+        try(var pool=Executors.newSingleThreadExecutor();var ctx=new org.springframework.context.annotation.AnnotationConfigApplicationContext()){
+            ctx.registerBean(org.springframework.transaction.event.TransactionalEventListenerFactory.class);
+            ctx.registerBean(NativeTaskConfigurationProbe.class,()->probe);
+            var reader=new cn.jia.agent.service.recommendation.PreparedTaskTermsReader(service,sessions,ctx.getDefaultListableBeanFactory().getBeanProvider(NativeTaskConfigurationProbe.class));
+            ctx.registerBean(cn.jia.agent.service.recommendation.SelectedTaskComparison.class,()->new cn.jia.agent.service.recommendation.SelectedTaskComparison(pool,reader));ctx.refresh();service.setSelectionEvents(ctx);
+            verifySignedSelectionReplay(agent,()->{
+                pool.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(1,sends.get());
+                assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_native_preparation WHERE JSON_UNQUOTE(JSON_EXTRACT(intent_json,'$.binding.target.agent'))=? AND measurement_sha IS NOT NULL",Integer.class,agent));return null;
+            });pool.submit(()->{}).get(5,TimeUnit.SECONDS);assertEquals(1,sends.get());
+        }
+    }
+    private void verifySignedSelectionReplay(String agent,java.util.concurrent.Callable<Void> checked)throws Exception{
         var uri=URI.create(origin+"/agent/tasks/"+TASK+"/initial-actions/"+agent);var token=httpToken();var mapper=new ObjectMapper();
         try(var client=HttpClient.newHttpClient()){
             class Call{tools.jackson.databind.JsonNode run(String key,String choice,String version,int expected,String code)throws Exception{
@@ -1482,7 +1514,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     b.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
                 var r=client.send(b.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());return env.path("data");
             }}var call=new Call();var empty=call.run(null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt");
-            call.run(null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");var saved=call.run("one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());
+            call.run(null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");var saved=call.run("one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());checked.call();
             jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
             assertEquals(saved,call.run("one","LOCAL_ANSWER",stamp,200,"E0"));call.run("one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");
             call.run("new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");assertEquals(before+1,count("agent_task_native_selection_receipt"));
