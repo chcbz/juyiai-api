@@ -20,6 +20,12 @@ final class CandidateRankFusion {
     private static final Comparator<Hit> BEST = Comparator.comparingDouble(Hit::score).reversed()
             .thenComparing(Hit::evidenceKey);
 
+    static List<Ranked> measured(io.micrometer.observation.ObservationRegistry registry, Set<String> candidates, Collection<Hit> lexical, Collection<Hit> vector) {
+        if(candidates.isEmpty()) return List.of();
+        return io.micrometer.observation.Observation.createNotStarted("cyf.task.recommendation.rank",registry)
+                .observe(()->fuse(candidates,lexical,vector));
+    }
+
     static List<Ranked> fuse(Set<String> candidates, Collection<Hit> lexical, Collection<Hit> vector) {
         var words = ranks(candidates, lexical);
         var vectors = ranks(candidates, vector);

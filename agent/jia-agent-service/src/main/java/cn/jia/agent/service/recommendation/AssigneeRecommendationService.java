@@ -55,7 +55,7 @@ public final class AssigneeRecommendationService {
         var docs=observed.values().stream().flatMap(c->c.citations().values().stream()).map(CapabilityDocuments.Citation::doc).toList();
         if(docs.isEmpty()) {
             truncated=false;
-            found=new CapabilitySearch.Result("NOT_NEEDED",CandidateRankFusion.fuse(observed.keySet(),List.of(),List.of()),List.of());
+            found=new CapabilitySearch.Result("NOT_NEEDED",CandidateRankFusion.measured(observations,observed.keySet(),List.of(),List.of()),List.of());
         }
         else {
             var text = TaskRetrievalText.from(task,inputs); truncated=text.truncated();

@@ -8,6 +8,8 @@ import co.elastic.clients.elasticsearch.core.search.TotalHitsRelation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.*;
@@ -21,7 +23,12 @@ final class CapabilitySearch {
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(CapabilitySearch.class);
     record Result(String mode, List<CandidateRankFusion.Ranked> rows, List<String> reasons) { }
     private final ObjectProvider<ElasticsearchClient> clients;
-    CapabilitySearch(ObjectProvider<ElasticsearchClient> clients) { this.clients = clients; }
+    CapabilitySearch(ObjectProvider<ElasticsearchClient> clients) { this(clients, Optional.empty()); }
+    private final ObservationRegistry observations;
+    @org.springframework.beans.factory.annotation.Autowired
+    CapabilitySearch(ObjectProvider<ElasticsearchClient> clients, Optional<ObservationRegistry> registry) {
+        this.clients=clients; this.observations=registry.orElse(ObservationRegistry.NOOP);
+    }
 
     record QueryVector(Vector value,String missingReason) { }
     Result retrieve(Set<String> candidates, List<CapabilityDocuments.Doc> authorized, String text, java.util.function.Supplier<QueryVector> query) {
@@ -47,7 +54,7 @@ final class CapabilitySearch {
                     return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
                 var count = coverage.aggregations().get("encoded");
                 if (count == null || !count.isFilter() || count.filter().docCount() != total.value()) vectorsComplete = false;
-                batch.collect(view.search(batch.ranked(text, null)), lexical);
+                readRanked(view,batch,text,null,lexical);
             }
             wordsComplete = true;
             if (!vectorsComplete) return lexical(candidates, lexical, "CAPABILITY_VECTOR_INCOMPLETE");
@@ -57,11 +64,9 @@ final class CapabilitySearch {
             if(authorized.stream().anyMatch(d->!vector.identity().equals(d.embedding())))return lexical(candidates,lexical,"CAPABILITY_VECTOR_INCOMPLETE");
             var values = vector.values();
             for (var batch : batches) {
-                var res = view.search(batch.ranked(text, values));
-                if (res.hits().hits().size() != batch.agents.size()) throw new IOException("incomplete vector groups");
-                batch.collect(res, semantic);
+                readRanked(view,batch,text,values,semantic);
             }
-            return new Result("HYBRID", CandidateRankFusion.fuse(candidates, lexical, semantic), List.of());
+            return new Result("HYBRID", CandidateRankFusion.measured(observations, candidates, lexical, semantic), List.of());
         } catch (IOException | co.elastic.clients.elasticsearch._types.ElasticsearchException failed) {
             return wordsComplete ? lexical(candidates, lexical, "CAPABILITY_VECTOR_SEARCH_FAILED") : unavailable(candidates, "CAPABILITY_SEARCH_FAILED");
         } finally {
@@ -69,11 +74,22 @@ final class CapabilitySearch {
             catch (IOException | RuntimeException closeFailure) { LOG.warn("capability_search_pit_close_failed"); }
         }
     }
-    private static Result unavailable(Set<String> ids, String reason) {
-        return new Result("UNAVAILABLE", CandidateRankFusion.fuse(ids, List.of(), List.of()), List.of(reason));
+    // One actual ranked ES batch, never an authorization/coverage probe or an embedding call.
+    private void readRanked(View view,Batch batch,String text,float[] vector,List<CandidateRankFusion.Hit> into) throws IOException {
+        var span=Observation.createNotStarted("cyf.task.recommendation.search",observations)
+                .lowCardinalityKeyValue("route",vector==null?"lexical":"vector").start();
+        String outcome="error";
+        try {
+            var res=view.search(batch.ranked(text,vector));
+            if(vector!=null && res.hits().hits().size()!=batch.agents.size()) throw new IOException("incomplete vector groups");
+            batch.collect(res,into); outcome="ok";
+        } finally { span.lowCardinalityKeyValue("outcome",outcome).stop(); }
     }
-    private static Result lexical(Set<String> ids, List<CandidateRankFusion.Hit> hits, String reason) {
-        return new Result("LEXICAL_ONLY", CandidateRankFusion.fuse(ids, hits, List.of()), List.of(reason));
+    private Result unavailable(Set<String> ids, String reason) {
+        return new Result("UNAVAILABLE", CandidateRankFusion.measured(observations, ids, List.of(), List.of()), List.of(reason));
+    }
+    private Result lexical(Set<String> ids, List<CandidateRankFusion.Hit> hits, String reason) {
+        return new Result("LEXICAL_ONLY", CandidateRankFusion.measured(observations, ids, hits, List.of()), List.of(reason));
     }
     private static final class View {
         private final ElasticsearchClient es;

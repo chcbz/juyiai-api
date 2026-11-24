@@ -118,11 +118,25 @@ class CapabilitySearchTest {
             var beans=new DefaultListableBeanFactory(); beans.registerSingleton("es",es);
             var vector=new float[1024]; vector[0]=1;
             var calls=new java.util.concurrent.atomic.AtomicInteger();
-            var result=new CapabilitySearch(beans.getBeanProvider(ElasticsearchClient.class)).retrieve(Set.of("a","b"),List.of(doc),"写作",()->{
+            var registry=io.micrometer.observation.ObservationRegistry.create();var stages=new ArrayList<String>();
+            registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+                public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+                public void onStop(io.micrometer.observation.Observation.Context c){
+                    assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());var tags=new HashMap<String,String>();
+                    c.getLowCardinalityKeyValues().forEach(k->tags.put(k.getKey(),k.getValue()));
+                    if(c.getName().equals("cyf.task.recommendation.rank")){assertTrue(tags.isEmpty());stages.add("rank");}
+                    else{assertEquals("cyf.task.recommendation.search",c.getName());assertEquals(Set.of("route","outcome"),tags.keySet());stages.add(tags.get("route")+":"+tags.get("outcome"));}
+                }
+            });
+            var result=new CapabilitySearch(beans.getBeanProvider(ElasticsearchClient.class),Optional.of(registry)).retrieve(Set.of("a","b"),List.of(doc),"写作",()->{
                 assertEquals(3,requests.size(),"PIT, exact coverage and lexical ranking before encoding");calls.incrementAndGet();
                 return new CapabilitySearch.QueryVector(new TaskFeatureEncoder.Vector(ID,vector),null);
             });
             assertEquals("HYBRID".equals(expected)||expiredAt==4?1:0,calls.get());
+            var expectedStages=new ArrayList<String>();
+            if(present!=0)expectedStages.add(expiredAt==3?"lexical:error":"lexical:ok");
+            if(encoded!=0 && expiredAt!=3)expectedStages.add(expiredAt==4?"vector:error":"vector:ok");
+            expectedStages.add("rank");assertEquals(expectedStages,stages);
             if(expiredAt!=0)assertEquals(List.of(expiredAt==4?"CAPABILITY_VECTOR_SEARCH_FAILED":"CAPABILITY_SEARCH_FAILED"),result.reasons());
             else if("LEXICAL_ONLY".equals(expected))assertEquals(List.of("CAPABILITY_VECTOR_INCOMPLETE"),result.reasons());
             assertEquals(expected,result.mode()); assertEquals(2,result.rows().size());
