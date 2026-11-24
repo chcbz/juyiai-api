@@ -1464,7 +1464,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 TENANT,CLIENT,OWNER,bound.conversationId(),first.requestId(),intent.targetAgentId(),intent.grantId(),intent.grantVersion(),intent.assignmentRevision(),intent.requirementRevision());
         int registered = independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",Integer.class,TENANT,CLIENT,OWNER,intent.taskId());
         assertEquals(1,registered);
-        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member m JOIN chat_turn t ON t.turn_id=m.execution_id AND t.dispatch_id=m.run_id JOIN chat_request r ON r.request_id=t.request_id WHERE m.task_id=? AND m.capture_id IS NULL AND m.admission_sha256=SUBSTRING(r.request_digest,8) AND r.request_id=?",Integer.class,intent.taskId(),first.requestId()));
+        assertEquals(1,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member m JOIN chat_turn t ON BINARY t.turn_id=BINARY m.execution_id AND BINARY t.dispatch_id=BINARY m.run_id JOIN chat_request r ON r.request_id=t.request_id WHERE m.task_id=? AND m.capture_id IS NULL AND BINARY m.admission_sha256=BINARY SUBSTRING(r.request_digest,8) AND r.request_id=?",Integer.class,intent.taskId(),first.requestId()));
         assertEquals(requirement.title()+"\n\n"+requirement.description(),saved);
     }
 

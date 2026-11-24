@@ -68,6 +68,11 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     @Test void missingRetryPreventsWholeTaskSampleEvenWithCompleteFirstRun(@TempDir Path temp) throws Exception {
         verifyPeer(temp,json.readTree(new ClassPathResource("metered-local-artifact-fixture.json").getContentAsString(StandardCharsets.UTF_8)),true);
     }
+    // Upstream Chat admission is verified in the signed quote/dispatch regression. This
+    // fixture starts at its Agent port, with no synthetic Chat or native execution row.
+    @Test void missingDiscussionUsagePreventsWholeTaskSampleDespiteCompleteNativeRun(@TempDir Path temp) throws Exception {
+        verifyPeer(temp,json.readTree(new ClassPathResource("metered-local-artifact-fixture.json").getContentAsString(StandardCharsets.UTF_8)),false,false,true);
+    }
     @Test void successorEpochLostResponseStillHasOneOriginalMySqlLedgerRevision(@TempDir Path temp) throws Exception {
         verifyPeer(temp,null,false,true);
     }
@@ -75,6 +80,9 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         verifyPeer(temp,measured,retry,false);
     }
     private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor) throws Exception {
+        verifyPeer(temp,measured,retry,successor,false);
+    }
+    private void verifyPeer(Path temp,tools.jackson.databind.JsonNode measured,boolean retry,boolean successor,boolean discussion) throws Exception {
         var ds=Objects.requireNonNull(jdbc.getDataSource());var manager=new DataSourceTransactionManager(ds);
         String schema=new ClassPathResource("db/schema.sql").getContentAsString(StandardCharsets.UTF_8);
         for(String table:List.of("agent_runtime","agent_persona_binding","agent_identity_registry","agent_identity_alias")){
@@ -119,7 +127,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var mvc=MockMvcBuilders.standaloneSetup(ctrl).setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice()).addFilters(new RequestIdFilter(),new AgentRuntimeAuthenticationFilter(auth),principal).build();
         if(measured!=null){
             // Original, unchanged wire records from an isolated CLI + loopback TLS run. Independent pin predated PLAN.
-            var scenario=confirmTestTask(measured,sql,manager,schema,retry);
+            var scenario=confirmTestTask(measured,sql,manager,schema,retry,discussion);
             var records=measured.get("records");assertEquals(10,records.size());var keys=new ArrayList<>(List.of("plan","source-0","request-1-1","request-1-2","request-2-1","request-2-2"));
             for(int i=1;i<=2;i++)keys.add("response-"+records.get("request-"+i+"-2").get("observation").get("sourceAttemptId").asText()+"-1");
             keys.addAll(List.of("source-final-1","capture-final-1"));
@@ -131,7 +139,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_capture WHERE coverage_state='COMPLETE' AND projection_revision=input_revision",Integer.class));
             assertEquals(10,count("economy_usage_capture_receipt"));assertEquals(2,count("economy_usage_attempt"));assertEquals(2,count("economy_usage_revision"));
             assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_usage_revision WHERE cost_yuan IS NULL AND revision=1",Integer.class));
-            verifyAcceptedSample(scenario,sql,manager,retry);return;
+            verifyAcceptedSample(scenario,sql,manager,retry||discussion);return;
         }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
         server.createContext("/",exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
@@ -172,7 +180,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
     // response association, whole-task projection and repricing use production services on this fixture DB.
     record Scenario(TaskBillingService.Task task,TaskBillingService billing,MeasuredTaskRepricing.Reference reference,String sample){}
     void lockTask(){assertEquals("task",jdbc.queryForObject("SELECT task_id FROM agent_task_meta WHERE tenant_id='0' AND client_id='client' AND owner_jiacn='owner' AND task_id='task' FOR UPDATE",String.class));}
-    Scenario confirmTestTask(tools.jackson.databind.JsonNode fixture,SqlSessionTemplate sql,DataSourceTransactionManager manager,String schema,boolean retry){
+    Scenario confirmTestTask(tools.jackson.databind.JsonNode fixture,SqlSessionTemplate sql,DataSourceTransactionManager manager,String schema,boolean retry,boolean discussion){
         int begin=schema.indexOf("CREATE TABLE IF NOT EXISTS agent_task_meta (");assertTrue(begin>=0);jdbc.execute(schema.substring(begin,schema.indexOf(";\n",begin)));
         jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('task','owner','0','client')");
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();jdbc.update("INSERT INTO economy_account(account_id,owner_type,owner_id,purpose,currency,balance_wen,allow_negative,status,version,tenant_id,client_id,create_time,update_time) VALUES('wallet','USER','payer','AVAILABLE','WEN',100,0,'ACTIVE',0,'0','client',1,1)");
@@ -191,6 +199,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var prepared=new TaskBillingService.MeasuredPreparation(features,group,"fixture","test-calibration","test-only",estimate);
         tx.executeWithoutResult(st->{lockTask();var q=billing.storeMeasured(task,binding,"payer",prepared);assertEquals(10,q.amountWen());billing.reserve(task,q.quoteId(),binding,"payer");
             var member=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setOwnerJiacn("owner").setTaskId("task").setExecutionId("exec1").setRunId("run-exec1").setRequestHash("a".repeat(64));member.setTenantId("0");member.setClientId("client");executions.registerTaskMember(member,fixture.at("/records/plan/captureId").asText());
+            if(discussion){new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","initial-turn","initial-dispatch","d".repeat(64));}
             if(retry){row("retry","owner","task","CONVERSATION","RESULT_COMMITTED",6);member.setExecutionId("retry").setRunId("run-retry");executions.registerTaskMember(member,null);}});
         return new Scenario(task,billing,reference,jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class));
     }
@@ -199,12 +208,15 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         assertEquals(ConfirmedSampleEvidence.Verdict.ACTIVE,reader.inspect(s.task,s.sample).verdict());
         tx.executeWithoutResult(st->{lockTask();executions.closeTaskMembers("0","client","owner","task",cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,"decision",11,777);s.billing.capture(s.task);});
         var terminal=executions.pending("0","client",executions.pendingPage("0","client","").getFirst().fact());
-        var receiver=transactional(new TaskMembershipReceiptStore(sql.getMapper(TaskMembershipReceiptMapper.class)),TaskMembershipReceipt.class,manager);var cursor=receiver.open(terminal);
-        assertTrue(receiver.accept(terminal,cursor.revision(),executions.members(terminal,cursor.revision())).verified());executions.delivered(terminal);
+        var receiver=transactional(new TaskMembershipReceiptStore(sql.getMapper(TaskMembershipReceiptMapper.class)),TaskMembershipReceipt.class,manager);var delivery=new TaskMembershipDelivery(executions,receiver,new DefaultListableBeanFactory().getBeanProvider(ScheduleService.class),new FixedTenantAdmissionPolicy("0","client"));
+        var invocation=new ScheduledInvocation("0",new ScheduleKey("client",delivery.getName(),terminal.fact(),""),1);
+        delivery.executeScheduled(invocation);delivery.executeScheduled(invocation);assertTrue(receiver.open(terminal).verified());
         var measured=reader.measure(s.task,s.sample,decoder);assertEquals(retry?2:1,measured.assessment().members());
         var projection=new ConfirmedSampleProjectionService(reader,mapper,json,manager);assertTrue(projection.refresh(s.task,s.sample,decoder));assertFalse(projection.refresh(s.task,s.sample,decoder));
         assertEquals(retry?"WAITING_EVIDENCE":"READY",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample_revision WHERE sample_revision=(SELECT evidence_revision FROM economy_task_cost_sample)",String.class));
-        if(retry){assertTrue(measured.operations().isEmpty());}else{assertEquals(2,measured.operations().size());var quoted=MeasuredTaskRepricing.reprice(s.reference,measured.operations().stream().map(ConfirmedSampleEvidence.Operation::fact).toList());assertEquals(2,quoted.lines().size());assertEquals(0,new BigDecimal("0.00000250").compareTo(quoted.yuan()));}
+        if(retry){assertEquals(ConfirmedSampleEvidence.Verdict.USAGE_INCOMPLETE,measured.assessment().verdict());assertTrue(measured.operations().isEmpty());
+            assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='WAITING_EVIDENCE' AND reason_code='USAGE_INCOMPLETE' AND member_count=2 AND JSON_LENGTH(operation_refs)=0",Integer.class));
+            assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample_revision WHERE sample_state='READY'",Integer.class));}else{assertEquals(2,measured.operations().size());var quoted=MeasuredTaskRepricing.reprice(s.reference,measured.operations().stream().map(ConfirmedSampleEvidence.Operation::fact).toList());assertEquals(2,quoted.lines().size());assertEquals(0,new BigDecimal("0.00000250").compareTo(quoted.yuan()));}
         assertEquals(10,jdbc.queryForObject("SELECT amount_wen FROM economy_task_charge WHERE state='CAPTURED'",Integer.class));assertEquals(2,count("economy_transaction"));
     }
     int count(String table){return jdbc.queryForObject("SELECT COUNT(*) FROM "+table,Integer.class);}
