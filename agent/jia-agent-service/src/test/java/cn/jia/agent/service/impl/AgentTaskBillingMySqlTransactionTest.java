@@ -683,7 +683,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     void largeHistoryInlinePhaseCosts(){profileHistoryPages(false,1025);}
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.measuredBatchQuoteLoad",matches="true")
     void largeHistorySharedPhaseCosts(){profileHistoryPages(true,1025);}
-    private void profileHistoryPages(boolean shared,int n){
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.measuredBatchQuoteLoad",matches="true")
+    void denseHistoryInlinePhaseCosts(){profileHistoryPages(false,1025,true);}
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.measuredBatchQuoteLoad",matches="true")
+    void denseHistorySharedPhaseCosts(){profileHistoryPages(true,1025,true);}
+    private void profileHistoryPages(boolean shared,int n){profileHistoryPages(shared,n,false);}
+    private void profileHistoryPages(boolean shared,int n,boolean dense){
         // Synthetic READY rows for deterministic read cost only, never accuracy/quality evidence.
         var f=measuredOffer();var prep=f.preparation();var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(prep.group(),prep.features());
         var reader=BILLING_TASK;var writer=shared?billing:inlineBilling;
@@ -691,12 +696,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             for(int i=0;i<n;i++){
                 String sid=String.format(java.util.Locale.ROOT,"%064x",i+1);ids.add(sid);
                 var task=new TaskBillingService.Task(reader.scope(),OWNER,"history-"+i);
-                var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"batch-"+task.taskId()),prep)).toList();
+                var original=prep.features();var vector=new java.util.ArrayList<Float>();
+                if(dense){var random=new java.util.Random(i+42L);vector.add(1f);for(int j=1;j<1024;j++)vector.add((random.nextFloat()-0.5f)*0.01f);}
+                var source=dense?new TaskEstimateFeatures(original.featureVersion(),original.templateVersion(),original.requirementSha256(),original.inputSnapshotSha256(),original.textSha256(),original.embeddingIdentity(),vector,original.files(),original.requestedDeliverables()):original;
+                var storedPrep=dense?new TaskBillingService.MeasuredPreparation(source,prep.group(),prep.estimatorVersion(),prep.calibrationVersion(),prep.qualityStatus(),prep.estimate()):prep;
+                var writes=List.of("a","b").stream().map(a->new TaskBillingService.MeasuredWrite(new TaskBillingService.Binding(1,f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),a,"batch-"+task.taskId()),storedPrep)).toList();
                 var stored=writer.storeMeasuredBatch(task,PAYER,writes);
-                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),prep.features().digest(),group.digest());
+                jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,projection_revision,sample_state,history_group_sha256) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,1,'READY',?)",sid,TENANT,CLIENT,OWNER,task.taskId(),stored.getFirst().quoteId(),f.binding().requirementSha256(),f.binding().inputSnapshotDigest(),source.digest(),group.digest());
             }
         });assertEquals(shared?n:0,count("economy_task_quote_preparation"));
-        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared);return;}
+        if(n>257){profileEstimatorPhases(reader,group,prep.features(),ids,shared,dense);return;}
         var probe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var matches=new java.util.ArrayList<String>();
         recShapes().forEach((id,v)->{var old=probe.getOrDefault(id,new Shape(0,0,0,0));if(v.calls()-old.calls()==1 && v.sent()-old.sent()==64)matches.add(id);});
         assertEquals(1,matches.size());var pageDigest=matches.getFirst();var cfg=recommendationSql.getConfiguration();
@@ -731,7 +740,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_cost_sample SET quote_id='missing' WHERE sample_id=?",ids.get(80));
         assertThrows(IllegalStateException.class,()->historyCatalog.page(reader,group,ids.get(63)));
     }
-    private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared){
+    private void profileEstimatorPhases(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,TaskEstimateFeatures features,List<String> ids,boolean shared,boolean dense){
         // Synthetic READY projection of one measured frame per task. Identical vectors force stable tie selection across the entire group.
         String ops="""
             [{"memberRevision":1,"captureId":"fixture","captureRevision":1,"recordId":"fixture","sourceRevision":"1","evidenceSha256":"test-proof","operation":{"namespace":"fixture","externalId":"operation"},"kind":"draw","component":"frame","basis":"UNIT","quantity":{"unit":{"channel":"test","tool":"draw","unit":"frame"},"decimalCount":"1"}}]
@@ -745,11 +754,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             try{return method.invoke(historyCatalog,args);}catch(java.lang.reflect.InvocationTargetException e){throw e.getCause();}finally{phase[slot]+=System.nanoTime()-t;phase[slot+2]++;}
         }));
         var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(timed,(scope,v,routes,kinds)->{assertEquals(java.util.Set.of("draw"),kinds);return fixtureReference();});
+        var beforeProbe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var digests=new java.util.ArrayList<String>();
+        recShapes().forEach((key,now)->{var old=beforeProbe.getOrDefault(key,new Shape(0,0,0,0));if(now.calls()-old.calls()==1 && now.sent()-old.sent()==64)digests.add(key);});assertEquals(1,digests.size());
+        List<String> firstSelection=null;
         for(int i=0;i<=5;i++){
-            java.util.Arrays.fill(phase,0);long start=System.nanoTime();var result=engine.estimate(reader,group.execution(),features,pin,params,Map.of());long estimate=System.nanoTime()-start;
-            assertEquals(25,result.wen());assertEquals(ids.subList(0,3),result.contributions().stream().map(x->x.sampleId()).toList());assertEquals(17,phase[2]);assertEquals(3,phase[3]);
+            var prev=recShapes().get(digests.getFirst());java.util.Arrays.fill(phase,0);long start=System.nanoTime();var result=engine.estimate(reader,group.execution(),features,pin,params,Map.of());long estimate=System.nanoTime()-start;
+            assertEquals(25,result.wen());var chosen=result.contributions().stream().map(x->x.sampleId()).toList();assertEquals(3,new java.util.HashSet<>(chosen).size());assertTrue(ids.containsAll(chosen));if(!dense)assertEquals(ids.subList(0,3),chosen);if(firstSelection==null)firstSelection=chosen;else assertEquals(firstSelection,chosen);
+            var now=recShapes().get(digests.getFirst());assertEquals(17,now.calls()-prev.calls());assertEquals(ids.size(),now.sent()-prev.sent());assertEquals(17,phase[2]);assertEquals(3,phase[3]);
             long[] lock=new long[1];long begin=System.nanoTime();locked(()->{long t=System.nanoTime();for(var c:result.contributions())assertTrue(historyCatalog.lockCandidate(reader,group,pin,new cn.jia.economy.task.TaskHistoryCatalog.Revision(c.sampleId(),1)));lock[0]=System.nanoTime()-t;return null;});long transaction=System.nanoTime()-begin;
-            System.out.printf(java.util.Locale.ROOT,"QUOTE_HISTORY_PHASE shared=%s warmup=%s histories=%d pages=%d selected=%d estimateMs=%.3f pageReadDecodeMs=%.3f quantitiesMs=%.3f selectAndRepriceMs=%.3f selectedLockMs=%.3f rootTxnMs=%.3f%n",shared,i==0,ids.size(),phase[2],phase[3],estimate/1e6,phase[0]/1e6,phase[1]/1e6,(estimate-phase[0]-phase[1])/1e6,lock[0]/1e6,transaction/1e6);
+            System.out.printf(java.util.Locale.ROOT,"QUOTE_HISTORY_PHASE shared=%s dense=%s warmup=%s histories=%d pages=%d selected=%d estimateMs=%.3f pageReadDecodeMs=%.3f quantitiesMs=%.3f selectAndRepriceMs=%.3f selectedLockMs=%.3f rootTxnMs=%.3f serverPageMs=%.3f rowsExamined=%d%n",shared,dense,i==0,ids.size(),phase[2],phase[3],estimate/1e6,phase[0]/1e6,phase[1]/1e6,(estimate-phase[0]-phase[1])/1e6,lock[0]/1e6,transaction/1e6,(now.picos()-prev.picos())/1e9,now.examined()-prev.examined());
         }
     }
     @Test void scopedQuotePreparationReadsExactBytesAndRejectsForeignOrDamagedReferences() throws Exception {
