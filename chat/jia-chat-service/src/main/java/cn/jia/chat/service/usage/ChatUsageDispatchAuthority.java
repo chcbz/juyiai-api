@@ -46,9 +46,9 @@ public final class ChatUsageDispatchAuthority {
     }
     /** Point-in-time dispatch-origin observation only. No capture enrollment, receipt or fee is implied. */
     public boolean matchesTaskSource(AuthenticatedRuntimeOperation.Device device,String turnId,String dispatchId,String contextHash){
-        var original=original(device.subject(),dispatchId);var dispatch=original.dispatch();
+        var original=original(device.subject(),dispatchId);var dispatch=original.dispatch();var fence=device.fence();
         return original.taskId()!=null && !original.multiMember() && dispatch.getTaskGrantId()!=null && dispatch.getTaskGrantVersion()!=null
-                && Objects.equals(dispatch.getTurnId(),turnId) && origins.matches(dispatch.getEventId(),contextHash,device.fence());
+                && Objects.equals(dispatch.getTurnId(),turnId) && origins.matches(dispatch.getEventId(),contextHash,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
     }
     private static ChatDeliberationException denied() {
         return new ChatDeliberationException(ChatDeliberationException.Reason.NOT_FOUND_OR_FORBIDDEN,
