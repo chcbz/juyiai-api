@@ -179,9 +179,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var global = new GlobalConfig(); global.setIdentifierGenerator(new DefaultIdentifierGenerator());
         var factory = new MybatisSqlSessionFactoryBean(); factory.setDataSource(source);
         factory.setConfiguration(config); factory.setGlobalConfig(global);
+        for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(cn.jia.economy.mapper.TaskCalibrationMapper.class);
-        var sql = new SqlSessionTemplate(factory.getObject());
+        var sql = new SqlSessionTemplate(factory.getObject()); recommendationSql=sql;
         var meta = new AgentTaskMetaDaoImpl();
         ReflectionTestUtils.setField(meta, "baseMapper", sql.getMapper(AgentTaskMetaMapper.class));
         var members = new AgentTaskMemberDaoImpl(sql.getMapper(AgentTaskMemberMapper.class));
@@ -1096,6 +1097,75 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 cold/1e6,hot.get(14)/1e6,hot.get(28)/1e6,hot.getLast()/1e6,replay/1e6,calls.get());
     }
 
+    private SqlSessionTemplate recommendationSql;
+    private cn.jia.agent.api.AssigneeRecommendationController recommendationController;
+    private <T> T withMapper(T dao,Class<?> mapper){ReflectionTestUtils.setField(dao,"baseMapper",recommendationSql.getMapper(mapper));return dao;}
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.capabilityEsLoad",matches="true")
+    void signedRecommendationWithRealCandidateAuthorityAndIsolatedEs() throws Exception {
+        var ds=jdbc.getDataSource();String schema=Files.readString(DDL.resolve("schema.sql"));int start=schema.indexOf("CREATE TABLE IF NOT EXISTS agent_runtime (");assertTrue(start>=0);jdbc.execute(schema.substring(start,schema.indexOf(";\n",start)));
+        var identityDdl=Files.readString(DDL.resolve("agent-identity-schema.sql"));int boundary=identityDdl.indexOf("-- A02 uses a temporary assertion procedure");assertTrue(boundary>0);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ByteArrayResource(identityDdl.substring(0,boundary).getBytes(StandardCharsets.UTF_8))).execute(ds);
+        new cn.jia.agent.config.AgentExternalServicePolicySchemaInitializer(jdbc).afterPropertiesSet();
+        for(String file:List.of("agent-task-requirement-snapshot-v1.sql","agent-task-current-requirement-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(file))).execute(ds);
+        var meta=withMapper(new AgentTaskMetaDaoImpl(),AgentTaskMetaMapper.class);
+        var runtimes=withMapper(new AgentRuntimeDaoImpl(),AgentRuntimeMapper.class);
+        var bindings=withMapper(new AgentPersonaBindingDaoImpl(),AgentPersonaBindingMapper.class);
+        var identities=proxy(new AgentIdentityServiceImpl(withMapper(new AgentIdentityRegistryDaoImpl(),AgentIdentityRegistryMapper.class),withMapper(new AgentIdentityAliasDaoImpl(),AgentIdentityAliasMapper.class),bindings),AgentIdentityService.class);
+        var policies=proxy(new AgentExternalServicePolicyServiceImpl(new AgentExternalServicePolicyDaoImpl(recommendationSql.getMapper(AgentExternalServicePolicyMapper.class)),identities,meta,new AgentTaskExecutionGrantDaoImpl(recommendationSql.getMapper(AgentTaskExecutionGrantMapper.class)),runtimes),AgentExternalServicePolicyService.class);
+        var agents=new AgentServiceImpl(runtimes,identities,null,bindings,meta,null,null,null,null,null,null,null,null,null,null,roots,null,new cn.jia.core.security.FixedTenantAdmissionPolicy(TENANT,CLIENT));
+        var req=new AgentTaskRequirementSnapshotServiceImpl(jdbc,roots);agents.setRequirementSnapshots(req);agents.setExternalServicePolicies(policies);
+        // Only installed skills, attached materials and runtime readiness are fixture boundaries. Roster and abilities use production SQL.
+        var skills=mock(cn.jia.agent.skill.SkillManagementService.class);when(skills.recommendationSkills(any(),anyList())).thenAnswer(call->{var rows=call.<List<AgentTaskAssigneeCandidateDTO>>getArgument(1);return rows.stream().collect(java.util.stream.Collectors.toMap(r->r.target().agentId(),r->List.of()));});
+        var materials=mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class);
+        try(var es=new cn.jia.agent.service.recommendation.RecommendationHttpTestWiring(agents,skills,materials,roots)){
+            recommendationController=es.controller;startHttp();var expected=new java.util.LinkedHashSet<String>();
+            for(int n:List.of(1,108)){
+                String task="rec-http-"+n;jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",task,OWNER,TENANT,CLIENT);
+                roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,task,r->req.captureOnCreate(SCOPE,task,"合同审查 "+n,"核对合同条款"));
+                for(int i=expected.size();i<n;i++){
+                    String id="agt_"+String.format(java.util.Locale.ROOT,"%032x",i+1),ability="合同审查 "+i;
+                    jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES (?,?,?,1,1,?,?)",OWNER,"rec"+i,id,TENANT,CLIENT);
+                    long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,id);
+                    jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'rec-http-fixture',1,1)",id,CLIENT,OWNER,TENANT,binding);
+                    jdbc.update("INSERT INTO agent_runtime(agent_id,name,owner_jiacn,binding_id,status,tenant_id,client_id,abilities) VALUES (?,?,?,?,'offline',?,?,?)",id,"测试候选"+i,OWNER,binding,TENANT,CLIENT,new ObjectMapper().writeValueAsString(List.of(ability)));
+                    es.index(TENANT,CLIENT,OWNER,id,ability);expected.add(id);
+                }
+                es.refresh();measureRecommendationHttp(task,expected,es.encodes);
+            }
+        }
+    }
+    /** Called only inside the isolated loopback HTTP/MySQL/ES fixture. The initial query vector uses
+     * the fixture encoder; cold refers to the API vector cache, not a real provider or cold OS. */
+    private void measureRecommendationHttp(String task, java.util.Set<String> expected, java.util.concurrent.atomic.AtomicInteger encodes) throws Exception {
+        int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
+        try(var client=HttpClient.newHttpClient()){
+            record Observation(long nanos,boolean degraded,boolean invalid){}
+            class Probe { Observation run(String id)throws Exception{
+                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+token)
+                    .header("Content-Type","application/json").header("X-Request-Id",id).timeout(java.time.Duration.ofSeconds(20))
+                    .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\""+id+"\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
+                long t=System.nanoTime();var res=client.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
+                var env=mapper.readTree(res.body());var data=env.path("data");var rows=data.path("recommendations");var seen=new java.util.HashSet<String>();
+                boolean bad=res.statusCode()!=200||!"E0".equals(env.path("code").asText())||!id.equals(env.path("requestId").asText())||!task.equals(data.path("taskId").asText())||!"0".equals(data.path("taskVersion").asText())||!data.path("candidateSetComplete").asBoolean()||!rows.isArray();
+                for(var row:rows)if(!seen.add(row.at("/agent/agentId").asText())||row.path("evidence").size()==0||!"UNKNOWN".equals(row.path("recommendationLevel").asText()))bad=true;
+                return new Observation(elapsed,!"HYBRID".equals(data.path("retrievalMode").asText()),bad||!seen.equals(expected));
+            }}
+            var probe=new Probe();var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());
+            for(int concurrency:List.of(1,5,10)){
+                int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
+                try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
+                    for(int round=0;round<30/concurrency;round++){
+                        var gate=new java.util.concurrent.CyclicBarrier(concurrency);var pending=new java.util.ArrayList<java.util.concurrent.Future<Observation>>();
+                        for(int i=0;i<concurrency;i++){String key="rec-"+expected.size()+"-"+concurrency+"-"+round+"-"+i;
+                            pending.add(pool.submit(()->{gate.await(15,java.util.concurrent.TimeUnit.SECONDS);return probe.run(key);}));}
+                        for(var f:pending){var s=f.get(25,java.util.concurrent.TimeUnit.SECONDS);times.add(s.nanos());if(s.invalid())invalid++;if(s.degraded())degraded++;}
+                    }
+                }
+                times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"RECOMMEND_HTTP candidates=%d concurrency=%d coldFixtureMs=%.3f hotN=%d p50ms=%.3f p95ms=%.3f maxms=%.3f invalid=%d degraded=%d%n",expected.size(),concurrency,cold.nanos()/1e6,times.size(),times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6,invalid,degraded);
+                assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
+            }
+        }
+    }
     private void startHttp() throws Exception {
         // The current Web uses delivery-review-operations, not the legacy raw-body formal decision route.
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-delivery-review-v1.sql"))
@@ -1121,6 +1191,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         httpContext.register(HttpApp.class);
         httpContext.addBeanFactoryPostProcessor(factory -> {
             factory.registerSingleton("jwtDecoder", decoder);
+            if(recommendationController!=null)factory.registerSingleton("recommendationController",recommendationController);
             if(independentQuoteController!=null)factory.registerSingleton("independentQuoteController",independentQuoteController);
             factory.registerSingleton("walletController", new cn.jia.economy.api.EconomyWalletController(walletGate, walletReads));
             factory.registerSingleton("assignmentController", new AgentTaskDeliberationOperationController(operationReads, assignment));
