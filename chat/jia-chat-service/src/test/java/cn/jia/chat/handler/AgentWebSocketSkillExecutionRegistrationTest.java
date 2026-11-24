@@ -18,6 +18,30 @@ class AgentWebSocketSkillExecutionRegistrationTest {
     final SkillExecutionSessionRegistry registry = new SkillExecutionSessionRegistry();
     final ObjectMapper json = new ObjectMapper();
 
+    @Test void slowSubjectCannotHoldRegistrationOrReturnEvidenceAfterScopeChanges() throws Exception {
+        var entered=new java.util.concurrent.CountDownLatch(1);var release=new java.util.concurrent.CountDownLatch(1);
+        var catalog=new Catalog("1",List.of());var other=new Scope(TENANT,CLIENT,OWNER,"another-agent");
+        registry.register("slow",scope,fence,catalog,()->{
+            entered.countDown();try{return release.await(10,java.util.concurrent.TimeUnit.SECONDS);}
+            catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
+        });
+        var pool=java.util.concurrent.Executors.newFixedThreadPool(2);
+        try{
+            var reading=pool.submit(()->registry.lookup(scope,fence));assertTrue(entered.await(5,java.util.concurrent.TimeUnit.SECONDS));
+            var changed=pool.submit(()->{
+                registry.register("other",other,fence,catalog,()->true);
+                assertEquals(State.AVAILABLE,registry.lookup(other,fence).state());
+                // Another live entry appears without replacing the original key: validating
+                // only the selected entry at the end would disclose an ambiguous subject.
+                registry.register("replacement",scope,fence,catalog,()->true);
+            });changed.get(5,java.util.concurrent.TimeUnit.SECONDS);release.countDown();
+            assertEquals(State.FENCED,reading.get(5,java.util.concurrent.TimeUnit.SECONDS).state());
+            assertEquals(State.AMBIGUOUS,registry.lookup(scope,fence).state());
+            registry.suspend("slow");assertEquals("replacement",registry.lookup(scope,fence).sessionId());
+            registry.remove("replacement");assertEquals(State.DISCONNECTED,registry.lookup(scope,fence).state());
+        }finally{release.countDown();pool.shutdownNow();}
+    }
+
     Fixture fixture() throws Exception {
         var f = new Fixture(false); f.handler.setSkillExecutionSessions(registry);
         when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))

@@ -15,7 +15,10 @@ import java.util.function.BooleanSupplier;
 public final class SkillExecutionSessionRegistry implements SkillCapabilityLookup, cn.jia.agent.service.SkillCatalogIndexHints {
     private record Key(String sessionId, String agentId) { }
     private record Entry(Key key, Scope scope, SessionFence fence, Catalog catalog, BooleanSupplier current) { }
-    private final ConcurrentHashMap<Key, Entry> entries = new ConcurrentHashMap<>();
+    // Writers own the reverse key index under this monitor. Readers use immutable per-subject
+    // snapshots; a slow native authority callback must not hold the registration monitor.
+    private final java.util.Map<Key,Entry> entries = new java.util.HashMap<>();
+    private final ConcurrentHashMap<Scope,java.util.List<Entry>> subjects = new ConcurrentHashMap<>();
 
     private final ConcurrentHashMap<Key,Entry> watermarks=new ConcurrentHashMap<>();
 
@@ -34,7 +37,14 @@ public final class SkillExecutionSessionRegistry implements SkillCapabilityLooku
             if(order<0 || order==0&&!sameMeasuredFacts(previous.catalog(),catalog)) throw new IllegalArgumentException("Skill catalog revision conflict");
         }
         var entry=new Entry(key,trustedScope,trustedFence,catalog,Objects.requireNonNull(currentBinding));
-        entries.put(key,entry);if(catalog!=null)watermarks.put(key,entry);
+        var old=entries.put(key,entry);
+        if(old!=null && !trustedScope.equals(old.scope()))unlink(old);
+        subjects.compute(trustedScope,(unused,rows)->{
+            var next=new java.util.ArrayList<Entry>();
+            if(rows!=null)for(var row:rows)if(row!=old)next.add(row);
+            next.add(entry);return java.util.List.copyOf(next);
+        });
+        if(catalog!=null)watermarks.put(key,entry);
     }
 
     private static boolean sameMeasuredFacts(Catalog previous,Catalog next) {
@@ -53,23 +63,33 @@ public final class SkillExecutionSessionRegistry implements SkillCapabilityLooku
     }
 
     public synchronized void suspend(String sessionId) {
-        if(sessionId!=null)entries.entrySet().removeIf(e->sessionId.equals(e.getKey().sessionId()));
+        if(sessionId!=null)entries.values().removeIf(entry->{
+            if(!sessionId.equals(entry.key().sessionId()))return false;
+            unlink(entry);return true;
+        });
+    }
+    private void unlink(Entry entry){
+        subjects.computeIfPresent(entry.scope(),(unused,rows)->{
+            var next=rows.stream().filter(row->row!=entry).toList();return next.isEmpty()?null:next;
+        });
     }
     public synchronized void remove(String sessionId) {
         suspend(sessionId);
         if(sessionId!=null)watermarks.entrySet().removeIf(e->sessionId.equals(e.getKey().sessionId()));
     }
 
-    @Override public synchronized View lookup(Scope scope, SessionFence expectedFence) {
+    @Override public View lookup(Scope scope, SessionFence expectedFence) {
         Objects.requireNonNull(scope); SkillCapabilityLookup.validateFence(expectedFence);
+        var snapshot=subjects.get(scope);
+        if(snapshot==null)return View.unavailable(State.DISCONNECTED);
         Entry selected = null;
-        for (var entry : entries.values()) {
-            if (!entry.scope().equals(scope) || !current(entry)) continue;
+        for (var entry : snapshot) {
+            if (!current(entry)) continue;
             if (selected != null) return View.unavailable(State.AMBIGUOUS);
             selected = entry;
         }
         if (selected == null) return View.unavailable(State.DISCONNECTED);
-        if (!selected.fence().equals(expectedFence) || !current(selected) || entries.get(selected.key()) != selected)
+        if (!selected.fence().equals(expectedFence) || !current(selected) || subjects.get(scope) != snapshot)
             return View.unavailable(State.FENCED);
         if (selected.catalog() == null) return View.unavailable(State.INVALID_DECLARATION);
         return new View(State.AVAILABLE, selected.key().sessionId(), selected.fence(), selected.catalog());
@@ -77,7 +97,7 @@ public final class SkillExecutionSessionRegistry implements SkillCapabilityLooku
 
     @Override public java.util.List<cn.jia.agent.service.SkillCatalogIndexHints.Key> local(String tenant,String optionalClient){
         // Weakly consistent hints. lookup() on the eventual claim rechecks the live predicate and ambiguity.
-        return entries.values().stream().map(Entry::scope).filter(s->tenant.equals(s.tenantId())&&(optionalClient==null||optionalClient.equals(s.clientId())))
+        return subjects.keySet().stream().filter(s->tenant.equals(s.tenantId())&&(optionalClient==null||optionalClient.equals(s.clientId())))
                 .map(s->new cn.jia.agent.service.SkillCatalogIndexHints.Key(s.tenantId(),s.clientId(),s.agentId())).distinct().toList();
     }
     private static boolean current(Entry entry) {
