@@ -5,7 +5,7 @@ import cn.jia.economy.pricing.TaskNeighborSearch;
 
 /** No HTTP writer. An offline publisher owns source admission, independently retained evidence and monotonic head generations. */
 public interface TaskCalibrationCatalog {
-    record Receipt(String estimatorVersion,String datasetSha256,String splitSha256,String referenceBookSha256,String policySha256,
+    record Receipt(String estimatorVersion,String datasetSha256,String splitSha256,String referenceBookSha256,String policySha256,String trainingBenchmarksSha256,
                    TaskEstimateCalibration.Gate gate,TaskEstimateCalibration.Report report){}
     record Pin(String group,long generation,String receiptSha256){}
     record Active(Pin pin,TaskNeighborSearch.Parameters parameters){}

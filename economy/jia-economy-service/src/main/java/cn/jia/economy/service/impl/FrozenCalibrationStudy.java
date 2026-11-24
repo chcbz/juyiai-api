@@ -31,10 +31,14 @@ public final class FrozenCalibrationStudy {
     public record Dataset(TaskEstimateCalibration.PrivateGroup group,List<Member> members){}
     public record Policy(String evaluatorVersion,List<TaskEstimateCalibration.Trial> trials,TaskEstimateCalibration.Gate gate,long seed){}
     // Changing scoring, temporal split, trial selection, bootstrap or wire semantics requires a new study version.
-    public static final String VERSION="private-scoped-study-v3";
+    public static final String VERSION="private-scoped-study-v4";
     public record Artifact(String sha256,String json){@Override public String toString(){return "Artifact[private]";}}
     public record Pins(String split,String dataset,String reference,String policy){}
-    public record Result(TaskCalibrationCatalog.Receipt receipt,TaskEstimateCalibration.EvaluationReport report){}
+    /** Verified TRAIN observations only. A private commitment, not permission to quote. */
+    public record TrainingBenchmarks(TaskEstimateCalibration.PrivateGroup owner,Pins inputs,List<Member> members){
+        public TrainingBenchmarks{members=List.copyOf(members);}
+    }
+    public record Result(TaskCalibrationCatalog.Receipt receipt,TaskEstimateCalibration.EvaluationReport report,Artifact trainingBenchmarks){}
     private record Rate(String kind,String component,String type,String body){}
     private record Book(String version,List<Rate> rates){}
     public Artifact freeze(Object value){String body=json.writeValueAsString(value);return new Artifact(hash(body),body);}
@@ -66,6 +70,7 @@ public final class FrozenCalibrationStudy {
                 ||!group.execution().routeVersion().equals(book.version())||!VERSION.equals(policy.evaluatorVersion()))throw new IllegalArgumentException("Wrong study inputs");
         var byTask=new HashMap<String,Member>();for(var m:data.members())if(byTask.putIfAbsent(m.task(),m)!=null)throw new IllegalArgumentException("Duplicate dataset task");
         var samples=new ArrayList<TaskEstimateCalibration.Sample>();var scope=new EconomyScope(owner.tenantId(),owner.clientId());
+        var training=new TreeMap<String,Member>();
         for(var a:split.assignments()){
             var m=byTask.remove(a.task());if(m==null)throw new IllegalArgumentException("Missing or repeated assigned task");
             var pin=m.benchmark();var planned=a.benchmarkCase();
@@ -75,9 +80,11 @@ public final class FrozenCalibrationStudy {
             var task=new Task(scope,owner.ownerJiacn(),a.task());
             samples.add(m.benchmark()==null?observations.replay(task,group,m.source(),a.family(),a.split(),m.observationSha256(),bytes):
                     FrozenBenchmarkObservation.replay(json,task,group,m.source(),m.benchmark(),a.family(),a.split(),m.observationSha256(),bytes));
+            if(pin!=null && a.split()==Split.TRAIN)training.put(a.task(),m);
         }if(!byTask.isEmpty())throw new IllegalArgumentException("Unassigned dataset member");
         var report=TaskEstimateCalibration.evaluateWithIntervals(owner,book,samples,policy.trials(),policy.gate(),policy.seed());
-        var receipt=new TaskCalibrationCatalog.Receipt(TaskNeighborSearch.VERSION,pins.dataset(),pins.split(),pins.reference(),pins.policy(),policy.gate(),report.points());
-        return new Result(receipt,report);
+        var eligible=freeze(new TrainingBenchmarks(owner,pins,List.copyOf(training.values())));
+        var receipt=new TaskCalibrationCatalog.Receipt(TaskNeighborSearch.VERSION,pins.dataset(),pins.split(),pins.reference(),pins.policy(),eligible.sha256(),policy.gate(),report.points());
+        return new Result(receipt,report,eligible);
     }
 }

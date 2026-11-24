@@ -99,6 +99,11 @@ class DatabaseTaskPricingServiceTest {
         String coldData=keep.apply(new FrozenCalibrationStudy.Dataset(owner,cold)),mixedData=keep.apply(new FrozenCalibrationStudy.Dataset(owner,mixed));
         java.util.function.BiFunction<String,String,FrozenCalibrationStudy.Result> score=(r,d)->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(r,d,book.sha256(),policy),objects::get);
         var all=score.apply(coldRoster,coldData);var joined=score.apply(mixedRoster,mixedData);assertEquals(all.report(),joined.report());assertEquals(joined,score.apply(mixedRoster,mixedData));
+        var exported=json.readValue(joined.trainingBenchmarks().json(),FrozenCalibrationStudy.TrainingBenchmarks.class);
+        assertEquals(owner,exported.owner());assertEquals(mixedData,exported.inputs().dataset());
+        assertEquals(java.util.List.of(mixed.stream().filter(m->m.task().equals("TRAIN")).findFirst().orElseThrow()),exported.members());
+        assertEquals(study.freeze(exported).sha256(),joined.receipt().trainingBenchmarksSha256());
+        assertNotEquals(all.receipt().trainingBenchmarksSha256(),joined.receipt().trainingBenchmarksSha256());
         assertEquals("fixed",joined.report().points().winner().trial());assertFalse(joined.report().points().meetsPointCriteria());assertEquals(1,joined.report().points().holdout().underestimates());
         assertEquals(0,joined.report().points().holdout().wape().compareTo(new TaskEstimateEvaluation.Ratio(BigDecimal.valueOf(9),BigDecimal.TEN)));
         assertThrows(IllegalArgumentException.class,()->score.apply(mixedRoster,coldData));assertThrows(IllegalArgumentException.class,()->score.apply(coldRoster,mixedData));
