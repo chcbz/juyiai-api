@@ -1291,6 +1291,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(50, wallet(independent)); assertEquals(2, count("economy_transaction"));
     }
 
+    @Test void pausedAssignmentRejectsNewIntentButPreservesReplayAndCancellation() throws Exception {
+        prepareCancellation(); startHttp();
+        var pause = new cn.jia.agent.service.TaskAssigneeAdmission(true);
+        ReflectionTestUtils.setField(assignment,"admission",pause);
+        httpPost("/point-and-deliberate",pointBody(),"assign-http",false,401);
+        pointHttp(503); assertAssignmentAbsent();
+        ReflectionTestUtils.setField(assignment,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(false));
+        pointHttp(200);
+        ReflectionTestUtils.setField(assignment,"admission",pause); pointHttp(200);
+        assertEquals(1,count("economy_transaction")); assertEquals(1,count("agent_task_execution_grant"));
+        prepareRetry(); httpPost("/cancel","{\"expectedTaskVersion\":\"1\"}","cancel-http",true,200); assertCancelled();
+    }
+
     @Test void realHttpCancellationReleasesOnceAndRejectsUnauthenticatedMutation() throws Exception {
         prepareCancellation(); startHttp();
         httpPost("/point-and-deliberate", pointBody(), "assign-http", false, 401);
@@ -2250,6 +2263,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertFalse(item.path("amount").isObject());assertFalse(item.path("quoteId").isString());assertEquals(3,calls.get());
             assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
             assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
+            var intents=ReflectionTestUtils.getField(ReflectionTestUtils.getField(independentQuoteController,"quotes"),"intents");
+            ReflectionTestUtils.setField(intents,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(true));
+            assertEquals(original,http.post(agent,key,200,"E0"));
+            http.post("changed-target",key,409,"QUOTE_IDEMPOTENCY_CONFLICT");
+            http.post(agent,"paused-intent",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
         }
         assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
@@ -2402,6 +2420,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
                     jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('foreign-rec','different-owner',?,?)",TENANT,CLIENT);
                     checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");assertEquals(before,es.encodes.get());
+                    var svc=ReflectionTestUtils.getField(recommendationController,"recommendations");
+                    ReflectionTestUtils.setField(svc,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(true));
+                    checkRecError(task,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");
+                    assertEquals(before,es.encodes.get());ReflectionTestUtils.setField(svc,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(false));
                     String other=expected.stream().skip(9).findFirst().orElseThrow();var ids=java.util.Set.of(onlySkill,other);
                     assertEquals(ids,auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
                     // Same fence and even the same socket ID after disconnect are not the same observed binding.

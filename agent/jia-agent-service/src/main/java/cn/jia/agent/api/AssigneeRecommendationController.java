@@ -17,7 +17,7 @@ import static cn.jia.agent.entity.AssigneeRecommendation.*;
 /** Replaces (does not coexist with) AgentController's rule-scored recommendation endpoint. */
 @RestController
 @RequestMapping("/agent/tasks")
-public final class AssigneeRecommendationController {
+public final class AssigneeRecommendationController implements TaskAssigneeAdmissionErrors {
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(AssigneeRecommendationController.class);
     private final AssigneeRecommendationService recommendations;
     public AssigneeRecommendationController(AssigneeRecommendationService recommendations) {

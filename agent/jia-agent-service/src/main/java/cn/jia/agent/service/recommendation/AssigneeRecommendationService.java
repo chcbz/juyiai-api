@@ -14,6 +14,9 @@ import static cn.jia.agent.entity.AssigneeRecommendation.*;
  * Never assigns the task, generates a judgement, quotes a price or reads a wallet. */
 @Service
 public final class AssigneeRecommendationService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private cn.jia.agent.service.TaskAssigneeAdmission admission = new cn.jia.agent.service.TaskAssigneeAdmission(false);
+
     private final AgentService agents;
     private final CandidateSuitability suitability;
     private final SkillManagementService skills;
@@ -31,6 +34,7 @@ public final class AssigneeRecommendationService {
         if(request==null || request.expectedTaskVersion()==null || request.expectedTaskVersion().isBlank()) throw new Failure(400,"BAD_REQUEST");
         var task = transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,
                 root->task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion()));
+        admission.requireOpen();
         var observed = observe(actor, taskId);
         var inputs = observed.isEmpty() ? List.<RecommendationMaterials.Observation>of() : materials.observe(actor,taskId);
         var time = System.currentTimeMillis();
