@@ -2914,7 +2914,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     es.index(TENANT,CLIENT,OWNER,id,abilities);if(i%8==1){installed.installed(id);if(i==1)installed.retained(id);es.indexSkill(TENANT,CLIENT,id,skills);}expected.add(id);
                 }
                 if(n==108){for(var cursor:List.of("",expected.stream().skip(99).findFirst().orElseThrow())){explainRecPage(cursor);}}
-                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es,installed);
+                es.refresh();assertEquals(n==1?2L:228L,es.documentCount());measureRecommendationHttp(task,expected,es,installed,req);
                 if(n==1){String agent=expected.iterator().next();
                     assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
                     String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
@@ -3062,17 +3062,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 """,(rs,n)->{var count=rs.getObject(1);var millis=rs.getObject(2);assertNotNull(count);assertNotNull(millis);return new long[]{rs.getLong(1),rs.getLong(2)};});
         return new RecSql(values[0],values[1],values[2],values[3],values[4],lock[0],lock[1]);
     }
-    private void measureRecommendationHttp(String task, java.util.Set<String> expected, cn.jia.agent.service.recommendation.RecommendationHttpTestWiring es,cn.jia.agent.skill.InstalledPurposeHttpFixture installed) throws Exception {
+    private void measureRecommendationHttp(String task, java.util.Set<String> expected, cn.jia.agent.service.recommendation.RecommendationHttpTestWiring es,cn.jia.agent.skill.InstalledPurposeHttpFixture installed,AgentTaskRequirementSnapshotService reqs) throws Exception {
         var encodes=es.encodes;int before=encodes.get();String token=httpToken();var mapper=new ObjectMapper();
         try(var client=HttpClient.newHttpClient()){
             record Observation(long nanos,boolean degraded,boolean invalid){}
-            class Probe { Observation run(String id)throws Exception{
-                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+token)
+            class Probe { Observation run(String id)throws Exception{return run(task,id);}
+                Observation run(String requested,String id)throws Exception{
+                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+requested+"/recommend")).header("Authorization","Bearer "+token)
                     .header("Content-Type","application/json").header("X-Request-Id",id).timeout(java.time.Duration.ofSeconds(20))
                     .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\""+id+"\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
                 long t=System.nanoTime();var res=client.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
                 var env=mapper.readTree(res.body());var data=env.path("data");var rows=data.path("recommendations");var seen=new java.util.HashSet<String>();
-                boolean bad=res.statusCode()!=200||!"E0".equals(env.path("code").asText())||!id.equals(env.path("requestId").asText())||!task.equals(data.path("taskId").asText())||!"0".equals(data.path("taskVersion").asText())||!data.path("candidateSetComplete").asBoolean()||!rows.isArray();
+                boolean bad=res.statusCode()!=200||!"E0".equals(env.path("code").asText())||!id.equals(env.path("requestId").asText())||!requested.equals(data.path("taskId").asText())||!"0".equals(data.path("taskVersion").asText())||!data.path("candidateSetComplete").asBoolean()||!rows.isArray();
                 for(var row:rows)if(!seen.add(row.at("/agent/agentId").asText())||row.path("evidence").size()==0||!"UNKNOWN".equals(row.path("recommendationLevel").asText()))bad=true;
                 if(id.startsWith("rec-slow-fail-"))bad|=!"DEGRADED".equals(data.path("state").asText())||!"LEXICAL_ONLY".equals(data.path("retrievalMode").asText())||!data.path("degradedReasons").equals(mapper.valueToTree(List.of("QUERY_VECTOR_UNAVAILABLE")));
                 return new Observation(elapsed,!"HYBRID".equals(data.path("retrievalMode").asText()),bad||!seen.equals(expected));
@@ -3093,6 +3094,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }
             var cold=probe.run("rec-cold-"+expected.size());assertFalse(cold.invalid());assertFalse(cold.degraded());assertEquals(before+1,encodes.get());es.slowQuery=false;
             for(int concurrency:List.of(1,5,10)){
+                es.resetStages();
                 long execBefore=installed.inventoryExecutions();long sharedBefore=sharedTaskRootSelects();var proofBefore=proofSelects();long inventoryBefore=paidInventorySelects();var sqlBefore=readRecSql();var shapes=concurrency==1?recShapes():null;
                 int invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
                 try(var pool=java.util.concurrent.Executors.newFixedThreadPool(concurrency)){
@@ -3128,7 +3130,28 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 System.out.printf(java.util.Locale.ROOT,"RECOMMEND_MYSQL candidates=%d concurrency=%d n=%d selects=%d rowsExamined=%d rowsSent=%d sumSelectMs=%.3f matchingRootLocks=%d rowWaits=%d sumRowWaitMs=%d%n",expected.size(),concurrency,times.size(),delta.statements(),delta.examined(),delta.sent(),delta.statementPicos()/1e9,delta.roots(),delta.waits(),delta.waitMillis());
                 assertEquals(0,delta.roots(),"pure recommendation reads must not take exclusive task locks");
                 assertTrue(delta.statements()>0 && delta.examined()>0 && delta.sent()>0 && delta.statementPicos()>0,"missing statement observations");assertTrue(delta.waits()>=0 && delta.waitMillis()>=0);
-                assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
+                assertEquals(0,es.reportStages("hot",expected.size(),concurrency));assertEquals(0,invalid);assertEquals(0,degraded);assertEquals(before+1,encodes.get());
+            }
+            // Distinct authorized tasks AND texts per cold request; no test-only cache reset, no shared producer.
+            for(int lanes:List.of(1,5,10)){
+                var tasks=new java.util.ArrayList<String>();
+                for(int i=0;i<30;i++){
+                    String key=task+"-cold-"+lanes+"-"+i;
+                    jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",key,OWNER,TENANT,CLIENT);
+                    roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,key,r->reqs.captureOnCreate(SCOPE,key,"合同审查 "+key,"核对合同条款"));
+                    jdbc.update("INSERT INTO agent_personal_workspace_task_file_link(relation_id,owner_jiacn,task_id,file_id,file_version,link_role,link_state,relation_revision,created_at,tenant_id,client_id) VALUES(?,?,?,?,1,'INPUT','ACTIVE',1,1,?,?)",key,OWNER,key,"file-"+expected.size(),TENANT,CLIENT);
+                    tasks.add(key);
+                }
+                es.resetStages();int start=encodes.get(),invalid=0,degraded=0;var times=new java.util.ArrayList<Long>();
+                try(var pool=java.util.concurrent.Executors.newFixedThreadPool(lanes)){
+                    for(int base=0;base<tasks.size();base+=lanes){var gate=new java.util.concurrent.CyclicBarrier(lanes);var pending=new java.util.ArrayList<java.util.concurrent.Future<Observation>>();
+                        for(String key:tasks.subList(base,base+lanes))pending.add(pool.submit(()->{gate.await(15,java.util.concurrent.TimeUnit.SECONDS);return probe.run(key,"rec-"+key);}));
+                        for(var f:pending){var x=f.get(25,java.util.concurrent.TimeUnit.SECONDS);times.add(x.nanos());if(x.invalid())invalid++;if(x.degraded())degraded++;}
+                    }
+                }
+                times.sort(Long::compare);int calls=encodes.get()-start;
+                System.out.printf(java.util.Locale.ROOT,"RECOMMEND_DISTINCT_COLD candidates=%d concurrency=%d n=%d encodes=%d degraded=%d invalid=%d p50ms=%.3f p95ms=%.3f maxms=%.3f%n",expected.size(),lanes,times.size(),calls,degraded,invalid,times.get(14)/1e6,times.get(28)/1e6,times.getLast()/1e6);
+                assertEquals(calls,es.reportStages("cold",expected.size(),lanes));assertEquals(30,calls+degraded);assertEquals(0,invalid);
             }
         }
     }

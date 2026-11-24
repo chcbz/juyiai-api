@@ -26,6 +26,17 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
         var value=new tools.jackson.databind.ObjectMapper().readTree(response.body()).at("/_all/total/search/open_contexts");
         assertTrue(value.isIntegralNumber());return value.asLong();
     }
+    private final io.micrometer.observation.ObservationRegistry registry=io.micrometer.observation.ObservationRegistry.create();
+    private final java.util.concurrent.ConcurrentMap<String,java.util.concurrent.ConcurrentLinkedQueue<Long>> stages=new java.util.concurrent.ConcurrentHashMap<>();
+    public void resetStages(){stages.clear();} // only between completed request windows
+    public int reportStages(String temperature,int n,int lanes){
+        for(var e:new java.util.TreeMap<>(stages).entrySet()){
+            var times=e.getValue().stream().sorted().toList();
+            System.out.printf(java.util.Locale.ROOT,"RECOMMEND_STAGE temperature=%s candidates=%d concurrency=%d stage=%s count=%d p95ms=%.3f%n",temperature,n,lanes,e.getKey(),times.size(),times.get((95*times.size()+99)/100-1)/1e6);
+        }
+        for(String k:List.of("candidate.read.initial","candidate.read.recheck","search.lexical","rank"))assertEquals(30,stages.get(k).size(),k);
+        return stages.getOrDefault("feature.encode",new java.util.concurrent.ConcurrentLinkedQueue<>()).size();
+    }
     public final AssigneeRecommendationController controller;
     public RecommendationHttpTestWiring(AgentService agents,SkillManagementService skills,RecommendationMaterials materials,AgentTaskRootObservation roots)throws Exception {
         int port=Integer.parseInt(System.getProperty("cyf.capabilityEsPort"));String cluster=System.getProperty("cyf.capabilityEsCluster");
@@ -38,7 +49,17 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
             try(var mapping=Objects.requireNonNull(getClass().getResourceAsStream("/elasticsearch/agent-capability-evidence-v1.json"))){client.indices().create(b->b.index(CapabilityIndexWriter.GENERATION).withJson(mapping));}
             var factory=new DefaultListableBeanFactory();factory.registerSingleton("es",client);var clients=factory.getBeanProvider(ElasticsearchClient.class);writer=new CapabilityIndexWriter(clients);
             var encoder=new TaskFeatureEncoder(){public Identity identity(){return id;}public Vector encode(String text){assertTrue(text.contains("原始文件名: pinned-v1-"));assertFalse(text.contains("unselected-v2"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));encodes.incrementAndGet();if(slowQuery){try{Thread.sleep(4000);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}if(failQuery)throw new TaskFeatureEncoder.Unavailable();}return vector();}};
-            controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10)),new CapabilitySearch(clients),roots,new CandidateSuitability("","")));
+            registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+                public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+                public void onStart(io.micrometer.observation.Observation.Context c){c.put("fixtureStart",System.nanoTime());}
+                public void onStop(io.micrometer.observation.Observation.Context c){
+                    String k=c.getName().replace("cyf.task.recommendation.","").replace("cyf.task.","");
+                    for(var tag:c.getLowCardinalityKeyValues())if(List.of("phase","route","path").contains(tag.getKey()))k+="."+tag.getValue();
+                    long start=c.get("fixtureStart");stages.computeIfAbsent(k,ignored->new java.util.concurrent.ConcurrentLinkedQueue<>()).add(System.nanoTime()-start);
+                }
+            });
+            var reg=java.util.Optional.of(registry);
+            controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10),reg),new CapabilitySearch(clients,reg),roots,new CandidateSuitability("",""),reg));
         }catch(Exception|Error failure){try{client.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
     /** Real root reader; probes must remain untouched for every stopped or invisible request. */
