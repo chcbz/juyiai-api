@@ -48,6 +48,37 @@ public final class FrozenCalibrationStudy {
             String type=switch(r){case MeasuredTaskRepricing.TokenRate ignored->"token";case MeasuredTaskRepricing.UnitRate ignored->"unit";case MeasuredTaskRepricing.ExplicitZero ignored->"zero";};
             rows.add(new Rate(k,c,type,json.writeValueAsString(r)));}));return freeze(new Book(book.version(),rows));
     }
+    /** Offline collector only: freeze every operation in the server-resolved contract in one catalog snapshot. */
+    public Artifact freezeContractReference(Task original,cn.jia.economy.task.TaskBudgetEstimator.Terms terms,cn.jia.economy.pricing.TaskReferencePricing prices){
+        if(terms.routes().isEmpty())throw new IllegalArgumentException("Missing evaluation price contract");
+        return freezeReference(prices.freeze(original.scope(),terms.execution().routeVersion(),terms.routes(),terms.routes().keySet()));
+    }
+    // Read original resolved LONGTEXT, not MySQL JSON_EXTRACT (which can normalize decimals).
+    private void verifyQuoteRates(String snapshot,MeasuredTaskRepricing.Reference book){
+        if(snapshot==null)throw new IllegalArgumentException("Missing original measured quote");
+        var exact=json.reader().with(tools.jackson.databind.DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        var root=exact.readTree(snapshot);var contributions=root.at("/preparation/estimate/contributions");
+        if(!"MEASURED_TASK_QUOTE_V1".equals(root.path("schema").asString())||!contributions.isArray()||contributions.isEmpty())throw new IllegalArgumentException("Missing measured contributions");
+        for(var contribution:contributions){
+            var repricing=contribution.path("repricing");var lines=repricing.path("lines");
+            if(!book.version().equals(repricing.path("referenceVersion").asString())||!lines.isArray()||lines.isEmpty())throw new IllegalArgumentException("Missing quoted price lines");
+            for(var line:lines){
+                var fact=line.path("fact");var rates=book.byKind().get(fact.path("kind").asString());
+                var rate=rates==null?null:rates.get(fact.path("component").asString());
+                if(rate==null||!sameRate(line.path("price"),exact.readTree(json.writeValueAsString(rate))))throw new IllegalArgumentException("Quoted rate differs from evaluation book");
+            }
+        }
+    }
+    /** Current sealed rates contain only objects, scalars and category maps. Compare decimal values, not double/scale or key order. */
+    private static boolean sameRate(tools.jackson.databind.JsonNode a,tools.jackson.databind.JsonNode b){
+        if(a.isNumber()&&b.isNumber())return a.decimalValue().compareTo(b.decimalValue())==0;
+        if(a.isObject()&&b.isObject()){
+            if(a.size()!=b.size())return false;
+            for(var field:b.properties())if(!sameRate(a.path(field.getKey()),field.getValue()))return false;
+            return true;
+        }
+        return a.equals(b);
+    }
     /** Private input pinned before confirmation/outcome, from the published forecast and the evaluation book. */
     public record OfferedHoldout(Task original,String family,String groupSha,String featureSha,String quoteId,String agentId,long wen,String referenceSha){
         @Override public String toString(){return "OfferedHoldout[private]";}}
@@ -55,13 +86,16 @@ public final class FrozenCalibrationStudy {
         @Override public String toString(){return "ConfirmedPoint[private]";}}
     /** Single compatible confirmed case, NOT the eligible population or a fallback for missing whole-task truth. */
     public ConfirmedPoint confirmedPoint(Task original,TaskHistoryCatalog.Group group,TaskHistoryCatalog.Revision revision,
-            String forecastSha,Function<String,String> objects){
+            String forecastSha,Function<String,String> objects,cn.jia.economy.mapper.EconomyTaskBillingMapper quotes){
         var offer=read(objects,forecastSha,OfferedHoldout.class);
         if(!original.equals(offer.original())||!group.digest().equals(offer.groupSha()))throw new IllegalArgumentException("Wrong holdout task or group");
         var book=reference(read(objects,offer.referenceSha(),Book.class));
         if(!group.execution().routeVersion().equals(book.version()))throw new IllegalArgumentException("Wrong reference version");
         var bound=observations.freezeConfirmedQuote(original,group,revision,offer.family(),Split.HOLDOUT,offer.quoteId(),offer.agentId());
         if(bound.amountWen()!=offer.wen())throw new IllegalArgumentException("Forecast differs from immutable quote");
+        var quote=quotes.findQuote(original.scope().tenantId(),original.scope().clientId(),original.ownerJiacn(),original.taskId(),bound.quoteId());
+        if(quote==null)throw new IllegalArgumentException("Missing confirmed quote");
+        verifyQuoteRates(quote.getSnapshotJson(),book);
         var frozen=bound.observation();var sample=observations.replay(original,group,revision,offer.family(),Split.HOLDOUT,frozen.sha256(),frozen.json());
         if(!sample.features().digest().equals(offer.featureSha()))throw new IllegalArgumentException("Wrong forecast features");
         var actual=MeasuredTaskRepricing.reprice(book,sample.facts());

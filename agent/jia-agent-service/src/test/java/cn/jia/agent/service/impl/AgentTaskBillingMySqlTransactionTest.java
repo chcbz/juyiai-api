@@ -825,9 +825,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),observations);
         var offer=measuredOffer();var offeredGroup=cn.jia.economy.task.TaskHistoryCatalog.Group.of(offer.preparation().group(),offer.features());
-        var book=study.freezeReference(fixtureReference());
+        var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
+        var allTerms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(offeredGroup.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(unit)),
+                "MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        var book=study.freezeContractReference(BILLING_TASK,allTerms,(scope,version,routes,kinds)->{assertEquals(BILLING_TASK.scope(),scope);assertEquals("r1",version);
+            assertEquals(allTerms.routes(),routes);assertEquals(java.util.Set.of("draw","MODEL_RESPONSE"),kinds);return fixtureReference();});
+        // Same contract version and same rounded forecast, even identical model rates for all actual operations.
+        // Only the tool rate used by the original neighbour differs in the 25th decimal place.
+        var changed=study.freezeReference(new MeasuredTaskRepricing.Reference("r1",Map.of("MODEL_RESPONSE",fixtureReference().byKind().get("MODEL_RESPONSE"),
+                "draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.2500000000000000000000001")))))));
+
         var before=new cn.jia.economy.service.impl.FrozenCalibrationStudy.OfferedHoldout(BILLING_TASK,"frozen-family",offeredGroup.digest(),offer.features().digest(),offer.offer().quoteId(),offer.binding().agentId(),offer.offer().amountWen(),book.sha256());
         var forecast=study.freeze(before);var artifacts=Map.of(book.sha256(),book.json(),forecast.sha256(),forecast.json());
+        var drift=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.OfferedHoldout(before.original(),before.family(),before.groupSha(),before.featureSha(),before.quoteId(),before.agentId(),before.wen(),changed.sha256()));
+        var driftObjects=Map.of(changed.sha256(),changed.json(),drift.sha256(),drift.json());
         assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
         confirmMeasured(offer);String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
         assertNull(sampleEvidence.inspect(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),sid));
@@ -889,10 +900,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
         locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
         var pointRecordedQuote=verifyHistoryQuoteHttp(query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms);
-        var point=study.confirmedPoint(BILLING_TASK,group,selected,forecast.sha256(),artifacts::get);
+        var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
+        var point=study.confirmedPoint(BILLING_TASK,group,selected,forecast.sha256(),artifacts::get,quotes);
+        var mismatch=assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,drift.sha256(),driftObjects::get,quotes));
+        assertEquals("Quoted rate differs from evaluation book",mismatch.getMessage());
         assertEquals(25L,point.point().predictedWen().longValue());assertEquals(0,new BigDecimal("0.65").compareTo(point.point().truthYuan()));
         var wrong=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.OfferedHoldout(before.original(),before.family(),before.groupSha(),before.featureSha(),before.quoteId(),before.agentId(),65,before.referenceSha()));
-        assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,wrong.sha256(),Map.of(book.sha256(),book.json(),wrong.sha256(),wrong.json())::get));
+        assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,wrong.sha256(),Map.of(book.sha256(),book.json(),wrong.sha256(),wrong.json())::get,quotes));
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
         String confirmedQuote=jdbc.queryForObject("SELECT quote_id FROM economy_task_charge WHERE task_id=?",String.class,TASK);
