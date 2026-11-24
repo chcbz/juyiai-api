@@ -213,10 +213,14 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         try {
             Path peer=Path.of(System.getProperty("ownedMeteredRuntime")).resolve("conf/codex-bridge/test/fixtures/metered-java-peer.mjs");assertTrue(Files.isRegularFile(peer));
             for(String phase:cutover?List.of("stop","resume"):List.of("")){
-            var pb=new ProcessBuilder("node",peer.toString());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
+            String fixture=System.getProperty("ownedRuntimeRepairFixture");
+            boolean repaired=phase.equals("resume") && fixture!=null;
+            var pb=repaired?new ProcessBuilder("python3","-B",Path.of(System.getProperty("ownedCutoverController"),"ops/orchestration/tests/runtime_cutover_resume_probe.py").toString(),fixture,peer.toString(),temp.toString()):new ProcessBuilder("node",peer.toString());
+            if(repaired)pb.redirectError(temp.resolve("runtime-repair.log").toFile());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
             try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("cutover",phase,"rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());if(phase.equals("stop")){assertEquals(75,child.exitValue());assertNotNull(cuts.get());webCutoverWindow(temp,cuts.get());continue;}
-                assertEquals(0,child.exitValue(),"Runtime peer failed: "+trace);
+                assertEquals(0,child.exitValue(),repaired?Files.readString(temp.resolve("runtime-repair.log")):"Runtime peer failed: "+trace);
+                if(repaired){var proof=json.readTree(Files.readAllBytes(temp.resolve("runtime-repair-proof.json")));assertEquals("forward_only_repair_required",proof.path("failure").asText());assertTrue(proof.path("pendingUnchanged").asBoolean());assertFalse(proof.required("donorStarted").asBoolean());}
                 var report=json.readTree(child.getInputStream().readAllBytes());assertEquals(rotate?4:successor?9:7,report.path("ackCount").asInt());assertEquals(cuts.get(),report.path("receiptId").asText());if(rotate)assertEquals(1,report.path("pending").asInt());else assertEquals("1",report.path("revision").asText());
             }finally{if(child.isAlive()){child.destroyForcibly();child.waitFor();}}
             }

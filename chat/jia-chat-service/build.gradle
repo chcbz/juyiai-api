@@ -516,7 +516,7 @@ tasks.register('nativeSkillResultRegression', Test) {
     classpath = nativeSkillResultSourceSet.runtimeClasspath
     useJUnitPlatform()
     maxParallelForks = 1
-    ['ownedCutoverController','ownedCutoverWebPackage'].each { key ->
+    ['ownedCutoverController','ownedCutoverWebPackage','ownedRuntimeRepairFixture'].each { key ->
         if (providers.gradleProperty(key).isPresent()) systemProperty key, providers.gradleProperty(key).get()
     }
     def meteredPeer = providers.gradleProperty('ownedMeteredRuntime')
