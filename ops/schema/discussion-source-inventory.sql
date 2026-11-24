@@ -1,7 +1,7 @@
 -- Read-only inventory, not a grant, proof of delivery, or permission to switch.
 -- Bind tenant, client, owner, task (in order); run with an already authorized read-only identity.
 WITH requested AS (SELECT ? AS tenant, ? AS client, ? AS owner_id, ? AS task)
-SELECT s.membership_revision AS set_revision,s.execution_count,s.execution_set_sha256,
+SELECT s.tenant_id,s.client_id,s.owner_jiacn,s.task_id,s.membership_revision AS set_revision,s.execution_count,s.execution_set_sha256,
        m.membership_revision AS member_revision,m.capture_id,m.execution_id,m.run_id,m.admission_sha256,t.target_agent_id,
        d.event_id,o.context_hash,SHA2(d.payload_json,256) AS payload_sha256,
        o.installation_id,o.host_id,o.runtime_instance_id,o.session_generation,

@@ -295,6 +295,14 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         if(liveDrain){assertNull(rotated.get());assertEquals(roster.get(),originalRevisions(device));assertEquals(roster.get().keySet(),durableDeviceReceipts(device,roster.get()));}
         if(missingSource){
             assertEquals(frozen,inventory());var ids=frozen.stream().map(r->(String)r.get("capture_id")).toList();assertEquals(2,new HashSet<>(ids).size());
+            var scopeFile=temp.resolve("scopes.json");var before=temp.resolve("before.json");var after=temp.resolve("after.json");
+            var first=frozen.getFirst();var scopeFields=List.of("tenant_id","client_id","owner_jiacn","task_id");var scopeRow=new HashMap<String,Object>();for(String k:scopeFields)scopeRow.put(k,first.get(k));
+            Files.write(scopeFile,json.writeValueAsBytes(List.of(scopeRow)));Files.write(before,json.writeValueAsBytes(frozen));
+            var plan=rosterCommand(temp,scopeFile,before,null,0);assertEquals(ids.stream().sorted().toList(),json.convertValue(plan.at("/devices/0/manifest/captureIds"),List.class));
+            Files.write(after,json.writeValueAsBytes(inventory().reversed()));assertTrue(rosterCommand(temp,scopeFile,before,after,0).required("inventoryUnchanged").asBoolean());
+            // An additional unmetered legacy member must invalidate the scope, not disappear from it.
+            tx.executeWithoutResult(st->{new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","legacy-turn","legacy-run","e".repeat(64),false);});
+            Files.write(after,json.writeValueAsBytes(inventory()));rosterCommand(temp,scopeFile,before,after,2);
             String probe="""
                 import {PersistentChatInbox} from './chat-runtime.mjs';import {ChatUsageDelivery} from './chat-usage-delivery.mjs';
                 const [rootDir,agentId,...ids]=process.argv.slice(1),inbox=new PersistentChatInbox({rootDir,profile:{agentId}});
@@ -304,8 +312,8 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             try{assertTrue(child.waitFor(15,TimeUnit.SECONDS));assertEquals(0,child.exitValue());var audit=json.readTree(child.getInputStream().readAllBytes());assertEquals(2,audit.required("expected").asInt());assertEquals(1,audit.required("acknowledged").asInt());assertEquals(1,audit.required("missing").asInt());assertEquals(0,audit.required("unexpected").asInt());}finally{child.destroyForcibly();}
             // Restore both original mappings before checking the independent authorization boundaries below.
             try{jdbc.update("UPDATE chat_task_dispatch_origin SET mixed_origin=TRUE WHERE event_id=?",payload.get("messageId"));
-            assertEquals(List.of("UNVERIFIED","MAPPED_SENT_ORIGIN"),inventory().stream().map(r->r.get("source_state")).toList());
-            jdbc.update("DELETE FROM chat_task_dispatch_origin");assertEquals(List.of("UNVERIFIED","UNVERIFIED"),inventory().stream().map(r->r.get("source_state")).toList());
+            assertEquals(List.of("UNVERIFIED","MAPPED_SENT_ORIGIN","UNVERIFIED"),inventory().stream().map(r->r.get("source_state")).toList());
+            jdbc.update("DELETE FROM chat_task_dispatch_origin");assertEquals(List.of("UNVERIFIED","UNVERIFIED","UNVERIFIED"),inventory().stream().map(r->r.get("source_state")).toList());
             }finally{seedOriginalOrigin(payload);seedOriginalOrigin(discussionPayload(true));}
         }
         if(rotate){
@@ -348,6 +356,10 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         facts.put("taskUsageCapture",Map.of("protocol","METERED_CAPTURE_V2","captureId",NativeCaptureEvidence.captureIdentity((String)wire.get("turnId"),(String)wire.get("dispatchId"))));
         String hash=cn.jia.chat.service.ChatDeliberationService.digest(Map.of("sourceVector",wire.get("sourceVector"),"facts",facts));wire.put("contextHash",hash);
         var snap=(Map<String,Object>)wire.get("contextSnapshot");snap.put("facts",facts);snap.put("contextHash",hash);return wire;
+    }
+    private tools.jackson.databind.JsonNode rosterCommand(Path temp,Path scopes,Path before,Path after,int expected)throws Exception{
+        var args=new ArrayList<>(List.of("node",Path.of("../../ops/schema/discussion_source_roster.mjs").toAbsolutePath().toString(),System.getProperty("ownedMeteredRuntime"),scopes.toString(),before.toString()));if(after!=null)args.add(after.toString());
+        var proc=new ProcessBuilder(args).redirectError(temp.resolve("inventory.err").toFile()).start();try{assertTrue(proc.waitFor(10,TimeUnit.SECONDS));assertEquals(expected,proc.exitValue(),Files.readString(temp.resolve("inventory.err")));byte[] out=proc.getInputStream().readAllBytes();if(expected!=0){assertEquals(0,out.length);return null;}return json.readTree(out);}finally{proc.destroyForcibly();}
     }
     void seedOriginalOrigin(Map<String,Object> w){new cn.jia.chat.deliberation.ChatTaskDispatchOriginStore(jdbc).observe((String)w.get("messageId"),(String)w.get("contextHash"),INSTALL,"host","rt",1);}
     void seedSentDiscussion(Map<String,Object> w,TaskDiscussionMembershipService members,cn.jia.chat.deliberation.ChatTaskDispatchOriginStore origins){
