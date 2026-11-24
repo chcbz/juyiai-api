@@ -507,8 +507,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private MeasuredNeighborEstimate.Estimate fixtureNeighborEstimate(){
         var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
         var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("source","op"),"draw","frame","fixture-proof",new MeasuredTaskRepricing.Units(unit,BigDecimal.ONE));
-        var reference=new MeasuredTaskRepricing.Reference("book",Map.of("draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
-        return MeasuredNeighborEstimate.aggregate(reference,List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
+        return MeasuredNeighborEstimate.aggregate(fixtureReference(),List.of(new MeasuredNeighborEstimate.Neighbor("training-case","7",BigDecimal.ONE,List.of(fact))));
+    }
+    private MeasuredTaskRepricing.Reference fixtureReference(){
+        var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
+        var token=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
+        return new MeasuredTaskRepricing.Reference("r1",Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",token)),
+                "draw",Map.of("frame",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("r1","fixture",new BigDecimal("0.25"))))));
     }
     @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {benchmarkOfferFence("stop-first");}
     @Test void benchmarkCaseQuoteFirstKeepsItsFixedPriceAfterRevocation() throws Exception {benchmarkOfferFence("quote-first");}
@@ -775,8 +780,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1,count("economy_transaction"));
     }
 
-    private void confirmMeasured(){
-        var prepared=measuredOffer();
+    private void confirmMeasured(){confirmMeasured(measuredOffer());}
+    private void confirmMeasured(PreparedFixture prepared){
         if(conflictOnDiscussionRetry){ // Fixture only: exercise full confirmation/history/calibration before enabling the compact writer.
             String raw=prepared.offer().snapshotJson();String body=new ObjectMapper().writeValueAsString(prepared.preparation());
             String sha=jdbc.queryForObject("SELECT SHA2(?,256)",String.class,body);
@@ -817,7 +822,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         verifyCurrentMemberEligibility();
     }
     private void verifyCurrentMemberEligibility() throws Exception {
-        confirmMeasured();String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
+        var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),observations);
+        var offer=measuredOffer();var offeredGroup=cn.jia.economy.task.TaskHistoryCatalog.Group.of(offer.preparation().group(),offer.features());
+        var book=study.freezeReference(fixtureReference());
+        var before=new cn.jia.economy.service.impl.FrozenCalibrationStudy.OfferedHoldout(BILLING_TASK,"frozen-family",offeredGroup.digest(),offer.features().digest(),offer.offer().quoteId(),offer.binding().agentId(),offer.offer().amountWen(),book.sha256());
+        var forecast=study.freeze(before);var artifacts=Map.of(book.sha256(),book.json(),forecast.sha256(),forecast.json());
+        assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
+        confirmMeasured(offer);String sid=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
         assertNull(sampleEvidence.inspect(new TaskBillingService.Task(BILLING_TASK.scope(),"other",TASK),sid));
         assertEquals("ACTIVE",sampleEvidence.inspect(BILLING_TASK,sid).verdict().name());prepareSubmitted();
         locked(()->{for(int i=0;i<65;i++){var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(TASK).setOwnerJiacn(OWNER).setExecutionId("exec"+i).setRunId("run").setRequestHash("a".repeat(64));m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(m.getExecutionId(),m.getRunId()));}return null;});
@@ -877,7 +889,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
         locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
         var pointRecordedQuote=verifyHistoryQuoteHttp(query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms);
-        var observations=proxy(new cn.jia.economy.service.impl.TaskHistoryCatalogService(recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskCalibrationObservations.class);
+        var point=study.confirmedPoint(BILLING_TASK,group,selected,forecast.sha256(),artifacts::get);
+        assertEquals(25L,point.point().predictedWen().longValue());assertEquals(0,new BigDecimal("0.65").compareTo(point.point().truthYuan()));
+        var wrong=study.freeze(new cn.jia.economy.service.impl.FrozenCalibrationStudy.OfferedHoldout(before.original(),before.family(),before.groupSha(),before.featureSha(),before.quoteId(),before.agentId(),65,before.referenceSha()));
+        assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,wrong.sha256(),Map.of(book.sha256(),book.json(),wrong.sha256(),wrong.json())::get));
         var held=cn.jia.economy.pricing.TaskEstimateEvaluation.Split.HOLDOUT;
         long beforeRead=jdbc.queryForObject("SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3))*1000 AS UNSIGNED)",Long.class);
         String confirmedQuote=jdbc.queryForObject("SELECT quote_id FROM economy_task_charge WHERE task_id=?",String.class,TASK);

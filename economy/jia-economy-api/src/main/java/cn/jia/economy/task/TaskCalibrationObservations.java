@@ -13,7 +13,7 @@ public interface TaskCalibrationObservations {
     TaskEstimateCalibration.Sample replay(TaskBillingService.Task original,TaskHistoryCatalog.Group group,
             TaskHistoryCatalog.Revision selected,String family,TaskEstimateEvaluation.Split partition,String expectedSha256,String json);
     /** Offline join to an already frozen forecast. Identity comes from the confirmed quote, never from execution self-report. */
-    record QuotedObservation(String quoteId,String agentId,Frozen observation){@Override public String toString(){return "QuotedObservation[private]";}}
+    record QuotedObservation(String quoteId,String agentId,long amountWen,Frozen observation){@Override public String toString(){return "QuotedObservation[private]";}}
     QuotedObservation freezeConfirmedQuote(TaskBillingService.Task original,TaskHistoryCatalog.Group group,
             TaskHistoryCatalog.Revision selected,String family,TaskEstimateEvaluation.Split partition,String expectedQuoteId,String expectedAgentId);
     Frozen freezeConfirmed(TaskBillingService.Task original,TaskHistoryCatalog.Group group,

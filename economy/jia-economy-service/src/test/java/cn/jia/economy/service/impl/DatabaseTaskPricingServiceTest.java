@@ -80,7 +80,7 @@ class DatabaseTaskPricingServiceTest {
         var reference=keep.apply(study.freezeReference(ref));var members=new java.util.ArrayList<FrozenCalibrationStudy.Member>();
         long t=1;for(var a:assignments){var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var revision=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sid-"+a.task(),1);
             var op=new ProjectedTaskOperation(1,"capture",1,"record","source","f".repeat(64),new MeasuredTaskRepricing.Operation("gw",a.task()),"text","model","TOKEN",json.valueToTree(new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,1000000L))));
-            when(db.selectedForCalibration(task,group.digest(),revision.sampleId(),1)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
+            when(db.selectedForCalibration(task,group.digest(),revision.sampleId(),1)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",25L,t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
             when(db.observedByMillis()).thenReturn(t+1);t+=2;
             var f=obs.freezeConfirmed(task,group,revision,a.family(),a.split());objects.put(f.sha256(),f.json());members.add(new FrozenCalibrationStudy.Member(a.task(),revision,f.sha256()));}
         var dataset=keep.apply(study.freeze(new FrozenCalibrationStudy.Dataset(owner,members)));var pins=new FrozenCalibrationStudy.Pins(roster,dataset,reference,policy);
@@ -120,7 +120,7 @@ class DatabaseTaskPricingServiceTest {
             objects.put(frozen.sha256(),frozen.json());var member=new FrozenCalibrationStudy.Member(a.task(),rev,frozen.sha256(),pin);cold.add(member);
             if(a.split()!=TaskEstimateEvaluation.Split.CALIBRATE)mixed.add(member);
             else{var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var selected=new cn.jia.economy.task.TaskHistoryCatalog.Revision("confirmed",3);
-                when(db.selectedForCalibration(task,group.digest(),selected.sampleId(),3)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
+                when(db.selectedForCalibration(task,group.digest(),selected.sampleId(),3)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",25L,t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
                 when(db.observedByMillis()).thenReturn(t+1);var f=observations.freezeConfirmed(task,group,selected,a.family(),a.split());objects.put(f.sha256(),f.json());mixed.add(new FrozenCalibrationStudy.Member(a.task(),selected,f.sha256()));}
             t+=2;
         }

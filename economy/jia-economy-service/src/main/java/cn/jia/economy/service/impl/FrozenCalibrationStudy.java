@@ -2,6 +2,7 @@ package cn.jia.economy.service.impl;
 
 import cn.jia.economy.pricing.MeasuredTaskRepricing;
 import cn.jia.economy.pricing.TaskEstimateCalibration;
+import cn.jia.economy.pricing.TaskEstimateEvaluation;
 import cn.jia.economy.pricing.TaskEstimateEvaluation.Split;
 import cn.jia.economy.pricing.TaskNeighborSearch;
 import cn.jia.economy.service.EconomyScope;
@@ -46,6 +47,25 @@ public final class FrozenCalibrationStudy {
         var rows=new ArrayList<Rate>();new TreeMap<>(book.byKind()).forEach((k,components)->new TreeMap<>(components).forEach((c,r)->{
             String type=switch(r){case MeasuredTaskRepricing.TokenRate ignored->"token";case MeasuredTaskRepricing.UnitRate ignored->"unit";case MeasuredTaskRepricing.ExplicitZero ignored->"zero";};
             rows.add(new Rate(k,c,type,json.writeValueAsString(r)));}));return freeze(new Book(book.version(),rows));
+    }
+    /** Private input pinned before confirmation/outcome, from the published forecast and the evaluation book. */
+    public record OfferedHoldout(Task original,String family,String groupSha,String featureSha,String quoteId,String agentId,long wen,String referenceSha){
+        @Override public String toString(){return "OfferedHoldout[private]";}}
+    public record ConfirmedPoint(TaskEstimateEvaluation.Prediction point,TaskCalibrationObservations.Frozen source) {
+        @Override public String toString(){return "ConfirmedPoint[private]";}}
+    /** Single compatible confirmed case, NOT the eligible population or a fallback for missing whole-task truth. */
+    public ConfirmedPoint confirmedPoint(Task original,TaskHistoryCatalog.Group group,TaskHistoryCatalog.Revision revision,
+            String forecastSha,Function<String,String> objects){
+        var offer=read(objects,forecastSha,OfferedHoldout.class);
+        if(!original.equals(offer.original())||!group.digest().equals(offer.groupSha()))throw new IllegalArgumentException("Wrong holdout task or group");
+        var book=reference(read(objects,offer.referenceSha(),Book.class));
+        if(!group.execution().routeVersion().equals(book.version()))throw new IllegalArgumentException("Wrong reference version");
+        var bound=observations.freezeConfirmedQuote(original,group,revision,offer.family(),Split.HOLDOUT,offer.quoteId(),offer.agentId());
+        if(bound.amountWen()!=offer.wen())throw new IllegalArgumentException("Forecast differs from immutable quote");
+        var frozen=bound.observation();var sample=observations.replay(original,group,revision,offer.family(),Split.HOLDOUT,frozen.sha256(),frozen.json());
+        if(!sample.features().digest().equals(offer.featureSha()))throw new IllegalArgumentException("Wrong forecast features");
+        var actual=MeasuredTaskRepricing.reprice(book,sample.facts());
+        return new ConfirmedPoint(new TaskEstimateEvaluation.Prediction(original.taskId(),actual.yuan(),offer.wen()),frozen);
     }
     private MeasuredTaskRepricing.Reference reference(Book book){
         var rates=new HashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();

@@ -26,10 +26,10 @@ public interface ConfirmedSampleMapper {
         AND s.benchmark_case_id IS NULL AND s.sample_definition_version='TASK_LIFECYCLE_V1'
         """;
     String HISTORY=ELIGIBLE_HISTORY+" AND s.task_id<>#{t.taskId} ";
-    record CalibrationRow(String quoteId,String agentId,long featuresAt,String requirementSha,String inputSha,String featureSha,String features,String execution,String operations) { }
+    record CalibrationRow(String quoteId,String agentId,long amountWen,long featuresAt,String requirementSha,String inputSha,String featureSha,String features,String execution,String operations) { }
     // One explicitly selected original task/revision. No fallback to newer evidence, another owner, or an unapproved benchmark.
     @Select("""
-        SELECT q.quote_id,q.snapshot_json->>'$.binding.agentId',q.created_at,s.initial_requirement_sha256,s.initial_input_snapshot_sha256,s.initial_feature_sha256,
+        SELECT q.quote_id,q.snapshot_json->>'$.binding.agentId',q.amount_wen,q.created_at,s.initial_requirement_sha256,s.initial_input_snapshot_sha256,s.initial_feature_sha256,
           JSON_EXTRACT(q.snapshot_json,'$.preparation.features'),JSON_EXTRACT(q.snapshot_json,'$.preparation.group'),r.operation_refs
         FROM economy_task_cost_sample s JOIN economy_task_cost_sample_revision r ON r.sample_id=s.sample_id
           AND r.sample_revision=s.projection_revision AND r.sample_state='READY'

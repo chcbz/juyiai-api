@@ -79,7 +79,7 @@ public class TaskHistoryCatalogService implements TaskHistoryCatalog,cn.jia.econ
         var row=db.selectedForCalibration(original,group.digest(),selected.sampleId(),selected.revision());
         if(row==null||expectedQuoteId==null||expectedQuoteId.isBlank()||!expectedQuoteId.equals(row.quoteId())
                 ||expectedAgentId==null||expectedAgentId.isBlank()||!expectedAgentId.equals(row.agentId()))throw new NotEligible();
-        return new QuotedObservation(row.quoteId(),row.agentId(),capsule(original,group,selected,family,partition,row));
+        return new QuotedObservation(row.quoteId(),row.agentId(),row.amountWen(),capsule(original,group,selected,family,partition,row));
     }
     private Frozen capsule(Task original,Group group,Revision selected,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split partition,ConfirmedSampleMapper.CalibrationRow row){
         var roster=new cn.jia.economy.pricing.TaskEstimateEvaluation.Case(original.taskId(),family,row.featuresAt(),db.observedByMillis(),partition);
