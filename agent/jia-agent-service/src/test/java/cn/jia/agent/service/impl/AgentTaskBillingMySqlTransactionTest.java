@@ -519,7 +519,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertThrows(InjectedFailure.class,()->lock.apply(()->{enroll.get();throw new InjectedFailure();}));assertEquals(0,count("economy_task_cost_sample"));
         assertEquals(sha,lock.apply(enroll));assertEquals(sha,lock.apply(enroll));assertEquals(1,count("economy_task_cost_sample"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE quote_id IS NULL AND benchmark_case_id='case' AND sample_state='WAITING_EVIDENCE' AND projection_revision IS NULL AND history_group_sha256=?",Integer.class,cn.jia.economy.task.TaskHistoryCatalog.Group.of(exec,f).digest()));
-        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,()->lock.apply(enroll));
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-closure-v1.sql")).execute(jdbc.getDataSource());
+        cfg.addMapper(cn.jia.economy.mapper.TaskBenchmarkClosureMapper.class);
+        var closure=proxy(new cn.jia.economy.service.impl.TaskBenchmarkClosureService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkClosureMapper.class),recommendationSql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.task.TaskBenchmarkClosure.class);
+        lock.apply(()->{for(int i=0;i<65;i++){
+            var m=new cn.jia.agent.entity.PersonalWorkspaceExecutionEntity().setTaskId(bench.taskId()).setOwnerJiacn(OWNER).setExecutionId("bench-exec"+i).setRunId("run").setRequestHash("a".repeat(64));
+            m.setTenantId(TENANT);m.setClientId(CLIENT);executionRows.registerTaskMember(m,null);}
+            executionRows.closeTaskMembers(TENANT,CLIENT,OWNER,bench.taskId(),cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,"fixture-reviewed",2,123);return "ok";});
+        String fact=jdbc.queryForObject("SELECT terminal_fact_id FROM agent_task_execution_set WHERE task_id=?",String.class,bench.taskId());
+        java.util.function.Supplier<String> step=()->closure.reconcile(bench,"case",sha,fact).name();
+        assertEquals("AWAITING_VERIFIED_TERMINAL",step.get());deliverTerminal();assertEquals("AWAITING_VERIFIED_TERMINAL",step.get());assertEquals(0,count("economy_task_benchmark_closure"));
+        deliverTerminal();assertEquals("AWAITING_VERIFIED_TERMINAL",closure.reconcile(bench,"case",sha,"f".repeat(64)).name());
+        assertThrows(denied,()->closure.reconcile(BILLING_TASK,"case",sha,fact));assertEquals("MORE",step.get());assertEquals(64,count("economy_task_cost_sample_member"));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT lifecycle_state FROM economy_task_cost_sample WHERE sample_id=?",String.class,sha));
+        assertEquals("CLOSED",step.get());assertEquals("CLOSED",step.get());assertEquals(65,count("economy_task_cost_sample_member"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE sample_id=? AND lifecycle_state='ACCEPTED' AND sample_state='WAITING_EVIDENCE' AND evidence_revision=2",Integer.class,sha));
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");assertThrows(denied,step::get);assertThrows(denied,()->lock.apply(enroll));
         assertEquals(quoteCount,count("economy_task_quote"));assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_quote WHERE task_id=?",Integer.class,bench.taskId()));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
     }
     @Test void measuredBatchRollsBackEarlierChunksAndPreservesMixedSnapshots() throws Exception {
