@@ -58,6 +58,20 @@ class MeasuredTaskRepricingTest {
         return new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),vector,
                 Collections.nCopies(files,new TaskEstimateFeatures.File("INPUT","text/plain",1024,1)),deliverables);
     }
+    @Test void fullSortOracleMatchesDensePackedSearchAtEveryPageBoundaryIncludingWeights(){
+        var random=new Random(1329);var q=features(-0.25f,0,2);
+        var params=new TaskNeighborSearch.Parameters(new TaskNeighborSearch.Scales(0,0,0),1,1,1,1,1,.1,.5,5,1,4,.3);
+        var search=new TaskNeighborSearch(q,params);var all=new ArrayList<TaskNeighborSearch.Hit>();
+        for(int n=1;n<=193;n++){
+            var bytes=java.nio.ByteBuffer.allocate(4096);double aa=0,bb=0,ab=0;
+            for(int i=0;i<1024;i++){float f=n%13==0?q.vector().get(i):random.nextFloat()-.5f;bytes.putFloat(f);double x=q.vector().get(i),y=f;aa+=x*x;bb+=y*y;ab+=x*y;}
+            var sample=new TaskEstimateFeatures(q.featureVersion(),q.templateVersion(),q.requirementSha256(),q.inputSnapshotSha256(),q.textSha256(),q.embeddingIdentity(),TaskEstimateFeatures.vectorFromBytes(bytes.array()),q.files(),2);
+            var id=String.format(Locale.ROOT,"%04d",n);search.accept(id,n,sample);
+            double d=1-Math.clamp(ab/(Math.sqrt(aa)*Math.sqrt(bb)),-1d,1d);var bw=BigDecimal.valueOf(.3);
+            all.add(new TaskNeighborSearch.Hit(id,n,d,bw.divide(bw.add(BigDecimal.valueOf(d)),java.math.MathContext.DECIMAL128)));
+            if(n<6 || n%64==0 || n==193)assertEquals(all.stream().sorted(Comparator.comparingDouble(TaskNeighborSearch.Hit::distance).thenComparing(TaskNeighborSearch.Hit::id)).limit(5).toList(),search.selected());
+        }
+    }
     @Test void streamingNeighborsUseTrainingRangesUnknownIsNotZeroAndTiesDoNotDependOnPages(){
         var query=features(1,0,null);var knownZero=features(1,0,0);var orthogonal=features(0,0,null);var large=features(1,2,4);
         var scales=TaskNeighborSearch.trainingScales(List.of(knownZero,large));assertEquals(2,scales.fileCount());assertEquals(4,scales.deliverables());assertEquals(Math.log1p(2048),scales.logBytes());

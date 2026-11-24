@@ -36,14 +36,23 @@ public final class TaskNeighborSearch {
     }
     private static double range(DoubleSummaryStatistics s){return s.getCount()==0?0:s.getMax()-s.getMin();}
     private static double scaled(double a,double b,double scale){return a==b?0:scale==0?Double.POSITIVE_INFINITY:Math.abs(a-b)/scale;}
-    private static double cosine(TaskEstimateFeatures a,TaskEstimateFeatures b){
-        double aa=0,bb=0,ab=0;for(int i=0;i<a.vector().size();i++){double x=a.component(i),y=b.component(i);aa+=x*x;bb+=y*y;ab+=x*y;}
-        return 1-Math.clamp(ab/(Math.sqrt(aa)*Math.sqrt(bb)),-1d,1d);
+    private final double[] queryComponents;
+    private final double queryNorm;
+    private double cosine(TaskEstimateFeatures sample){
+        double bb=0,ab=0;
+        for(int i=0;i<queryComponents.length;i++){double y=sample.component(i);bb+=y*y;ab+=queryComponents[i]*y;}
+        return 1-Math.clamp(ab/(queryNorm*Math.sqrt(bb)),-1d,1d);
     }
-    private static final Comparator<Hit> ORDER=Comparator.comparingDouble(Hit::distance).thenComparing(Hit::id);
+    private record Ranked(String id,long revision,double distance) {}
+    private static final Comparator<Ranked> ORDER=Comparator.comparingDouble(Ranked::distance).thenComparing(Ranked::id);
     private final TaskEstimateFeatures query;private final Shape q;private final Parameters p;
-    private final PriorityQueue<Hit> best=new PriorityQueue<>(ORDER.reversed());private String last="";private long considered;
-    public TaskNeighborSearch(TaskEstimateFeatures query,Parameters p){this.query=query;this.q=shape(query);this.p=Objects.requireNonNull(p);}
+    private final PriorityQueue<Ranked> best=new PriorityQueue<>(ORDER.reversed());private String last="";private long considered;
+    public TaskNeighborSearch(TaskEstimateFeatures query,Parameters p){
+        this.query=query;this.q=shape(query);this.p=Objects.requireNonNull(p);
+        queryComponents=new double[query.vector().size()];double aa=0;
+        for(int i=0;i<queryComponents.length;i++){double x=query.component(i);queryComponents[i]=x;aa+=x*x;}
+        queryNorm=Math.sqrt(aa);
+    }
     /** Caller provides one current revision per sample in strictly increasing keyset order, across all pages. */
     public void accept(String id,long revision,TaskEstimateFeatures sample){
         if(last.compareTo(id)>=0||revision<1)throw new IllegalArgumentException("Unstable history cursor");last=id;
@@ -52,15 +61,16 @@ public final class TaskNeighborSearch {
         considered++;var s=shape(sample);long overlap=0;for(var entry:q.histogram.entrySet())overlap+=Math.min(entry.getValue(),s.histogram.getOrDefault(entry.getKey(),0));
         long n=(long)q.count+s.count;double types=n==0?0:1-(2d*overlap/n);
         double deliver=q.deliverables==null&&s.deliverables==null?p.bothMissing:q.deliverables==null||s.deliverables==null?p.oneMissing:scaled(q.deliverables,s.deliverables,p.scales.deliverables);
-        double distance=p.text*cosine(query,sample)+p.files*scaled(q.count,s.count,p.scales.fileCount)+p.bytes*scaled(q.logBytes,s.logBytes,p.scales.logBytes)+p.types*types+p.deliverables*deliver;
+        double distance=p.text*cosine(sample)+p.files*scaled(q.count,s.count,p.scales.fileCount)+p.bytes*scaled(q.logBytes,s.logBytes,p.scales.logBytes)+p.types*types+p.deliverables*deliver;
         if(distance>p.maxDistance)return;
-        // Cauchy-like monotone kernel with validation-selected bandwidth. No currency rounding here.
-        var weight=BigDecimal.valueOf(p.bandwidth).divide(BigDecimal.valueOf(p.bandwidth).add(BigDecimal.valueOf(distance)),java.math.MathContext.DECIMAL128);
-        var hit=new Hit(id,revision,distance,weight);if(best.size()<p.neighbors)best.add(hit);else if(ORDER.compare(hit,best.element())<0){best.remove();best.add(hit);}
+        var hit=new Ranked(id,revision,distance);if(best.size()<p.neighbors)best.add(hit);else if(ORDER.compare(hit,best.element())<0){best.remove();best.add(hit);}
     }
     public List<Hit> selected(){
         if(considered<p.minimum)throw new MeasuredTaskRepricing.Unavailable("NO_BASELINE");
         if(best.size()<p.minimum)throw new MeasuredTaskRepricing.Unavailable("OUT_OF_DISTRIBUTION");
-        return best.stream().sorted(ORDER).toList();
+        // Weight never participates in ordering; preserve DECIMAL128 only for returned neighbors.
+        var bandwidth=BigDecimal.valueOf(p.bandwidth);
+        return best.stream().sorted(ORDER).map(r->new Hit(r.id,r.revision,r.distance,
+                bandwidth.divide(bandwidth.add(BigDecimal.valueOf(r.distance)),java.math.MathContext.DECIMAL128))).toList();
     }
 }
