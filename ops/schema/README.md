@@ -117,3 +117,7 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 单承办 CHAT 原派发来源：新 relay 安装前显式执行 `chat/jia-chat-mapper/src/main/resources/db/chat-task-dispatch-origin-v1.sql`（依赖 `chat_dispatch_outbox`）。空表即可，不根据现有设备回填。仅记录一次派发的候选来源与冲突标记，不是已发送、逐调用计量或报价授权。
 
 **整事项报价读取候选**：基础 Economy 七表之后，须显式安装 `economy/jia-economy-mapper/src/main/resources/db/economy-task-quote-preparation-v1.sql` 的专用表与 SQL SECURITY INVOKER 视图，然后安装读取新视图的 API。未授权不改生产；先读后写，`jia.economy.task-quotes.shared-preparation-writes` 默认 false，仅控制新批次引用写入；开启须先核实完整表/视图及两条不可变触发器、读路径与回退版本，无回填。关闭写入后保留原视图、依据和触发器；新批次改写内嵌依据，旧批次重放、确认和校准继续解析原引用。这是配置回退，不是数据库降级；迁移只在显式维护窗口执行，部分DDL成功时核对目录后只补缺失对象，不盲重跑触发器。写入候选启用后，禁止删除共享依据或直接回退到不认识引用的读取端。
+
+### 切换前只读议事来源清点
+
+`discussion-source-inventory.sql` 是参数化 SELECT，绑定 tenant、client、事项属主、task；只向已有权限的运维读取端返回标识和原派发映射，不输出对话正文。不得按设备或已收到的 ACK 先过滤成员。无行、空成员、行数与 execution_count 不符、重复 captureId、任何 UNVERIFIED（包括尚未分类的原生执行）、原身份不明时停止，不生成“已齐”结论。受理暂停后固定各事项 set_revision、execution_count、execution_set_sha256 和每个原设备元组及成员 ID；设备核完后重读全部绑定并逐项比对，两次之间还须独立证明没有新增写入。仅在固定的全议事范围按原主体汇总清单；MAPPED_SENT_ORIGIN 是来源映射而非当前授权、设备送达或发布许可，不作为计费输入。
