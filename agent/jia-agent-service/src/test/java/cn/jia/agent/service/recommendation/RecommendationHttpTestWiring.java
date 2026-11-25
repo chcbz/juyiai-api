@@ -62,14 +62,22 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
             controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10),reg),new CapabilitySearch(clients,reg),roots,new CandidateSuitability("",""),reg));
         }catch(Exception|Error failure){try{client.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
-    /** Real root reader; probes must remain untouched for every stopped or invisible request. */
-    public record BeforeRetrieval(AssigneeRecommendationController controller,Runnable verifyUntouched) {}
-    public static BeforeRetrieval beforeRetrieval(AgentTaskRootObservation roots){
+    /** Real SQL ownership reader and HTTP endpoint; candidate data is an explicit empty fixture. */
+    public record ReadOnlyRecommendation(AssigneeRecommendationController controller,Runnable verifyReads) {}
+    public static ReadOnlyRecommendation readOnly(AgentTaskRootObservation roots,String taskId){
         var agents=org.mockito.Mockito.mock(AgentService.class);var skills=org.mockito.Mockito.mock(SkillManagementService.class);
         var materials=org.mockito.Mockito.mock(RecommendationMaterials.class);var vectors=org.mockito.Mockito.mock(TaskQueryVectors.class);
         var search=org.mockito.Mockito.mock(CapabilitySearch.class);
+        var task=new cn.jia.agent.entity.AgentTaskDTO();task.setTaskVersion("0");task.setStatus("open");task.setTitle("Paused admission read fixture");
+        org.mockito.Mockito.when(agents.getTaskRecommendationInputWithinLockedTask(org.mockito.ArgumentMatchers.eq(taskId),org.mockito.ArgumentMatchers.any())).thenReturn(task);
+        org.mockito.Mockito.when(agents.listTaskAssigneeCandidates(taskId)).thenReturn(java.util.List.of());
         var service=new AssigneeRecommendationService(agents,skills,materials,vectors,search,roots,new CandidateSuitability("",""));
-        return new BeforeRetrieval(new AssigneeRecommendationController(service),()->org.mockito.Mockito.verifyNoInteractions(agents,skills,materials,vectors,search));
+        return new ReadOnlyRecommendation(new AssigneeRecommendationController(service),()->{
+            org.mockito.Mockito.verify(agents,org.mockito.Mockito.times(3)).getTaskRecommendationInputWithinLockedTask(org.mockito.ArgumentMatchers.eq(taskId),org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.verify(agents,org.mockito.Mockito.times(2)).listTaskAssigneeCandidates(taskId);
+            org.mockito.Mockito.verifyNoMoreInteractions(agents);
+            org.mockito.Mockito.verifyNoInteractions(skills,materials,vectors,search);
+        });
     }
     private TaskFeatureEncoder.Vector vector(){float[] v=new float[1024];v[0]=1;return new TaskFeatureEncoder.Vector(id,v);}
     public void index(String tenant,String clientId,String owner,String agent,List<String> abilities)throws Exception {

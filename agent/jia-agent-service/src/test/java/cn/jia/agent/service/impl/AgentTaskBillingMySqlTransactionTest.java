@@ -1800,7 +1800,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
             if(quote!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(ReflectionTestUtils.getField(quote,"quotes"),"intents"),"admission",app.getBean(TaskAssigneeAdmission.class));
             if(selection!=null)ReflectionTestUtils.setField(selection,"admission",app.getBean(TaskAssigneeAdmission.class));
-            if(recommendation!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(recommendation,"recommendations"),"admission",app.getBean(TaskAssigneeAdmission.class));
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
         public void close() throws Exception {try {if(base!=null)server.stop();}finally{try{server.destroy();}finally{app.close();}}}
@@ -1821,21 +1820,23 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
     }
 
-    @Test void recommendationStoppedInstancesCheckVisibilityButNeverReadOrRankTaskInputs() throws Exception {
+    @Test void recommendationRemainsReadableOnPausedNodesWithoutAdmissionOrWalletWrites() throws Exception {
         signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
         jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('other-rec','foreign-owner',?,?)",TENANT,CLIENT);
         try(var a=new AssignmentNode();var b=new AssignmentNode();var client=HttpClient.newHttpClient()){
-            var first=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.beforeRetrieval(roots);
-            var second=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.beforeRetrieval(roots);
+            var first=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.readOnly(roots,TASK);
+            var second=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.readOnly(roots,TASK);
             a.recommendation=first.controller();b.recommendation=second.controller();a.start("a",true);b.start("b",true);assertNotEquals(a.base,b.base);
             for(var node:List.of(a,b))for(var task:List.of(TASK,"other-rec","missing-rec"))for(var version:List.of("0","999")){
                 String id="recommend-stop";String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId",id,"data",Map.of("expectedTaskVersion",version)));
                 var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+token).header("Content-Type","application/json").header("X-Request-Id",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();
-                var res=client.send(req,HttpResponse.BodyHandlers.ofString());boolean visible=task.equals(TASK);assertEquals(visible?503:404,res.statusCode(),res.body());var env=json.readTree(res.body());
-                assertEquals(visible?"TASK_ASSIGNEE_ADMISSION_PAUSED":"RECOMMENDATION_NOT_FOUND",env.path("code").asText());assertEquals(id,env.path("requestId").asText());assertTrue(env.at("/data/recommendations").isMissingNode());
+                var res=client.send(req,HttpResponse.BodyHandlers.ofString());boolean visible=task.equals(TASK);assertEquals(visible?(version.equals("0")?200:409):404,res.statusCode(),res.body());var env=json.readTree(res.body());
+                assertEquals(visible?(version.equals("0")?"E0":"RECOMMENDATION_STALE"):"RECOMMENDATION_NOT_FOUND",env.path("code").asText());assertEquals(id,env.path("requestId").asText());
+                if(visible&&version.equals("0")){assertEquals("NO_CANDIDATES",env.at("/data/state").asText());assertEquals(0,env.at("/data/recommendations").size());}
+                else assertTrue(env.at("/data/recommendations").isMissingNode());
                 String cache=String.join(",",res.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);
             }
-            first.verifyUntouched().run();second.verifyUntouched().run();
+            first.verifyReads().run();second.verifyReads().run();
             assertEquals(100,wallet(independent));assertEquals(0,count("economy_transaction"));assertEquals(0,count("agent_task_execution_grant"));
             assertEquals(0,count("agent_task_bounty_bootstrap_outbox"));assertEquals(1,count("economy_task_quote"));
             assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_meta WHERE task_id IN (?,?) AND task_version=0 AND reward_status='open'",Integer.class,TASK,"other-rec"));

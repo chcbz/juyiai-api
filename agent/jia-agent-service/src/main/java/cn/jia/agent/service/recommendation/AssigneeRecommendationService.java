@@ -16,9 +16,6 @@ import static cn.jia.agent.entity.AssigneeRecommendation.*;
  * Never assigns the task, generates a judgement, quotes a price or reads a wallet. */
 @Service
 public final class AssigneeRecommendationService {
-    @org.springframework.beans.factory.annotation.Autowired
-    private cn.jia.agent.service.TaskAssigneeAdmission admission = new cn.jia.agent.service.TaskAssigneeAdmission(false);
-
     private final AgentService agents;
     private final CandidateSuitability suitability;
     private final SkillManagementService skills;
@@ -43,8 +40,8 @@ public final class AssigneeRecommendationService {
         if(request==null || request.expectedTaskVersion()==null || request.expectedTaskVersion().isBlank()) throw new Failure(400,"BAD_REQUEST");
         var task = transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,
                 root->{
-                    // The root reader has established owner visibility. Paused admission needs no requirement snapshot.
-                    admission.requireOpen();
+                    // Recommendation is a read, not admission. Keep owner/version checks while
+                    // assignment, preparation and quote issuance enforce the admission pause.
                     return task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
                 });
         var observed = observe(actor, taskId,"initial");
