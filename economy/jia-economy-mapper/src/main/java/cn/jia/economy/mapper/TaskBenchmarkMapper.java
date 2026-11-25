@@ -2,6 +2,7 @@ package cn.jia.economy.mapper;
 
 import cn.jia.economy.task.TaskBillingService.Task;
 import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Update;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Param;
 
@@ -17,4 +18,14 @@ public interface TaskBenchmarkMapper {
         +"SELECT #{sha},#{t.scope.tenantId},#{t.scope.clientId},#{t.ownerJiacn},#{t.taskId},#{id},'TASK_LIFECYCLE_V1',#{req},#{input},#{features},#{grp},'ACTIVE',1,'WAITING_EVIDENCE' FROM DUAL WHERE "
         +"NOT EXISTS(SELECT 1 FROM economy_task_membership_receipt WHERE "+SCOPE+") AND NOT EXISTS(SELECT 1 FROM economy_task_charge WHERE "+SCOPE+") AND NOT EXISTS(SELECT 1 FROM economy_usage_capture WHERE "+SCOPE+")")
     int seed(@Param("t") Task task,@Param("id") String id,@Param("sha") String sha,@Param("req") String req,@Param("input") String input,@Param("features") String features,@Param("grp") String group);
+
+    record FundingRow(String authorityJson, String authoritySha, String state, boolean withdrawn) {}
+    @Select("SELECT authority_json,authority_sha,state,withdrawn FROM economy_task_benchmark_sponsorship WHERE " + SCOPE + " FOR UPDATE")
+    FundingRow funding(@Param("t") Task task);
+    @Select("SELECT COUNT(*) FROM economy_task_charge WHERE " + SCOPE)
+    int charges(@Param("t") Task task);
+    @Update("UPDATE economy_task_benchmark_sponsorship SET state=#{next},updated_at=UTC_TIMESTAMP(3) WHERE " + SCOPE
+        + " AND authority_sha=#{sha} AND state=#{previous}")
+    int transitionFunding(@Param("t") Task task, @Param("sha") String sha,
+            @Param("previous") String previous, @Param("next") String next);
 }

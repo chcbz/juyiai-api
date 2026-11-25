@@ -127,3 +127,9 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 报价原件完整性补丁 `economy-task-quote-features-v2.sql`：在已安装 V1 后显式替换原 INVOKER 报价视图，仅补验证唯一被替换的引用确实位于顶层 `preparation`，否则解析为 NULL；不能借嵌套同名字段伪造成功。已否决的历史特征专用读视图不安装，线上分页仍使用原报价视图。此补丁不改七表、触发器、原件、权限或开关，不需回填；需固定版本、核已有报价还原及实际调用身份后另行授权应用。
 
 历史特征派生读取（默认关闭）：在已安装整事项样本表和报价 V1/V2 的数据库上，另行显式应用 `economy-history-feature-projection-v1.sql`。`jia.economy.history-feature-projection` 不授权基准/样本，不触发编码或回填。未启用不查派生表；启用后缺行、失配或无法解码整页回读原件，原件缺失仍不能报价。仅样本拥有派生行并随其删除，反向删除派生行不删除样本/报价。不得把实验回填脚本用于生产。尚未具备发布条件，未开启任何环境。
+
+### 基准赞助资金原语（2026-11-25，尚未接通Agent生产入口）
+
+`economy-task-benchmark-sponsorship-v1.sql`同样仅供维护窗口创建空表，不自动安装。它与原case备案分开：操作方事前导入`TaskBenchmarkAdmission.SponsorshipAuthority`原文及SHA，包含任务、case/manifest SHA、Agent、原派发action及完整请求SHA、首动作SHA、真实支出批准引用。不是报价、0元charge、LEGACY_FREE，也不授权浏览器自助免费派发。
+
+应用仅SELECT及UPDATE(state, updated_at)，不授INSERT/DELETE或authority_json/authority_sha/withdrawn修改权限；维护方可新增批准或withdrawn，原文不可覆写。状态APPROVED→ACTIVE→ACCEPTED/CANCELLED由同任务根事务控制；ACTIVE/终态原事实保留，撤回不妨碍取消/结算。样本READY/闭包仍沿原验证链。本轮只实现内部资金原语，未导入生产批准、未安装此表、未新增公开端点；Agent首派、重放、初始执行和验收/取消尚未接通，不能启用基准或解除受理暂停。

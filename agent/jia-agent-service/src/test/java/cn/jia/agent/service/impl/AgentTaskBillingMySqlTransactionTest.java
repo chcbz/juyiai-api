@@ -50,6 +50,8 @@ import cn.jia.economy.config.TaskPricingTestFixture;
 import cn.jia.economy.service.impl.EconomyPostingServiceImpl;
 import cn.jia.economy.service.impl.TaskBillingServiceImpl;
 import cn.jia.economy.task.TaskBillingService;
+import cn.jia.economy.task.TaskBenchmarkAdmission;
+import static cn.jia.economy.task.TaskBenchmarkAdmission.SponsorshipState.*;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.config.GlobalConfig;
 import com.baomidou.mybatisplus.core.incrementer.DefaultIdentifierGenerator;
@@ -548,6 +550,139 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     private String fixtureBookPin(MeasuredTaskRepricing.Reference reference){return new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),null).freezeReference(reference).sha256();}
     private Map<String,Map<String,cn.jia.economy.pricing.TaskReferencePricing.Route>> fixtureDrawRoutes(){return Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame"))));}
+    private record SponsoredFixture(TaskBenchmarkAdmission service, TaskBillingService.Task task,
+            TaskBenchmarkAdmission.Manifest manifest, String manifestSha,
+            TaskBenchmarkAdmission.SponsorshipAuthority authority) {}
+
+    private SponsoredFixture sponsorshipFixture(boolean approved) throws Exception {
+        new ResourceDatabasePopulator(
+                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql"),
+                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-sponsorship-v1.sql"))
+                .execute(jdbc.getDataSource());
+        recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
+        var service = proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(
+                recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()),
+                TaskBenchmarkAdmission.class);
+        var task = new TaskBillingService.Task(BILLING_TASK.scope(),OWNER,"sponsored-benchmark");
+        jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",
+                task.taskId(),OWNER,TENANT,CLIENT);
+        var group = new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),
+                "f".repeat(64),"r1","d".repeat(64),"cp");
+        var features = new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture","a".repeat(64),
+                "b".repeat(64),"c".repeat(64),new TaskEstimateFeatures.Identity("fixture","test",1024),
+                java.util.Collections.nCopies(1024,1f),List.of(),null);
+        var manifest = new TaskBenchmarkAdmission.Manifest("benchmark-case-v1",task,"sponsor-case",AGENT,
+                "fixture only: not a production grant","review entire task",group,features);
+        var json = new ObjectMapper(); String raw = json.writeValueAsString(manifest);
+        String sha = jdbc.queryForObject("SELECT SHA2(?,256)",String.class,raw);
+        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",
+                TENANT,CLIENT,OWNER,task.taskId(),manifest.caseId(),raw,sha);
+        var authority = new TaskBenchmarkAdmission.SponsorshipAuthority("benchmark-sponsorship-v1",task,
+                manifest.caseId(),sha,AGENT,"ASSIGN_AND_START:fixture","e".repeat(64),"f".repeat(64),
+                "isolated fixture sponsorship only");
+        if (approved) {
+            String body = json.writeValueAsString(authority);
+            jdbc.update("INSERT INTO economy_task_benchmark_sponsorship(tenant_id,client_id,owner_jiacn,task_id,authority_json,authority_sha) VALUES(?,?,?,?,?,SHA2(?,256))",
+                    TENANT,CLIENT,OWNER,task.taskId(),body,body);
+        }
+        return new SponsoredFixture(service,task,manifest,sha,authority);
+    }
+    private <T> T sponsoredLock(SponsoredFixture f, java.util.function.Supplier<T> work) {
+        return roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,f.task().taskId(),root -> work.get());
+    }
+    private TaskBenchmarkAdmission.Sponsorship activate(SponsoredFixture f) {
+        var a=f.authority(); var m=f.manifest();
+        return f.service().sponsor(f.task(),m.caseId(),f.manifestSha(),AGENT,m.execution(),m.features(),
+                a.actionId(),a.assignmentSha256(),a.initialIntentSha256());
+    }
+    private void assertSponsorNoMoney() {
+        assertEquals(100,wallet(jdbc)); assertEquals(0,count("economy_task_charge"));
+        assertEquals(0,count("economy_transaction")); assertEquals(1,count("economy_task_quote"));
+    }
+    @Test void sponsorshipNeedsTransactionAndSeparateAuthority() throws Exception {
+        var f=sponsorshipFixture(false);
+        assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->activate(f));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->activate(f)));
+        assertFalse(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
+        assertNull(sponsoredLock(f,()->f.service().sponsorship(f.task())));
+        assertEquals(0,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipApprovalAloneNeverMeansFundedAndCannotHideMissingReservation() throws Exception {
+        var f=sponsorshipFixture(true);
+        assertFalse(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),CANCELLED)));
+        assertThrows(cn.jia.economy.task.TaskBillingException.class,()->sponsoredLock(f,()->billing.capture(f.task())));
+        assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertEquals(0,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipActivationReplayAndAcceptanceDoNotCreateMoneyOrReadySamples() throws Exception {
+        var f=sponsorshipFixture(true); var first=sponsoredLock(f,()->activate(f));
+        assertEquals(ACTIVE,first.state()); assertEquals(first,sponsoredLock(f,()->activate(f)));
+        assertEquals(first,sponsoredLock(f,()->f.service().sponsorship(f.task())));
+        assertTrue(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
+        assertTrue(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->f.service().settleSponsorship(f.task(),CANCELLED)));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->activate(f)));
+        assertEquals("WAITING_EVIDENCE",jdbc.queryForObject("SELECT sample_state FROM economy_task_cost_sample",String.class));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT lifecycle_state FROM economy_task_cost_sample",String.class));
+        assertEquals(1,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipWithdrawalBlocksFirstActivationButNotRecordedCancellation() throws Exception {
+        var f=sponsorshipFixture(true);
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=TRUE");
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->activate(f)));
+        assertEquals(0,count("economy_task_cost_sample"));
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=FALSE");
+        sponsoredLock(f,()->activate(f));
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=TRUE");
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
+        assertEquals(ACTIVE,sponsoredLock(f,()->f.service().sponsorship(f.task())).state());
+        assertTrue(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),CANCELLED)));
+        assertTrue(sponsoredLock(f,()->f.service().settleSponsorship(f.task(),CANCELLED)));
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
+        assertSponsorNoMoney();
+    }
+    @Test void sponsorshipActivationAndTerminalRollBackWithTaskTransaction() throws Exception {
+        var f=sponsorshipFixture(true);
+        assertThrows(InjectedFailure.class,()->sponsoredLock(f,()->{activate(f);throw new InjectedFailure();}));
+        assertEquals(0,count("economy_task_cost_sample"));
+        assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        sponsoredLock(f,()->activate(f));
+        assertThrows(InjectedFailure.class,()->sponsoredLock(f,()->{f.service().settleSponsorship(f.task(),ACCEPTED);throw new InjectedFailure();}));
+        assertEquals(ACTIVE,sponsoredLock(f,()->f.service().sponsorship(f.task())).state()); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipRejectsChangedActionInitialIntentAndForeignOwner() throws Exception {
+        var f=sponsorshipFixture(true); var a=f.authority(); var m=f.manifest();
+        for(int i=0;i<3;i++) { final int change=i;
+            assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->f.service().sponsor(
+                    f.task(),m.caseId(),f.manifestSha(),AGENT,m.execution(),m.features(),
+                    change==0?"ASSIGN_AND_START:other":a.actionId(),change==1?"0".repeat(64):a.assignmentSha256(),
+                    change==2?"0".repeat(64):a.initialIntentSha256())));
+        }
+        var foreign=new TaskBillingService.Task(f.task().scope(),"another-owner",f.task().taskId());
+        assertNull(sponsoredLock(f,()->f.service().sponsorship(foreign)));
+        var changed=new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","0".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp");
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->f.service().sponsor(f.task(),m.caseId(),f.manifestSha(),AGENT,changed,m.features(),a.actionId(),a.assignmentSha256(),a.initialIntentSha256())));
+        assertEquals(0,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipRejectsCorruptAuthorityAndMissingEnrollment() throws Exception {
+        var f=sponsorshipFixture(true);
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET authority_sha=?","0".repeat(64));
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->activate(f)));
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET authority_sha=SHA2(authority_json,256),state='ACTIVE'");
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
+        assertEquals(0,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipCannotSettleOrActivateAlongsideOrdinaryCharge() throws Exception {
+        var f=sponsorshipFixture(true); sponsoredLock(f,()->activate(f));
+        // Deliberate corrupt coexistence fixture, not a supported source of a charge.
+        jdbc.update("INSERT INTO economy_task_charge(tenant_id,client_id,owner_jiacn,task_id,amount_wen,state,created_at,updated_at) VALUES(?,?,?,?,50,'HELD',1,1)",
+                TENANT,CLIENT,OWNER,f.task().taskId());
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->activate(f)));
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->f.service().settleSponsorship(f.task(),CANCELLED)));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertEquals("HELD",charge()); assertEquals(100,wallet(jdbc)); assertEquals(0,count("economy_transaction"));
+    }
+
     @Test void benchmarkCaseRequiresSeparateAuthorityAndNeverSeedsAQuoteOrTrainingTruth() throws Exception {benchmarkOfferFence("stop-first");}
     @Test void benchmarkCaseQuoteFirstKeepsItsFixedPriceAfterRevocation() throws Exception {benchmarkOfferFence("quote-first");}
     @Test void benchmarkCaseReviewRetirementCannotResurrectPreparation() throws Exception {benchmarkOfferFence("review");}
