@@ -82,7 +82,7 @@ class CapabilityIndexElasticsearchTest {
             String other=index+"_fixture_alt";
             try(var mapping=getClass().getResourceAsStream("/elasticsearch/agent-capability-evidence-v1.json")){
                 var json=new com.fasterxml.jackson.databind.ObjectMapper();var schema=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(mapping);
-                schema.withObject("/aliases").remove(index+"_write");es.indices().create(b->b.index(other).withJson(new java.io.StringReader(json.writeValueAsString(schema))));
+                schema.withObject("/aliases").remove(index+"_write");String mappingJson=json.writeValueAsString(schema);es.indices().create(b->b.index(other).withJson(new java.io.StringReader(mappingJson)));
             }
             var a=authorized.getFirst();var missing=abilities("a",ID,"missing").getFirst().doc();
             var source=es.get(g->g.index(index).id(a.id()),java.util.Map.class).source();
