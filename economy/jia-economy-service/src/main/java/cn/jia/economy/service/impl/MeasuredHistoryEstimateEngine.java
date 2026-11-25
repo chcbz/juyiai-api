@@ -11,8 +11,6 @@ import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import java.util.*;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 /** Internal estimation after calibration admission. Does not grant eligibility, authorize a user, commit a quote or change a balance. */
 @Service
@@ -25,9 +23,12 @@ public class MeasuredHistoryEstimateEngine {
     public MeasuredHistoryEstimateEngine(TaskHistoryCatalog history,TaskReferencePricing prices,Optional<ObservationRegistry> registry){
         this.history=history;this.prices=prices;this.observations=registry.orElse(ObservationRegistry.NOOP);
     }
-    @Transactional(propagation=Propagation.NEVER)
+    // Reject real transactions without opening an empty Spring synchronization scope: history reads
+    // must release their connection before pricing opens its own repeatable-read transaction.
     public MeasuredNeighborEstimate.Estimate estimate(TaskBillingService.Task task,TaskBillingService.MeasuredGroup execution,
             TaskEstimateFeatures query,cn.jia.economy.task.TaskCalibrationCatalog.Pin pin,TaskNeighborSearch.Parameters params,Map<String,Map<String,TaskReferencePricing.Route>> routes){
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new org.springframework.transaction.IllegalTransactionStateException("Budget estimation must be outside a transaction");
         var span=Observation.start("cyf.task.quote.estimate",observations);String outcome="error";
         try{var result=calculate(task,execution,query,pin,params,routes);outcome="ok";return result;}
         catch(StaleSample stale){outcome="stale";throw stale;}

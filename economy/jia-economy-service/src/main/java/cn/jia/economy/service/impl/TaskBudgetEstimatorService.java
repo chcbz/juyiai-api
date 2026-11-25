@@ -23,8 +23,11 @@ public class TaskBudgetEstimatorService implements TaskBudgetEstimator {
     private final TaskCalibrationCatalog calibration;private final TaskHistoryCatalog history;private final MeasuredHistoryEstimateEngine engine;
     public TaskBudgetEstimatorService(TaskCalibrationCatalog calibration,TaskHistoryCatalog history,MeasuredHistoryEstimateEngine engine){
         this.calibration=calibration;this.history=history;this.engine=engine;}
-    @Transactional(propagation=Propagation.NEVER)
+    // Reject real transactions without opening an empty Spring synchronization scope: history reads
+    // must release their connection before pricing opens its own repeatable-read transaction.
     public Outcome prepare(TaskBillingService.Task task,TaskEstimateFeatures features,Terms terms){
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
+            throw new org.springframework.transaction.IllegalTransactionStateException("Budget estimation must be outside a transaction");
         if(terms==null||terms.routes().isEmpty())return new Unavailable(BILLING_ROUTE_MISSING);
         var group=TaskHistoryCatalog.Group.of(terms.execution(),features);var active=calibration.resolve(task,group);
         if(active==null)return new Unavailable(NO_BASELINE);

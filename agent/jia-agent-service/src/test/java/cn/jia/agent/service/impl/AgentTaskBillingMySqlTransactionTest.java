@@ -715,6 +715,27 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     void denseHistoryPooledInlinePhaseCosts(){profileHistoryPages(false,1025,true);}
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.pooledHistoryComparison",matches="true")
     void denseHistoryPooledSharedPhaseCosts(){profileHistoryPages(true,1025,true);}
+    @Test void estimateReleasesHistoryConnectionBeforePriceFreezeAndRejectsTaskTransactions(){
+        var fixture=measuredOffer();var features=fixture.features();var measured=fixture.preparation().group();
+        var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(measured,features);
+        var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),1,"a".repeat(64));
+        var params=new TaskNeighborSearch.Parameters(TaskNeighborSearch.trainingScales(List.of(features)),1,1,1,1,1,0.1,0.2,1,1,10,1);
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(measured,Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
+        var cal=mock(cn.jia.economy.task.TaskCalibrationCatalog.class);var hist=mock(cn.jia.economy.task.TaskHistoryCatalog.class);
+        when(cal.resolve(BILLING_TASK,group)).thenAnswer(call->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params);});
+        var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sample",1);
+        when(hist.candidatePage(BILLING_TASK,group,pin,"")).thenAnswer(call->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return List.of(new cn.jia.economy.task.TaskHistoryCatalog.Entry(rev,"history",features));});
+        var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture","op"),"draw","frame","proof",new MeasuredTaskRepricing.Units(new TaskQuoteCalculator.ToolKey("test","draw","frame"),BigDecimal.ONE));
+        when(hist.candidateQuantities(BILLING_TASK,group,pin,rev)).thenReturn(List.of(fact));
+        cn.jia.economy.pricing.TaskReferencePricing prices=(scope,version,routes,kinds)->{
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.hasResource(jdbc.getDataSource()));
+            return new TransactionTemplate(manager).execute(tx->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return fixtureReference();});};
+        var engine=proxy(new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(hist,prices),cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
+        var estimator=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(cal,hist,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
+        assertEquals(25,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(BILLING_TASK,features,terms)).preparation().estimate().wen());
+        locked(()->{assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->estimator.prepare(BILLING_TASK,features,terms));
+            assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->engine.estimate(BILLING_TASK,measured,features,pin,params,terms.routes()));return null;});
+    }
     private boolean attachedProbe;
     private record AttachedQuote(TaskEstimateFeatures reference,MeasuredNeighborEstimate.Estimate expected){}
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.pooledHistoryComparison",matches="true")
