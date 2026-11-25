@@ -71,10 +71,9 @@ public final class TaskEstimateCalibration {
         for(var row:cases){if(row.split().split()!=partition)continue;
             var truth=MeasuredTaskRepricing.reprice(reference,row.facts()).yuan();Long predicted=null;
             if(p!=null){var search=new TaskNeighborSearch(row.features(),p);for(var s:train.values())search.accept(s.id(),s.revision(),s.features());
-                List<TaskNeighborSearch.Hit> hits;
-                try{hits=search.selected();}catch(MeasuredTaskRepricing.Unavailable noSupport){hits=List.of();}
-                if(!hits.isEmpty()){var neighbors=hits.stream().map(h->new MeasuredNeighborEstimate.Neighbor(h.id(),Long.toString(h.revision()),h.weight(),train.get(h.id()).facts())).toList();
-                    predicted=MeasuredNeighborEstimate.aggregate(reference,neighbors).wen();}}
+                try{var neighbors=search.selected().stream().map(h->new MeasuredNeighborEstimate.Neighbor(h.id(),Long.toString(h.revision()),h.weight(),train.get(h.id()).facts())).toList();
+                    predicted=MeasuredNeighborEstimate.aggregate(reference,neighbors).wen();
+                }catch(MeasuredTaskRepricing.Unavailable unavailable){/* No quote for this row; truth and roster stay mandatory. */}}
             predictions.add(new Prediction(row.split().task(),truth,predicted));}
         return predictions;
     }

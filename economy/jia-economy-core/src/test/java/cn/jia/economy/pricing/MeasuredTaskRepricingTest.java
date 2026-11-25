@@ -136,6 +136,29 @@ class MeasuredTaskRepricingTest {
         var insufficient=TaskEstimateCalibration.evaluate(privateGroup,book,List.of(row.apply(train,1),row.apply(tune,1),row.apply(hold,1)),grid,new TaskEstimateCalibration.Gate(2,BigDecimal.ONE));
         assertNull(insufficient.winner());assertEquals(1,insufficient.holdout().eligible());assertEquals(0,insufficient.holdout().quoted());assertFalse(insufficient.meetsPointCriteria());
     }
+    @Test void missingNeighborPriceCountsAsAbstentionButMissingTruthCannotBeScored(){
+        var group=new TaskEstimateCalibration.PrivateGroup("tenant","client","owner","a".repeat(64));
+        var book=new Reference("frozen",Map.of("text",Map.of("inference",tokens)));
+        var rows=new ArrayList<TaskEstimateCalibration.Sample>();
+        for(var split:List.of(TaskEstimateEvaluation.Split.TRAIN,TaskEstimateEvaluation.Split.CALIBRATE,TaskEstimateEvaluation.Split.HOLDOUT)){
+            for(int side=0;side<2;side++){
+                String id=split.name()+side;int start=1+rows.size()*2;
+                var assignment=new TaskEstimateEvaluation.Case(id,id,start,start+1,split);
+                var category=side==0 && split==TaskEstimateEvaluation.Split.TRAIN?ModelTokenPrice.Category.OUTPUT:INPUT;
+                rows.add(new TaskEstimateCalibration.Sample(group,id,1,assignment,features(side,0,1),
+                        List.of(fact(id,"text","inference",new Tokens("disjoint-v1",Map.of(category,1000000L))))));
+            }
+        }
+        var trials=List.of(new TaskEstimateCalibration.Trial("nearest",1,1,1,1,1,0,0,1,1,1,1));
+        var gate=new TaskEstimateCalibration.Gate(1,new BigDecimal("0.5"));
+        var report=TaskEstimateCalibration.evaluate(group,book,rows,trials,gate);
+        assertTrue(report.meetsPointCriteria());
+        for(var score:List.of(report.winner().calibration(),report.holdout())){
+            assertEquals(2,score.eligible());assertEquals(1,score.quoted());assertEquals(0,score.wape().numerator().signum());
+        }
+        var held=rows.getLast();rows.set(rows.size()-1,new TaskEstimateCalibration.Sample(group,held.id(),1,held.split(),held.features(),rows.getFirst().facts()));
+        assertEquals("TOKEN_PRICE_MISSING",assertThrows(Unavailable.class,()->TaskEstimateCalibration.evaluate(group,book,rows,trials,gate)).getMessage());
+    }
     @Test void noFallbackWhenEvidenceOrAnExclusiveBasisIsMissing(){
         var book=new Reference("ref",Map.of("image",Map.of("render",frames)));
         var good=fact("i","image","render",new Units(image,BigDecimal.ONE));var doubleCharge=fact("i","image","image-tokens",new Tokens("disjoint-v1",Map.of(INPUT,1L)));
