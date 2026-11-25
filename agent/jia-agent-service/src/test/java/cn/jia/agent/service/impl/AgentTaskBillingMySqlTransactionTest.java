@@ -822,26 +822,58 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         long elapsed=System.nanoTime()-start;samples.sort(Long::compare);assertEquals(ids.size(),count("economy_history_feature_projection"));assertEquals(ids.size(),count("economy_task_cost_sample_revision"));
         System.out.printf(java.util.Locale.ROOT,"QUOTE_READY_PUBLISH shared=%s rows=%d totalMs=%.3f p50ms=%.3f p95ms=%.3f maxms=%.3f%n",shared,ids.size(),elapsed/1e6,samples.get((ids.size()-1)/2)/1e6,samples.get((95*ids.size()+99)/100-1)/1e6,samples.getLast()/1e6);return elapsed;
     }
+    // Diagnostic only: keep the SQL and MyBatis parameter binding identical; do not bypass the catalog for quotes.
+    private List<cn.jia.economy.mapper.ConfirmedSampleMapper.CompactRow> jdbcCompactPage(TaskBillingService.Task reader,String group,String after,String known,long[] ns){
+        long start=System.nanoTime();var cfg=recommendationSql.getConfiguration();var stmt=cfg.getMappedStatement(cn.jia.economy.mapper.ConfirmedSampleMapper.class.getName()+".compactHistory");
+        var args=Map.of("t",reader,"group",group,"after",after,"limit",64,"knownInline",known);var bound=stmt.getBoundSql(args);
+        var result=new java.util.ArrayList<cn.jia.economy.mapper.ConfirmedSampleMapper.CompactRow>();
+        try(var conn=jdbc.getDataSource().getConnection();var ps=conn.prepareStatement(bound.getSql())){
+            cfg.newParameterHandler(stmt,args,bound).setParameters(ps);long t=System.nanoTime();ns[0]+=t-start;
+            try(var rs=ps.executeQuery()){long executed=System.nanoTime();ns[1]+=executed-t;
+                while(rs.next()){int valid=rs.getInt(7);Integer value=rs.wasNull()?null:Integer.valueOf(valid);
+                    result.add(new cn.jia.economy.mapper.ConfirmedSampleMapper.CompactRow(rs.getString(1),rs.getLong(2),rs.getString(3),rs.getString(4),rs.getString(5),rs.getBytes(6),value,rs.getString(8)));}
+                ns[2]+=System.nanoTime()-executed;
+            }
+        }catch(java.sql.SQLException err){throw new AssertionError(err);}ns[3]+=System.nanoTime()-start;return result;
+    }
+    private static void fixtureField(java.io.DataOutputStream out,String value)throws java.io.IOException{
+        byte[] b=value.getBytes(StandardCharsets.UTF_8);out.writeInt(b.length);out.write(b);
+    }
+    // Independent canonical V1 bytes for the digest-only control. No retained payload after the current row.
+    private static byte[] fixtureCommitment(TaskEstimateFeatures f,byte[] vector){
+        var bytes=new java.io.ByteArrayOutputStream(4608);
+        try(var out=new java.io.DataOutputStream(bytes)){
+            for(var field:List.of(f.featureVersion(),f.templateVersion(),f.requirementSha256(),f.inputSnapshotSha256(),f.textSha256(),f.embeddingIdentity().providerConfigVersion(),f.embeddingIdentity().model()))fixtureField(out,field);
+            out.writeInt(f.embeddingIdentity().dimensions());out.write(vector);out.writeInt(f.files().size());
+            for(var file:f.files()){fixtureField(out,file.purpose());fixtureField(out,file.contentMimeType());out.writeLong(file.byteLength());out.writeInt(file.version());}
+            out.writeBoolean(f.requestedDeliverables()!=null);if(f.requestedDeliverables()!=null)out.writeInt(f.requestedDeliverables());
+        }catch(java.io.IOException err){throw new AssertionError(err);}return bytes.toByteArray();
+    }
     // A serial diagnostic of the actual mapper/JSON/restore operations, not inferred CPU or concurrent HTTP time.
     private void profileCompactStages(TaskBillingService.Task reader,cn.jia.economy.task.TaskHistoryCatalog.Group group,List<String> ids,boolean shared){
         var db=recommendationSql.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var json=new ObjectMapper();String groupSha=group.digest();
         var known=new java.util.HashMap<String,String>();
         for(int run=0;run<4;run++){
-            long mapper=0,decode=0,restore=0,construct=0,commitment=0;int pos=0,pages=0;String after="";
-            while(true){long t=System.nanoTime();var rows=db.compactHistory(reader,groupSha,after,64,known.getOrDefault(after,""));mapper+=System.nanoTime()-t;pages++;
+            long[] direct=new long[4];long wireBuild=0,wireHash=0;long mapper=0,decode=0,restore=0,construct=0,commitment=0;int pos=0,pages=0;String after="";
+            while(true){String hint=known.getOrDefault(after,"");var plain=run%2==0?jdbcCompactPage(reader,groupSha,after,hint,direct):null;
+                long t=System.nanoTime();var rows=db.compactHistory(reader,groupSha,after,64,hint);mapper+=System.nanoTime()-t;pages++;
+                if(plain==null)plain=jdbcCompactPage(reader,groupSha,after,hint,direct);assertEquals(rows.size(),plain.size());int at=0;
                 var learned=new java.util.StringJoiner(",");
-                for(var row:rows){assertEquals(ids.get(pos++),row.id());assertEquals(Integer.valueOf(1),row.sourceValid());
+                for(var row:rows){var raw=plain.get(at++);assertEquals(row.id(),raw.id());assertEquals(row.taskId(),raw.taskId());assertEquals(row.revision(),raw.revision());assertEquals(row.metadata(),raw.metadata());assertArrayEquals(row.vector(),raw.vector());assertEquals(row.featureSha(),raw.featureSha());assertEquals(row.sourceValid(),raw.sourceValid());assertEquals(row.inlineSha(),raw.inlineSha());assertEquals(ids.get(pos++),row.id());assertEquals(Integer.valueOf(1),row.sourceValid());
                     t=System.nanoTime();var meta=json.readValue(row.metadata(),cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.Metadata.class);decode+=System.nanoTime()-t;
                     t=System.nanoTime();var feature=cn.jia.economy.service.impl.EconomyHistoryFeatureBytes.restore(meta,row.vector(),row.featureSha());restore+=System.nanoTime()-t;
                     // Independent timed replay of the same two core operations. Timers are not nested in restore.
                     // Compare to the real production restore above; never substitute a cheaper checksum.
                     t=System.nanoTime();var unpacked=new TaskEstimateFeatures(meta.featureVersion(),meta.templateVersion(),meta.requirementSha256(),meta.inputSnapshotSha256(),meta.textSha256(),meta.embeddingIdentity(),TaskEstimateFeatures.vectorFromBytes(row.vector()),meta.files(),meta.requestedDeliverables());construct+=System.nanoTime()-t;
                     t=System.nanoTime();String sha=unpacked.digest();commitment+=System.nanoTime()-t;assertEquals(row.featureSha(),sha);
+                    t=System.nanoTime();var canonical=fixtureCommitment(feature,row.vector());wireBuild+=System.nanoTime()-t;
+                    try{t=System.nanoTime();var whole=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(canonical));wireHash+=System.nanoTime()-t;assertEquals(row.featureSha(),whole);}catch(java.security.NoSuchAlgorithmException err){throw new AssertionError(err);}
                     assertEquals(group,cn.jia.economy.task.TaskHistoryCatalog.Group.of(group.execution(),feature));if(row.inlineSha()!=null)learned.add(row.inlineSha());
                 }
                 if(learned.length()>0)known.put(after,learned.toString());if(rows.size()<64)break;after=rows.getLast().id();
             }
             assertEquals(ids.size(),pos);assertEquals(17,pages);
+            System.out.printf(java.util.Locale.ROOT,"DENSE_CONTROL shared=%s run=%d prepBindMs=%.3f executeMs=%.3f extractRowsMs=%.3f jdbcTotalMs=%.3f encodeControlMs=%.3f hashControlMs=%.3f%n",shared,run,direct[0]/1e6,direct[1]/1e6,direct[2]/1e6,direct[3]/1e6,wireBuild/1e6,wireHash/1e6);
             System.out.printf(java.util.Locale.ROOT,"DENSE_COMPACT_STAGES shared=%s run=%d rows=%d mapperMs=%.3f metadataDecodeMs=%.3f vectorRestoreAndDigestMs=%.3f replayConstructValidateMs=%.3f replayCommitmentMs=%.3f%n",shared,run,pos,mapper/1e6,decode/1e6,restore/1e6,construct/1e6,commitment/1e6);
         }
     }
