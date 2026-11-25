@@ -8,6 +8,7 @@ import cn.jia.core.config.ApiEnvelopeAdvice;
 import cn.jia.core.config.ApiRequestEnvelopeAdvice;
 import cn.jia.core.config.ExceptionHandlerAdvice;
 import cn.jia.core.filter.RequestIdFilter;
+import cn.jia.core.security.FixedTenantAdmissionPolicy;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.Filter;
 import org.apache.catalina.Context;
@@ -72,8 +73,8 @@ class AgentExternalServicePolicyControllerTest {
     @EnableWebSecurity
     public static class HttpFixture {
         @Bean ObjectMapper json() { return JsonMapper.builder().build(); }
-        @Bean AgentExternalServicePolicyController controller(AgentExternalServicePolicyService service, ObjectMapper json) {
-            return new AgentExternalServicePolicyController(service, json);
+        @Bean AgentExternalServicePolicyController controller(AgentExternalServicePolicyService service, ObjectMapper json, FixedTenantAdmissionPolicy policy) {
+            return new AgentExternalServicePolicyController(service, json, policy);
         }
         @Bean ApiEnvelopeAdvice responseAdvice() { return new ApiEnvelopeAdvice(); }
         @Bean ApiRequestEnvelopeAdvice requestAdvice() { return new ApiRequestEnvelopeAdvice(); }
@@ -84,7 +85,7 @@ class AgentExternalServicePolicyControllerTest {
         }
     }
 
-    @BeforeEach void setUp() throws Exception {
+    @BeforeEach void setUp(org.junit.jupiter.api.TestInfo info) throws Exception {
         service = mock(AgentExternalServicePolicyService.class);
         signingKey = new byte[32]; new SecureRandom().nextBytes(signingKey);
         var decoder = NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey, "HmacSHA256"))
@@ -96,6 +97,8 @@ class AgentExternalServicePolicyControllerTest {
         context.setParentClassLoader(getClass().getClassLoader());
         app = new AnnotationConfigWebApplicationContext(); app.setServletContext(context.getServletContext());
         app.addBeanFactoryPostProcessor(factory -> {
+            factory.registerSingleton("processScope", info.getTags().contains("grey-tenant")
+                    ? new FixedTenantAdmissionPolicy("grey", "client-a") : new FixedTenantAdmissionPolicy("0", null));
             factory.registerSingleton("policyService", service);
             factory.registerSingleton("jwtDecoder", decoder);
         });
@@ -210,6 +213,22 @@ class AgentExternalServicePolicyControllerTest {
             envelope(send("GET", ROUTE, token("client-a", owner, Map.of("tenant_id", "0")), null, null), 401);
         }
         verifyNoInteractions(service);
+    }
+
+    @org.junit.jupiter.api.Tag("grey-tenant")
+    @Test void candidateReadUsesProcessPartitionWithoutOpeningPolicyManagement() throws Exception {
+        var actor = new AgentTaskExecutionGrantService.Scope("grey", "client-a", "provider");
+        var path = "/agent/tasks/task-a/assignee-candidates";
+        var grey = token("client-a", "provider", Map.of("tenant_id", "grey"));
+        when(service.candidates(actor,"task-a",null,50)).thenReturn(new AgentExternalServicePolicyService.Candidates(List.of(),null));
+        envelope(send("GET",path,grey,null,null),200);
+        for (String invalid : List.of(ownerToken(), token("client-b","provider",Map.of("tenant_id","grey")),
+                token("client-a","provider",Map.of("tenant_id","grey","tenantId","0")))) {
+            envelope(send("GET",path,invalid,null,null),401);
+        }
+        envelope(send("GET",ROUTE,grey,null,null),401);
+        verify(service).candidates(actor,"task-a",null,50);
+        verifyNoMoreInteractions(service);
     }
 
     @Test void candidateGetUsesCanonicalCursorAndOnlyFiveSafeFieldsIncludingNullProvider() throws Exception {

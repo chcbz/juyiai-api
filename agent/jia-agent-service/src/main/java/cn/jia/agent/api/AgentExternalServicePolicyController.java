@@ -3,6 +3,7 @@ package cn.jia.agent.api;
 import cn.jia.agent.service.*;
 import cn.jia.core.entity.JsonResult;
 import cn.jia.core.security.TenantClaimPolicy;
+import cn.jia.core.security.FixedTenantAdmissionPolicy;
 import jakarta.inject.Inject;
 import org.springframework.http.*;
 import org.springframework.security.core.Authentication;
@@ -15,8 +16,9 @@ import tools.jackson.databind.ObjectMapper;
 public final class AgentExternalServicePolicyController {
     private final AgentExternalServicePolicyService service;
     private final ObjectMapper json;
-    @Inject public AgentExternalServicePolicyController(AgentExternalServicePolicyService service,ObjectMapper json) {
-        this.service=service;this.json=json;
+    private final FixedTenantAdmissionPolicy processScope;
+    @Inject public AgentExternalServicePolicyController(AgentExternalServicePolicyService service,ObjectMapper json,FixedTenantAdmissionPolicy processScope) {
+        this.service=service;this.json=json;this.processScope=processScope;
     }
     @GetMapping("/{agentId}/external-service-policy")
     public ResponseEntity<?> read(@PathVariable String agentId,Authentication authentication) {
@@ -48,7 +50,7 @@ public final class AgentExternalServicePolicyController {
     @GetMapping("/tasks/{taskId}/assignee-candidates")
     public ResponseEntity<?> candidates(@PathVariable String taskId,
             @RequestParam(required=false) String afterAgentId,@RequestParam(defaultValue="50") int pageSize,Authentication authentication) {
-        return ok(service.candidates(scope(authentication),taskId,afterAgentId,pageSize));
+        return ok(service.candidates(candidateScope(authentication),taskId,afterAgentId,pageSize));
     }
     @ExceptionHandler(AgentTaskExecutionGrantException.class)
     public ResponseEntity<?> failure(AgentTaskExecutionGrantException failure) {
@@ -68,13 +70,25 @@ public final class AgentExternalServicePolicyController {
         return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL,"private, no-store").body(JsonResult.success(value));
     }
     private static AgentTaskExecutionGrantService.Scope scope(Authentication authentication) {
+        var actor=signedScope(authentication);
+        if(!"0".equals(actor.tenantId())) throw unauthorized(); // Legacy policy-management boundary only.
+        return actor;
+    }
+    private AgentTaskExecutionGrantService.Scope candidateScope(Authentication authentication) {
+        var actor=signedScope(authentication);
+        try { processScope.requireAdmitted(actor.tenantId(),actor.clientId()); }
+        catch(IllegalArgumentException invalid) { throw unauthorized(); }
+        return new AgentTaskExecutionGrantService.Scope(processScope.businessTenantId(),actor.clientId(),actor.ownerJiacn());
+    }
+    private static AgentTaskExecutionGrantService.Scope signedScope(Authentication authentication) {
         if(!(authentication instanceof JwtAuthenticationToken jwt) || !jwt.isAuthenticated()) throw unauthorized();
         var claims=jwt.getToken().getClaims();
         Object owner=claims.get("jiacn"),client=claims.get("client_id");
         try {
-            if(!"0".equals(TenantClaimPolicy.resolve(claims)) || !(owner instanceof String o)
+            String tenant=TenantClaimPolicy.resolve(claims);
+            if(!(owner instanceof String o)
                     || !(client instanceof String c) || !exact(o) || "0".equals(o) || !exact(c)) throw unauthorized();
-            return new AgentTaskExecutionGrantService.Scope("0",c,o);
+            return new AgentTaskExecutionGrantService.Scope(tenant,c,o);
         } catch(IllegalArgumentException invalid) { throw unauthorized(); }
     }
     private static boolean exact(String s) { return !s.isBlank()&&s.equals(s.strip())&&s.length()<=50&&!s.chars().anyMatch(Character::isISOControl); }
