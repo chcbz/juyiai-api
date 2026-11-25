@@ -20,6 +20,17 @@ class TaskFeatureCommitmentTest {
         view.putFloat(0,1f);view.putFloat(4092,Float.NEGATIVE_INFINITY);
         assertThrows(IllegalArgumentException.class,()->new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"t","r","i","s",id,TaskEstimateFeatures.vectorFromBytes(bytes),List.of(),null));
     }
+    @Test void bulkCopyReplacesEveryComponentAndDoesNotMutatePackedState(){
+        var random=new Random(9091);var boxed=new ArrayList<Float>();var data=java.nio.ByteBuffer.allocate(4096);
+        for(int i=0;i<1024;i++){float v=switch(i%5){case 0->-0f;case 1->Float.MIN_VALUE;case 2->-Float.MAX_VALUE;default->random.nextFloat()-.5f;};boxed.add(v);data.putFloat(v);}
+        var target=new float[1024];var id=new TaskEstimateFeatures.Identity("cfg","model",1024);
+        for(var src:List.of(boxed,TaskEstimateFeatures.vectorFromBytes(data.array()))){
+            var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"v","r","i","t",id,src,List.of(),null);String digest=f.digest();
+            for(int pass=0;pass<2;pass++){Arrays.fill(target,Float.NaN);f.copyComponents(target);
+                for(int i=0;i<target.length;i++)assertEquals(Float.floatToRawIntBits(boxed.get(i)),Float.floatToRawIntBits(target[i]));}
+            Arrays.fill(target,0);assertEquals(digest,f.digest());assertThrows(IllegalArgumentException.class,()->f.copyComponents(new float[1023]));
+        }
+    }
     @Test void canonicalV1BytesRemainIdenticalForOldCommitments(){
         var vector=new ArrayList<Float>(Collections.nCopies(1024,0f));
         vector.set(0,-0f);vector.set(1,Float.MIN_VALUE);vector.set(2,Float.MAX_VALUE);vector.set(3,-0.5f);

@@ -38,9 +38,11 @@ public final class TaskNeighborSearch {
     private static double scaled(double a,double b,double scale){return a==b?0:scale==0?Double.POSITIVE_INFINITY:Math.abs(a-b)/scale;}
     private final double[] queryComponents;
     private final double queryNorm;
+    private final float[] sampleComponents; // owned only by this streaming search
     private double cosine(TaskEstimateFeatures sample){
         double bb=0,ab=0;
-        for(int i=0;i<queryComponents.length;i++){double y=sample.component(i);bb+=y*y;ab+=queryComponents[i]*y;}
+        sample.copyComponents(sampleComponents);
+        for(int i=0;i<queryComponents.length;i++){double y=sampleComponents[i];bb+=y*y;ab+=queryComponents[i]*y;}
         return 1-Math.clamp(ab/(queryNorm*Math.sqrt(bb)),-1d,1d);
     }
     private record Ranked(String id,long revision,double distance) {}
@@ -49,7 +51,7 @@ public final class TaskNeighborSearch {
     private final PriorityQueue<Ranked> best=new PriorityQueue<>(ORDER.reversed());private String last="";private long considered;
     public TaskNeighborSearch(TaskEstimateFeatures query,Parameters p){
         this.query=query;this.q=shape(query);this.p=Objects.requireNonNull(p);
-        queryComponents=new double[query.vector().size()];double aa=0;
+        queryComponents=new double[query.vector().size()];sampleComponents=new float[queryComponents.length];double aa=0;
         for(int i=0;i<queryComponents.length;i++){double x=query.component(i);queryComponents[i]=x;aa+=x*x;}
         queryNorm=Math.sqrt(aa);
     }

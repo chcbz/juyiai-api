@@ -23,8 +23,8 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
     /** Immutable list view of an owned V1 byte block; keep the JSON/list contract at the boundary. */
     private static final class PackedVector extends AbstractList<Float> implements RandomAccess {
         private final byte[] bytes;
-        private final java.nio.ByteBuffer view;
-        private PackedVector(byte[] source){bytes=source.clone();view=java.nio.ByteBuffer.wrap(bytes);}
+        private final java.nio.FloatBuffer view;
+        private PackedVector(byte[] source){bytes=source.clone();view=java.nio.ByteBuffer.wrap(bytes).asFloatBuffer();}
         /** For big-endian binary32, exponent bits are the low seven of byte 0 and the high bit of byte 1.
          * Ignore the sign for zero, but check the exponent of every component even after a nonzero is found. */
         private boolean validateAndFindNonzero(){
@@ -38,7 +38,7 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
         }
         @Override public int size(){return bytes.length/Float.BYTES;}
         @Override public Float get(int index){return value(index);}
-        private float value(int index){return view.getFloat(Objects.checkIndex(index,size())*Float.BYTES);}
+        private float value(int index){return view.get(index);}
     }
     public static List<Float> vectorFromBytes(byte[] bytes){
         if(bytes==null || bytes.length!=1024*Float.BYTES)throw new IllegalArgumentException("Invalid feature vector length");
@@ -46,6 +46,12 @@ public record TaskEstimateFeatures(String featureVersion,String templateVersion,
     }
     private static float component(List<Float> values,int index){return values instanceof PackedVector packed?packed.value(index):values.get(index);}
     float component(int index){return component(vector,index);}
+    // Absolute bulk read: no shared cursor mutation and no exposure of the immutable source bytes.
+    void copyComponents(float[] target){
+        if(target.length!=vector.size())throw new IllegalArgumentException("Invalid feature vector length");
+        if(vector instanceof PackedVector packed)packed.view.get(0,target);
+        else for(int i=0;i<target.length;i++)target[i]=vector.get(i);
+    }
     /** Detached canonical bytes; never expose mutable storage from this immutable feature. */
     public byte[] vectorBytes(){
         if(vector instanceof PackedVector packed)return packed.bytes.clone();
