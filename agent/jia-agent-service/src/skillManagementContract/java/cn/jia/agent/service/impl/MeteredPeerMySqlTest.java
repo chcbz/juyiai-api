@@ -267,7 +267,19 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         }
         var server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);var cuts=new AtomicReference<String>();var error=new AtomicReference<Throwable>();var trace=new java.util.concurrent.CopyOnWriteArrayList<String>();
         var rotated=new AtomicReference<cn.jia.agent.entity.AgentRuntimeV1SessionResponse>();var originalBody=new AtomicReference<byte[]>();
-        boolean liveDrain=missingSource||peerMode==DiscussionPeer.LIVE_DRAIN;Path device=temp.resolve("cutover-inbox");var roster=new AtomicReference<Map<String,String>>();
+        boolean liveDrain=missingSource||peerMode==DiscussionPeer.LIVE_DRAIN;var runtime=Path.of(System.getProperty("ownedMeteredRuntime"));
+        var layout=liveDrain?prepareDrainDevice(runtime,temp):null;
+        Path state=liveDrain?Path.of(layout.required("stateRoot").asText()):temp;
+        Path device=state.resolve(liveDrain?"inbox":"cutover-inbox");
+        Path scopeFile=temp.resolve("scopes.json"),before=temp.resolve("before.json"),after=temp.resolve("after.json"),entry=temp.resolve("device-entry.json");
+        if(liveDrain){
+            Files.write(scopeFile,json.writeValueAsBytes(List.of(Map.of("tenant_id","0","client_id","client","owner_jiacn","owner","task_id","task"))));
+            Files.write(before,json.writeValueAsBytes(inventory()));var plan=rosterCommand(temp,scopeFile,before,null,0);
+            Files.writeString(temp.resolve("prior.sha"),plan.required("snapshotSha256").asText());assertEquals(1,plan.required("devices").size());
+            Files.createFile(entry,java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+            Files.write(entry,json.writeValueAsBytes(plan.required("devices").get(0)));
+        }
+        var roster=new AtomicReference<Map<String,String>>();
         com.sun.net.httpserver.HttpHandler handler=exchange->{try(exchange){var req=request(HttpMethod.valueOf(exchange.getRequestMethod()),exchange.getRequestURI());exchange.getRequestHeaders().forEach((k,v)->req.header(k,v.toArray()));
             byte[] input=exchange.getRequestBody().readAllBytes();if(input.length>0)req.content(input);
             if(liveDrain){
@@ -297,7 +309,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             String fixture=System.getProperty("ownedRuntimeRepairFixture");
             boolean repaired=phase.equals("resume") && fixture!=null;
             var pb=repaired?new ProcessBuilder("python3","-B",Path.of(System.getProperty("ownedCutoverController"),"ops/orchestration/tests/runtime_cutover_resume_probe.py").toString(),fixture,peer.toString(),temp.toString()):new ProcessBuilder("node",peer.toString());
-            if(repaired)pb.redirectError(temp.resolve("runtime-repair.log").toFile());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
+            if(repaired)pb.redirectError(temp.resolve("runtime-repair.log").toFile());pb.environment().put("TMPDIR",state.toString());var child=pb.start();
             try{try(var in=child.getOutputStream()){in.write(json.writeValueAsBytes(Map.of("cutover",phase,"rotate",rotate,"discussion",chat?(Object)payload:false,"successor",successor,"snapshotDigest",NativeCancellationFixture.snapshotDigest("task"),"port",server.getAddress().getPort(),"executionId","exec1","runId","run-exec1","session",Map.of("sessionToken",session.sessionToken(),"canonicalAgentId",AGENT,"installationId",INSTALL,"hostId","host","runtimeInstanceId","rt","sessionGeneration","1"))));}
                 assertTrue(child.waitFor(50,TimeUnit.SECONDS));if(error.get()!=null)throw new AssertionError("receiver",error.get());if(phase.equals("stop")){assertEquals(75,child.exitValue());assertNotNull(cuts.get());
                     var address=server.getAddress();server.stop(0);server=null;
@@ -311,23 +323,16 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
             }
         }finally{if(server!=null)server.stop(0);}
         if(liveDrain){assertNull(rotated.get());assertEquals(roster.get(),originalRevisions(device));assertEquals(roster.get().keySet(),durableDeviceReceipts(device,roster.get()));}
+        if(liveDrain){
+            var audit=runProbe(temp,List.of("node",runtime.resolve("conf/cyf-agent-runtime-v1/agent-runtime.mjs").toString(),"inspect-discussion-receipts","--config",layout.required("config").asText(),"--subject",layout.required("subject").asText(),"--expected-sources",entry.toString()),missingSource?2:0);
+            assertEquals(missingSource?2:1,audit.required("expected").asInt());assertEquals(1,audit.required("acknowledged").asInt());assertEquals(missingSource?1:0,audit.required("missing").asInt());assertEquals(0,audit.required("unexpected").asInt());
+            Files.write(after,json.writeValueAsBytes(inventory().reversed()));assertTrue(rosterCommand(temp,scopeFile,before,after,0).required("inventoryUnchanged").asBoolean());
+        }
         if(missingSource){
             assertEquals(frozen,inventory());var ids=frozen.stream().map(r->(String)r.get("capture_id")).toList();assertEquals(2,new HashSet<>(ids).size());
-            var scopeFile=temp.resolve("scopes.json");var before=temp.resolve("before.json");var after=temp.resolve("after.json");
-            var first=frozen.getFirst();var scopeFields=List.of("tenant_id","client_id","owner_jiacn","task_id");var scopeRow=new HashMap<String,Object>();for(String k:scopeFields)scopeRow.put(k,first.get(k));
-            Files.write(scopeFile,json.writeValueAsBytes(List.of(scopeRow)));Files.write(before,json.writeValueAsBytes(frozen));
-            var plan=rosterCommand(temp,scopeFile,before,null,0);Files.writeString(temp.resolve("prior.sha"),plan.required("snapshotSha256").asText());assertEquals(ids.stream().sorted().toList(),json.convertValue(plan.at("/devices/0/manifest/captureIds"),List.class));
-            Files.write(after,json.writeValueAsBytes(inventory().reversed()));assertTrue(rosterCommand(temp,scopeFile,before,after,0).required("inventoryUnchanged").asBoolean());
             // An additional unmetered legacy member must invalidate the scope, not disappear from it.
             tx.executeWithoutResult(st->{new TaskDiscussionMembershipService(executions).admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","client","owner"),"task","legacy-turn","legacy-run","e".repeat(64),false);});
             Files.write(after,json.writeValueAsBytes(inventory()));rosterCommand(temp,scopeFile,before,after,2);
-            String probe="""
-                import {PersistentChatInbox} from './chat-runtime.mjs';import {ChatUsageDelivery} from './chat-usage-delivery.mjs';
-                const [rootDir,agentId,...ids]=process.argv.slice(1),inbox=new PersistentChatInbox({rootDir,profile:{agentId}});
-                console.log(JSON.stringify(await new ChatUsageDelivery({inbox,scope:{tenantId:'0',clientId:'client',agentId}}).inspectDiscussionSources(ids)));
-                """;
-            var child=new ProcessBuilder("node","--input-type=module","-e",probe,device.toString(),AGENT,ids.get(0),ids.get(1)).directory(Path.of(System.getProperty("ownedMeteredRuntime"),"conf/codex-bridge").toFile()).start();
-            try{assertTrue(child.waitFor(15,TimeUnit.SECONDS));assertEquals(0,child.exitValue());var audit=json.readTree(child.getInputStream().readAllBytes());assertEquals(2,audit.required("expected").asInt());assertEquals(1,audit.required("acknowledged").asInt());assertEquals(1,audit.required("missing").asInt());assertEquals(0,audit.required("unexpected").asInt());}finally{child.destroyForcibly();}
             // Restore both original mappings before checking the independent authorization boundaries below.
             try{jdbc.update("UPDATE chat_task_dispatch_origin SET mixed_origin=TRUE WHERE event_id=?",payload.get("messageId"));
             assertEquals(List.of("UNVERIFIED","MAPPED_SENT_ORIGIN","UNVERIFIED"),inventory().stream().map(r->r.get("source_state")).toList());
@@ -375,6 +380,22 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         facts.put("taskUsageCapture",Map.of("protocol","METERED_CAPTURE_V2","captureId",NativeCaptureEvidence.captureIdentity((String)wire.get("turnId"),(String)wire.get("dispatchId"))));
         String hash=cn.jia.chat.service.ChatDeliberationService.digest(Map.of("sourceVector",wire.get("sourceVector"),"facts",facts));wire.put("contextHash",hash);
         var snap=(Map<String,Object>)wire.get("contextSnapshot");snap.put("facts",facts);snap.put("contextHash",hash);return wire;
+    }
+    private tools.jackson.databind.JsonNode prepareDrainDevice(Path runtime,Path temp)throws Exception {
+        String setup="""
+            import {pathToFileURL} from 'node:url';
+            const [module,installationId,canonicalAgentId]=process.argv.slice(1);
+            const {fixture}=await import(pathToFileURL(module));
+            // JUnit owns the private TMPDIR and its cleanup; pin device identity independently of the SQL export.
+            const f=await fixture({after(){}},{count:1,firstIdentity:{tenantId:'0',clientId:'client',installationId,canonicalAgentId}});
+            f.raw.hostId='host';const {agents:[agent]}=await f.config();
+            console.log(JSON.stringify({config:f.path,stateRoot:agent.stateRoot,subject:agent.subjectKey}));
+            """;
+        return runProbe(temp,List.of("node","--input-type=module","-e",setup,runtime.resolve("conf/cyf-agent-runtime-v1/test/channel-fixture.mjs").toString(),INSTALL,AGENT),0);
+    }
+    private tools.jackson.databind.JsonNode runProbe(Path temp,List<String> args,int status)throws Exception {
+        var err=temp.resolve("device-probe.err");var pb=new ProcessBuilder(args).redirectError(err.toFile());pb.environment().put("TMPDIR",temp.toString());var child=pb.start();
+        try{assertTrue(child.waitFor(15,TimeUnit.SECONDS));assertEquals(status,child.exitValue(),Files.readString(err));return json.readTree(child.getInputStream().readAllBytes());}finally{child.destroyForcibly();}
     }
     private tools.jackson.databind.JsonNode rosterCommand(Path temp,Path scopes,Path before,Path after,int expected)throws Exception{
         var args=new ArrayList<>(List.of("node",Path.of("../../ops/schema/discussion_source_roster.mjs").toAbsolutePath().toString(),System.getProperty("ownedMeteredRuntime"),scopes.toString(),before.toString()));if(after!=null){args.add(after.toString());args.add(Files.readString(temp.resolve("prior.sha")));}
