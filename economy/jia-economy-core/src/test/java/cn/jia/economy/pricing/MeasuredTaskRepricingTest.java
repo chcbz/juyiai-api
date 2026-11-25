@@ -149,7 +149,7 @@ class MeasuredTaskRepricingTest {
                         List.of(fact(id,"text","inference",new Tokens("disjoint-v1",Map.of(category,1000000L))))));
             }
         }
-        var trials=List.of(new TaskEstimateCalibration.Trial("nearest",1,1,1,1,1,0,0,1,1,1,1));
+        var trials=List.of(new TaskEstimateCalibration.Trial("nearest",1,1,1,1,1,.1,.2,1,1,1,1));
         var gate=new TaskEstimateCalibration.Gate(1,new BigDecimal("0.5"));
         var report=TaskEstimateCalibration.evaluate(group,book,rows,trials,gate);
         assertTrue(report.meetsPointCriteria());
