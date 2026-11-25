@@ -58,6 +58,15 @@ class MeasuredTaskRepricingTest {
         return new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),vector,
                 Collections.nCopies(files,new TaskEstimateFeatures.File("INPUT","text/plain",1024,1)),deliverables);
     }
+    @Test void structuralRadiusRejectionStillCountsEvidenceAndKeepsExactBoundary(){
+        var q=features(1,0,2);var params=new TaskNeighborSearch.Parameters(new TaskNeighborSearch.Scales(0,0,1),1,1,1,1,1,.1,.5,2,2,1,1);
+        var search=new TaskNeighborSearch(q,params);search.accept("a",1,features(1,1,2));
+        assertEquals("NO_BASELINE",assertThrows(Unavailable.class,search::selected).getMessage());
+        search.accept("b",1,features(1,0,4)); // finite deliverable term 2 exceeds radius 1
+        assertEquals("OUT_OF_DISTRIBUTION",assertThrows(Unavailable.class,search::selected).getMessage());
+        search.accept("c",2,features(1,0,3));search.accept("d",3,q);
+        assertEquals(List.of(new TaskNeighborSearch.Hit("d",3,0,BigDecimal.ONE),new TaskNeighborSearch.Hit("c",2,1,new BigDecimal("0.5"))),search.selected());
+    }
     @Test void fullSortOracleMatchesDensePackedSearchAtEveryPageBoundaryIncludingWeights(){
         var random=new Random(1329);var q=features(-0.25f,0,2);
         var params=new TaskNeighborSearch.Parameters(new TaskNeighborSearch.Scales(0,0,0),1,1,1,1,1,.1,.5,5,1,4,.3);

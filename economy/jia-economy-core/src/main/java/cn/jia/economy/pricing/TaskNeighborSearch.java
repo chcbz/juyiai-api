@@ -61,7 +61,12 @@ public final class TaskNeighborSearch {
         considered++;var s=shape(sample);long overlap=0;for(var entry:q.histogram.entrySet())overlap+=Math.min(entry.getValue(),s.histogram.getOrDefault(entry.getKey(),0));
         long n=(long)q.count+s.count;double types=n==0?0:1-(2d*overlap/n);
         double deliver=q.deliverables==null&&s.deliverables==null?p.bothMissing:q.deliverables==null||s.deliverables==null?p.oneMissing:scaled(q.deliverables,s.deliverables,p.scales.deliverables);
-        double distance=p.text*cosine(sample)+p.files*scaled(q.count,s.count,p.scales.fileCount)+p.bytes*scaled(q.logBytes,s.logBytes,p.scales.logBytes)+p.types*types+p.deliverables*deliver;
+        double files=p.files*scaled(q.count,s.count,p.scales.fileCount), bytes=p.bytes*scaled(q.logBytes,s.logBytes,p.scales.logBytes);
+        double kinds=p.types*types, outputs=p.deliverables*deliver;
+        // Each distance term is nonnegative. An individual term strictly outside the calibrated
+        // radius cannot be rescued by cosine. Keep the exact original sum order for all other rows.
+        if(files>p.maxDistance || bytes>p.maxDistance || kinds>p.maxDistance || outputs>p.maxDistance)return;
+        double distance=p.text*cosine(sample)+files+bytes+kinds+outputs;
         if(distance>p.maxDistance)return;
         var hit=new Ranked(id,revision,distance);if(best.size()<p.neighbors)best.add(hit);else if(ORDER.compare(hit,best.element())<0){best.remove();best.add(hit);}
     }
