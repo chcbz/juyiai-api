@@ -19,6 +19,10 @@ public interface ChatContextHistoryMapper {
             AND CAST(r.client_id AS BINARY)=CAST(#{turn.clientId} AS BINARY)
             AND CAST(r.conversation_id AS BINARY)=CAST(#{turn.conversationId} AS BINARY)
             """;
+    /** Enroll only the first request in this locked conversation generation. A later DELTA can be replaced. */
+    @Select("SELECT EXISTS (SELECT 1 FROM chat_request r WHERE " + REQUEST_SCOPE + " AND r.id < #{turn.id})")
+    boolean hasEarlierRequest(@Param("turn") ChatRequestEntity request);
+
     String MESSAGE_SCOPE = """
             m.tenant_id=#{turn.tenantId} AND m.jiacn=#{turn.ownerJiacn}
             AND m.client_id=#{turn.clientId} AND m.conversation_id=#{turn.conversationId}

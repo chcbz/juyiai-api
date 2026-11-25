@@ -1,5 +1,6 @@
 package cn.jia.agent.api;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.agent.hosting.HostingRentApplicationException;
 import cn.jia.agent.service.impl.AgentServiceImpl;
@@ -16,7 +17,7 @@ import static cn.jia.agent.entity.AssigneeRecommendation.*;
 /** Replaces (does not coexist with) AgentController's rule-scored recommendation endpoint. */
 @RestController
 @RequestMapping("/agent/tasks")
-public final class AssigneeRecommendationController {
+public final class AssigneeRecommendationController implements TaskAssigneeAdmissionErrors {
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(AssigneeRecommendationController.class);
     private final AssigneeRecommendationService recommendations;
     public AssigneeRecommendationController(AssigneeRecommendationService recommendations) {
@@ -51,7 +52,18 @@ public final class AssigneeRecommendationController {
     }
     @ExceptionHandler(AgentServiceImpl.AgentBizException.class)
     public ResponseEntity<JsonResult<Void>> task(AgentServiceImpl.AgentBizException error) {
-        return failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+        // Only the task's owner-scoped lookup proves it is absent/invisible. A candidate
+        // projection failure after that lookup must not be translated to a missing task.
+        return cn.jia.agent.common.AgentErrorConstants.TASK_NOT_FOUND.equals(error.getCode()) ? missing() : unavailable(error);
+    }
+    private ResponseEntity<JsonResult<Void>> missing() { return failure(new Failure(404,"RECOMMENDATION_NOT_FOUND")); }
+    @ExceptionHandler(cn.jia.agent.service.AgentTaskExecutionGrantException.class)
+    public ResponseEntity<JsonResult<Void>> policy(cn.jia.agent.service.AgentTaskExecutionGrantException error) {
+        return switch(error.reason()) {
+            case NOT_FOUND -> missing(); // candidate policy rechecks task ownership
+            case BAD_REQUEST -> failure(new Failure(400,"BAD_REQUEST"));
+            default -> unavailable(error);
+        };
     }
     @ExceptionHandler(cn.jia.agent.exception.AgentTaskCollaborationException.class)
     public ResponseEntity<JsonResult<Void>> lockedTask(cn.jia.agent.exception.AgentTaskCollaborationException error) {
@@ -59,6 +71,22 @@ public final class AssigneeRecommendationController {
             case NOT_FOUND, FORBIDDEN -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
             case VERSION_CONFLICT, INVALID_TRANSITION -> failure(new Failure(409, "RECOMMENDATION_STALE"));
             default -> failure(new Failure(503, "RECOMMENDATION_UNAVAILABLE"));
+        };
+    }
+    @ExceptionHandler(cn.jia.agent.service.AgentTaskRequirementReadException.class)
+    public ResponseEntity<JsonResult<Void>> requirement(cn.jia.agent.service.AgentTaskRequirementReadException error) {
+        return switch(error.reason()) {
+            case NOT_FOUND -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+            case RECONFIRM_REQUIRED -> failure(new Failure(409, "RECOMMENDATION_STALE"));
+            case INTEGRITY_ERROR, SOURCE_UNAVAILABLE -> unavailable(error);
+        };
+    }
+    @ExceptionHandler(PersonalWorkspaceException.class)
+    public ResponseEntity<JsonResult<Void>> workspace(PersonalWorkspaceException error) {
+        return switch (error.getReason()) {
+            case NOT_FOUND -> failure(new Failure(404, "RECOMMENDATION_NOT_FOUND"));
+            case VERSION_CONFLICT, METADATA_CHANGED -> failure(new Failure(409, "RECOMMENDATION_STALE"));
+            default -> unavailable(error);
         };
     }
     @ExceptionHandler(RuntimeException.class)

@@ -43,9 +43,20 @@ class SkillManagementRetainedAuthorizationTest {
         assertNull(service.read(SCOPE));when(mapper.paidInventory("0","client","a","owner")).thenReturn(paid("{broken"));
         assertEquals("SKILL_STATE_UNAVAILABLE",assertThrows(SkillMarketplaceException.class,()->service.read(SCOPE)).code());
     }
+    @Test void bulkReadsExactPairsInBoundedGroupsAndKeepsMissingMissing(){
+        var db=mock(SkillManagementMapper.class);var service=new SkillRelationshipAuthorizations(db,true);
+        var keys=java.util.stream.IntStream.range(0,129).mapToObj(i->new SkillManagementMapper.InventoryKey("a"+i,"owner"+i)).toList();
+        var row=paid(inventory("si_a","a".repeat(64))).setAgentId("a128").setOwnerJiacn("owner128");
+        when(db.paidInventories("0","client",keys.subList(128,129))).thenReturn(List.of(row));
+        assertEquals(java.util.Set.of(keys.getLast()),service.readMany("0","client",keys).keySet());
+        verify(db).paidInventories("0","client",keys.subList(0,128));verify(db).paidInventories("0","client",keys.subList(128,129));verifyNoMoreInteractions(db);
+        row.setOwnerJiacn("owner0");assertEquals("SKILL_STATE_UNAVAILABLE",assertThrows(SkillMarketplaceException.class,()->service.readMany("0","client",keys)).code());
+        row.setOwnerJiacn("owner128");when(db.paidInventories("0","client",keys.subList(128,129))).thenReturn(List.of(row,row));
+        assertThrows(SkillMarketplaceException.class,()->service.readMany("0","client",keys));
+    }
     @Test void recommendationsUseNewPaidRuntimeFenceAndReadInventoryOnlyOncePerAgent() {
         var f=new SkillManagementRecommendationTest.Fixture();f.installed("a");
-        var auth=f.db.activeAuthorizationsForAgent("0","client","a").getFirst();auth.setRuntimeInstallationId("retired-runtime");
+        var auth=f.authorizations.get("a");auth.setRuntimeInstallationId("retired-runtime");
         f.service.setRelationshipAuthorizations(new SkillRelationshipAuthorizations(f.db,true));
         assertFalse(f.service.recommendationSkills(SkillManagementRecommendationTest.ACTOR,SkillManagementRecommendationTest.candidates("a")).get("a").getFirst().available());
         when(f.db.paidInventory("0","client","a","owner")).thenReturn(paid(inventory("si_a","a".repeat(64))));

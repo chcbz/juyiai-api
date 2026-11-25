@@ -78,6 +78,8 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
     @Autowired public void setMaterialsAuthority(ChatMaterialsInputService service) {materialsAuthority=service;}
     private ChatInspectionAuthorityService inspectionAuthority;
     private ChatActionFinalService actionFinals;
+    private cn.jia.agent.service.TaskDiscussionMembership taskMembers;
+    @Autowired public void setTaskMembers(cn.jia.agent.service.TaskDiscussionMembership value) { taskMembers = value; }
     private ChatDispatchAuthorityService dispatchAuthority;
     @Autowired public void setDispatchAuthority(ChatDispatchAuthorityService value) { dispatchAuthority=value; }
 
@@ -371,7 +373,13 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             InteractionRoute route, ChatMessageDTO input, Map<String, Object> taskMaterials,
             Map<String, Object> trustedTypedFacts, Map<String, Object> trustedTypedAdmission) {
         return admitTrusted(tenantId, sender, conversationId, expectedGeneration, scope, route, input,
-                taskMaterials, trustedTypedFacts, trustedTypedAdmission, null, null, null);
+                taskMaterials, trustedTypedFacts, trustedTypedAdmission, null, null, null,false);
+    }
+
+    // Package-internal: only the already locked typed bootstrap can request this source.
+    Admission admitTextBootstrap(String tenant,ServerResolvedSender sender,String conversation,long generation,
+            JuyitingConversationScope scope,ChatMessageDTO input,Map<String,Object> typed,Map<String,Object> admission) {
+        return admitTrusted(tenant,sender,conversation,generation,scope,InteractionRoute.CHAT,input,null,typed,admission,null,null,null,true);
     }
 
     /** Sibling-only authority path. Generic INSPECT callers retain the legacy inputRef guard. */
@@ -390,7 +398,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         }
         return admitTrusted(tenantId, sender, conversationId, expectedGeneration, scope,
                 InteractionRoute.INSPECT, input, taskMaterials, null, trustedTypedAdmission,
-                normalizedInspection, null, null);
+                normalizedInspection, null, null,false);
     }
 
     /** Called under task-root/binding/conversation locks by the durable action consumer only.
@@ -429,7 +437,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         input.setContent(user.getContent()); input.setConversationId(owner.conversationId());
         var sender = new ServerResolvedSender("user", user.getSenderName(), owner.ownerJiacn(), owner.clientId(), DisplayNameSource.FALLBACK);
         return admitTrusted(owner.tenantId(), sender, owner.conversationId(), owner.conversationGeneration(), scope,
-                InteractionRoute.INSPECT, input, null, null, null, inspection, user, lineage);
+                InteractionRoute.INSPECT, input, null, null, null, inspection, user, lineage,false);
     }
 
     /** Trusted message revision continuation: fresh CHAT request, immutable parent, same real USER. */
@@ -452,7 +460,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
         admissionFacts.put("nativeMaterials",ChatMaterialsInputContract.candidates(context.frozenDeclaration(),
                 ChatTypedDeliberationContextService.parseCatalog(context.sourceCatalogJson())));
         return admitTrusted(owner.tenantId(),sender,owner.conversationId(),owner.conversationGeneration(),scope,
-                InteractionRoute.CHAT,input,null,context.facts(),admissionFacts,null,user,lineage);
+                InteractionRoute.CHAT,input,null,context.facts(),admissionFacts,null,user,lineage,false);
     }
     static String deliveryRevisionRequestId(ChatTypedDeliberationStore.Scope scope,String operationId) {
         return "delivery-revision_"+sha256(String.join("\0",scope.tenantId(),scope.ownerJiacn(),scope.clientId(),operationId)).substring(0,40);
@@ -511,7 +519,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             InteractionRoute route, ChatMessageDTO input, Map<String, Object> taskMaterials,
             Map<String, Object> trustedTypedFacts, Map<String, Object> trustedTypedAdmission,
             Map<String, Object> trustedTypedInspection, ChatMessageEntity continuationUser,
-            Map<String, Object> continuationFacts) {
+            Map<String, Object> continuationFacts, boolean captureTextBootstrap) {
         requireIdentity(tenantId, 50);
         ServerResolvedSender trustedSender = requireHumanSender(sender);
         String ownerJiacn = trustedSender.jiacn();
@@ -686,6 +694,12 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             }
             if (taskGrant != null) {
                 var boundFacts = new LinkedHashMap<>(facts);
+                boolean capture = captureTextBootstrap && contextDraft && List.of(targetAgentId).equals(facts.get("participantAgentIds"))
+                        && !facts.containsKey("materialsInput") && contextHistory != null && !contextHistory.hasEarlierRequest(request);
+                // The task root and Chat admission share this transaction. Persist once, before hashing the snapshot.
+                var captureId = taskMembers.admit(new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(tenantId,clientId,ownerJiacn),
+                        scope.taskId(),turnId,dispatchId,requestDigest.substring("sha256:".length()),capture);
+                if (captureId != null) boundFacts.put("taskUsageCapture",Map.of("protocol","METERED_CAPTURE_V2","captureId",captureId));
                 boundFacts.put("taskAuthority", Map.of("grantId", taskGrant.grantId(),
                         "grantVersion", Long.toString(taskGrant.grantVersion()),
                         "assignmentRevision", Long.toString(taskGrant.assignmentRevision()),

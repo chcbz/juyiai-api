@@ -11,8 +11,8 @@ public interface SkillManagementMapper {
     int insertState(SkillManagedStateEntity row);
     /** Current relationship only. A frozen quote or reserved funds alone never grant skill use.
      * Original INITIAL capture remains the source after ordinary rent renewals/reprovision. */
-    @Select("""
-            SELECT l.principal_id, r.owner_jiacn, r.binding_id, l.lease_id, i.intent_id,
+    String PAID_INVENTORY = """
+            SELECT r.agent_id, l.principal_id, r.owner_jiacn, r.binding_id, l.lease_id, i.intent_id,
                    i.capture_transaction_id, r.runtime_installation_id, r.runtime_host_id, q.inventory_snapshot_json
             FROM agent_runtime r
             JOIN agent_persona_binding b ON b.tenant_id=r.tenant_id AND b.client_id=r.client_id AND b.id=r.binding_id
@@ -25,9 +25,14 @@ public interface SkillManagementMapper {
                  AND i.settlement_kind='PAID' AND i.capture_transaction_id IS NOT NULL
             JOIN economy_hosting_rent_quote q ON q.tenant_id=i.tenant_id AND q.client_id=i.client_id
                  AND q.quote_id=i.quote_id
-            WHERE r.tenant_id=#{tenantId} AND r.client_id=#{clientId} AND r.agent_id=#{agentId}
-              AND BINARY r.owner_jiacn=BINARY #{ownerJiacn} AND r.runtime_installation_id IS NOT NULL AND r.runtime_host_id IS NOT NULL
-            """)
+            WHERE r.tenant_id=#{tenantId} AND r.client_id=#{clientId}
+              AND r.runtime_installation_id IS NOT NULL AND r.runtime_host_id IS NOT NULL
+            """;
+    record InventoryKey(String agentId,String ownerJiacn) {}
+    @Select("<script>"+PAID_INVENTORY+" AND (r.agent_id,BINARY r.owner_jiacn) IN "
+            +"<foreach collection='keys' item='k' open='(' separator=',' close=')'>(#{k.agentId},BINARY #{k.ownerJiacn})</foreach></script>")
+    List<PaidSkillInventoryEntity> paidInventories(@Param("tenantId") String t,@Param("clientId") String c,@Param("keys") List<InventoryKey> keys);
+    @Select(PAID_INVENTORY+" AND r.agent_id=#{agentId} AND BINARY r.owner_jiacn=BINARY #{ownerJiacn}")
     PaidSkillInventoryEntity paidInventory(@Param("tenantId") String tenantId, @Param("clientId") String clientId,
             @Param("agentId") String agentId, @Param("ownerJiacn") String ownerJiacn);
     @Select("SELECT * FROM agent_skill_managed_state WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND agent_id=#{agentId} AND skill_key=#{skillKey}")
@@ -122,9 +127,25 @@ public interface SkillManagementMapper {
     SkillEntitlementEntity entitlement(@Param("tenantId") String t,@Param("clientId") String c,@Param("entitlementId") String id);
     @Select("SELECT p.* FROM agent_skill_product p WHERE "+S+" AND status='PUBLISHED' ORDER BY product_id")
     List<SkillProductEntity> products(@Param("tenantId") String t,@Param("clientId") String c);
-    /** Active managed installations include native position skills without marketplace purchase rows. */
-    @Select("SELECT a.* FROM agent_skill_managed_state s JOIN agent_skill_installation_authorization a ON a.tenant_id=s.tenant_id AND a.client_id=s.client_id AND a.installation_id=s.active_installation_id WHERE s.tenant_id=#{tenantId} AND s.client_id=#{clientId} AND s.agent_id=#{agentId} ORDER BY a.installation_id")
-    List<SkillInstallationAuthorizationEntity> activeAuthorizationsForAgent(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentId") String a);
+    /** Public labels for the installed approved version. A newer published version does not replace it. */
+    record RecommendationProduct(String installedVersionId,String productId,String currentProductVersionId,Long version,String name,String description) {}
+    @Select("""
+            <script>SELECT v.product_version_id,p.product_id,p.current_product_version_id,p.version,p.name,p.description
+              FROM agent_skill_product_version v JOIN agent_skill_product p
+                ON p.tenant_id=v.tenant_id AND p.client_id=v.client_id AND p.product_id=v.product_id
+               AND CAST(p.tenant_id AS BINARY)=CAST(v.tenant_id AS BINARY) AND CAST(p.client_id AS BINARY)=CAST(v.client_id AS BINARY)
+               AND CAST(p.product_id AS BINARY)=CAST(v.product_id AS BINARY)
+             WHERE v.tenant_id=#{tenantId} AND v.client_id=#{clientId} AND v.review_status='APPROVED' AND p.status='PUBLISHED'
+               AND CAST(v.tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY) AND CAST(v.client_id AS BINARY)=CAST(#{clientId} AS BINARY)
+               AND v.product_version_id IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>#{id}</foreach>
+            </script>""")
+    List<RecommendationProduct> recommendationProducts(@Param("tenantId") String t,@Param("clientId") String c,@Param("ids") List<String> ids);
+    String RECOMMENDATION_AGENT_IDS = "<foreach collection='agentIds' item='id' open='(' separator=',' close=')'>#{id}</foreach>";
+    @Select("<script>SELECT * FROM agent_skill_managed_state WHERE "+S+" AND active_installation_id IS NOT NULL AND agent_id IN "+RECOMMENDATION_AGENT_IDS+" ORDER BY agent_id,skill_key</script>")
+    List<SkillManagedStateEntity> activeRecommendationStates(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentIds") List<String> agents);
+    /** Includes native/adopted skills without marketplace purchase rows; queried only for a non-empty authorized batch. */
+    @Select("<script>SELECT a.* FROM agent_skill_managed_state s JOIN agent_skill_installation_authorization a ON a.tenant_id=s.tenant_id AND a.client_id=s.client_id AND a.installation_id=s.active_installation_id WHERE s.tenant_id=#{tenantId} AND s.client_id=#{clientId} AND s.agent_id IN "+RECOMMENDATION_AGENT_IDS+" ORDER BY a.installation_id</script>")
+    List<SkillInstallationAuthorizationEntity> activeRecommendationAuthorizations(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentIds") List<String> agents);
     @Select("SELECT a.* FROM agent_skill_installation_authorization a JOIN agent_skill_installation i ON i.tenant_id=a.tenant_id AND i.client_id=a.client_id AND i.installation_id=a.installation_id WHERE a.tenant_id=#{tenantId} AND a.client_id=#{clientId} AND i.target_agent_id=#{agentId} ORDER BY a.installation_id")
     List<SkillInstallationAuthorizationEntity> authorizationsForAgent(@Param("tenantId") String t,@Param("clientId") String c,@Param("agentId") String a);
     @Select("SELECT * FROM agent_skill_installation_authorization WHERE "+S+" AND change_id=#{changeId} ORDER BY installation_id")

@@ -4,6 +4,7 @@ import cn.jia.agent.entity.AgentIdentityRegistryEntity;
 import cn.jia.core.dao.IBaseDao;
 
 public interface AgentIdentityRegistryDao extends IBaseDao<AgentIdentityRegistryEntity> {
+    java.util.List<AgentIdentityRegistryEntity> findActiveCanonicals(String tenant, String client, String owner, java.util.Set<String> ids);
     AgentIdentityRegistryEntity findExactByCanonicalInScope(String tenantId, String clientId,
             String ownerJiacn, String canonicalAgentId);
 

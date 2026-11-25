@@ -25,6 +25,31 @@ public class AgentRuntimeDaoImpl extends BaseDaoImpl<AgentRuntimeMapper, AgentRu
         return query;
     }
 
+    @Override public java.util.List<AgentRuntimeEntity> registeredProofRows(String tenant,String client,java.util.Set<String> ids) {return ids.isEmpty()?java.util.List.of():baseMapper.registeredProofRows(tenant,client,ids);}
+    @Override
+    public java.util.List<AgentRuntimeEntity> findOwnedCapabilityRows(String tenant, String client, String owner, java.util.Set<String> ids) {
+
+        if (ids.isEmpty()) return java.util.List.of();
+        var q = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentRuntimeEntity>();
+        IdentityExactQuerySupport.exact(q,"tenant_id",tenant,200);
+        IdentityExactQuerySupport.exact(q,"client_id",client,200);
+        IdentityExactQuerySupport.exact(q,"owner_jiacn",owner,200);
+        q.select("agent_id","tenant_id","client_id","owner_jiacn","binding_id","persona_code","abilities");
+        return baseMapper.selectList(q.in("agent_id",ids));
+    }
+
+    private com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentRuntimeEntity> capabilityScope(String tenant,String client){
+        var q=new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentRuntimeEntity>();
+        IdentityExactQuerySupport.exact(q,"tenant_id",tenant,200);
+        if(client!=null)IdentityExactQuerySupport.exact(q,"client_id",client,200);
+        return q.isNotNull("binding_id").gt("binding_id",0);
+    }
+    @Override public List<AgentRuntimeEntity> capabilityRepairPage(String tenant,String clientOrAll,long after){
+        return baseMapper.selectList(capabilityScope(tenant,clientOrAll).select("id","tenant_id","client_id").gt("id",after).orderByAsc("id").last("LIMIT "+REPAIR_PAGE_SIZE));
+    }
+    @Override public AgentRuntimeEntity capabilityOwner(String tenant,String client,long runtimeId){
+        return baseMapper.selectOne(capabilityScope(tenant,java.util.Objects.requireNonNull(client)).select("id","tenant_id","client_id","owner_jiacn","agent_id","binding_id").eq("id",runtimeId));
+    }
     @Override
     public int updateRegistration(AgentRuntimeEntity entity) {
         // The service holds the authorized runtime row lock. Include nullable model in this

@@ -26,6 +26,11 @@ public interface AgentTaskRequirementSnapshotService {
      */
     CurrentSnapshot readCurrent(AgentTaskExecutionGrantService.Scope scope, String taskId);
 
+    /** Internal: caller holds the exact owner-scoped task root in the current transaction.
+     * Pass that callback's root, never a browser value or a detached prior observation. */
+    CurrentSnapshot readCurrentWithinLockedTask(AgentTaskExecutionGrantService.Scope scope,String taskId,
+            cn.jia.agent.entity.AgentTaskMetaEntity lockedRoot);
+
     /** Mutable current-state replacement; caller holds the task root and authorizes the edit. */
     Snapshot updateCurrent(AgentTaskExecutionGrantService.Scope scope,String taskId,long expectedRevision,
             String title,String description);

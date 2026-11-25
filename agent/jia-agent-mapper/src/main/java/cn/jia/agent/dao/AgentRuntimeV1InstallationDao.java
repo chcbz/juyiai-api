@@ -6,6 +6,7 @@ import cn.jia.core.dao.IBaseDao;
 public interface AgentRuntimeV1InstallationDao extends IBaseDao<AgentRuntimeV1InstallationEntity> {
     void insertCandidateIfAbsent(AgentRuntimeV1InstallationEntity candidate);
     AgentRuntimeV1InstallationEntity lock(String installationId);
+    java.util.List<AgentRuntimeV1InstallationEntity> registeredProofRows(String tenant,String client,java.util.Set<String> ids);
     AgentRuntimeV1InstallationEntity findInScope(String tenantId, String clientId, String installationId);
     AgentRuntimeV1InstallationEntity findActiveByAuthorizationHash(byte[] authorizationHash);
     int activate(AgentRuntimeV1InstallationEntity installation, byte[] authorizationHash, long now);

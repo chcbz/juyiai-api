@@ -34,6 +34,7 @@ class ChatReviewContextAdmissionTest {
         when(authority.admission("0","owner","client",scope.taskId(),"agent")).thenReturn(
                 new cn.jia.agent.service.AgentTaskExecutionGrantService.Admission("grant",1,7,"agent",null,false,List.of(),null,null,7L,2L,"a".repeat(64),null,null));
         service.setDispatchAuthority(authority);
+        service.setTaskMembers(mock(cn.jia.agent.service.TaskDiscussionMembership.class));
         var conversation=new ChatConversationEntity().setId(123L).setJiacn("owner").setConversationType("juyiting").setConversationScopeType("bounty")
                 .setConversationScopeKey(scope.scopeKey()).setTaskId(scope.taskId()).setLifecycleGeneration(1L).setTargetAgentIds("[\"agent\"]");
         conversation.setTenantId("0");conversation.setClientId("client");when(conversations.lockScopedById("0","owner","client","123")).thenReturn(conversation);

@@ -679,6 +679,19 @@ class PersonalWorkspaceServiceImplTest {
                     tenantId, clientId, ownerJiacn, fileId, version)));
         }
 
+        @Override public List<PersonalWorkspaceFileEntity> selectedHeaders(String t,String c,String o,List<String> ids) {
+            return ids.stream().map(id -> findFile(t,c,o,id)).filter(java.util.Objects::nonNull).toList();
+        }
+        @Override public List<PersonalWorkspaceVersionEntity> selectedMetadata(String t,String c,String o,List<VersionPick> picks) {
+            return picks.stream().map(p -> findVersion(t,c,o,p.fileId(),p.version())).filter(java.util.Objects::nonNull).toList();
+        }
+        @Override
+        public List<PersonalWorkspaceVersionEntity> selectedVersionMetadata(String tenantId,String clientId,
+                String ownerJiacn,String fileId,List<Integer> numbers) {
+            return numbers.stream().map(n -> findVersion(tenantId,clientId,ownerJiacn,fileId,n))
+                    .filter(java.util.Objects::nonNull).toList();
+        }
+
         @Override
         public List<PersonalWorkspaceVersionEntity> listVersions(String tenantId, String clientId,
                 String ownerJiacn, String fileId, int limit) {

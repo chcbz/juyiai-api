@@ -22,6 +22,10 @@ public interface SkillExecutionMapper {
             AND OCTET_LENGTH(execution_id)=OCTET_LENGTH(#{execution})
             """;
 
+    @Select("SELECT snapshot_sha256 FROM agent_skill_execution WHERE " + EXACT_SCOPE)
+    String snapshotDigest(@Param("tenant") String tenant, @Param("client") String client,
+            @Param("owner") String owner, @Param("execution") String execution);
+
     @Select("SELECT * FROM agent_skill_execution WHERE " + EXACT_SCOPE)
     SkillExecutionEntity find(@Param("tenant") String tenant, @Param("client") String client,
             @Param("owner") String owner, @Param("execution") String execution);

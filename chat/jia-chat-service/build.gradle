@@ -471,6 +471,7 @@ def nativeSkillResultSourceSet = sourceSets.create('nativeSkillResultRegression'
     java.include 'cn/jia/agent/service/impl/NativeConversationQueueMySqlTest.java'
     java.include 'cn/jia/agent/service/impl/NativeConversationWorkDiscoveryMySqlTest.java'
     java.include 'cn/jia/agent/service/impl/TaskExecutionCancellationMySqlTest.java'
+    java.include 'cn/jia/agent/service/impl/MeteredPeerMySqlTest.java'
     java.include 'cn/jia/chat/service/WorkspaceProjectionQueryMySqlTest.java'
     java.include 'cn/jia/chat/api/ChatSkillResultControllerTest.java'
     java.include 'cn/jia/agent/service/impl/PersonalWorkspaceConversationExecutionTest.java'
@@ -515,6 +516,19 @@ tasks.register('nativeSkillResultRegression', Test) {
     classpath = nativeSkillResultSourceSet.runtimeClasspath
     useJUnitPlatform()
     maxParallelForks = 1
+    // The full installer/HTTP/MySQL rehearsal shares host CPU and IO with the quote-to-Chat fixture.
+    // Preserve both test sets and timeouts, but don't run these two heavy cross-process suites together.
+    if (providers.gradleProperty('ownedRuntimeRepairFixture').isPresent()) {
+        mustRunAfter ':agent:jia-agent-service:taskQuoteRegression'
+    }
+    ['ownedCutoverController','ownedCutoverWebPackage','ownedRuntimeRepairFixture'].each { key ->
+        if (providers.gradleProperty(key).isPresent()) systemProperty key, providers.gradleProperty(key).get()
+    }
+    def meteredPeer = providers.gradleProperty('ownedMeteredRuntime')
+    if (meteredPeer.isPresent()) {
+        systemProperty 'ownedMeteredRuntime', meteredPeer.get()
+        filter.includeTestsMatching 'cn.jia.agent.service.impl.MeteredPeerMySqlTest.*'
+    }
     filter {
         includeTestsMatching 'cn.jia.chat.handler.SkillNativeResultMySqlTest.nativeSkillAckReceivedStartedDownloadAndRealResultActivateWithoutBroker'
         includeTestsMatching 'cn.jia.agent.skill.SkillExecutionServiceTest'
@@ -760,6 +774,7 @@ def runtimeCapabilityRegressionSourceSet = sourceSets.create('runtimeCapabilityR
 configurations.named(runtimeCapabilityRegressionSourceSet.implementationConfigurationName) { extendsFrom configurations.testImplementation }
 configurations.named(runtimeCapabilityRegressionSourceSet.runtimeOnlyConfigurationName) { extendsFrom configurations.testRuntimeOnly }
 tasks.register('runtimeCapabilityRegression', Test) {
+    if (providers.gradleProperty('ownedMeteredRuntime').isPresent()) systemProperty 'ownedMeteredRuntime', providers.gradleProperty('ownedMeteredRuntime').get()
     dependsOn tasks.named(runtimeCapabilityRegressionSourceSet.classesTaskName)
     testClassesDirs = runtimeCapabilityRegressionSourceSet.output.classesDirs
     classpath = runtimeCapabilityRegressionSourceSet.runtimeClasspath
@@ -770,9 +785,11 @@ tasks.register('runtimeCapabilityRegression', Test) {
 def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
         srcDir 'src/test/java'
-        include 'cn/jia/chat/service/recommendation/RecommendationCostRecorderTest.java'
+        include 'cn/jia/chat/service/recommendation/SpringTaskFeatureEncoderTest.java'
+        include 'cn/jia/chat/ai/AiProviderConfigurationTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationUsageRecoveryTest.java'
+        include 'cn/jia/chat/service/usage/ChatUsageCostRecorderTest.java'
     }
     resources.srcDir 'src/test/resources'
     compileClasspath += sourceSets.main.output

@@ -116,6 +116,7 @@ class EconomyWalletHttpMySqlTest {
     @BeforeEach void prepare() throws Exception {
         database.start(); var db = database.newDatabase("wallet_http"); dataSource = db.dataSource(); jdbc = db.jdbc();
         new EconomySchemaInitializer(jdbc).afterPropertiesSet();
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-preparation-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-task-quote-features-v2.sql")).execute(jdbc.getDataSource());
         new EconomyUsageCostSchemaInitializer(dataSource).afterPropertiesSet();
         cn.jia.economy.config.TaskPricingTestFixture.install(jdbc, SCOPE, List.of(PRICE));
         jdbc.execute("CREATE TABLE test_task_root (id VARCHAR(100) PRIMARY KEY) ENGINE=InnoDB");

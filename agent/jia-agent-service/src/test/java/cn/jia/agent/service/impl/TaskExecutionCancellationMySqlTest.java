@@ -46,7 +46,7 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
         for(String name:List.of("agent-personal-workspace-v1_11-executions.sql", "agent-personal-workspace-v1_13-task-execution.sql",
                 "agent-personal-workspace-v1_13-task-publication.sql", "agent-personal-workspace-v1_14-conversation-execution.sql",
                 "agent-personal-workspace-v1_14-conversation-output.sql", "agent-personal-workspace-v1_15-conversation-lease.sql",
-                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql"))
+                "agent-personal-workspace-v1_16-conversation-provider-start.sql", "agent-skill-execution-v1.sql", "agent-personal-workspace-native-v5.sql", "agent-personal-workspace-native-v6.sql","agent-personal-workspace-metered-capture-v2.sql","agent-native-capture-profile-v1.sql","agent-task-execution-members-v1.sql"))
             schema.addScript(new ClassPathResource("db/"+name));
         schema.execute(source);
         new ControlledImageFollowupV3SchemaInitializer(jdbc).afterPropertiesSet();
@@ -76,6 +76,24 @@ class TaskExecutionCancellationMySqlTest extends cn.jia.agent.skill.SkillManagem
             assertTrue(database.matches("cyf_execcancel_[a-z0-9]+"));
             admin.execute("DROP DATABASE `"+database+"`");
         }
+    }
+    @Test void nativeMembershipRollsBackWithItsRunAndDoesNotInferZeroFromMissingCapture() {
+        var member=new PersonalWorkspaceExecutionEntity().setOwnerJiacn("owner").setTaskId("task").setExecutionId("exec").setRunId("run-exec").setRequestHash("a".repeat(64));
+        member.setTenantId("0");member.setClientId("client");
+        tx.executeWithoutResult(status->{row("exec","owner","task","CONVERSATION","QUEUED",6);
+            executions.registerTaskMember(member,null);status.setRollbackOnly();});
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_personal_workspace_execution WHERE execution_id='exec'",Integer.class));
+        tx.executeWithoutResult(status->{row("exec","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,null);});
+        assertThrows(org.springframework.dao.DuplicateKeyException.class,()->tx.executeWithoutResult(status->executions.registerTaskMember(member,"b".repeat(64))));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE capture_id IS NULL AND admission_sha256=REPEAT('a',64)",Integer.class));
+        member.setExecutionId("retry").setRunId("run-retry");
+        tx.executeWithoutResult(status->{row("retry","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,"b".repeat(64));});
+        tx.executeWithoutResult(status->executions.closeTaskMembers("0","client","owner","task",TaskExecutionClosureDao.Outcome.ACCEPTED,"delivery",15,777));
+        assertEquals("8ddbea4eaabfe535083e36b0f2f6822291d707ee4330051a2127fa70b6c99c49",jdbc.queryForObject("SELECT execution_set_sha256 FROM agent_task_execution_set WHERE terminal_state='ACCEPTED' AND execution_count=2 AND membership_revision=(SELECT MAX(membership_revision) FROM agent_task_execution_member)",String.class));
+        member.setExecutionId("late").setRunId("run-late");
+        assertThrows(IllegalStateException.class,()->tx.executeWithoutResult(status->{row("late","owner","task","CONVERSATION","QUEUED",6);executions.registerTaskMember(member,null);}));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member",Integer.class));
     }
     void row(String id,String owner,String task,String mode,String state,Integer protocol) {
         jdbc.update("""

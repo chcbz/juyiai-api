@@ -53,7 +53,7 @@ class AgentTaskCancellationServiceImplTest {
             return state;
         });
         service=new AgentTaskCancellationServiceImpl(tx,states,items,grants,dao,billing,
-                executions, discussions, leases, consents);
+                executions, discussions, leases, consents, mock(cn.jia.agent.dao.TaskExecutionClosureDao.class));
     }
     @Test void assignedCancellationReleasesInRootTransactionBeforeStateWrites() {
         cancel();

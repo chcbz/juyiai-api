@@ -8,6 +8,10 @@ public interface AgentExternalServicePolicyDao {
     AgentExternalServicePolicyEntity latest(String tenant, String client, String agent, long binding);
     AgentExternalServicePolicyEntity receipt(String tenant, String client, String owner, String key);
     AgentIdentityRegistryEntity identity(String tenant, String client, String agent);
-    List<AgentIdentityRegistryEntity> candidates(String tenant, String client, String owner, String after, int limit);
+    /** Task picker projection: no runtime credentials, private abilities or provider login in display fields. */
+    record CandidateRow(String agentId, String ownerJiacn, String displayName, String status) { }
+    List<CandidateRow> candidates(String tenant, String client, String owner, String after, int limit);
+    record QuoteIdentity(String agent,String provider,long binding,Long revision){}
+    List<QuoteIdentity> selected(String tenant,String client,String owner,List<String> ids,boolean locking);
     void insert(AgentExternalServicePolicyEntity policy);
 }

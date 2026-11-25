@@ -76,6 +76,11 @@ class AgentTaskExecutionGrantServiceImplTest {
                     ? new AgentLegacyTaskCompatibilityService.AssignOutcome(List.of("agent-1"),true,"event-1",1L)
                     : new AgentLegacyTaskCompatibilityService.AssignOutcome(List.of("agent-1"),false);
         });
+        when(workspace.selectedMetadata(eq("0"),eq("client"),eq("owner"),anyList())).thenAnswer(call -> {
+            List<PersonalWorkspaceDao.VersionPick> picks=call.getArgument(3);
+            return picks.stream().map(p -> workspace.findVersion("0","client","owner",p.fileId(),p.version()))
+                    .filter(java.util.Objects::nonNull).toList();
+        });
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
                 new DirectTransaction(root),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
         service.setAssigneeAuthority(authority);

@@ -64,6 +64,7 @@ def usageCostRegressionSourceSet = sourceSets.create('usageCostRegression') {
     java {
         srcDir 'src/test/java'
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
+        include 'cn/jia/economy/service/impl/UsageCaptureJournalTransactionTest.java'
         include 'cn/jia/economy/service/impl/UsageCostServiceMySqlTest.java'
     }
     resources.srcDir 'src/test/resources'

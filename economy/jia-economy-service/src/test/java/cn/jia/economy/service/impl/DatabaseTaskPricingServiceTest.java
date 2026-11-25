@@ -36,6 +36,154 @@ class DatabaseTaskPricingServiceTest {
     private static String tools(String units) {
         return "[{\"channel\":\"tool-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"" + units + "\"}]";
     }
+    @Test void preparedReferenceRoutesArePrivateExactImmutableAndContentVersioned(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)throws Exception{
+        var c=new cn.jia.economy.task.PreparedReferenceRoutes.Configuration("NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1");
+        var key=Map.of("tenant","tenant","client","client","owner","owner","configuration",c);
+        var entry=Map.of("key",key,"model","modelA","channel","channel","tier","standard");
+        var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","task");var file=dir.resolve("manifest");
+        class Load {PinnedReferenceRoutes from(Object... rows)throws Exception{var bytes=new ObjectMapper().writeValueAsBytes(Map.of("schema","prepared-reference-routes-v1","entries",java.util.List.of(rows)));
+            java.nio.file.Files.write(file,bytes);return new PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));}}
+        var load=new Load();var first=load.from(entry);var terms=first.resolve(task,c);assertNotNull(terms);
+        assertEquals(new TaskReferencePricing.TokenRoute("channel","modelA","standard","RESPONSES_TEXT_TOKENS_V1"),terms.routes().get("MODEL_RESPONSE").get("INFERENCE"));
+        assertNull(first.resolve(new cn.jia.economy.task.TaskBillingService.Task(scope,"other","task"),c));
+        assertNull(first.resolve(task,new cn.jia.economy.task.PreparedReferenceRoutes.Configuration(c.version(),c.executionSha(),c.localRouteSha(),"4".repeat(64),c.capturePolicy())));
+        var edited=new java.util.HashMap<String,Object>(entry);edited.put("model","modelB");assertNotEquals(terms.execution().routeVersion(),load.from(edited).resolve(task,c).execution().routeVersion());
+        assertEquals(terms,first.resolve(task,c));assertNull(load.from(entry,edited).resolve(task,c));
+        assertNull(new PinnedReferenceRoutes(file.toString(),"0".repeat(64)).resolve(task,c));assertNull(new PinnedReferenceRoutes("","").resolve(task,c));
+    }
+    @Test void licensedAndConfirmedKeysetsMergeAcrossInterleavedPagesAndOneSourceTail(){
+        var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var catalog=new TaskHistoryCatalogService(db,json,true);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
+        var execution=new cn.jia.economy.task.TaskBillingService.MeasuredGroup("v1","1".repeat(64),"2".repeat(64),"book","3".repeat(64),"capture");
+        var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(execution,features);var query=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","query");
+        var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),7,"a".repeat(64));var bytes=json.writeValueAsString(features);var digest=features.digest();
+        var rows=java.util.stream.IntStream.range(0,201).mapToObj(i->new cn.jia.economy.mapper.ConfirmedSampleMapper.HistoryRow("%04x".formatted(i),i+1,"task-"+i,digest,bytes)).toList();
+        java.util.function.Predicate<cn.jia.economy.mapper.ConfirmedSampleMapper.HistoryRow> history=r->r.revision()>128 || r.revision()%2==0;
+        when(db.history(eq(query),eq(pin.group()),anyString(),eq(64))).thenAnswer(i->rows.stream().filter(history).filter(r->r.id().compareTo(i.getArgument(2,String.class))>0).limit(64).toList());
+        when(db.benchmarkPage(eq(query),eq(pin),anyString(),eq(64))).thenAnswer(i->rows.stream().filter(history.negate()).filter(r->r.id().compareTo(i.getArgument(2,String.class))>0).limit(64).toList());
+        var ids=new java.util.ArrayList<String>();String after="";for(int size:new int[]{64,64,64,9}){
+            var page=catalog.candidatePage(query,group,pin,after);assertEquals(size,page.size());for(var e:page)ids.add(e.source().sampleId());after=page.getLast().source().sampleId();}
+        assertEquals(rows.stream().map(r->r.id()).toList(),ids);verify(db,times(4)).history(eq(query),eq(pin.group()),anyString(),eq(64));verify(db,times(4)).benchmarkPage(eq(query),eq(pin),anyString(),eq(64));verifyNoMoreInteractions(db);
+    }
+    @Test void offlineStudyJoinsTheEntirePinnedRosterAndRepricesOnlyFromRetainedBytes(){
+        var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        var obs=new TaskHistoryCatalogService(db,json);var study=new FrozenCalibrationStudy(json,obs);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
+        var execution=new cn.jia.economy.task.TaskBillingService.MeasuredGroup("v1","1".repeat(64),"2".repeat(64),"book","3".repeat(64),"capture");
+        var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(execution,features);var owner=new TaskEstimateCalibration.PrivateGroup("tenant","client","owner",group.digest());
+        var objects=new java.util.HashMap<String,String>();java.util.function.Function<FrozenCalibrationStudy.Artifact,String> keep=a->{objects.put(a.sha256(),a.json());return a.sha256();};
+        var assignments=java.util.Arrays.stream(TaskEstimateEvaluation.Split.values()).map(s->new FrozenCalibrationStudy.Assignment(s.name(),"family-"+s.name(),s)).toList();
+        var roster=keep.apply(study.freeze(new FrozenCalibrationStudy.Roster(owner,assignments)));
+        var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var trial=new TaskEstimateCalibration.Trial("fixture",1,1,1,1,1,0.1,0.2,1,1,1,1);
+        var policy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy(FrozenCalibrationStudy.VERSION,java.util.List.of(trial),gate,123L)));
+        var routes=Map.of("text",Map.<String,TaskReferencePricing.Route>of("model",new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint")));
+        String equalRates="{\"basis\":\"synthetic\",\"yuanPerMillionTokens\":{\"INPUT\":\"1\",\"OUTPUT\":\"1\"},\"longContextYuanPerMillionTokens\":{}}";
+        price(equalRates);var ref=service.freeze(scope,"book",routes,routes.keySet());
+        var reference=keep.apply(study.freezeReference(ref));var members=new java.util.ArrayList<FrozenCalibrationStudy.Member>();
+        long t=1;for(var a:assignments){var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var revision=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sid-"+a.task(),1);
+            var op=new ProjectedTaskOperation(1,"capture",1,"record","source","f".repeat(64),new MeasuredTaskRepricing.Operation("gw",a.task()),"text","model","TOKEN",json.valueToTree(new MeasuredTaskRepricing.Tokens("disjoint",Map.of(a.split()==TaskEstimateEvaluation.Split.HOLDOUT?ModelTokenPrice.Category.OUTPUT:ModelTokenPrice.Category.INPUT,1000000L))));
+            when(db.selectedForCalibration(task,group.digest(),revision.sampleId(),1)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",25L,t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
+            when(db.observedByMillis()).thenReturn(t+1);t+=2;
+            var f=obs.freezeConfirmed(task,group,revision,a.family(),a.split());objects.put(f.sha256(),f.json());members.add(new FrozenCalibrationStudy.Member(a.task(),revision,f.sha256()));}
+        var dataset=keep.apply(study.freeze(new FrozenCalibrationStudy.Dataset(owner,members)));var pins=new FrozenCalibrationStudy.Pins(roster,dataset,reference,policy);
+        clearInvocations(db,mapper);var result=study.evaluate(owner,group,pins,objects::get);assertTrue(result.report().points().meetsPointCriteria());assertEquals(1,result.report().points().holdout().quoted());
+        assertEquals(123L,result.report().uncertainty().seed());assertEquals(reference,result.receipt().referenceBookSha256());assertEquals(dataset,result.receipt().datasetSha256());
+        assertEquals(result,study.evaluate(owner,group,pins,objects::get));verifyNoInteractions(db,mapper);
+        // Only the current output tariff changes. Same routes, measured operations, features, split, trial and policy.
+        price(equalRates.replace("\"OUTPUT\":\"1\"","\"OUTPUT\":\"4\"")).setPriceVersion("v2");
+        var changed=keep.apply(study.freezeReference(service.freeze(scope,"book",routes,routes.keySet())));
+        var repriced=study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,dataset,changed,policy),objects::get).report().points();
+        assertNotEquals(reference,changed);assertEquals(result.report().points().referenceVersion(),repriced.referenceVersion());
+        assertEquals(result.report().points().winner(),repriced.winner());assertFalse(repriced.meetsPointCriteria());
+        assertEquals(0,new TaskEstimateEvaluation.Ratio(BigDecimal.valueOf(3),BigDecimal.valueOf(4)).compareTo(repriced.holdout().wape()));
+        assertEquals(result,study.evaluate(owner,group,pins,objects::get)); // old evidence retains precisely its original meaning
+        // New quotes must use the complete current contract, even when selected neighbors only consume text.
+        var tool=new TaskQuoteCalculator.ToolKey("tools","draw","frame");
+        var contract=new java.util.HashMap<>(routes);contract.put("render",Map.of("frame",new TaskReferencePricing.UnitRoute(tool)));
+        java.util.function.Function<String,MeasuredTaskRepricing.Reference> complete=price->new MeasuredTaskRepricing.Reference("book",Map.of("text",ref.byKind().get("text"),"render",Map.of("frame",new MeasuredTaskRepricing.UnitRate(tool,new TaskQuoteCalculator.ToolPrice("v","fixture",new BigDecimal(price))))));
+        var current=new java.util.concurrent.atomic.AtomicReference<>(complete.apply("0.2500"));var calls=new java.util.concurrent.atomic.AtomicInteger();
+        var history=mock(cn.jia.economy.task.TaskHistoryCatalog.class);var catalog=mock(cn.jia.economy.task.TaskCalibrationCatalog.class);
+        var query=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","new");var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),1,"a".repeat(64));
+        var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision("s",1);var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(execution,contract);
+        when(history.candidatePage(query,group,pin,"")).thenReturn(java.util.List.of(new cn.jia.economy.task.TaskHistoryCatalog.Entry(rev,"historical",features)));
+        when(history.candidateQuantities(query,group,pin,rev)).thenReturn(java.util.List.of(new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("gw","one"),"text","model","proof",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,1000000L)))));
+        var params=result.report().points().winner().parameters();
+        when(catalog.resolve(query,group)).thenReturn(new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,study.freezeReference(complete.apply("0.25")).sha256()));
+        var estimator=new TaskBudgetEstimatorService(catalog,history,new MeasuredHistoryEstimateEngine(history,(scope,v,r,kinds)->{calls.incrementAndGet();assertEquals(contract.keySet(),kinds);return current.get();}));
+        assertEquals(100,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,features,terms)).preparation().estimate().wen());
+        current.set(complete.apply("0.2500000000000000000000001"));
+        assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(query,features,terms));
+        when(catalog.resolve(query,group)).thenReturn(new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,study.freezeReference(current.get()).sha256()));
+        assertEquals(100,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,features,terms)).preparation().estimate().wen());assertEquals(3,calls.get());
+        var previousPolicy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy("private-scoped-study-v4",java.util.List.of(trial),gate,123L)));
+        assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,dataset,reference,previousPolicy),objects::get));
+        var shortSet=keep.apply(study.freeze(new FrozenCalibrationStudy.Dataset(owner,members.subList(0,2))));
+        assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,shortSet,reference,policy),objects::get));
+        for(String sha:java.util.List.of(roster,dataset,reference,policy,members.getLast().observationSha256())){
+            var bytes=objects.get(sha);objects.put(sha,bytes+" ");assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,pins,objects::get));objects.put(sha,bytes);}
+    }
+    @Test void frozenMixedAndBenchmarkOnlyStudiesRejectReplacementApprovalsAndForeignOwners(){
+        var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        var observations=new TaskHistoryCatalogService(db,json);var study=new FrozenCalibrationStudy(json,observations);
+        var objects=new java.util.HashMap<String,String>();java.util.function.Function<Object,String> keep=value->{var artifact=study.freeze(value);objects.put(artifact.sha256(),artifact.json());return artifact.sha256();};
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
+        var execution=new cn.jia.economy.task.TaskBillingService.MeasuredGroup("v1","1".repeat(64),"2".repeat(64),"rates","3".repeat(64),"cp");
+        var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(execution,features);var owner=new TaskEstimateCalibration.PrivateGroup("tenant","client","owner",group.digest());
+        var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var policy=keep.apply(new FrozenCalibrationStudy.Policy(FrozenCalibrationStudy.VERSION,java.util.List.of(new TaskEstimateCalibration.Trial("fixed",1,1,1,1,1,0.1,0.2,1,1,1,1)),gate,71));
+        var unit=new TaskQuoteCalculator.ToolKey("local","render","frame");var book=study.freezeReference(new MeasuredTaskRepricing.Reference("rates",Map.of("render",Map.of("frames",new MeasuredTaskRepricing.UnitRate(unit,new TaskQuoteCalculator.ToolPrice("p","reference",BigDecimal.ONE))))));objects.put(book.sha256(),book.json());
+        // No result facts in a predeclared assignment. Fix both rosters and exact approvals first.
+        var coldPlan=new java.util.ArrayList<FrozenCalibrationStudy.Assignment>();var mixedPlan=new java.util.ArrayList<FrozenCalibrationStudy.Assignment>();
+        for(var split:TaskEstimateEvaluation.Split.values()){
+            var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",split.name());var id="case-"+split;
+            var m=new cn.jia.economy.task.TaskBenchmarkAdmission.Manifest("benchmark-case-v1",task,id,"agent","fixture-approval","inspect the complete artifact",execution,features);
+            var a=new FrozenCalibrationStudy.Assignment(task.taskId(),"family-"+split,split,new FrozenCalibrationStudy.PlannedBenchmark(id,keep.apply(m)));coldPlan.add(a);
+            mixedPlan.add(split==TaskEstimateEvaluation.Split.CALIBRATE?new FrozenCalibrationStudy.Assignment(a.task(),a.family(),split):a);
+        }
+        String coldRoster=keep.apply(new FrozenCalibrationStudy.Roster(owner,coldPlan)),mixedRoster=keep.apply(new FrozenCalibrationStudy.Roster(owner,mixedPlan));
+        var cold=new java.util.ArrayList<FrozenCalibrationStudy.Member>();var mixed=new java.util.ArrayList<FrozenCalibrationStudy.Member>();long t=1;
+        for(var a:coldPlan){var planned=a.benchmarkCase();String manifest=planned.manifestSha(),fact="fact-"+a.task();
+            var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision(manifest,2);var when=new TaskEstimateEvaluation.Case(a.task(),a.family(),t,t+1,a.split());
+            var review=new cn.jia.economy.usage.BenchmarkSampleEvidence.Review("benchmark-review-v1",planned.caseId(),manifest,fact,"7".repeat(64),"ACCEPTED","fixture reviewer","fixture output");String reviewSha=keep.apply(review);
+            var pin=new cn.jia.economy.usage.BenchmarkSampleEvidence.Pin(planned.caseId(),manifest,fact,reviewSha);
+            var op=new ProjectedTaskOperation(1,"capture",1,"record","source","f".repeat(64),new MeasuredTaskRepricing.Operation("render",a.task()),"render","frames","UNIT",json.valueToTree(Map.of("unit",unit,"decimalCount",a.split()==TaskEstimateEvaluation.Split.HOLDOUT?"10":"1")));
+            var frozen=new FrozenBenchmarkObservation("benchmark-observation-v1",when,rev,objects.get(manifest),objects.get(reviewSha),java.util.List.of(op)).seal(json);
+            objects.put(frozen.sha256(),frozen.json());var member=new FrozenCalibrationStudy.Member(a.task(),rev,frozen.sha256(),pin);cold.add(member);
+            if(a.split()!=TaskEstimateEvaluation.Split.CALIBRATE)mixed.add(member);
+            else{var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var selected=new cn.jia.economy.task.TaskHistoryCatalog.Revision("confirmed",3);
+                when(db.selectedForCalibration(task,group.digest(),selected.sampleId(),3)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",25L,t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
+                when(db.observedByMillis()).thenReturn(t+1);var f=observations.freezeConfirmed(task,group,selected,a.family(),a.split());objects.put(f.sha256(),f.json());mixed.add(new FrozenCalibrationStudy.Member(a.task(),selected,f.sha256()));}
+            t+=2;
+        }
+        clearInvocations(db,mapper);
+        String coldData=keep.apply(new FrozenCalibrationStudy.Dataset(owner,cold)),mixedData=keep.apply(new FrozenCalibrationStudy.Dataset(owner,mixed));
+        java.util.function.BiFunction<String,String,FrozenCalibrationStudy.Result> score=(r,d)->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(r,d,book.sha256(),policy),objects::get);
+        var all=score.apply(coldRoster,coldData);var joined=score.apply(mixedRoster,mixedData);assertEquals(all.report(),joined.report());assertEquals(joined,score.apply(mixedRoster,mixedData));
+        var exported=json.readValue(joined.trainingBenchmarks().json(),FrozenCalibrationStudy.TrainingBenchmarks.class);
+        assertEquals(owner,exported.owner());assertEquals(mixedData,exported.inputs().dataset());
+        assertEquals(java.util.List.of(mixed.stream().filter(m->m.task().equals("TRAIN")).findFirst().orElseThrow()),exported.members());
+        assertEquals(study.freeze(exported).sha256(),joined.receipt().trainingBenchmarksSha256());
+        assertNotEquals(all.receipt().trainingBenchmarksSha256(),joined.receipt().trainingBenchmarksSha256());
+        assertEquals("fixed",joined.report().points().winner().trial());assertFalse(joined.report().points().meetsPointCriteria());assertEquals(1,joined.report().points().holdout().underestimates());
+        assertEquals(0,joined.report().points().holdout().wape().compareTo(new TaskEstimateEvaluation.Ratio(BigDecimal.valueOf(9),BigDecimal.TEN)));
+        assertThrows(IllegalArgumentException.class,()->score.apply(mixedRoster,coldData));assertThrows(IllegalArgumentException.class,()->score.apply(coldRoster,mixedData));
+        var foreign=new TaskEstimateCalibration.PrivateGroup("tenant","client","other-owner",group.digest());
+        var foreignPins=new FrozenCalibrationStudy.Pins(keep.apply(new FrozenCalibrationStudy.Roster(foreign,coldPlan)),keep.apply(new FrozenCalibrationStudy.Dataset(foreign,cold)),book.sha256(),policy);
+        assertThrows(IllegalArgumentException.class,()->study.evaluate(foreign,group,foreignPins,objects::get));
+        var substituted=new java.util.ArrayList<>(coldPlan);var head=coldPlan.getFirst();substituted.set(0,new FrozenCalibrationStudy.Assignment(head.task(),head.family(),head.split(),new FrozenCalibrationStudy.PlannedBenchmark(head.benchmarkCase().caseId(),"0".repeat(64))));
+        assertThrows(IllegalArgumentException.class,()->score.apply(keep.apply(new FrozenCalibrationStudy.Roster(owner,substituted)),coldData));verifyNoInteractions(db,mapper);
+    }
+    @Test void measuredSamplesResolveEachRequiredReferenceRouteOnceWithoutEstimatedUnitsOrActualBills(){
+        price(DATA);var key=new TaskQuoteCalculator.ToolKey("tool-channel","render","image");
+        var row=new EconomyToolPriceRow();row.setPriceVersion("units-v1");row.setPriceDataJson("{\"basis\":\"reference\",\"yuanPerUnit\":\"0.15\"}");
+        when(mapper.findCurrentTool("tenant","client","tool-channel","render","image")).thenReturn(row);
+        var route=new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint");
+        Map<String,Map<String,TaskReferencePricing.Route>> rules=Map.of("text",Map.of("model",route),"combined",Map.of("model",route,"image",new TaskReferencePricing.UnitRoute(key)));
+        var book=service.freeze(scope,"contract-v1",rules,rules.keySet());verify(mapper,times(1)).findCurrentModel("tenant","client","channel","model","standard");
+        verify(mapper,never()).findTaskTariff(any(),any(),any());var op=new MeasuredTaskRepricing.Operation("gw","op");
+        var priced=MeasuredTaskRepricing.reprice(book,java.util.List.of(new MeasuredTaskRepricing.Fact(op,"combined","model","a",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,101L))),new MeasuredTaskRepricing.Fact(op,"combined","image","b",new MeasuredTaskRepricing.Units(key,new BigDecimal("2")))));
+        assertEquals(0,new BigDecimal("0.30013509558").compareTo(priced.yuan()));
+        assertEquals(MODEL_PRICE_MISSING,assertThrows(TaskPricingService.Unavailable.class,()->service.freeze(new EconomyScope("other","client"),"contract-v1",rules,java.util.Set.of("text"))).reason());
+    }
     @Test void missingModelsAndRoutesAreNotImplicitPrices() {
         assertEquals(BILLING_ROUTE_MISSING, assertThrows(TaskPricingService.Unavailable.class, () -> service.prepare(scope, work, null)).reason());
         verifyNoInteractions(mapper);

@@ -65,7 +65,8 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,size+1);
         boolean more=rows.size()>size;
         var page=rows.subList(0,Math.min(size,rows.size()));
-        return new Candidates(page.stream().map(i->summary(scope,i,true)).toList(),more?page.getLast().getCanonicalAgentId():null);
+        var ready=pageReadiness(scope,page);
+        return new Candidates(page.stream().map(i->candidateSummary(scope,i,ready)).toList(),more?page.getLast().agentId():null);
     }
     public List<AgentTaskAssigneeCandidateDTO> recommendationCandidates(AgentTaskExecutionGrantService.Scope scope,String task) {
         requireTask(scope,task);
@@ -75,12 +76,39 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
             // Same SQL authority as the public picker: active binding, same scope, owned or external opt-in.
             var rows=policies.candidates(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),after,101);
             var page=rows.subList(0,Math.min(100,rows.size()));
-            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(summary(scope,identity,true),List.of(),identity.getOwnerJiacn()));
+            var ready=pageReadiness(scope,page);
+            for(var identity:page)result.add(new AgentTaskAssigneeCandidateDTO(candidateSummary(scope,identity,ready),List.of(),identity.ownerJiacn()));
             if(rows.size()<=100)return List.copyOf(result);
-            String next=page.getLast().getCanonicalAgentId();
+            String next=page.getLast().agentId();
             if(next.equals(after))throw new IllegalStateException("Candidate pagination did not advance");
             after=next;
         }
+    }
+    private Set<TaskDeliberationRuntimeLookup.Scope> pageReadiness(AgentTaskExecutionGrantService.Scope scope,
+            List<AgentExternalServicePolicyDao.CandidateRow> page) {
+        var targets=new HashSet<TaskDeliberationRuntimeLookup.Scope>();
+        for(var row:page) if(row.status()!=null) targets.add(executorScope(scope,row));
+        return targets.isEmpty()?Set.of():deliberationRuntime.readyScopes(targets);
+    }
+    private static TaskDeliberationRuntimeLookup.Scope executorScope(AgentTaskExecutionGrantService.Scope scope,
+            AgentExternalServicePolicyDao.CandidateRow row) {
+        return new TaskDeliberationRuntimeLookup.Scope(scope.tenantId(),scope.clientId(),row.ownerJiacn(),row.agentId());
+    }
+    private AgentTaskTargetSummaryDTO candidateSummary(AgentTaskExecutionGrantService.Scope scope,AgentExternalServicePolicyDao.CandidateRow row,
+            Set<TaskDeliberationRuntimeLookup.Scope> readyScopes) {
+        boolean ready=row.status()!=null && readyScopes.contains(executorScope(scope,row));
+        return new AgentTaskTargetSummaryDTO(row.agentId(),row.displayName(),null,
+                scope.ownerJiacn().equals(row.ownerJiacn()),ready?row.status():"unavailable");
+    }
+    public List<QuoteTarget> quoteTargets(AgentTaskExecutionGrantService.Scope scope,String task,List<String> ids,boolean locking){
+        if(locking && !org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
+        requireTask(scope,task);var ordered=new java.util.TreeSet<>(ids);var keys=List.copyOf(ordered);var byId=new java.util.HashMap<String,QuoteTarget>();
+        for(int i=0;i<keys.size();i+=128){var chunk=keys.subList(i,Math.min(i+128,keys.size()));
+            for(var row:policies.selected(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),chunk,locking)){
+                if(row.revision()==null)continue;
+                if(ordered.contains(row.agent()) && byId.put(row.agent(),new QuoteTarget(row.agent(),row.provider(),row.binding(),row.revision()))!=null)throw new IllegalStateException("Ambiguous quote target");
+            }}
+        return keys.stream().map(byId::get).filter(Objects::nonNull).toList();
     }
     public AgentTaskTargetSummaryDTO assignedTarget(AgentTaskExecutionGrantService.Scope scope,String task) {
         requireTask(scope,task);
@@ -89,19 +117,15 @@ public class AgentExternalServicePolicyServiceImpl implements AgentExternalServi
         var identity=policies.identity(scope.tenantId(),scope.clientId(),grant.getTargetAgentId());
         if(identity==null || !Objects.equals(identity.getOwnerJiacn(),grant.getExecutorOwnerJiacn())
                 || !Objects.equals(identity.getBindingId(),grant.getExecutorBindingId())) return null;
-        return summary(scope,identity,false);
-    }
-    private AgentTaskTargetSummaryDTO summary(AgentTaskExecutionGrantService.Scope scope,AgentIdentityRegistryEntity identity,boolean newAssignment) {
+
         var runtime=runtimes.findByAgentId(identity.getCanonicalAgentId());
         boolean valid=runtime!=null && Objects.equals(runtime.getClientId(),scope.clientId())
                 && Objects.equals(runtime.getOwnerJiacn(),identity.getOwnerJiacn())
                 && Objects.equals(runtime.getBindingId(),identity.getBindingId());
-        boolean ready = !newAssignment || deliberationRuntime.ready(new TaskDeliberationRuntimeLookup.Scope(
-                scope.tenantId(), scope.clientId(), identity.getOwnerJiacn(), identity.getCanonicalAgentId()));
         // Public profile source is optional. Never expose the internal login as a nickname.
         return new AgentTaskTargetSummaryDTO(identity.getCanonicalAgentId(),valid?runtime.getName():identity.getCanonicalAgentId(),
                 null,scope.ownerJiacn().equals(identity.getOwnerJiacn()),
-                valid && ready && "ACTIVE".equals(identity.getLifecycleStatus())?runtime.getStatus():"unavailable");
+                valid && "ACTIVE".equals(identity.getLifecycleStatus())?runtime.getStatus():"unavailable");
     }
     private AgentIdentityRegistryEntity owned(AgentTaskExecutionGrantService.Scope scope,String agent) {
         exact(agent,100);var i=policies.identity(scope.tenantId(),scope.clientId(),agent);

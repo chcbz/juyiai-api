@@ -9,6 +9,10 @@ import org.apache.ibatis.annotations.Update;
 import java.util.List;
 
 public interface AgentRuntimeMapper extends BaseMapper<AgentRuntimeEntity> {
+    /** Liveness observation only. Restrict by exact partition, and return no enrollment credentials or catalog bodies. */
+    @Select("<script>SELECT tenant_id,client_id,owner_jiacn,agent_id,status,binding_id,token_hash,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation FROM agent_runtime WHERE tenant_id=#{t} AND client_id=#{c} AND BINARY tenant_id=BINARY #{t} AND BINARY client_id=BINARY #{c} AND agent_id IN <foreach collection='ids' item='id' open='(' separator=',' close=')'>BINARY #{id}</foreach></script>")
+    java.util.List<AgentRuntimeEntity> registeredProofRows(@Param("t") String tenant,@Param("c") String client,@Param("ids") java.util.Set<String> ids);
+
     @Select("""
             SELECT * FROM agent_runtime
             WHERE tenant_id = #{tenantId} AND client_id = #{clientId} AND agent_id = #{agentId}

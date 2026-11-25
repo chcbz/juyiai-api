@@ -17,6 +17,14 @@ class ChatActionExecutionServiceTest {
         assertNotEquals(ChatSkillSnapshotJson.sha(answer),ChatSkillSnapshotJson.sha(files));
         assertEquals(ChatSkillSnapshotJson.sha(answer),ChatSkillSnapshotJson.sha(ChatActionExecutionService.nativeOutputs(Map.of("outputMode","ANSWER"),List.of("text/plain"))));
     }
+    @Test void committedFirstFileNarrowsButNeverExtendsTheCurrentNativeCapability(){
+        var fixed=new cn.jia.agent.service.NativeTaskPreparation.Output(cn.jia.agent.service.NativeTaskPreparation.Mode.ARTIFACTS,List.of("text/plain"));
+        var broad=List.of("application/pdf","text/plain");var files=Map.<String,Object>of("outputMode","ARTIFACTS");
+        assertEquals(fixed.commandOutputs(),ChatActionExecutionService.nativeOutputs(files,broad,fixed));
+        assertEquals(broad,ChatActionExecutionService.nativeOutputs(files,broad,null).get("mimeTypes"));
+        assertThrows(ChatDeliberationException.class,()->ChatActionExecutionService.nativeOutputs(files,List.of("application/pdf"),fixed));
+        assertThrows(ChatDeliberationException.class,()->ChatActionExecutionService.nativeOutputs(Map.of("outputMode","ANSWER"),broad,fixed));
+    }
     @Test void schemaRequiresExplicitOutputIntentAndDoesNotPermitExtraParameters() {
         var schema=ChatActionCapabilityService.nativeParametersSchema();
         assertEquals(List.of("outputMode"),schema.get("required"));assertEquals(false,schema.get("additionalProperties"));

@@ -31,12 +31,8 @@ class AgentExternalServicePolicyServiceImplTest {
     }
     @Test void onlineCandidateWithoutNativeReadinessIsUnavailableAndCanRecover() {
         when(tasks.findByTaskIdInOwnerScope("0","client","B","task")).thenReturn(new AgentTaskMetaEntity());
-        var identity = new AgentIdentityRegistryEntity().setCanonicalAgentId("external-agent")
-                .setOwnerJiacn("executor-owner").setBindingId(7L).setLifecycleStatus("ACTIVE");
-        when(policies.candidates("0","client","B","",101)).thenReturn(List.of(identity));
-        var runtime = new AgentRuntimeEntity(); runtime.setClientId("client"); runtime.setOwnerJiacn("executor-owner");
-        runtime.setBindingId(7L); runtime.setStatus("online"); runtime.setName("Agent");
-        when(runtimes.findByAgentId("external-agent")).thenReturn(runtime);
+        var row=new AgentExternalServicePolicyDao.CandidateRow("external-agent","executor-owner","Agent","online");
+        when(policies.candidates("0","client","B","",101)).thenReturn(List.of(row));
         assertEquals("unavailable", service.recommendationCandidates(owner,"task").getFirst().target().availability());
         service.setDeliberationRuntime(executor -> executor.equals(new TaskDeliberationRuntimeLookup.Scope(
                 "0", "client", "executor-owner", "external-agent")));
@@ -70,12 +66,12 @@ class AgentExternalServicePolicyServiceImplTest {
         assertThrows(AgentTaskExecutionGrantException.class,()->service.recommendationCandidates(owner,"foreign"));
         verify(policies,never()).candidates(any(),any(),any(),any(),anyInt());
         when(tasks.findByTaskIdInOwnerScope("0","client","B","task")).thenReturn(new AgentTaskMetaEntity());
-        var rows=java.util.stream.IntStream.range(0,101).mapToObj(n->new AgentIdentityRegistryEntity()
-                .setCanonicalAgentId(String.format("agent-%03d",n)).setOwnerJiacn("external-private-owner")
-                .setBindingId((long)n+1).setLifecycleStatus("ACTIVE")).toList();
+        var rows=java.util.stream.IntStream.range(0,101).mapToObj(n->new AgentExternalServicePolicyDao.CandidateRow(
+                String.format("agent-%03d",n),"external-private-owner",String.format("agent-%03d",n),null)).toList();
         when(policies.candidates("0","client","B","",101)).thenReturn(rows);
         when(policies.candidates("0","client","B","agent-099",101)).thenReturn(List.of(rows.getLast()));
         var result=service.recommendationCandidates(owner,"task");
+        verifyNoInteractions(runtimes); // no runtime SELECT per candidate on either page
         assertEquals(101,result.size());assertEquals("external-private-owner",result.getLast().skillProviderOwnerJiacn());
         assertFalse(result.getLast().target().isMine());assertTrue(result.getLast().abilities().isEmpty());
         String encoded=new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(result);

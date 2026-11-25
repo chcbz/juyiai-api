@@ -43,6 +43,8 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         this.grants=grants; this.executions=executions; this.installed=installed;this.runtimes=runtimes;this.policies=policies;
     }
 
+    private cn.jia.agent.service.TaskInitialActionOutput initialOutputs;
+    @org.springframework.beans.factory.annotation.Autowired public void setInitialOutputs(cn.jia.agent.service.TaskInitialActionOutput source){initialOutputs=Objects.requireNonNull(source);}
     private ChatActionCapabilityService nativeCapabilities;
     private cn.jia.chat.handler.TypedDeliberationSessionRegistry nativeSessions;
     @org.springframework.beans.factory.annotation.Autowired
@@ -158,7 +160,8 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),"assignmentRevision",Long.toString(baseline.assignmentRevision())));
         snapshot.put("instruction",action.validated().interactionOutcome().action().instruction());snapshot.put("parameters",action.validated().interactionOutcome().action().parameters());
         snapshot.put("inputs",List.copyOf(inputs));snapshot.put("sourceSnapshotDigest",ChatSkillSnapshotJson.sha(inputs));
-        snapshot.put("outputs",nativeOutputs(action.validated().interactionOutcome().action().parameters(),capability.outputMimeTypes()));
+        var fixed=capability.skill()==null?initialOutputs.pending(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),parent.taskId(),baseline.targetAgentId()):null;
+        snapshot.put("outputs",nativeOutputs(action.validated().interactionOutcome().action().parameters(),capability.outputMimeTypes(),fixed));
         if(capability.skill()==null) {
             snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());
         }
@@ -173,14 +176,15 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
     }
 
     static Map<String,Object> nativeOutputs(Map<String,Object> parameters,List<String> mimeTypes) {
-        return switch ((String)parameters.get("outputMode")) {
-            case "ANSWER" -> Map.of("mimeTypes",List.of(),"multiple",false,"artifactsRequired",false,
-                    "dataSchema",Map.of("$schema","https://json-schema.org/draft/2020-12/schema","type","object",
-                            "properties",Map.of("answer",Map.of("type","string","minLength",1,"pattern","\\S")),
-                            "required",List.of("answer"),"additionalProperties",false));
-            case "ARTIFACTS" -> Map.of("mimeTypes",mimeTypes,"multiple",true,"artifactsRequired",true);
-            default -> throw conflict();
-        };
+        return nativeOutputs(parameters,mimeTypes,null);
+    }
+    static Map<String,Object> nativeOutputs(Map<String,Object> parameters,List<String> mimeTypes,cn.jia.agent.service.NativeTaskPreparation.Output fixed) {
+        var mode=switch ((String)parameters.get("outputMode")) {
+            case "ANSWER" -> cn.jia.agent.service.NativeTaskPreparation.Mode.ANSWER;
+            case "ARTIFACTS" -> cn.jia.agent.service.NativeTaskPreparation.Mode.ARTIFACTS;
+            default -> throw conflict();};
+        if(fixed!=null){if(mode!=fixed.mode()||!mimeTypes.containsAll(fixed.mimeTypes()))throw conflict();return fixed.commandOutputs();}
+        return new cn.jia.agent.service.NativeTaskPreparation.Output(mode,mimeTypes).commandOutputs();
     }
 
     static Map<String,Object> nativeSelection(InstalledSkillDescriptorLookup.Snapshot current,ChatActionOutcomeContract.Capability capability) {

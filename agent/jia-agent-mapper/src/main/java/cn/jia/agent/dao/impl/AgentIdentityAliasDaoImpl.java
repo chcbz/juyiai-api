@@ -13,6 +13,18 @@ public class AgentIdentityAliasDaoImpl
         extends BaseDaoImpl<AgentIdentityAliasMapper, AgentIdentityAliasEntity>
         implements AgentIdentityAliasDao {
     @Override
+    public java.util.List<AgentIdentityAliasEntity> findActiveBindingAliases(String tenant, String client, String owner, java.util.Set<Long> ids) {
+        requireStrictOwnerScope(tenant,client,owner);
+        if (ids.isEmpty()) return java.util.List.of();
+        var q = new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<AgentIdentityAliasEntity>();
+        IdentityExactQuerySupport.exact(q,"tenant_id",tenant,200);
+        IdentityExactQuerySupport.exact(q,"client_id",client,200);
+        IdentityExactQuerySupport.exact(q,"owner_jiacn",owner,200);
+
+        return baseMapper.selectList(q.eq("alias_type","LEGACY_AGENT_ID").eq("alias_status","ACTIVE").isNull("valid_to").in("registry_id",ids));
+    }
+
+    @Override
     public AgentIdentityAliasEntity findExactActiveLegacyAlias(String tenantId, String clientId,
             String ownerJiacn, String aliasValue) {
         QueryWrapper<AgentIdentityAliasEntity> query = exactAliasQuery(

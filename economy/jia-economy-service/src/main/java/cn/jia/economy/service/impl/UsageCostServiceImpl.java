@@ -102,6 +102,12 @@ public class UsageCostServiceImpl implements UsageCostService {
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public java.util.Optional<Observation> observation(Binding binding, String receiptId) {
+        return retained(binding,receiptId,null);
+    }
+    @Override
+    @Transactional(readOnly=true,propagation=Propagation.SUPPORTS)
+    public java.util.Optional<Observation> observationAt(Binding binding,long revision){ return retained(binding,null,revision); }
+    private java.util.Optional<Observation> retained(Binding binding,String receiptId,Long revision){
         var scope = binding.scope();
         String attemptId = digest(json.writeValueAsString(List.of(binding.source(), binding.sourceAttemptId())));
         var attempt = mapper.findAttempt(new EconomyUsageAttemptEntity().setTenantId(scope.tenantId())
@@ -109,8 +115,8 @@ public class UsageCostServiceImpl implements UsageCostService {
         if (attempt == null) return java.util.Optional.empty();
         if (!Objects.equals(binding.ownerJiacn(), attempt.getOwnerJiacn()) || !Objects.equals(binding.taskId(), attempt.getTaskId()))
             throw new UsageCostConflict(ATTEMPT_BINDING);
-        var row = mapper.findReceipt(new EconomyUsageRevisionEntity().setTenantId(scope.tenantId())
-                .setClientId(scope.clientId()).setAttemptId(attemptId).setReceiptKey(digest(receiptId)));
+        var key = new EconomyUsageRevisionEntity().setTenantId(scope.tenantId()).setClientId(scope.clientId()).setAttemptId(attemptId);
+        var row = revision==null?mapper.findReceipt(key.setReceiptKey(digest(receiptId))):mapper.findRevision(key.setRevision(revision));
         if (row == null) return java.util.Optional.empty();
         return java.util.Optional.of(new Observation(binding, row.getReceiptId(), row.getRevision() - 1,
                 row.getRawUsageJson(), row.getNormalizedUsageJson() == null ? null : json.readValue(row.getNormalizedUsageJson(), TokenUsageCost.Usage.class),

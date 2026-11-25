@@ -7,6 +7,64 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWorkspaceExecutionEntity> {
+    @org.apache.ibatis.annotations.Insert("""
+        INSERT INTO agent_task_execution_set(tenant_id,client_id,owner_jiacn,task_id,membership_revision,execution_count,execution_set_sha256)
+        VALUES(#{t},#{c},#{o},#{id},0,0,SHA2('',256)) ON DUPLICATE KEY UPDATE task_id=VALUES(task_id)
+        """)
+    void ensureMemberSet(@Param("t") String tenant,@Param("c") String client,@Param("o") String owner,@Param("id") String task);
+    @Update("""
+        UPDATE agent_task_execution_set s JOIN agent_task_execution_member m USING (tenant_id,client_id,owner_jiacn,task_id)
+        SET s.membership_revision=m.membership_revision,s.execution_count=s.execution_count+1,
+            s.execution_set_sha256=SHA2(CONCAT(s.execution_set_sha256,#{leaf}),256)
+        WHERE s.tenant_id=#{r.tenantId} AND s.client_id=#{r.clientId} AND s.owner_jiacn=#{r.ownerJiacn} AND s.task_id=#{r.taskId}
+          AND m.execution_id=#{r.executionId} AND m.run_id=#{r.runId} AND s.terminal_state IS NULL AND m.membership_revision>s.membership_revision
+        """)
+    int advanceMemberSet(@Param("r") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("leaf") String leaf);
+    @Update("""
+        UPDATE agent_task_execution_set SET terminal_state=#{state},terminal_fact_id=#{fact},terminal_revision=#{revision},closed_at=#{time},delivery_state='PENDING'
+        WHERE tenant_id=#{t} AND client_id=#{c} AND owner_jiacn=#{o} AND task_id=#{id} AND terminal_state IS NULL
+        """)
+    int freezeMemberSet(@Param("t") String tenant,@Param("c") String client,@Param("o") String owner,@Param("id") String task,
+        @Param("state") String state,@Param("fact") String fact,@Param("revision") long revision,@Param("time") long time);
+
+    @Select("""
+        SELECT tenant_id,client_id,owner_jiacn,task_id,terminal_fact_id,terminal_state,terminal_revision,closed_at,membership_revision,execution_count,execution_set_sha256
+        FROM agent_task_execution_set WHERE tenant_id=#{t} AND client_id=#{c} AND terminal_fact_id=#{id} AND delivery_state='PENDING'
+        """) cn.jia.economy.usage.TaskMembership.Terminal pendingTerminal(@Param("t") String t,@Param("c") String c,@Param("id") String id);
+    @Select("""
+        SELECT membership_revision,execution_id,run_id,capture_id,admission_sha256 FROM agent_task_execution_member
+        WHERE tenant_id=#{t.tenant} AND client_id=#{t.client} AND owner_jiacn=#{t.owner} AND task_id=#{t.task}
+          AND membership_revision>#{after} AND membership_revision<=#{t.membershipRevision} ORDER BY membership_revision LIMIT #{limit}
+        """) java.util.List<cn.jia.economy.usage.TaskMembership.Member> membersPage(@Param("t") cn.jia.economy.usage.TaskMembership.Terminal t,@Param("after") long after,@Param("limit") int limit);
+    @Update("""
+        UPDATE agent_task_execution_set SET delivery_state='DELIVERED' WHERE tenant_id=#{tenant} AND client_id=#{client} AND owner_jiacn=#{owner}
+          AND task_id=#{task} AND terminal_fact_id=#{fact} AND delivery_state='PENDING'
+        """) int markMembershipDelivered(cn.jia.economy.usage.TaskMembership.Terminal t);
+
+    @Select("""
+        <script>SELECT client_id,terminal_fact_id FROM agent_task_execution_set WHERE tenant_id=#{t} AND delivery_state='PENDING'
+        <if test="c != null">AND client_id=#{c}</if> AND terminal_fact_id &gt; #{after} ORDER BY terminal_fact_id LIMIT #{limit}</script>
+        """) java.util.List<cn.jia.economy.usage.TaskMembership.Pending> pendingMembershipPage(@Param("t") String tenant,@Param("c") String client,@Param("after") String after,@Param("limit") int limit);
+
+    // Seek the unique membership key. The binary comparisons additionally reject padded aliases.
+    @Select("""
+        SELECT EXISTS(SELECT 1 FROM agent_task_execution_member
+          WHERE tenant_id=#{row.tenantId} AND client_id=#{row.clientId} AND owner_jiacn=#{row.ownerJiacn}
+            AND task_id=#{row.taskId} AND execution_id=#{row.executionId} AND run_id=#{row.runId}
+            AND BINARY tenant_id=BINARY #{row.tenantId} AND BINARY client_id=BINARY #{row.clientId}
+            AND BINARY owner_jiacn=BINARY #{row.ownerJiacn} AND BINARY task_id=BINARY #{row.taskId}
+            AND BINARY execution_id=BINARY #{row.executionId} AND BINARY run_id=BINARY #{row.runId}
+            AND BINARY admission_sha256=BINARY #{row.requestHash} AND BINARY capture_id=BINARY #{capture})
+        """)
+    boolean hasMemberCapture(@Param("row") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("capture") String capture);
+
+    /** Append under the original task-root lock. Revision is an ordering cursor, not a count. */
+    @org.apache.ibatis.annotations.Insert("""
+        INSERT INTO agent_task_execution_member(tenant_id,client_id,owner_jiacn,task_id,execution_id,run_id,admission_sha256,capture_id)
+        VALUES(#{row.tenantId},#{row.clientId},#{row.ownerJiacn},#{row.taskId},#{row.executionId},#{row.runId},#{row.requestHash},#{capture})
+        """)
+    void registerTaskMember(@Param("row") cn.jia.agent.dao.PersonalWorkspaceExecutionDao.MemberIdentity row,@Param("capture") String capture);
+
     @Select("""
             SELECT * FROM agent_personal_workspace_execution
             WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
@@ -89,6 +147,16 @@ public interface PersonalWorkspaceExecutionMapper extends BaseMapper<PersonalWor
         @Param("clientId") String clientId, @Param("executorOwner") String executorOwner,
         @Param("agentId") String agentId, @Param("executionId") String executionId,
         @Param("runId") String runId);
+
+    @Select("""
+        SELECT capture_profile_sha256 FROM agent_personal_workspace_execution
+        WHERE tenant_id=#{tenant} AND client_id=#{client} AND execution_id=#{execution}
+          AND BINARY tenant_id=BINARY #{tenant} AND BINARY client_id=BINARY #{client} AND BINARY execution_id=BINARY #{execution}
+          AND BINARY run_id=BINARY #{run} AND BINARY owner_jiacn=BINARY #{owner} AND BINARY task_id=BINARY #{task}
+          AND BINARY target_agent_id=BINARY #{agent} AND business_scope='TASK' AND execution_protocol_version=6
+          AND usage_mode='RESPONSE_V2' AND capture_protocol='METERED_CAPTURE_V2'
+        """) String admittedCaptureProfile(@Param("tenant")String tenant,@Param("client")String client,@Param("owner")String owner,
+                @Param("task")String task,@Param("agent")String agent,@Param("execution")String execution,@Param("run")String run);
 
     @Select("""
             SELECT COUNT(*)

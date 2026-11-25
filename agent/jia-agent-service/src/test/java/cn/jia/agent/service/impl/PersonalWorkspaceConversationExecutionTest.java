@@ -62,6 +62,7 @@ class PersonalWorkspaceConversationExecutionTest {
                 mock(PersonalWorkspaceTaskLinkDao.class),runtimes,storage,writes,
                 new PersonalWorkspaceExecutionProperties(List.of("image/png","text/plain")));
         wireAssigneeFixture(service,rows);
+        service.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         service.setConversationAdmission(grants,transactions);
         principal(RUNTIME);
         var authentication=mock(AgentRuntimeAuthenticationService.class);

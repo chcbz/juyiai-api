@@ -75,7 +75,7 @@ class AgentRuntimePersistentSessionFenceTest {
         var session = auth.issue(installation, request("host", "boot"), 1000);
         var filter = new AgentRuntimeAuthenticationFilter(auth);
         for (String path : List.of("/internal/agent/skill-management/results", "/internal/agent/chat/dispatches/dispatch/usage",
-                "/internal/agent/tasks/task/runs/run/conversation/usage", "/internal/agent/tasks/task/runs/run/conversation/provider-usage")) {
+                "/internal/agent/executions/execution/runs/run/usage", "/internal/agent/executions/execution/runs/run/provider-usage")) {
             var called = new AtomicBoolean(); var response = new org.springframework.mock.web.MockHttpServletResponse();
             filter.doFilter(http(session, "POST", path), response, (a,b) -> {
                 called.set(true);
@@ -83,13 +83,16 @@ class AgentRuntimePersistentSessionFenceTest {
             });
             assertTrue(called.get(), path); assertEquals(200, response.getStatus());
         }
-        for (String path : List.of("/internal/agent/skill-installations/si/package", "/internal/agent/tasks/conversation-executions/commands",
-                "/internal/agent/tasks/task/runs/run/conversation/lease", "/internal/agent/tasks/task/runs/run/conversation/result-commits/result")) {
+        for (String path : List.of("/internal/agent/skill-installations/si/package", "/internal/agent/executions/commands",
+                "/internal/agent/executions/execution/runs/run/lease", "/internal/agent/executions/execution/runs/run/result-commits/result")) {
             var response = new org.springframework.mock.web.MockHttpServletResponse();
             filter.doFilter(http(session, path.endsWith("package") || path.endsWith("commands") ? "GET" : "POST", path), response,
                     (a,b) -> fail("offline session admitted new work: " + path));
             assertEquals(401, response.getStatus());
         }
+        var retired=new org.springframework.mock.web.MockHttpServletResponse();
+        filter.doFilter(http(session,"POST","/internal/agent/tasks/task/runs/run/conversation/usage"),retired,(a,b)->fail("retired route admitted"));
+        assertEquals(403,retired.getStatus());
         var successor = auth.issue(installation, request("host", "new-boot"), 1001);
         var stale = new org.springframework.mock.web.MockHttpServletResponse();
         filter.doFilter(http(session, "POST", "/internal/agent/skill-management/results"), stale, (a,b) -> fail("stale proof"));
@@ -194,10 +197,13 @@ class AgentRuntimePersistentSessionFenceTest {
         var ordered=inOrder(manager,installations,rows);
         ordered.verify(manager).getTransaction(any());ordered.verify(installations).lock(ID);
         ordered.verify(rows).lockInScope("0","client",AGENT);ordered.verify(manager).commit(status);
+        var device=proxy.withAuthenticatedDevice(admitted,value->value);
+        assertEquals(scope,device.subject());assertEquals(new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(ID,"host","boot",session.sessionGeneration()),device.fence());
         auth.issue(installation,request("host","replacement"),1001);clearInvocations(manager);
         AtomicBoolean entered=new AtomicBoolean();
         assertThrows(RuntimeException.class,()->proxy.withAuthenticatedRuntime(admitted,value->entered.compareAndSet(false,true)));
         assertFalse(entered.get());verify(manager).rollback(status);verify(manager,never()).commit(any());
+        assertThrows(RuntimeException.class,()->proxy.withAuthenticatedDevice(admitted,value->entered.compareAndSet(false,true)));
         assertThrows(RuntimeException.class,()->proxy.withAuthenticatedRuntime(
                 new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("owner","ignored",List.of()),
                 value->entered.compareAndSet(false,true)));
@@ -364,6 +370,15 @@ class AgentRuntimePersistentSessionFenceTest {
         assertThrows(RuntimeException.class,()->auth.currentRegisteredProof("0","client",AGENT));
     }
 
+    @Test void eachRegisteredProofObservationRechecksPersistentRowsOnceAndSeesRevocation() {
+        var session=auth.issue(installation,request("host","boot"),1000);row.setStatus("online");
+        var proof=auth.verify(headers(session));auth.bind("socket",proof,()->true);
+        clearInvocations(installations,rows);
+        assertEquals(proof,auth.currentRegisteredProof("0","client",AGENT));
+        verify(installations,times(1)).findInScope("0","client",ID);verify(rows,times(1)).findInScope("0","client",AGENT);
+        installation.setStatus("REVOKED");assertThrows(IllegalArgumentException.class,()->auth.currentRegisteredProof("0","client",AGENT));
+        verify(installations,times(2)).findInScope("0","client",ID);verify(rows,times(2)).findInScope("0","client",AGENT);
+    }
     @Test void sameSocketRefreshDuringPersistentValidationDoesNotFenceHttpAuthentication() {
         var session = auth.issue(installation, request("host", "boot"), 1000); row.setStatus("online");
         var proof = auth.verify(headers(session));

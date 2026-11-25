@@ -190,7 +190,7 @@ public interface AgentTaskMetaMapper extends BaseMapper<AgentTaskMetaEntity> {
             @Param("clientId") String clientId,
             @Param("taskId") String taskId);
 
-    @Select("""
+    String EXACT_OWNER_ROOT = """
             SELECT *
             FROM agent_task_meta
             WHERE tenant_id = #{tenantId}
@@ -206,9 +206,16 @@ public interface AgentTaskMetaMapper extends BaseMapper<AgentTaskMetaEntity> {
               AND CAST(task_id AS BINARY) = CAST(#{taskId} AS BINARY)
               AND OCTET_LENGTH(task_id) = OCTET_LENGTH(#{taskId})
             LIMIT 1
-            FOR UPDATE
-            """)
+            """;
+    @Select(EXACT_OWNER_ROOT + " FOR UPDATE")
     AgentTaskMetaEntity findExactByOwnerTaskScopeForUpdate(
+            @Param("tenantId") String tenantId,
+            @Param("clientId") String clientId,
+            @Param("ownerJiacn") String ownerJiacn,
+            @Param("taskId") String taskId);
+
+    @Select(EXACT_OWNER_ROOT + " FOR SHARE")
+    AgentTaskMetaEntity findExactByOwnerTaskScopeForShare(
             @Param("tenantId") String tenantId,
             @Param("clientId") String clientId,
             @Param("ownerJiacn") String ownerJiacn,

@@ -6,11 +6,16 @@ import cn.jia.core.dao.IBaseDao;
 import java.util.List;
 
 public interface AgentRuntimeDao extends IBaseDao<AgentRuntimeEntity> {
+    java.util.List<AgentRuntimeEntity> findOwnedCapabilityRows(String tenant, String client, String owner, java.util.Set<String> ids);
+    int REPAIR_PAGE_SIZE=64;
+    List<AgentRuntimeEntity> capabilityRepairPage(String tenant,String clientOrAll,long after);
+    AgentRuntimeEntity capabilityOwner(String tenant,String client,long runtimeId);
     /** Registration alone owns model updates; presence must not overwrite a newer report. */
     int updateRegistration(AgentRuntimeEntity entity);
 
     AgentRuntimeEntity findByAgentId(String agentId);
 
+    java.util.List<AgentRuntimeEntity> registeredProofRows(String tenant,String client,java.util.Set<String> ids);
     AgentRuntimeEntity findInScope(String tenantId, String clientId, String agentId);
 
     AgentRuntimeEntity lockInScope(String tenantId, String clientId, String agentId);

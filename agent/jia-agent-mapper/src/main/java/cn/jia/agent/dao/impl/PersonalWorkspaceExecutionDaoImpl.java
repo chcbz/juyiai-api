@@ -71,6 +71,9 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         scope(tenantId, clientId, ownerJiacn); id(idempotencyKey, "idempotencyKey");
         return executions.findByRevokeIdempotency(tenantId, clientId, ownerJiacn, idempotencyKey);
     }
+    @Override public String admittedCaptureProfile(String tenant,String client,String owner,String task,String agent,String execution,String run){
+        return executions.admittedCaptureProfile(tenant,client,owner,task,agent,execution,run);
+    }
     @Override public PersonalWorkspaceExecutionEntity findForNativeUsageCost(String tenantId, String clientId,
             String executorOwner, String agentId, String executionId, String runId) {
         return executions.findForNativeUsageCost(tenantId, clientId, executorOwner, agentId, executionId, runId);
@@ -108,6 +111,28 @@ public class PersonalWorkspaceExecutionDaoImpl implements PersonalWorkspaceExecu
         int count=executions.countExecutionProtocolVersionColumn();
         if(count<0||count>1)throw new IllegalStateException("execution protocol catalog ambiguity");
         return count==1;
+    }
+    @Override public void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId) {
+        appendMember(new MemberIdentity(execution.getTenantId(),execution.getClientId(),execution.getOwnerJiacn(),execution.getTaskId(),
+                execution.getExecutionId(),execution.getRunId(),execution.getRequestHash()),captureId);
+    }
+    @Override public boolean hasMemberCapture(MemberIdentity member,String captureId) {
+        return executions.hasMemberCapture(member,captureId);
+    }
+    @Override public void appendMember(MemberIdentity execution,String captureId) {
+        String t=execution.tenantId(),c=execution.clientId(),o=execution.ownerJiacn(),id=execution.taskId();
+        String leaf=cn.jia.economy.usage.TaskMembershipDigest.member(t,c,o,id,execution.executionId(),execution.runId(),captureId,execution.requestHash());
+        executions.ensureMemberSet(t,c,o,id);executions.registerTaskMember(execution,captureId);
+        if(executions.advanceMemberSet(execution,leaf)!=1) throw new IllegalStateException("Task execution set closed or stale");
+    }
+    @Override public cn.jia.economy.usage.TaskMembership.Terminal pending(String t,String c,String fact){return executions.pendingTerminal(t,c,fact);}
+    @Override public java.util.List<cn.jia.economy.usage.TaskMembership.Member> members(cn.jia.economy.usage.TaskMembership.Terminal t,long after){return executions.membersPage(t,after,cn.jia.economy.usage.TaskMembership.PAGE);}
+    @Override public void delivered(cn.jia.economy.usage.TaskMembership.Terminal t){executions.markMembershipDelivered(t);}
+    @Override public java.util.List<cn.jia.economy.usage.TaskMembership.Pending> pendingPage(String tenant,String client,String after){return executions.pendingMembershipPage(tenant,client,after,cn.jia.economy.usage.TaskMembership.PAGE);}
+    @Override public void closeTaskMembers(String t,String c,String o,String id,Outcome outcome,String ref,long revision,long time) {
+        String fact=cn.jia.economy.usage.TaskMembershipDigest.tuple("TASK_TERMINAL_V1",t,c,o,id,outcome.name(),ref,Long.toString(revision));
+        executions.ensureMemberSet(t,c,o,id);
+        if(executions.freezeMemberSet(t,c,o,id,outcome.name(),fact,revision,time)!=1) throw new IllegalStateException("Task execution set already closed");
     }
     @Override public void insert(PersonalWorkspaceExecutionEntity execution) { init(execution); executions.insert(execution); }
     @Override public void update(PersonalWorkspaceExecutionEntity execution) { execution.setUpdateTime(DateUtil.nowTime()); executions.updateById(execution); }

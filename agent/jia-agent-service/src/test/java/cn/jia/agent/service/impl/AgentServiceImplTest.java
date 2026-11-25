@@ -1657,7 +1657,11 @@ class AgentServiceImplTest extends BaseMockTest {
                 agent.getAgentId(), agent.getName(), null, true, agent.getStatus())).toList();
         when(externalServicePolicies.recommendationCandidates(any(), org.mockito.ArgumentMatchers.eq("task-001")))
                 .thenReturn(items.stream().map(t->new AgentTaskAssigneeCandidateDTO(t,List.of(),"jiacn")).toList());
-        for (var agent : agents) when(agentRuntimeDao.findByAgentId(agent.getAgentId())).thenReturn(agent);
+        var ids=agents.stream().map(AgentRuntimeEntity::getAgentId).collect(java.util.stream.Collectors.toSet());
+        when(agentRuntimeDao.findOwnedCapabilityRows("0","fixture-client_id-1","jiacn",ids)).thenReturn(agents);
+        when(agentIdentityService.activeBindingsForCandidates("0","fixture-client_id-1","jiacn",ids)).thenReturn(
+                agents.stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeEntity::getAgentId,AgentRuntimeEntity::getBindingId)));
+
     }
 
     @Test
@@ -1687,6 +1691,12 @@ class AgentServiceImplTest extends BaseMockTest {
 
         List<AgentTaskAssigneeCandidateDTO> result = agentService.listTaskAssigneeCandidates("task-001");
 
+        when(agentRuntimeDao.capabilityOwner("0","fixture-client_id-1",71)).thenReturn(planner);
+        var one=java.util.Set.of("agent-wuyong");when(agentIdentityService.activeBindingsForCandidates("0","fixture-client_id-1","jiacn",one)).thenReturn(java.util.Map.of("agent-wuyong",1L));
+        when(agentRuntimeDao.findOwnedCapabilityRows("0","fixture-client_id-1","jiacn",one)).thenReturn(List.of(planner));
+        var background=agentService.declaredCapabilities("0","fixture-client_id-1",71).orElseThrow();assertEquals(List.of("planning","analysis"),background.abilities());
+        assertEquals("jiacn",background.owner());assertTrue(agentService.declaredCapabilities("0","fixture-client_id-1",72).isEmpty());
+        assertThrows(IllegalArgumentException.class,()->agentService.declaredCapabilities("other","fixture-client_id-1",71));
         assertEquals(5, result.size());
         assertEquals(List.of("agent-linchong", "agent-offline", "agent-error", "agent-busy", "agent-wuyong"),
                 result.stream().map(c -> c.target().agentId()).toList());
@@ -1706,9 +1716,24 @@ class AgentServiceImplTest extends BaseMockTest {
         meta.setOwnerJiacn("jiacn"); meta.setRewardStatus(AgentConstants.TASK_STATUS_OPEN);
         meta.setTaskVersion(9L); meta.setRequiredAbilities("[\"analysis\"]");
         when(agentTaskMetaDao.findByTaskIdInOwnerScope("0", "fixture-client_id-1", "jiacn", "task-001")).thenReturn(meta);
+        var snapshots=mock(AgentTaskRequirementSnapshotService.class);agentService.setRequirementSnapshots(snapshots);
+        var scope=new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope("0","fixture-client_id-1","jiacn");
+        when(snapshots.readCurrent(scope,"task-001")).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",9,1,"当前完整标题","完整需求", "a".repeat(64),"CREATE"),
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",10,2,"新版","新要求", "b".repeat(64),"UPDATE"))
+                .thenThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED));
         var input = agentService.getTaskRecommendationInput("task-001");
         assertEquals("9", input.getTaskVersion());
-        assertEquals("task-001", input.getTitle());
+        when(snapshots.readCurrentWithinLockedTask(scope,"task-001",meta)).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-001",9,1,"当前完整标题","完整需求", "a".repeat(64),"CREATE"));
+        var recheck=agentService.getTaskRecommendationInputWithinLockedTask("task-001",meta);
+        assertEquals(input.getDescription(),recheck.getDescription());
+        verify(agentTaskMetaDao,times(1)).findByTaskIdInOwnerScope("0","fixture-client_id-1","jiacn","task-001");
+        verify(snapshots,times(1)).readCurrent(scope,"task-001");
+        assertEquals("当前完整标题",input.getTitle());assertEquals("完整需求",input.getDescription());
+        assertEquals(cn.jia.agent.exception.AgentTaskCollaborationException.Reason.VERSION_CONFLICT,assertThrows(cn.jia.agent.exception.AgentTaskCollaborationException.class,()->agentService.getTaskRecommendationInput("task-001")).getReason());
+        assertEquals(cn.jia.agent.service.AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED,assertThrows(cn.jia.agent.service.AgentTaskRequirementReadException.class,()->agentService.getTaskRecommendationInput("task-001")).reason());
+        verifyNoInteractions(taskServiceProvider);
         assertEquals(List.of("analysis"), input.getRequiredAbilities());
         verifyNoInteractions(externalServicePolicies, agentTaskMemberDao);
     }

@@ -250,6 +250,64 @@ public class AgentIdentityServiceImpl implements AgentIdentityService {
     }
 
     @Override
+    @Transactional(readOnly=true)
+    public java.util.Map<String,Long> activeBindingsForCandidates(String tenant,String client,String owner,Set<String> ids) {
+        requireScope(tenant,client,owner);
+        for (var id:ids) { requireAgentId(id); rejectSystem(id); }
+        if (ids.isEmpty()) return java.util.Map.of();
+        var rows=registryDao.findActiveCanonicals(tenant,client,owner,ids);
+        var verified=new java.util.HashMap<String,Long>();
+        for (var r:rows) {
+            var id=r.getCanonicalAgentId();
+            if (!ids.contains(id) || verified.containsKey(id) || r.getBindingId()==null || r.getBindingId()<=0)
+                throw forbidden("Candidate identity or binding is not exact");
+            validateRegistry(r,tenant,client,owner,id,true); requireActiveLifecycle(r);
+            verified.put(id,r.getBindingId());
+        }
+        if (!verified.keySet().equals(ids)) throw forbidden("Candidate identity is no longer active");
+        var bindings=bindingDao.selectBatchIds(verified.values()).stream().collect(java.util.stream.Collectors.toMap(
+                AgentPersonaBindingEntity::getId,java.util.function.Function.identity()));
+        var aliasRows=new java.util.HashMap<Long,AgentIdentityRegistryEntity>();
+        for (var r:rows) {
+            var b=bindings.get(r.getBindingId());
+            requireBindingScope(b,tenant,client,owner,r.getBindingId());
+            if (b.getStatus()!=AgentConstants.BINDING_STATUS_ACTIVE) throw forbidden("Candidate binding is inactive");
+            if (!r.getCanonicalAgentId().equals(b.getAgentId())) aliasRows.put(r.getId(),r);
+        }
+        if (!aliasRows.isEmpty()) {
+            var aliases=aliasDao.findActiveBindingAliases(tenant,client,owner,aliasRows.keySet());
+            var matched=new java.util.HashSet<Long>();
+            for (var a:aliases) {
+                var r=aliasRows.get(a.getRegistryId());
+                if (r==null) throw forbidden("Candidate alias escaped scope");
+                var b=bindings.get(r.getBindingId());
+                if (!Objects.equals(b.getAgentId(),a.getAliasValue())) continue;
+                validateBindingAlias(r,b,a,true);
+                if (!matched.add(r.getId())) throw forbidden("Ambiguous candidate binding alias");
+            }
+            if (!matched.equals(aliasRows.keySet())) throw forbidden("Candidate binding alias is no longer active");
+        }
+        return java.util.Map.copyOf(verified);
+    }
+
+    @Override
+    @Transactional(readOnly=true)
+    public java.util.Map<String,Long> observedActiveBindings(String tenant,String client,String owner,java.util.Map<String,Long> expected) {
+        try {
+            var verified=new java.util.HashMap<>(activeBindingsForCandidates(tenant,client,owner,expected.keySet()));
+            verified.entrySet().removeIf(e->!Objects.equals(expected.get(e.getKey()),e.getValue()));return java.util.Map.copyOf(verified);
+        }
+        catch(AgentServiceImpl.AgentBizException mixed) {
+            // Registration is advisory per Agent. Preserve individual failure isolation on stale/invalid rows.
+            var current=new java.util.HashMap<String,Long>();
+            for(var e:expected.entrySet())try{
+                var row=requireActiveIdentityForBinding(tenant,client,owner,e.getValue(),e.getKey());current.put(e.getKey(),row.getBindingId());
+            }catch(AgentServiceImpl.AgentBizException notActive){ /* no positive observation */ }
+            return java.util.Map.copyOf(current);
+        }
+    }
+
+    @Override
     public String requireCanonicalAgentIdInScope(
             String tenantId, String clientId, String ownerJiacn, String canonicalAgentId) {
         requireScope(tenantId, clientId, ownerJiacn);

@@ -1,0 +1,33 @@
+{
+  "protocolVersion": 1,
+  "code": "E0",
+  "msg": "ok",
+  "requestId": "recommend-test",
+  "data": {
+    "taskId": "task",
+    "taskVersion": "7",
+    "observedAt": 1000,
+    "state": "NO_MATCH",
+    "recommendations": [
+      {
+        "agent": {
+          "agentId": "a",
+          "name": "Agent",
+          "status": "online",
+          "abilities": [],
+          "canOperate": true,
+          "boundToMe": true,
+          "providerDisplayName": null
+        },
+        "recommendationLevel": "UNKNOWN",
+        "reason": "尚无能力介绍",
+        "evidence": [],
+        "gaps": []
+      }
+    ],
+    "candidateSetComplete": true,
+    "retrievalMode": "HYBRID",
+    "rankingVersion": "candidate-rrf-k60-v1",
+    "degradedReasons": []
+  }
+}

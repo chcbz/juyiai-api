@@ -1,0 +1,24 @@
+{
+  "aliases": {
+    "agent_capability_evidence": {},
+    "agent_capability_evidence_v1_write": {"is_write_index": true}
+  },
+  "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "partition": {"type": "keyword"},
+      "agent_id": {"type": "keyword"},
+      "evidence_key": {"type": "keyword"},
+      "fact_digest": {"type": "keyword"},
+      "text": {"type": "text"},
+      "text_sha256": {"type": "keyword"},
+      "provider_version": {"type": "keyword"},
+      "model": {"type": "keyword"},
+      "dimensions": {"type": "integer"},
+      "template_version": {"type": "keyword"},
+      "encoded": {"type": "boolean"},
+      "vector": {"type": "dense_vector", "dims": 1024, "index": false}
+    }
+  }
+}

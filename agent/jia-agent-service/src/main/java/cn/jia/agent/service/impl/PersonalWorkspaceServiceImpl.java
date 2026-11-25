@@ -58,6 +58,45 @@ public class PersonalWorkspaceServiceImpl implements PersonalWorkspaceService {
         PersonalWorkspaceViews.VersionView latest=versions.stream().filter(v->v.version()==file.getLatestVersion()).findFirst().orElseThrow(()->new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_CORRUPT));
         return new PersonalWorkspaceViews.FileDetailView(view(file),latest,versions,List.of(),List.of());
     }
+    private static final int METADATA_BATCH = 100;
+    @Override public java.util.Map<String,SelectedVersions> selectedVersionsBatch(Scope scope, java.util.Map<String,List<Integer>> picks) {
+        validateScope(scope);
+        var ids = List.copyOf(picks.keySet());
+        var keys = new ArrayList<PersonalWorkspaceDao.VersionPick>();
+        var result = new java.util.LinkedHashMap<String,SelectedVersions>();
+        var headers = new java.util.HashMap<String,PersonalWorkspaceFileEntity>();
+        var versions = new java.util.HashMap<PersonalWorkspaceDao.VersionPick,PersonalWorkspaceViews.VersionView>();
+        for (String fileId : ids) {
+            id(fileId,"fileId",100);
+            picks.get(fileId).stream().distinct().forEach(n -> keys.add(new PersonalWorkspaceDao.VersionPick(fileId,n)));
+        }
+        for (int i=0; i<ids.size(); i+=METADATA_BATCH) {
+            var page = ids.subList(i, Math.min(i+METADATA_BATCH,ids.size()));
+            dao.selectedHeaders(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),page).forEach(f -> headers.put(f.getFileId(),f));
+            if (!headers.keySet().containsAll(page)) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
+        }
+        for (int i=0; i<keys.size(); i+=METADATA_BATCH) {
+            var page = keys.subList(i, Math.min(i+METADATA_BATCH,keys.size()));
+            dao.selectedMetadata(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),page).forEach(v ->
+                    versions.put(new PersonalWorkspaceDao.VersionPick(v.getFileId(),v.getVersion()),version(v)));
+            if (!versions.keySet().containsAll(page)) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.VERSION_CONFLICT);
+        }
+        for (String id : ids) result.put(id,new SelectedVersions(view(headers.get(id)),picks.get(id).stream().distinct()
+                .map(n -> versions.get(new PersonalWorkspaceDao.VersionPick(id,n))).toList()));
+        return java.util.Map.copyOf(result);
+    }
+    @Override public SelectedVersions selectedVersions(Scope scope, String fileId, List<Integer> numbers) {
+        var header = file(scope, fileId);
+        var unique = numbers.stream().distinct().toList();
+        var rows = new ArrayList<PersonalWorkspaceViews.VersionView>();
+        for (int start = 0; start < unique.size(); start += 100) {
+            var page = unique.subList(start, Math.min(start + 100, unique.size()));
+            var selected = dao.selectedVersionMetadata(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), fileId, page);
+            if (selected.size() != page.size()) throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.VERSION_CONFLICT);
+            selected.stream().map(this::version).forEach(rows::add);
+        }
+        return new SelectedVersions(view(header), List.copyOf(rows));
+    }
     @Override public PersonalWorkspaceViews.VersionView readableVersion(Scope scope,String fileId,int number) {
         var file=file(scope,fileId);
         if(!"ACTIVE".equals(file.getState()))throw new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);

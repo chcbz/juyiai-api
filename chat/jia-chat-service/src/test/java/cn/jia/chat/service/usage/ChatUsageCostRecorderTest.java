@@ -17,7 +17,7 @@ class ChatUsageCostRecorderTest {
     private final ChatDispatchAuthorityMapper dispatches = mock(ChatDispatchAuthorityMapper.class);
     private final ChatDeliberationDao turns = mock(ChatDeliberationDao.class);
     private final UsageCostService costs = mock(UsageCostService.class);
-    private final ChatUsageCostRecorder recorder = new ChatUsageCostRecorder(dispatches, turns, costs);
+    private final ChatUsageCostRecorder recorder = new ChatUsageCostRecorder(new ChatUsageDispatchAuthority(dispatches, turns, mock(cn.jia.chat.deliberation.ChatTaskDispatchOriginStore.class)), costs);
     private final AuthenticatedRuntimeOperation.Scope scope =
             new AuthenticatedRuntimeOperation.Scope("0", "client", "executor", "agent");
     private ChatDispatchOutboxEntity dispatch;
@@ -98,6 +98,38 @@ class ChatUsageCostRecorderTest {
             dispatch.setPayloadJson(invalid);
             assertThrows(ChatDeliberationException.class, () -> recorder.record(scope, "dispatch", terminal()), invalid);
         }
+        verifyNoInteractions(costs);
+    }
+    @Test void taskSourceRequiresPositiveSingletonMembershipBeforeCheckingDeviceOrigin() {
+        var origins = mock(ChatTaskDispatchOriginStore.class);
+        var authority = new ChatUsageDispatchAuthority(dispatches, turns, origins);
+        var fence = new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence("install", "host", "boot", 1);
+        var device = new AuthenticatedRuntimeOperation.Device(scope, fence);
+        dispatch.setEventId("event");
+        turn.setDispatchId("dispatch").setContextDigest("context");
+        var json = new ObjectMapper();
+        for (Object ids : List.of("missing", "agent", List.of(), List.of("other"), List.of("agent", "other"), List.of("x", "y"))) {
+            var data = json.readTree(payload("\"task\"", "bounty")).deepCopy();
+            if (!"missing".equals(ids)) ((tools.jackson.databind.node.ObjectNode)data).putObject("factsManifest").set("participantAgentIds", json.valueToTree(ids));
+            dispatch.setPayloadJson(data.toString());
+            assertEquals(ChatUsageDispatchAuthority.TaskSource.UNMATCHED, authority.taskSource(device, "turn", "dispatch", "context"));
+        }
+        verifyNoInteractions(origins);
+        when(origins.matches("event", "context", "install", "host", "boot", 1)).thenReturn(true);
+        var valid = (tools.jackson.databind.node.ObjectNode)json.readTree(payload("\"task\"", "bounty"));
+        valid.putObject("factsManifest").putArray("participantAgentIds").add("agent");
+        dispatch.setPayloadJson(valid.toString());
+        var query = (java.util.function.Supplier<ChatUsageDispatchAuthority.TaskSource>) () -> authority.taskSource(device, "turn", "dispatch", "context");
+        assertEquals(ChatUsageDispatchAuthority.TaskSource.OBSERVED, query.get());
+        turn.setState("PUBLISHED").setFinalMessageId(10L);
+        assertEquals(ChatUsageDispatchAuthority.TaskSource.FINAL_BOUND, query.get());
+        turn.setDispatchId("replacement");
+        assertEquals(ChatUsageDispatchAuthority.TaskSource.UNMATCHED, query.get());
+        turn.setDispatchId("dispatch").setContextDigest("replacement-context");
+        assertEquals(ChatUsageDispatchAuthority.TaskSource.UNMATCHED, query.get());
+        turn.setContextDigest("context");
+        valid.put("conversationScopeType", "private");dispatch.setPayloadJson(valid.toString());
+        assertEquals(ChatUsageDispatchAuthority.TaskSource.UNMATCHED, authority.taskSource(device, "turn", "dispatch", "context"));
         verifyNoInteractions(costs);
     }
     @Test void absentOrAmbiguousDispatchCannotCreateAnAttempt() {

@@ -5,6 +5,8 @@ dependencies {
     // Strict metadata/request codecs intentionally use Jackson2, independently of networknt3/Jackson3.
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.20.1'
     api project(':agent:jia-agent-api')
+    compileOnly(libs.spring.boot.starter.elasticsearch)
+    testImplementation(libs.spring.boot.starter.elasticsearch)
     implementation project(':chat:jia-chat-api')
     implementation project(':economy:jia-economy-api')
     implementation project(':economy:jia-economy-mapper')
@@ -50,6 +52,8 @@ dependencies {
     testImplementation project(':oauth:jia-oauth-api')
     testImplementation project(':oauth:jia-oauth-resource')
     testImplementation project(':chat:jia-chat-service')
+    testImplementation project(':chat:jia-chat-mapper') // Real scoped bounty conversation in the quoted-assignment MySQL fixture.
+    testImplementation 'org.springframework:spring-websocket' // Signed-selection transport peer, never a production Agent dependency
     testImplementation 'org.springframework.security:spring-security-oauth2-resource-server'
     testImplementation 'org.springframework.security:spring-security-oauth2-jose'
     testImplementation platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}")
@@ -434,6 +438,7 @@ tasks.register('bf08FormalFlow', Test) {
 // and compile only the production-hosting contract here.
 def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegression') {
     java {
+        include 'cn/jia/agent/skill/InstalledPurposeHttpFixture.java'
         include 'cn/jia/agent/api/EconomyOperationWireTest.java'
         srcDir 'src/test/java'
         srcDir rootProject.file('agent/jia-agent-mapper/src/test/java')
@@ -468,6 +473,9 @@ def managedHostingRegressionSourceSet = sourceSets.create('managedHostingRegress
         include 'cn/jia/agent/service/impl/AgentCommandTransportRealTransactionTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskFormalDeliveryDecisionServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/chat/handler/SelectedProbeTestPeer.java'
+        include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
+        include 'cn/jia/agent/service/recommendation/RecommendationHttpTestWiring.java'
         include 'cn/jia/agent/hosting/HostingRentRenewalMySqlTest.java'
         include 'cn/jia/agent/hosting/HostingRentReprovisionTransactionTest.java'
         include 'cn/jia/agent/service/AgentPersonaProvisioningServiceTest.java'
@@ -989,6 +997,7 @@ def skillManagementContractSourceSet = sourceSets.create('skillManagementContrac
     java.include 'cn/jia/agent/service/AgentStatusMonitorTest.java'
     java.include 'cn/jia/agent/config/AgentStatusSchedulingConfigurationTest.java'
     java.setSrcDirs(['src/skillManagementContract/java', 'src/test/java'])
+    java.include 'cn/jia/agent/service/usage/CaptureProjectionMySqlTest.java'
     java.include 'cn/jia/agent/skill/SkillManagement*.java'
     java.include 'cn/jia/agent/skill/SkillInstallRecoveryServiceTest.java'
     java.include 'cn/jia/agent/skill/SkillExecutionSchemaMySqlTest.java'
@@ -1026,7 +1035,7 @@ dependencies {
 tasks.register('skillManagementContract', Test) {
     group = 'verification'
     description = 'Strict SM-C1 wire, actual HTTP adapter and private MySQL transactions; never production DB.'
-    filter { includeTestsMatching 'cn.jia.agent.skill.SkillPackagePublicationServiceTest'; includeTestsMatching 'cn.jia.agent.api.SkillPackagePublicationControllerTest'; includeTestsMatching 'cn.jia.agent.skill.SkillManagement*'; includeTestsMatching 'cn.jia.agent.skill.SkillInstallRecoveryServiceTest'; includeTestsMatching 'cn.jia.agent.service.AgentStatusMonitorTest'; includeTestsMatching 'cn.jia.agent.config.AgentStatusSchedulingConfigurationTest' }
+    filter { includeTestsMatching 'cn.jia.agent.service.usage.CaptureProjectionMySqlTest'; includeTestsMatching 'cn.jia.agent.skill.SkillPackagePublicationServiceTest'; includeTestsMatching 'cn.jia.agent.api.SkillPackagePublicationControllerTest'; includeTestsMatching 'cn.jia.agent.skill.SkillManagement*'; includeTestsMatching 'cn.jia.agent.skill.SkillInstallRecoveryServiceTest'; includeTestsMatching 'cn.jia.agent.service.AgentStatusMonitorTest'; includeTestsMatching 'cn.jia.agent.config.AgentStatusSchedulingConfigurationTest' }
     dependsOn tasks.named(skillManagementContractSourceSet.classesTaskName)
     testClassesDirs = skillManagementContractSourceSet.output.classesDirs
     classpath = skillManagementContractSourceSet.runtimeClasspath
@@ -1085,17 +1094,33 @@ gradle.projectsEvaluated {
 def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
         srcDir 'src/test/java'
+        srcDir 'src/taskQuoteRegression/java'
+        include 'cn/jia/agent/skill/InstalledPurposeHttpFixture.java'
+        include 'cn/jia/agent/service/recommendation/CapabilityIndexElasticsearchTest.java'
         srcDir rootProject.file('economy/jia-economy-service/src/test/java')
-        include 'cn/jia/agent/service/recommendation/AssigneeRecommendationQuotesTest.java'
+        include 'cn/jia/agent/service/impl/AgentServiceImplTest.java'
+        include 'cn/jia/agent/service/recommendation/CandidateRankFusionTest.java'
+        include 'cn/jia/agent/service/recommendation/CapabilitySearchTest.java'
+        include 'cn/jia/agent/service/recommendation/TaskQueryVectorsTest.java'
+        include 'cn/jia/agent/skill/SkillManagementRecommendationTest.java'
+        include 'cn/jia/agent/skill/SkillManagementRetainedAuthorizationTest.java'
         include 'cn/jia/agent/service/recommendation/AssigneeRecommendationServiceTest.java'
+        include 'cn/jia/agent/service/recommendation/RecommendationMaterialsTest.java'
         include 'cn/jia/agent/api/AssigneeRecommendationControllerTest.java'
         include 'cn/jia/agent/service/usage/NativeProviderUsageCostRecorderTest.java'
+        include 'cn/jia/agent/skill/SkillExecutionServiceTest.java'
+        include 'cn/jia/agent/service/usage/NativeExecutionUsageCostRecorderTest.java'
+        include 'cn/jia/agent/security/NativeExecutionUsageCostControllerTest.java'
+        include 'cn/jia/agent/service/usage/NativeCaptureEvidenceTest.java'
         include 'cn/jia/agent/service/usage/PlatformKnowledgeUsageRecorderTest.java'
         include 'cn/jia/agent/service/usage/PlatformKnowledgeMaintenanceFixture.java'
         include 'cn/jia/agent/security/PlatformKnowledgeUsageHttpMySqlTest.java'
         include 'cn/jia/agent/security/PlatformKnowledgeUsageControllerTest.java'
         include 'cn/jia/agent/security/AgentRuntimePersistentSessionFenceTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBillingMySqlTransactionTest.java'
+        include 'cn/jia/chat/handler/SelectedProbeTestPeer.java'
+        include 'cn/jia/agent/service/recommendation/QuoteHttpTestWiring.java'
+        include 'cn/jia/agent/service/recommendation/RecommendationHttpTestWiring.java'
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
         include 'cn/jia/economy/config/TaskPricingTestFixture.java'
     }
@@ -1108,6 +1133,7 @@ configurations.named(taskQuoteRegressionSourceSet.runtimeOnlyConfigurationName) 
 // Align Spring/Servlet dependencies locally using the application's Boot version.
 // Resolving starter's configuration from this project's parallel task is unsafe.
 dependencies {
+    add(taskQuoteRegressionSourceSet.implementationConfigurationName, 'com.zaxxer:HikariCP')
     add(taskQuoteRegressionSourceSet.implementationConfigurationName,
         platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}"))
 }
@@ -1119,6 +1145,31 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    if (providers.gradleProperty('pooledHistoryComparison').getOrElse('false') != 'true') {
+        filter { excludeTestsMatching '*.denseHistoryPooled*' }
+    }
+    systemProperty 'cyf.pooledHistoryComparison', providers.gradleProperty('pooledHistoryComparison').getOrElse('false')
+    systemProperty 'cyf.denseQuoteConcurrency', providers.gradleProperty('denseQuoteConcurrency').getOrElse('false')
+    systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')
+    if (providers.gradleProperty('ownedPickupCodex').isPresent()) {
+        systemProperty 'cyf.ownedPickupCodex', providers.gradleProperty('ownedPickupCodex').get()
+        systemProperty 'ownedMeteredRuntime', providers.gradleProperty('ownedMeteredRuntime').get()
+    }
+    if (providers.gradleProperty('exportQuoteWireFixture').getOrElse('false') == 'true') {
+        systemProperty 'cyf.quoteWireFixture', layout.buildDirectory.dir('test-results/taskQuoteRegression/owned-quote-wire').get().asFile.absolutePath
+    }
+    if (providers.gradleProperty('exportSelectedProbeFixture').getOrElse('false') == 'true') {
+        systemProperty 'cyf.selectedProbeFixture', layout.buildDirectory.file('test-results/taskQuoteRegression/selected-answer-probe.json').get().asFile.absolutePath
+    }
+    // The owned ES fixture is never resolved from application/production properties.
+    if (providers.gradleProperty('ownedCapabilityEsPort').isPresent()) {
+        systemProperty 'cyf.capabilityEsPort', providers.gradleProperty('ownedCapabilityEsPort').get()
+        systemProperty 'cyf.capabilityEsLoad', providers.gradleProperty('ownedCapabilityEsLoad').getOrElse('false')
+        systemProperty 'cyf.capabilityPitWindow', providers.gradleProperty('ownedCapabilityPitWindow').getOrElse('false')
+        systemProperty 'cyf.capabilityEsCluster', providers.gradleProperty('ownedCapabilityEsCluster').get()
+    } else {
+        filter { excludeTestsMatching 'cn.jia.agent.service.recommendation.CapabilityIndexElasticsearchTest' }
+    }
     useJUnitPlatform()
     maxParallelForks = 1
     maxHeapSize = '256m'

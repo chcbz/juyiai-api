@@ -52,6 +52,9 @@ public interface EconomyUsageCostMapper {
     @Select("SELECT * FROM economy_usage_attempt WHERE " + ATTEMPT)
     EconomyUsageAttemptEntity findAttempt(EconomyUsageAttemptEntity key);
 
+    @Select("SELECT * FROM economy_usage_revision WHERE " + ATTEMPT + " AND revision=#{revision}")
+    EconomyUsageRevisionEntity findRevision(EconomyUsageRevisionEntity key);
+
     /** Append-only revisions: no update/delete mapper is provided. */
     @Insert("""
             INSERT INTO economy_usage_revision(tenant_id,client_id,attempt_id,revision,receipt_key,receipt_id,request_sha256,

@@ -93,3 +93,37 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 - 迁移前必须按NF设计收尾已接收的5执行、投影及用量；MySQL DDL可能部分提交，逐项读取实际catalog并保留恢复依据，不能把Java事务当DDL回滚保证。
 
 以上是未编译的源码候选和操作边界，尚未执行DDL、正式测试或生产部署；现有新库/升级测试的显式DDL准备仍待完整同步。
+
+### 逐响应计量（开发候选，未启用）
+
+在部署含新执行实体的 API **之前**，通过原维护窗口应用 `agent/jia-agent-service/src/main/resources/db/agent-personal-workspace-metered-capture-v2.sql`。本迁移只新增两列；随后通过同一显式维护窗口执行同目录 `agent-native-capture-profile-v1.sql`，仅增加可空准入摘要。`jia.agent.conversation-execution.local-artifact-metering-profile-sha256` 默认为空；不得复制未核实 PLAN 的值作为准入配置。该配置只在新增无选定技能的正式事项执行时冻结，轮换不追改旧执行；不影响授权或价格。不要把存量执行补写成已采集。Economy 的 `db/economy-usage-capture.sql` 沿已有 usage-cost 显式维护入口。`jia.agent.conversation-execution.metered-capture-enabled` 默认关闭；建表/加列不等于启用。Runtime 真实命令接线、原执行鉴权、账本重放与 ACK 未联验前不要开启。
+
+### 预算基准：独立事前备案（开发候选）
+
+`economy-task-benchmark-case-v1.sql` 仅在显式维护窗口建空表。备案须来自真实独立的成本授权，保留原始批准记录、固定任务/承办者、事前特征、执行配置及整事项验收标准。业务账号只读备案，不授予写入/修改权限；维护方仅新登记或退役，不覆写已批准清单。只有在后续专用基准创建链可在首次派发前持有任务根、并实际落实这些权限后才能启用。摘要不是成本授权；本候选不安装表、不写批准记录、不启动执行。
+
+基准成员核对另需同目录 `economy-task-benchmark-closure-v1.sql`，在 usage-capture 和 case 表之后显式安装。只保存已绑定清单/终态的分页进度；核对沿已验真的成员收件箱进行，不重发执行，关闭成员集合并不证明验收标准或计量完整。
+
+基准评价另需维护迁移 `economy-task-benchmark-review-v1.sql`（closure 表之后）。专用评审身份按备案原文的完成标准核对实际交付，保留评审者和交付证据，在不可覆写的评审正文绑定清单/终态/成员摘要后登记；业务连接只读，不把成员关闭当评审，不为训练自动写 ACCEPTED。撤回旧评审仅设置 withdrawn，原正文保留。摘要和证据引用不替代真实评审授权。
+
+受控基准在线用途：显式安装 `economy-task-benchmark-use-v1.sql`，不灌数据。用途审批身份仅 INSERT grant/stop，绑定当前精确校准代次、私有作用域和观察摘要；不授 UPDATE/DELETE，撤销永久覆盖该代许可。重新批准必须换校准代次。物化身份仅按 `economy-task-benchmark-materialize.sql` 执行参数化写入，三个参数依次为原始训练清单、原始观察 UTF-8 文本与代次；必须影响恰好一行。重复主键不覆盖，不用 REPLACE。应用连接对三表只读。物化不改变资格、计价或样本状态；消费者仍须锁定当前校准头、用途、备案、评审和样本实测修订，不能把物化表直接作可报价集合。
+
+在线读取需先安装 `economy-task-benchmark-use-fence-v1.sql`；触发器让撤回 INSERT 在写 stop 前锁定同一条用途授权，固定报价先共享锁授权行再做当前读，不依赖缺行间隙锁。业务开关 `jia.economy.measured-benchmark-use` 默认 false；显式开启前验证触发器、只增权限及已授权作用域。不开启不查询新增表。开关不是费用或在线用途许可。
+
+启用基准在线选样前另执行 `economy-task-benchmark-retirement-v1.sql`。备案退役、评审撤回均为一次性终态；旧行不能通过改回标志复活。维护角色对原行只授相应标志列的 UPDATE，不授正文/主键 UPDATE、DELETE、REPLACE 或 DDL。报价值锁内已复核且先提交的不追改。
+
+正式 TASK 已明确本地原生初始动作的准备记录由 Agent 维护：显式安装 `agent-task-native-preparation-v1.sql`，应用仅需 SELECT/INSERT，不回填、无默认技能或用途许可。只有可信任务创建/编排方已决定初始动作时才冻结；开放议事、历史命令和浏览器不是生产者。此记录不是 Runtime 已测配置、定价路由、费用授权或执行命令。 后台比较另需显式执行同目录 `agent-task-native-observation-v1.sql`，仅授予该表新增 `probe_ticket,measurement_sha,measurement_json` 三列 UPDATE；不允许改写原意图列。同会话配置代次另需 `agent-runtime-prepared-profile-v1.sql`，仅增加可空探测列；不改执行、登记及认证语义。安装 `agent-task-native-observation-expiry-v1.sql` 并仅为新增 `probe_valid_until` 授予 UPDATE；无截止时间的旧票不可用。截止时间在预留时由数据库 UTC 时钟按既有 `jia.agent.status.heartbeat-timeout-seconds` 固定（默认60秒），心跳/回执不续期。仅控制未提交报价，不设任务执行期限。显式选择入口还需安装 `agent-task-native-selection-receipt-v1.sql`，仅授 SELECT/INSERT；不保存明文幂等键、不回填。启用带首动作摘要的报价前先显式安装 `agent-task-native-initial-admission-v1.sql`，仅授予新增 initial_execution_id 列 UPDATE；首个执行在准入事务成功时登记，不从既有执行回填。每次比较在准确事项锁下先换票并清空旧测量，迟到回执不能覆盖新票；未启用生产、无回填。
+
+单承办 CHAT 原派发来源：新 relay 安装前显式执行 `chat/jia-chat-mapper/src/main/resources/db/chat-task-dispatch-origin-v1.sql`（依赖 `chat_dispatch_outbox`）。空表即可，不根据现有设备回填。仅记录一次派发的候选来源与冲突标记，不是已发送、逐调用计量或报价授权。
+
+**整事项报价读取候选**：基础 Economy 七表之后，须显式安装 `economy/jia-economy-mapper/src/main/resources/db/economy-task-quote-preparation-v1.sql` 的专用表与 SQL SECURITY INVOKER 视图，然后安装读取新视图的 API。未授权不改生产；先读后写，`jia.economy.task-quotes.shared-preparation-writes` 默认 false，仅控制新批次引用写入；开启须先核实完整表/视图及两条不可变触发器、读路径与回退版本，无回填。关闭写入后保留原视图、依据和触发器；新批次改写内嵌依据，旧批次重放、确认和校准继续解析原引用。这是配置回退，不是数据库降级；迁移只在显式维护窗口执行，部分DDL成功时核对目录后只补缺失对象，不盲重跑触发器。写入候选启用后，禁止删除共享依据或直接回退到不认识引用的读取端。
+
+### 切换前只读议事来源清点
+
+`discussion-source-inventory.sql` 是参数化 SELECT，绑定 tenant、client、事项属主、task；只向已有权限的运维读取端返回标识和原派发映射，不输出对话正文。不得按设备或已收到的 ACK 先过滤成员。无行、空成员、行数与 execution_count 不符、重复 captureId、任何 UNVERIFIED（包括尚未分类的原生执行）、原身份不明时停止，不生成“已齐”结论。受理暂停后固定各事项 set_revision、execution_count、execution_set_sha256 和每个原设备元组及成员 ID；设备核完后重读全部绑定并逐项比对，两次之间还须独立证明没有新增写入。仅在固定的全议事范围按原主体汇总清单；MAPPED_SENT_ORIGIN 是来源映射而非当前授权、设备送达或发布许可，不作为计费输入。
+
+多事项使用同一只读一致性快照执行上述 SQL，把所有目标的原始行合并导出为 JSON 数组（BIGINT 可用十进制字符串）。另从固定受理范围准备 `scopes.json`，每项有 `tenant_id/client_id/owner_jiacn/task_id`，不能从成功查询或设备报告反推。在私有目录以 `umask 077` 执行 `node discussion_source_roster.mjs <固定Runtime源码根> scopes.json before.json > plan.json`；仅使用受信任的固定候选（复用其 subjectKey 实现）。按原设备元组向该主体提供一个完整的 `devices[i]`（含 `origin` 与 `manifest`，不裁剪），不得跨安装借用报告。核完后独立再取一轮 `after.json`，同命令末尾加 `after.json <首次生成清单时独立留存的snapshotSha256>`，同时核对前后两份原件与原固定摘要，只输出名册是否未变；不得等到复验时才从可变文件生成该摘要。零退出不表示设备已确认或集群已排空；任一失败不发布部分清单。未知成员、漏事项、同一原安装的会话冲突、成员或原派发变化均停止。本工具不联网、不持有数据库或设备凭证，也不安装组件。清单、前后原件及回执保存在授权运维私有目录，不写应用日志。
+
+报价原件完整性补丁 `economy-task-quote-features-v2.sql`：在已安装 V1 后显式替换原 INVOKER 报价视图，仅补验证唯一被替换的引用确实位于顶层 `preparation`，否则解析为 NULL；不能借嵌套同名字段伪造成功。已否决的历史特征专用读视图不安装，线上分页仍使用原报价视图。此补丁不改七表、触发器、原件、权限或开关，不需回填；需固定版本、核已有报价还原及实际调用身份后另行授权应用。
+
+历史特征派生读取（默认关闭）：在已安装整事项样本表和报价 V1/V2 的数据库上，另行显式应用 `economy-history-feature-projection-v1.sql`。`jia.economy.history-feature-projection` 不授权基准/样本，不触发编码或回填。未启用不查派生表；启用后缺行、失配或无法解码整页回读原件，原件缺失仍不能报价。仅样本拥有派生行并随其删除，反向删除派生行不删除样本/报价。不得把实验回填脚本用于生产。尚未具备发布条件，未开启任何环境。

@@ -65,6 +65,7 @@ class AgentExternalServicePolicyMySqlTest {
     private AgentExternalServicePolicyService policies;
     private TaskAssigneeAuthorityService authority;
     private AgentIdentityService identities;
+    private AgentRuntimeDaoImpl runtimeRows;
     private long providerBinding;
     private PersonalWorkspaceExecutionMapper executions;
 
@@ -167,6 +168,7 @@ class AgentExternalServicePolicyMySqlTest {
         var tasks = wire(new AgentTaskMetaDaoImpl(), sql.getMapper(AgentTaskMetaMapper.class));
         grants = new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class));
         var runtimes = wire(new AgentRuntimeDaoImpl(), sql.getMapper(AgentRuntimeMapper.class));
+        runtimeRows = runtimes;
         policies = proxy(new AgentExternalServicePolicyServiceImpl(policyDao, identities, tasks, grants, runtimes), AgentExternalServicePolicyService.class);
         authority = new TaskAssigneeAuthorityServiceImpl(policyDao, identities, grants);
         seed(A, TASK_OWNER, null, "offline"); providerBinding = seed(B, PROVIDER, null, "busy");
@@ -425,6 +427,50 @@ class AgentExternalServicePolicyMySqlTest {
         assertFailure(NOT_FOUND, () -> policies.read(PROVIDER, "legacy-provider-c"));
     }
 
+    @Test void batchOwnedProofRequiresAllCanonicalIdentitiesAndAuditedAliases() {
+        long c=seed(C,PROVIDER,"legacy-c","online"); var ids=java.util.Set.of(B,C);
+        assertEquals(java.util.Map.of(B,providerBinding,C,c),identities.activeBindingsForCandidates("0","client-a","provider",ids));
+        jdbc.update("UPDATE agent_runtime SET abilities='[\"writing\"]' WHERE agent_id=?",B);
+        var rows=runtimeRows.findOwnedCapabilityRows("0","client-a","provider",java.util.Set.of(A,B));
+        var scan=runtimeRows.capabilityRepairPage("0","client-a",0);
+        assertFalse(scan.isEmpty());var pk=scan.stream().map(r->r.getId()).filter(id->B.equals(runtimeRows.capabilityOwner("0","client-a",id).getAgentId())).findFirst().orElseThrow();
+        assertNull(runtimeRows.capabilityOwner("0","CLIENT-A",pk));assertNull(runtimeRows.capabilityOwner("other","client-a",pk));
+        var hint=runtimeRows.capabilityOwner("0","client-a",pk);assertEquals("provider",hint.getOwnerJiacn());assertNull(hint.getAbilities());assertNull(hint.getTokenHash());
+        assertTrue(runtimeRows.capabilityRepairPage("0","client-a",pk).stream().allMatch(r->r.getId()>pk));
+        assertEquals(1,rows.size()); assertEquals(B,rows.getFirst().getAgentId()); assertEquals("[\"writing\"]",rows.getFirst().getAbilities());
+        assertThrows(RuntimeException.class,()->identities.activeBindingsForCandidates("0","client-a","provider",java.util.Set.of(A,B)));
+        jdbc.update("UPDATE agent_identity_alias SET audit_reason=' bad ' WHERE alias_value='legacy-c'");
+        assertThrows(RuntimeException.class,()->identities.activeBindingsForCandidates("0","client-a","provider",ids));
+    }
+    @Test void pickerLookupCannotExposeCaseFoldedRuntimeAcrossFixtureCollations() {
+        policies.write(PROVIDER,B,"on",true,0);
+        // Independent, disposable MySQL schema; no application schema migration.
+        for(String collation:List.of("utf8mb4_0900_ai_ci","utf8mb4_0900_bin","utf8mb4_general_ci","utf8mb4_bin")){
+            jdbc.execute("ALTER TABLE agent_runtime MODIFY agent_id VARCHAR(100) CHARACTER SET utf8mb4 COLLATE "+collation+" NOT NULL");
+            jdbc.update("UPDATE agent_runtime SET name='current' WHERE BINARY agent_id=BINARY ?",B);
+            assertEquals("current",policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target().displayName(),collation);
+            new TransactionTemplate(transactions).executeWithoutResult(tx->{
+                assertEquals(1,jdbc.update("UPDATE agent_runtime SET agent_id=?,name='hidden' WHERE BINARY agent_id=BINARY ?",B.toUpperCase(java.util.Locale.ROOT),B));
+                var row=policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target();assertEquals(B,row.displayName(),collation);assertEquals("unavailable",row.availability());tx.setRollbackOnly();
+            });
+        }
+    }
+    @Test void recommendationProjectionDoesNotDiscloseAnotherScopeRuntimeOrDropAuthorizedIdentity() {
+        policies.write(PROVIDER, B, "open", true, 0);
+        var picks=policies.quoteTargets(TASK_OWNER,"task-a",List.of(B,"absent"),false);assertEquals(List.of(B),picks.stream().map(cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget::agent).toList());
+        assertEquals(1,picks.getFirst().externalPolicyRevision());assertEquals(providerBinding,picks.getFirst().binding());
+        assertEquals(picks,new TransactionTemplate(transactions).execute(st->policies.quoteTargets(TASK_OWNER,"task-a",List.of(B),true)));
+        jdbc.update("UPDATE agent_runtime SET name='display-ok' WHERE agent_id=?", B);
+        assertEquals("display-ok",policies.recommendationCandidates(TASK_OWNER,"task-a").getLast().target().displayName());
+        for (String mutation : List.of("tenant_id='1'", "client_id='CLIENT-A'", "owner_jiacn='PROVIDER'", "binding_id=binding_id+1")) {
+            new TransactionTemplate(transactions).executeWithoutResult(tx -> {
+                jdbc.update("UPDATE agent_runtime SET name='private-runtime'," + mutation + " WHERE agent_id=?", B);
+                var item=policies.recommendationCandidates(TASK_OWNER,"task-a").getLast();
+                assertEquals(B,item.target().displayName()); assertEquals("unavailable",item.target().availability());
+                assertTrue(item.abilities().isEmpty()); tx.setRollbackOnly();
+            });
+        }
+    }
     @Test void oldBindingPolicyCannotOpenReplacementAndRuntimeMismatchIsUnavailableNotLoginLeak() {
         policies.write(PROVIDER, B, "open", true, 0);
         jdbc.update("UPDATE agent_runtime SET binding_id=binding_id+1000,name='internal-login-secret' WHERE agent_id=?", B);
@@ -610,7 +656,7 @@ class AgentExternalServicePolicyMySqlTest {
                 """);
         jdbc.execute("""
                 CREATE TABLE agent_runtime (
-                    execution_model VARCHAR(200) DEFAULT NULL,
+                    execution_model VARCHAR(200) DEFAULT NULL, persona_code VARCHAR(100), abilities TEXT,
                   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, agent_id VARCHAR(100) NOT NULL,
                   name VARCHAR(100), owner_jiacn VARCHAR(50), binding_id BIGINT, status VARCHAR(20),
                   tenant_id VARCHAR(50), client_id VARCHAR(50), UNIQUE KEY uk_fixture_runtime (agent_id)

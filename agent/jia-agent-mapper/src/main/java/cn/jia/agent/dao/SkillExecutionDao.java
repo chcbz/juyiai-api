@@ -4,6 +4,7 @@ import cn.jia.agent.entity.SkillExecutionEntity;
 
 /** Data access only; runtime fencing, ACL and paired PWE transaction belong to the service. */
 public interface SkillExecutionDao {
+    String snapshotDigest(String tenant,String client,String owner,String execution);
     void insertReady(SkillExecutionEntity row);
     SkillExecutionEntity find(String tenant, String client, String owner, String execution);
     SkillExecutionEntity lock(String tenant, String client, String owner, String execution);

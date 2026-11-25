@@ -41,6 +41,8 @@ public interface AgentTaskMetaDao extends IBaseDao<AgentTaskMetaEntity> {
     AgentTaskMetaEntity findByTaskIdForUpdate(
             String tenantId, String clientId, String taskId);
 
+    AgentTaskMetaEntity findByTaskIdForShareInOwnerScope(String tenantId,String clientId,String ownerJiacn,String taskId);
+
     /** Strict task mutation lock: owner is part of the SQL predicate, never a post-filter. */
     AgentTaskMetaEntity findByTaskIdForUpdateInOwnerScope(
             String tenantId, String clientId, String ownerJiacn, String taskId);

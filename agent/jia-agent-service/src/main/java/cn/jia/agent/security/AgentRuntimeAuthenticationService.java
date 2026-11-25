@@ -169,11 +169,17 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     @Transactional(rollbackFor = Exception.class)
     public <T> T withAuthenticatedRuntime(java.security.Principal principal,
             java.util.function.Function<cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope, T> operation) {
+        return withAuthenticatedDevice(principal, device -> operation.apply(device.subject()));
+    }
+
+    @Override @Transactional(rollbackFor = Exception.class)
+    public <T> T withAuthenticatedDevice(java.security.Principal principal,
+            java.util.function.Function<cn.jia.agent.service.AuthenticatedRuntimeOperation.Device,T> operation) {
         if (!(principal instanceof org.springframework.security.core.Authentication authentication)) throw denied();
-        var proof = requireProof(authentication);
-        var scope = proof.scope();
-        return withFence(proof, false, () -> operation.apply(new cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope(
-                scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId())));
+        var proof=requireProof(authentication);var scope=proof.scope();
+        return withFence(proof,false,()->operation.apply(new cn.jia.agent.service.AuthenticatedRuntimeOperation.Device(
+                new cn.jia.agent.service.AuthenticatedRuntimeOperation.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),scope.agentId()),
+                new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),scope.runtimeInstanceId(),proof.sessionGeneration()))));
     }
 
     /** Native business commit boundary. This entry point owns a proxy transaction;
@@ -193,8 +199,7 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
             if (!tenantId.equals(scope.tenantId()) || !clientId.equals(scope.clientId())
                     || !agentId.equals(scope.agentId())) continue;
             try {
-                if (!hasChannel(candidate)) continue;
-                validateCurrent(candidate, true);
+                if (!current(binding)) continue;
             } catch (IllegalArgumentException stale) {
                 // Older boot entries are liveness hints, not authority. A valid current boot
                 // must not be starved by the previous one still awaiting socket close.
@@ -207,6 +212,76 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
         return result;
     }
 
+    /** Read-only observation for multiple discovered candidates. Persistent rows and account snapshots
+     * are shared only within this call. New work and money admission still use their original fences. */
+    public Map<String,Proof> currentRegisteredProofs(String tenant,String client,Set<String> requested) {
+        var result = new java.util.HashMap<String,Proof>();
+        observeRecommendationChannels(tenant, client, requested, (proof, channel) -> result.put(proof.scope().agentId(), proof));
+        return Map.copyOf(result);
+    }
+
+    /** Synchronous evidence for a recommendation directory read only. It is neither a grant
+     * nor a proof that a durable write may proceed. Never carries across observations or threads. */
+    public final class RecommendationChannel implements cn.jia.agent.service.RecommendationCatalogLookup.Observation {
+        private final Thread reader = Thread.currentThread();
+        private Binding observed;
+        private RecommendationChannel(Binding observed) { this.observed = observed; }
+
+        // Object identity, never the equal public wire fields. A new bind after disconnect mints new receipts.
+        public boolean issued(Receipt receipt) {
+            if(Thread.currentThread()!=reader || observed==null || receipt==null)return false;
+            return receipt==observed.enabledReceipt() || receipt==observed.disabledReceipt();
+        }
+
+        public boolean matches(String sessionId, String tenant, String client, String owner, String agent, String instance) {
+            if (Thread.currentThread() != reader) return false;
+            var b = observed;
+            if (b == null || !b.sessionId().equals(sessionId)) return false;
+            var scope = b.proof().scope();
+            return scope.tenantId().equals(tenant) && scope.clientId().equals(client) && scope.ownerJiacn().equals(owner)
+                    && scope.agentId().equals(agent) && scope.runtimeInstanceId().equals(instance)
+                    && b.connected().getAsBoolean() && bindings.get(scope) == b;
+        }
+    }
+
+    public void observeRecommendationChannels(String tenant, String client, Set<String> requested,
+            java.util.function.BiConsumer<Proof,RecommendationChannel> read) {
+        requireAdmitted(tenant,client);
+        var live=new java.util.ArrayList<Binding>();
+        for(var entry:bindings.values()){
+            var scope=entry.proof().scope();
+            if(tenant.equals(scope.tenantId())&&client.equals(scope.clientId())&&requested.contains(scope.agentId())
+                    &&entry.connected().getAsBoolean())live.add(entry);
+        }
+        var accepted=new java.util.HashMap<String,Binding>();var ambiguous=new java.util.HashSet<String>();
+        for(int from=0;from<live.size();from+=128){
+            var batch=live.subList(from,Math.min(from+128,live.size()));
+            var agents=new java.util.HashSet<String>();var installs=new java.util.HashSet<String>();
+            for(var b:batch){agents.add(b.proof().scope().agentId());installs.add(b.proof().installationId());}
+            var installRows=installations.registeredProofRows(tenant,client,installs).stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeV1InstallationEntity::getInstallationId,x->x));
+            var runtimeRows=runtimes.registeredProofRows(tenant,client,agents).stream().collect(java.util.stream.Collectors.toMap(AgentRuntimeEntity::getAgentId,x->x));
+            var owners=new java.util.HashMap<String,java.util.Map<String,Long>>();var eligible=new java.util.ArrayList<Binding>();
+            var accountsHere=new java.util.HashMap<String,AccountSecuritySnapshot>();
+            for(var b:batch){var p=b.proof();var scope=p.scope();var row=runtimeRows.get(scope.agentId());
+                try{validateSubject(p,installRows.get(p.installationId()),row,true,()->accountsHere.computeIfAbsent(scope.ownerJiacn(),this::account));}
+                catch(IllegalArgumentException stale){continue;}
+                owners.computeIfAbsent(scope.ownerJiacn(),k->new java.util.HashMap<>()).put(scope.agentId(),row.getBindingId());eligible.add(b);
+            }
+            owners.replaceAll((owner,expected)->identities.observedActiveBindings(tenant,client,owner,expected));
+            for(var b:eligible){var p=b.proof();var scope=p.scope();var id=scope.agentId();
+                if(!Objects.equals(runtimeRows.get(id).getBindingId(),owners.get(scope.ownerJiacn()).get(id))
+                        || !b.connected().getAsBoolean() || bindings.get(scope)!=b)continue;
+                if(accepted.putIfAbsent(id,b)!=null)ambiguous.add(id);
+            }
+        }
+        accepted.forEach((id,b) -> {
+            if (ambiguous.contains(id) || !b.connected().getAsBoolean() || bindings.get(b.proof().scope()) != b) return;
+            var channel = new RecommendationChannel(b);
+            try { read.accept(b.proof(), channel); }
+            finally { channel.observed = null; }
+        });
+    }
+
     /** No secret is retained in WS attributes or the registry. */
     public Receipt bind(String sessionId, Proof proof, BooleanSupplier connected) {
         if (!exact(sessionId, 128) || proof == null || connected == null || !connected.getAsBoolean()) throw denied();
@@ -214,13 +289,11 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
         validateCurrent(proof, true);
         // Repeated declarations on one authenticated socket retain their channel
         // identity. A new socket/proof still replaces and fences the previous one.
-        bindings.compute(proof.scope(), (scope, previous) -> previous != null
+        var binding=bindings.compute(proof.scope(), (scope, previous) -> previous != null
                 && previous.sessionId().equals(sessionId) && previous.proof().equals(proof)
                 ? previous : new Binding(sessionId, proof, connected));
         var scope = proof.scope();
-        return new Receipt("native-runtime-v1", scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId(),
-                scope.runtimeInstanceId(), proof.installationId(), proof.hostId(), proof.sessionGeneration(),
-                gate.allows(scope.tenantId(), scope.clientId()));
+        return gate.allows(scope.tenantId(),scope.clientId()) ? binding.enabledReceipt() : binding.disabledReceipt();
     }
 
     public void disconnect(String sessionId) {
@@ -231,16 +304,21 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
             String ownerJiacn, String agentId, String runtimeInstanceId) {
         var scope = new AgentRuntimeAuthentication.Scope(tenantId, clientId, ownerJiacn, agentId, runtimeInstanceId);
         Binding binding = bindings.get(scope);
-        if (binding == null || !binding.sessionId().equals(sessionId) || !binding.connected().getAsBoolean()) return false;
-        validateCurrent(binding.proof(), true);
-        return bindings.get(scope) == binding && binding.connected().getAsBoolean();
+        return binding != null && binding.sessionId().equals(sessionId) && current(binding);
     }
 
     private boolean hasChannel(Proof proof) {
-        Binding binding = bindings.get(proof.scope());
-        return binding != null && binding.proof().equals(proof) && binding.connected().getAsBoolean()
-                && isCurrentBinding(binding.sessionId(), proof.scope().tenantId(), proof.scope().clientId(),
-                        proof.scope().ownerJiacn(), proof.scope().agentId(), proof.scope().runtimeInstanceId());
+        var binding = bindings.get(proof.scope());
+        return binding != null && binding.proof().equals(proof) && current(binding);
+    }
+
+    /** Validate this exact registry entry, not a fresh entry found by session ID. No proof cache:
+     * each observation checks persistence, then confirms the same channel survived the read. */
+    private boolean current(Binding binding) {
+        var scope = binding.proof().scope();
+        if (bindings.get(scope) != binding || !binding.connected().getAsBoolean()) return false;
+        validateCurrent(binding.proof(), true);
+        return binding.connected().getAsBoolean() && bindings.get(scope) == binding;
     }
 
     public void validateCurrent(Proof proof, boolean registered) {
@@ -269,6 +347,19 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     }
 
     private void validateRow(Proof proof, AgentRuntimeV1InstallationEntity installation, AgentRuntimeEntity row, boolean registered) {
+        var scope=proof.scope();validateSubject(proof,installation,row,registered,()->account(scope.ownerJiacn()));
+        try {
+            var identity = registered ? identities.requireActiveIdentityForBinding(scope.tenantId(), scope.clientId(),
+                    scope.ownerJiacn(), row.getBindingId(), scope.agentId())
+                    : identities.requireRegistrationIdentityInScope(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId());
+            if (identity == null || !scope.agentId().equals(identity.getCanonicalAgentId())
+                    || !Objects.equals(identity.getBindingId(), row.getBindingId())
+                    || identities.requireActiveBinding(identity, null) == null) throw denied();
+        } catch (DataAccessException unavailable) { throw unavailable; }
+        catch (RuntimeException invalidIdentity) { throw denied(); }
+    }
+
+    private void validateSubject(Proof proof,AgentRuntimeV1InstallationEntity installation,AgentRuntimeEntity row,boolean registered,Supplier<AccountSecuritySnapshot> account) {
         var scope = proof.scope();
         requireAdmitted(scope.tenantId(), scope.clientId());
         String verifier = "urs1:" + proof.tokenDigest() + ":" + proof.userId() + ":" + proof.authEpoch();
@@ -283,16 +374,7 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
                 || !Objects.equals(proof.sessionGeneration(), row.getRuntimeSessionGeneration())
                 || row.getBindingId() == null || !verifier.equals(row.getTokenHash())
                 || (registered && !Set.of("online", "busy").contains(row.getStatus()))
-                || !account(scope.ownerJiacn()).matches(proof.userId(), scope.ownerJiacn(), proof.authEpoch())) throw denied();
-        try {
-            var identity = registered ? identities.requireActiveIdentityForBinding(scope.tenantId(), scope.clientId(),
-                    scope.ownerJiacn(), row.getBindingId(), scope.agentId())
-                    : identities.requireRegistrationIdentityInScope(scope.tenantId(), scope.clientId(), scope.ownerJiacn(), scope.agentId());
-            if (identity == null || !scope.agentId().equals(identity.getCanonicalAgentId())
-                    || !Objects.equals(identity.getBindingId(), row.getBindingId())
-                    || identities.requireActiveBinding(identity, null) == null) throw denied();
-        } catch (DataAccessException unavailable) { throw unavailable; }
-        catch (RuntimeException invalidIdentity) { throw denied(); }
+                || !account.get().matches(proof.userId(), scope.ownerJiacn(), proof.authEpoch())) throw denied();
     }
 
     private void requireAdmitted(String tenantId, String clientId) {
@@ -316,7 +398,16 @@ public class AgentRuntimeAuthenticationService implements cn.jia.agent.service.A
     static boolean validAgentReference(String agent) { return agent != null && AGENT_REFERENCE.matcher(agent).matches(); }
     static boolean validToken(String token) { return token != null && token.matches("rts1_[0-9a-f]{64}"); }
     static IllegalArgumentException denied() { return new IllegalArgumentException("AGENT_RUNTIME_UNAUTHENTICATED"); }
-    private record Binding(String sessionId, Proof proof, BooleanSupplier connected) { }
+    private record Binding(String sessionId, Proof proof, BooleanSupplier connected, Receipt enabledReceipt, Receipt disabledReceipt) {
+        Binding(String sessionId,Proof proof,BooleanSupplier connected) {
+            this(sessionId,proof,connected,receipt(proof,true),receipt(proof,false));
+        }
+        private static Receipt receipt(Proof proof,boolean enabled) {
+            var scope=proof.scope();
+            return new Receipt("native-runtime-v1",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),scope.agentId(),
+                    scope.runtimeInstanceId(),proof.installationId(),proof.hostId(),proof.sessionGeneration(),enabled);
+        }
+    }
     public record Proof(AgentRuntimeAuthentication.Scope scope, String installationId, String hostId,
                         long sessionGeneration, String tokenDigest, long userId, long authEpoch) {
         @Override public String toString() { return "AgentRuntimeProof[sessionGeneration=" + sessionGeneration + ", verifier=REDACTED]"; }

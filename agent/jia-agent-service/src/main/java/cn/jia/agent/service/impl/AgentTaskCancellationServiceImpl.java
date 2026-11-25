@@ -30,6 +30,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
     private final AgentTaskWorkItemDao workItems;
     private final AgentTaskExecutionGrantDao grants;
     private final AgentTaskCancellationDao cancellation;
+    private final cn.jia.agent.dao.TaskExecutionClosureDao closure;
     private final TaskBillingService billing;
     private final cn.jia.agent.service.TaskExecutionCancellationService executions;
     private final cn.jia.chat.service.TaskDiscussionCancellation discussions;
@@ -43,7 +44,8 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
             cn.jia.agent.service.TaskExecutionCancellationService executions,
             cn.jia.chat.service.TaskDiscussionCancellation discussions,
             cn.jia.agent.service.AgentWorkItemLeaseService leases,
-            cn.jia.agent.service.AgentTaskProviderCostConsentService consents) {
+            cn.jia.agent.service.AgentTaskProviderCostConsentService consents, cn.jia.agent.dao.TaskExecutionClosureDao closure) {
+        this.closure=Objects.requireNonNull(closure);
         this.transactions=Objects.requireNonNull(transactions);
         this.states=Objects.requireNonNull(states);
         this.workItems=Objects.requireNonNull(workItems);
@@ -204,6 +206,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
                     transition("cancelled",expectedTaskVersion));
             if (result==null || !taskId.equals(result.getTaskId()) || !"cancelled".equals(result.getStatus())
                     || !Objects.equals(result.getVersion(),expectedTaskVersion+1)) throw error(INVALID_PERSISTED_STATE);
+            closure.closeTaskMembers(tenant,client,owner,taskId,cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.CANCELLED,taskId,result.getVersion(),now);
             cancellation.releaseTaskOccupation(tenant,client,owner,taskId,now);
             return new Receipt(result.getTaskId(),result.getStatus(),result.getVersion());
         });

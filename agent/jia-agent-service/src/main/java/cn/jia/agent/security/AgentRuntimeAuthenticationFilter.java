@@ -30,7 +30,7 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || request.getRequestURI().matches(request.getContextPath()+"/internal/agent/chat/requests/[^/]+/turns/[^/]+/materials/inputs/[^/]+/content")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/tasks/[^/]+/work-items/[^/]+/reassignments/[^/]+/commands/[^/]+/(?:result-commit|lease)")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/executions/[^/]+/runs/[^/]+/(?:usage|provider-usage)")
-                || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/chat/dispatches/[^/]+/usage")
+                || request.getRequestURI().startsWith(request.getContextPath() + "/internal/agent/chat/dispatches/")
                 || request.getRequestURI().matches(request.getContextPath() + "/internal/agent/skill-installations/[^/]+/package")
                 || request.getRequestURI().equals(request.getContextPath() + "/ws/agent/channel")
                 || request.getRequestURI().startsWith(request.getContextPath() + "/agent/runtime/v1/commands/")
@@ -60,6 +60,7 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 || "GET".equals(request.getMethod()) && path.equals("/ws/agent/channel")
                 || "POST".equals(request.getMethod()) && path.matches("/agent/runtime/v1/commands/" + id + "/acks")
                 || "POST".equals(request.getMethod()) && path.matches("/internal/agent/chat/dispatches/" + id + "/usage")
+                || evidenceRead(request,path) || discussionCapture(request,path)
                 || "GET".equals(request.getMethod()) && path.equals("/internal/agent/executions/commands")
                 || request.getQueryString() == null && "POST".equals(request.getMethod())
                 && path.matches("/internal/agent/executions/" + id + "/runs/" + id + "/(?:skill-selection|business/[a-z][a-z0-9-]{0,63}/(?:lookup|commit|receipt))")
@@ -73,11 +74,23 @@ public final class AgentRuntimeAuthenticationFilter extends OncePerRequestFilter
                 + "/turns/" + id + "/(?:inspection|materials)/inputs/" + id + "/content");
     }
 
+    private static final String SUBJECT="/internal/agent/chat/dispatches/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}/turns/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}/contexts/[a-f0-9]{64}/captures/[a-f0-9]{64}/usage";
+    private static final java.util.regex.Pattern DISCUSSION_WRITE=java.util.regex.Pattern.compile(SUBJECT),
+            DISCUSSION_READ=java.util.regex.Pattern.compile(SUBJECT+"/(?:receipts/[A-Za-z0-9][A-Za-z0-9._:-]{0,99}|records/[a-f0-9]{64})");
+    private static boolean discussionCapture(HttpServletRequest request,String path){
+        return request.getQueryString()==null && ("POST".equals(request.getMethod()) && DISCUSSION_WRITE.matcher(path).matches()
+                || "GET".equals(request.getMethod()) && DISCUSSION_READ.matcher(path).matches());
+    }
+    private static boolean evidenceRead(HttpServletRequest request,String path){
+        String id="[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
+        return "GET".equals(request.getMethod()) && request.getQueryString()==null && path.matches("/internal/agent/executions/"+id+"/runs/"+id+"/usage/(?:receipts/"+id+"|records/[a-f0-9]{64})");
+    }
     /** Evidence may arrive after the owned engine/channel stopped. This never admits
      * command discovery, package downloads, execution leases or result commits. */
     private static boolean isEvidenceDelivery(HttpServletRequest request) {
-        if (!"POST".equals(request.getMethod()) || request.getQueryString() != null) return false;
         String path = request.getRequestURI().substring(request.getContextPath().length());
+        if(evidenceRead(request,path)||discussionCapture(request,path))return true;
+        if (!"POST".equals(request.getMethod()) || request.getQueryString() != null) return false;
         String id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,99}";
         return path.equals("/internal/agent/skill-management/results")
                 || path.matches("/internal/agent/chat/dispatches/" + id + "/usage")

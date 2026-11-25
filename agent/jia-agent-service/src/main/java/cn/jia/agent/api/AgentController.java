@@ -64,7 +64,7 @@ import java.util.Set;
 @Slf4j
 @RestController
 @RequestMapping("/agent")
-public class AgentController {
+public class AgentController implements TaskAssigneeAdmissionErrors {
     private final AgentService agentService;
     private final AbilityEvaluationService abilityEvaluationService;
     private cn.jia.agent.skill.SkillRosterProjection skillRoster;

@@ -60,6 +60,35 @@ class AiProviderConfigurationTest {
     }
 
     @Test
+    void productionEmbeddingUsesDedicatedGatewaySettings() throws Exception {
+        var config = new java.util.Properties();
+        try (var reader = Files.newBufferedReader(apiRoot().resolve("starter/src/main/resources/application-prod.properties"))) {
+            config.load(reader);
+        }
+        String prefix = "spring.ai.openai.embedding.";
+        assertEquals("openai", config.getProperty("spring.ai.model.embedding"));
+        assertEquals("https://codex.chcbz.net/v1", config.getProperty(prefix + "base-url"));
+        assertEquals("${SPRING_AI_OPENAI_EMBEDDING_API_KEY}", config.getProperty(prefix + "api-key"));
+        assertEquals("text-embedding-3-small", config.getProperty(prefix + "model"));
+        assertEquals("1024", config.getProperty(prefix + "dimensions"));
+        assertEquals("FLOAT", config.getProperty(prefix + "encoding-format"));
+    }
+
+    @Test
+    void embeddingSdkRetryBudgetIsZeroAcrossDeployedProfiles() throws Exception {
+        var directory = apiRoot().resolve("starter/src/main/resources");
+        for (String profile : List.of("dev", "grey", "prod")) {
+            var config = new java.util.Properties();
+            for (String file : List.of("application.properties", "application-" + profile + ".properties")) {
+                try (var reader = Files.newBufferedReader(directory.resolve(file))) {
+                    config.load(reader);
+                }
+            }
+            assertEquals("0", config.getProperty("spring.ai.openai.embedding.max-retries"), profile);
+        }
+    }
+
+    @Test
     void defaultOffFilterBlocksOnlyProviderChatAutoConfigurations() {
         AiChatAutoConfigurationImportFilter filter = new AiChatAutoConfigurationImportFilter();
         filter.setEnvironment(new MockEnvironment());

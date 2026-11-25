@@ -81,6 +81,24 @@ class AgentWebSocketRuntimeAuthenticationTest {
         verify(f.auth, atLeastOnce()).disconnect("socket-a");
     }
 
+    @Test void capabilityIndexFailureAfterRegistrationStaysScopedAndContentFree() throws Exception {
+        Fixture f = new Fixture(false);
+        when(f.auth.bind(eq("socket-a"), any(AgentRuntimeAuthenticationService.Proof.class), any()))
+                .thenReturn(new AgentRuntimeAuthenticationService.Receipt("native-runtime-v1", TENANT, CLIENT, OWNER, AGENT,
+                        "runtime-a", UnifiedRuntimeTestSupport.INSTALLATION, "host-1", 1, true));
+        when(f.service.listCapabilities()).thenThrow(new IllegalStateException("private-roster-detail"));
+        f.register();
+        var replies = f.frames.stream().map(s -> JsonUtil.getMapper().readTree(s)).toList();
+        assertTrue(replies.stream().anyMatch(r -> "agent.registered".equals(r.path("messageType").asText())));
+        var errors = replies.stream().filter(r -> "protocol.error".equals(r.path("messageType").asText())).toList();
+        assertEquals(1, errors.size()); var error = errors.getFirst();
+        assertEquals("reg-a", error.path("correlationId").asText());
+        assertEquals("AGENT_CAPABILITY_INDEX_UNAVAILABLE", error.path("code").asText());
+        assertEquals("Agent capability index is unavailable", error.path("msg").asText());
+        assertFalse(String.join("",f.frames).contains("private-roster-detail"));
+        verify(f.auth,never()).disconnect("socket-a");
+    }
+
     @Test void failedBindingCannotEmitCredentialsOrSuccessfulReconnect() throws Exception {
         Fixture f = new Fixture(false);
         when(f.auth.bind(anyString(),any(AgentRuntimeAuthenticationService.Proof.class),any()))

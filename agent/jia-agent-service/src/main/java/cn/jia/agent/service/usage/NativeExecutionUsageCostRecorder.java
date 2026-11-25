@@ -40,6 +40,9 @@ public final class NativeExecutionUsageCostRecorder {
                 scope.executorOwnerJiacn(), scope.agentId(), executionId, runId);
         if (execution == null) throw new PersonalWorkspaceExecutionService.Failure(
                 PersonalWorkspaceExecutionService.Reason.NOT_FOUND);
+        // One native model source per run. An unknown/partial pair must not fall back to turn totals.
+        if (execution.getUsageMode()!=null || execution.getCaptureProtocol()!=null)
+            throw new IllegalArgumentException("Execution does not accept legacy native usage");
         var binding = new UsageCostService.Binding(new EconomyScope(scope.tenantId(), scope.clientId()),
                 execution.getOwnerJiacn(), execution.getTaskId(), evidence.invocation()==Invocation.SKILL_SELECTION?"NATIVE_SELECTION_EVIDENCE":"NATIVE_EXECUTION_EVIDENCE", execution.getExecutionId());
         var raw = new LinkedHashMap<String, Object>();

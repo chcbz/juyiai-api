@@ -1,0 +1,1265 @@
+{
+  "contractVersion": "METERED_CAPTURE_V2",
+  "status": "DESIGN_FIXTURE_NOT_IMPLEMENTATION_EVIDENCE",
+  "cases": [
+    {
+      "id": "complete",
+      "notes": "Synthetic contract only; all protocol/normalization versions marked FIXTURE must be allowlisted by test adapters, never production. ACKs assume durable persistence has succeeded.",
+      "messages": [
+        {
+          "name": "plan_1",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_1",
+              "X-Request-Id": "receipt_complete_1"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_1",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "PLAN",
+                "recordId": "209f1cddd3a6c679f034f49943045ada86e702b90c6afc984386d8aa8f784484",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200001,
+                "observation": {
+                  "captureProtocol": "METERED_CAPTURE_V2",
+                  "executionConfigSha256": "50876c00dce84757e268800163453b94487a2c0684124c09a6becaccbc6f4919",
+                  "engineVersion": "codex-cli-0.167.0-fixture",
+                  "coveragePolicyVersion": "MODEL_ONLY_FIXTURE_V1",
+                  "rootSourceId": "source_model"
+                },
+                "evidenceSha256": "781862225dd0de4982a367cde64c42d50fd1a8d009410d368e69c54029cd2136",
+                "receiptId": "receipt_complete_1",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_1",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_1",
+                "recordId": "209f1cddd3a6c679f034f49943045ada86e702b90c6afc984386d8aa8f784484",
+                "sourceRevision": "1",
+                "evidenceSha256": "781862225dd0de4982a367cde64c42d50fd1a8d009410d368e69c54029cd2136",
+                "acceptedAt": 1795435300001,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "source_2",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_2",
+              "X-Request-Id": "receipt_complete_2"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_2",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "SOURCE",
+                "recordId": "cf51b738a7d10ca164ba2e93163e232cdeb1f1c60f052c3f7fff63ee216e4ffb",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200002,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sourceKind": "METERED_HTTP_RESPONSES_V1",
+                  "adapterVersion": "FIXTURE_V1",
+                  "channelNamespace": "fixture_gateway",
+                  "parentSourceRecordId": null,
+                  "previousEpochSourceRecordId": null
+                },
+                "evidenceSha256": "77137c8eef59d8baef484f437aaa4348f8aa192be72fe362b7c787a53f2ecadd",
+                "receiptId": "receipt_complete_2",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_2",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_2",
+                "recordId": "cf51b738a7d10ca164ba2e93163e232cdeb1f1c60f052c3f7fff63ee216e4ffb",
+                "sourceRevision": "1",
+                "evidenceSha256": "77137c8eef59d8baef484f437aaa4348f8aa192be72fe362b7c787a53f2ecadd",
+                "acceptedAt": 1795435300002,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "request_3",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_3",
+              "X-Request-Id": "receipt_complete_3"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_3",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "REQUEST",
+                "recordId": "1b6887275660ad749163c203dda1743c1ac5e12f7ccaabd8d806af6ac3181541",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200003,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "1",
+                  "attemptId": "attempt_1",
+                  "resolution": "PENDING",
+                  "sourceAttemptId": null,
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "815b4f28b98458246c953a484933323ff57b0b1e4b35f18cf97db2b679d3176c",
+                "receiptId": "receipt_complete_3",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_3",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_3",
+                "recordId": "1b6887275660ad749163c203dda1743c1ac5e12f7ccaabd8d806af6ac3181541",
+                "sourceRevision": "1",
+                "evidenceSha256": "815b4f28b98458246c953a484933323ff57b0b1e4b35f18cf97db2b679d3176c",
+                "acceptedAt": 1795435300003,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "response_4",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_4",
+              "X-Request-Id": "receipt_complete_4"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_4",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "RESPONSE",
+                "recordId": "d84afdbbc198d7647b003b7b4d6c4d4b665b5586f74bf55d5cd4116934282adc",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200004,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sourceAttemptId": "626273bccb406c33a057a34050ccd81c547064c5a8f438b864ba3f68e5b8cb51",
+                  "providerResponseId": "response_1",
+                  "reportedUsage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120
+                  },
+                  "measuredQuantities": {
+                    "normalizationBasis": "FIXTURE_NON_OVERLAPPING_V1",
+                    "tokens": {
+                      "INPUT": "100",
+                      "OUTPUT": "20"
+                    },
+                    "coverage": "COMPLETE"
+                  },
+                  "actualBillingIdentity": null,
+                  "reasonCodes": [
+                    "BILLING_IDENTITY_UNKNOWN"
+                  ]
+                },
+                "evidenceSha256": "f48a435e284434b3b8307465dc5b23e30ce97cacd0d2f1dcaa5b84f6eda71e48",
+                "receiptId": "receipt_complete_4",
+                "expectedRevision": "0"
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_4",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_4",
+                "recordId": "d84afdbbc198d7647b003b7b4d6c4d4b665b5586f74bf55d5cd4116934282adc",
+                "sourceRevision": "1",
+                "evidenceSha256": "f48a435e284434b3b8307465dc5b23e30ce97cacd0d2f1dcaa5b84f6eda71e48",
+                "acceptedAt": 1795435300004,
+                "acceptance": "DURABLE",
+                "ledger": {
+                  "attemptId": "a13c6c0911c21df7785a320ca25036ac6fd804dd64e944a456d0f29e8f3e9bb6",
+                  "revision": "1",
+                  "status": "PENDING_USAGE",
+                  "costYuan": null
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "request_5",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_5",
+              "X-Request-Id": "receipt_complete_5"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_5",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "REQUEST",
+                "recordId": "1b6887275660ad749163c203dda1743c1ac5e12f7ccaabd8d806af6ac3181541",
+                "sourceRevision": "2",
+                "previousEvidenceSha256": "815b4f28b98458246c953a484933323ff57b0b1e4b35f18cf97db2b679d3176c",
+                "observedAt": 1795435200005,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "1",
+                  "attemptId": "attempt_1",
+                  "resolution": "RESPONSE",
+                  "sourceAttemptId": "626273bccb406c33a057a34050ccd81c547064c5a8f438b864ba3f68e5b8cb51",
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "f45c484d3a1753f34455368e71ee37f5b0d2c9e6e780cdc71d98a5a8bc392851",
+                "receiptId": "receipt_complete_5",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_5",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_5",
+                "recordId": "1b6887275660ad749163c203dda1743c1ac5e12f7ccaabd8d806af6ac3181541",
+                "sourceRevision": "2",
+                "evidenceSha256": "f45c484d3a1753f34455368e71ee37f5b0d2c9e6e780cdc71d98a5a8bc392851",
+                "acceptedAt": 1795435300005,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "request_6",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_6",
+              "X-Request-Id": "receipt_complete_6"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_6",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "REQUEST",
+                "recordId": "3ebf436a3387f9da05ebfd5fc8639b9bc58a579660c05488d5331019ddc23225",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200006,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "2",
+                  "attemptId": "attempt_2",
+                  "resolution": "PENDING",
+                  "sourceAttemptId": null,
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "6a1cbf5c99f2a30f5d8368157fd25d02e69a2ec060980354c368b6ff5fa71721",
+                "receiptId": "receipt_complete_6",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_6",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_6",
+                "recordId": "3ebf436a3387f9da05ebfd5fc8639b9bc58a579660c05488d5331019ddc23225",
+                "sourceRevision": "1",
+                "evidenceSha256": "6a1cbf5c99f2a30f5d8368157fd25d02e69a2ec060980354c368b6ff5fa71721",
+                "acceptedAt": 1795435300006,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "response_7",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_7",
+              "X-Request-Id": "receipt_complete_7"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_7",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "RESPONSE",
+                "recordId": "4465e8d2783810de1126f4418add3d325657c892f0b17bb40fbb4d3eca946c49",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200007,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sourceAttemptId": "99604e8e0070d53817d3e7c4fbdd1abaf54e5c94a8643bfc806e4fca7274b394",
+                  "providerResponseId": "response_2",
+                  "reportedUsage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120
+                  },
+                  "measuredQuantities": {
+                    "normalizationBasis": "FIXTURE_NON_OVERLAPPING_V1",
+                    "tokens": {
+                      "INPUT": "100",
+                      "OUTPUT": "20"
+                    },
+                    "coverage": "COMPLETE"
+                  },
+                  "actualBillingIdentity": null,
+                  "reasonCodes": [
+                    "BILLING_IDENTITY_UNKNOWN"
+                  ]
+                },
+                "evidenceSha256": "d161ff0f0907bc892628a5394af8c87f62471938b6b07b6e1e0cf5e592b6044e",
+                "receiptId": "receipt_complete_7",
+                "expectedRevision": "0"
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_7",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_7",
+                "recordId": "4465e8d2783810de1126f4418add3d325657c892f0b17bb40fbb4d3eca946c49",
+                "sourceRevision": "1",
+                "evidenceSha256": "d161ff0f0907bc892628a5394af8c87f62471938b6b07b6e1e0cf5e592b6044e",
+                "acceptedAt": 1795435300007,
+                "acceptance": "DURABLE",
+                "ledger": {
+                  "attemptId": "21d818096392d43f11866890ea6f0ceda1c2e033c2c09e4b75f939300b7dee99",
+                  "revision": "1",
+                  "status": "PENDING_USAGE",
+                  "costYuan": null
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "request_8",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_8",
+              "X-Request-Id": "receipt_complete_8"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_8",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "REQUEST",
+                "recordId": "3ebf436a3387f9da05ebfd5fc8639b9bc58a579660c05488d5331019ddc23225",
+                "sourceRevision": "2",
+                "previousEvidenceSha256": "6a1cbf5c99f2a30f5d8368157fd25d02e69a2ec060980354c368b6ff5fa71721",
+                "observedAt": 1795435200008,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "2",
+                  "attemptId": "attempt_2",
+                  "resolution": "RESPONSE",
+                  "sourceAttemptId": "99604e8e0070d53817d3e7c4fbdd1abaf54e5c94a8643bfc806e4fca7274b394",
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "00ae3aacc88b9dead854e838338af8c2c2799fb90c0515d04933d98b1a980fb9",
+                "receiptId": "receipt_complete_8",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_8",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_8",
+                "recordId": "3ebf436a3387f9da05ebfd5fc8639b9bc58a579660c05488d5331019ddc23225",
+                "sourceRevision": "2",
+                "evidenceSha256": "00ae3aacc88b9dead854e838338af8c2c2799fb90c0515d04933d98b1a980fb9",
+                "acceptedAt": 1795435300008,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "source_final_9",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_9",
+              "X-Request-Id": "receipt_complete_9"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_9",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "SOURCE_FINAL",
+                "recordId": "df4afe2db62dab62e31cfdbbb27cab6988acf63ac65c74688d8f7a83e9ea3d85",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200009,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "reservedSequenceHighWatermark": "2",
+                  "requestCount": "2",
+                  "responseCount": "2",
+                  "recordsSha256": "829d25f3b643181aae387e97fd57e22a548858176c67af463664847a587ac22d",
+                  "closeState": "DRAINED",
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "8a955907c74ff81719c6abd0983723582239ad93956f6d1f197ac1884aeef2ec",
+                "receiptId": "receipt_complete_9",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_9",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_9",
+                "recordId": "df4afe2db62dab62e31cfdbbb27cab6988acf63ac65c74688d8f7a83e9ea3d85",
+                "sourceRevision": "1",
+                "evidenceSha256": "8a955907c74ff81719c6abd0983723582239ad93956f6d1f197ac1884aeef2ec",
+                "acceptedAt": 1795435300009,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "capture_final_10",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_complete/runs/run_fixture_complete/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_complete_10",
+              "X-Request-Id": "receipt_complete_10"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_10",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "kind": "CAPTURE_FINAL",
+                "recordId": "cf2271ce27ba80e83af5024239d004bc3c5daa0f97d3cff1ca65324216376f8c",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200010,
+                "observation": {
+                  "planEvidenceSha256": "781862225dd0de4982a367cde64c42d50fd1a8d009410d368e69c54029cd2136",
+                  "sourceCount": "1",
+                  "sourcesSha256": "be9202ed42c13f300ac6f32ff101ae95ff8e17132e71b22eddce850f67a5f930",
+                  "closeState": "DRAINED",
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "96f3be1afe962aeec2b72701327e5de347604674c04c07767aa53d527f292ef1",
+                "receiptId": "receipt_complete_10",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_complete_10",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_complete",
+                "runId": "run_fixture_complete",
+                "captureId": "b404443c7cba8c8c3f8b6dd78aaa4c6e9e8f94d9bf81f0f44f542edc9bccd219",
+                "receiptId": "receipt_complete_10",
+                "recordId": "cf2271ce27ba80e83af5024239d004bc3c5daa0f97d3cff1ca65324216376f8c",
+                "sourceRevision": "1",
+                "evidenceSha256": "96f3be1afe962aeec2b72701327e5de347604674c04c07767aa53d527f292ef1",
+                "acceptedAt": 1795435300010,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        }
+      ],
+      "expectedAfterAllMessages": {
+        "coverageState": "COMPLETE",
+        "fullTokenTotal": "240",
+        "observedPartialTokenTotal": "240",
+        "actualBillingPriced": false,
+        "businessTaskEligible": false
+      },
+      "businessTaskEligibleReason": "No trusted task lifecycle/member-set acceptance supplied by these Runtime messages."
+    },
+    {
+      "id": "missing_response",
+      "notes": "Synthetic contract only; all protocol/normalization versions marked FIXTURE must be allowlisted by test adapters, never production. ACKs assume durable persistence has succeeded.",
+      "messages": [
+        {
+          "name": "plan_1",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_1",
+              "X-Request-Id": "receipt_missing_response_1"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_1",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "PLAN",
+                "recordId": "27e8acd050bd2ef943926151097c17bb587ed801b97bf11ff1adb82d55d539b6",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200001,
+                "observation": {
+                  "captureProtocol": "METERED_CAPTURE_V2",
+                  "executionConfigSha256": "50876c00dce84757e268800163453b94487a2c0684124c09a6becaccbc6f4919",
+                  "engineVersion": "codex-cli-0.167.0-fixture",
+                  "coveragePolicyVersion": "MODEL_ONLY_FIXTURE_V1",
+                  "rootSourceId": "source_model"
+                },
+                "evidenceSha256": "c8a3fc2a204e78ff1c9049e56c7cf8a28221bb97fefed041f5be2448b922e685",
+                "receiptId": "receipt_missing_response_1",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_1",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_1",
+                "recordId": "27e8acd050bd2ef943926151097c17bb587ed801b97bf11ff1adb82d55d539b6",
+                "sourceRevision": "1",
+                "evidenceSha256": "c8a3fc2a204e78ff1c9049e56c7cf8a28221bb97fefed041f5be2448b922e685",
+                "acceptedAt": 1795435300001,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "source_2",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_2",
+              "X-Request-Id": "receipt_missing_response_2"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_2",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "SOURCE",
+                "recordId": "bf97a68778de6738e5b307f3fd3cf7fe47927fd61fae4d2e43ae2fbcbaf645e6",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200002,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sourceKind": "METERED_HTTP_RESPONSES_V1",
+                  "adapterVersion": "FIXTURE_V1",
+                  "channelNamespace": "fixture_gateway",
+                  "parentSourceRecordId": null,
+                  "previousEpochSourceRecordId": null
+                },
+                "evidenceSha256": "4005e0319602b68d8526a77514a9a2bdc17ad1e39524320ed3ce15b5a6983595",
+                "receiptId": "receipt_missing_response_2",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_2",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_2",
+                "recordId": "bf97a68778de6738e5b307f3fd3cf7fe47927fd61fae4d2e43ae2fbcbaf645e6",
+                "sourceRevision": "1",
+                "evidenceSha256": "4005e0319602b68d8526a77514a9a2bdc17ad1e39524320ed3ce15b5a6983595",
+                "acceptedAt": 1795435300002,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "request_3",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_3",
+              "X-Request-Id": "receipt_missing_response_3"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_3",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "REQUEST",
+                "recordId": "d10b3aff7fbf94d8037c0d5c8d02b1090f687a8ec36b6eca1d82e16d1e60b941",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200003,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "1",
+                  "attemptId": "attempt_1",
+                  "resolution": "PENDING",
+                  "sourceAttemptId": null,
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "b1c4935b5477c5458dfff47d009a9d5113f143858e73e88c901ede2b973d9dd7",
+                "receiptId": "receipt_missing_response_3",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_3",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_3",
+                "recordId": "d10b3aff7fbf94d8037c0d5c8d02b1090f687a8ec36b6eca1d82e16d1e60b941",
+                "sourceRevision": "1",
+                "evidenceSha256": "b1c4935b5477c5458dfff47d009a9d5113f143858e73e88c901ede2b973d9dd7",
+                "acceptedAt": 1795435300003,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "response_4",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_4",
+              "X-Request-Id": "receipt_missing_response_4"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_4",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "RESPONSE",
+                "recordId": "693beecdda447cc483a68784fe7f1b16e9ace2f18cb83df49cafca60f43c4ca9",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200004,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sourceAttemptId": "626273bccb406c33a057a34050ccd81c547064c5a8f438b864ba3f68e5b8cb51",
+                  "providerResponseId": "response_1",
+                  "reportedUsage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120
+                  },
+                  "measuredQuantities": {
+                    "normalizationBasis": "FIXTURE_NON_OVERLAPPING_V1",
+                    "tokens": {
+                      "INPUT": "100",
+                      "OUTPUT": "20"
+                    },
+                    "coverage": "COMPLETE"
+                  },
+                  "actualBillingIdentity": null,
+                  "reasonCodes": [
+                    "BILLING_IDENTITY_UNKNOWN"
+                  ]
+                },
+                "evidenceSha256": "b86e6af5a872c2913c5feee51c789271776f27acb5496cfee80baed574d30819",
+                "receiptId": "receipt_missing_response_4",
+                "expectedRevision": "0"
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_4",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_4",
+                "recordId": "693beecdda447cc483a68784fe7f1b16e9ace2f18cb83df49cafca60f43c4ca9",
+                "sourceRevision": "1",
+                "evidenceSha256": "b86e6af5a872c2913c5feee51c789271776f27acb5496cfee80baed574d30819",
+                "acceptedAt": 1795435300004,
+                "acceptance": "DURABLE",
+                "ledger": {
+                  "attemptId": "a13c6c0911c21df7785a320ca25036ac6fd804dd64e944a456d0f29e8f3e9bb6",
+                  "revision": "1",
+                  "status": "PENDING_USAGE",
+                  "costYuan": null
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "request_5",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_5",
+              "X-Request-Id": "receipt_missing_response_5"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_5",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "REQUEST",
+                "recordId": "d10b3aff7fbf94d8037c0d5c8d02b1090f687a8ec36b6eca1d82e16d1e60b941",
+                "sourceRevision": "2",
+                "previousEvidenceSha256": "b1c4935b5477c5458dfff47d009a9d5113f143858e73e88c901ede2b973d9dd7",
+                "observedAt": 1795435200005,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "1",
+                  "attemptId": "attempt_1",
+                  "resolution": "RESPONSE",
+                  "sourceAttemptId": "626273bccb406c33a057a34050ccd81c547064c5a8f438b864ba3f68e5b8cb51",
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "db3c5ffe1869bc81f9f12332b563de0beaa9fc322a91a8717202f3a8e2b41d98",
+                "receiptId": "receipt_missing_response_5",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_5",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_5",
+                "recordId": "d10b3aff7fbf94d8037c0d5c8d02b1090f687a8ec36b6eca1d82e16d1e60b941",
+                "sourceRevision": "2",
+                "evidenceSha256": "db3c5ffe1869bc81f9f12332b563de0beaa9fc322a91a8717202f3a8e2b41d98",
+                "acceptedAt": 1795435300005,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "request_6",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_6",
+              "X-Request-Id": "receipt_missing_response_6"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_6",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "REQUEST",
+                "recordId": "bf1054e8084935467880f0f3db965c861995e61e499247438bc52c14b16bb8b4",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200006,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "2",
+                  "attemptId": "attempt_2",
+                  "resolution": "PENDING",
+                  "sourceAttemptId": null,
+                  "reasonCodes": []
+                },
+                "evidenceSha256": "3fc6fef8428b1a3a40a82b5a435b9e44abd557eda252530a307ed177b0a386ea",
+                "receiptId": "receipt_missing_response_6",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_6",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_6",
+                "recordId": "bf1054e8084935467880f0f3db965c861995e61e499247438bc52c14b16bb8b4",
+                "sourceRevision": "1",
+                "evidenceSha256": "3fc6fef8428b1a3a40a82b5a435b9e44abd557eda252530a307ed177b0a386ea",
+                "acceptedAt": 1795435300006,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "request_7",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_7",
+              "X-Request-Id": "receipt_missing_response_7"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_7",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "REQUEST",
+                "recordId": "bf1054e8084935467880f0f3db965c861995e61e499247438bc52c14b16bb8b4",
+                "sourceRevision": "2",
+                "previousEvidenceSha256": "3fc6fef8428b1a3a40a82b5a435b9e44abd557eda252530a307ed177b0a386ea",
+                "observedAt": 1795435200007,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "sequence": "2",
+                  "attemptId": "attempt_2",
+                  "resolution": "UNRESOLVED",
+                  "sourceAttemptId": null,
+                  "reasonCodes": [
+                    "RESPONSE_ID_MISSING"
+                  ]
+                },
+                "evidenceSha256": "b5d7e28316d83ff08832746180f4df91a05428b8fa56949e6e77150e83101ca7",
+                "receiptId": "receipt_missing_response_7",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_7",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_7",
+                "recordId": "bf1054e8084935467880f0f3db965c861995e61e499247438bc52c14b16bb8b4",
+                "sourceRevision": "2",
+                "evidenceSha256": "b5d7e28316d83ff08832746180f4df91a05428b8fa56949e6e77150e83101ca7",
+                "acceptedAt": 1795435300007,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "source_final_8",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_8",
+              "X-Request-Id": "receipt_missing_response_8"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_8",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "SOURCE_FINAL",
+                "recordId": "ff79e1eff055a76a56b34c332bed85829d6994f90ebe844021ade4009dd73760",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200008,
+                "observation": {
+                  "sourceId": "source_model",
+                  "epoch": "0",
+                  "reservedSequenceHighWatermark": "2",
+                  "requestCount": "2",
+                  "responseCount": "1",
+                  "recordsSha256": "99e676a215ad9db73ab026fb9195658405ac6b7bf0c2c88a5ff4fbf7bae852cc",
+                  "closeState": "SEALED_INCOMPLETE",
+                  "reasonCodes": [
+                    "RESPONSE_ID_MISSING"
+                  ]
+                },
+                "evidenceSha256": "f97c77e009dac94d3f270667c91cefbeda0df570593ea038b92f74548b309a2f",
+                "receiptId": "receipt_missing_response_8",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_8",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_8",
+                "recordId": "ff79e1eff055a76a56b34c332bed85829d6994f90ebe844021ade4009dd73760",
+                "sourceRevision": "1",
+                "evidenceSha256": "f97c77e009dac94d3f270667c91cefbeda0df570593ea038b92f74548b309a2f",
+                "acceptedAt": 1795435300008,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        },
+        {
+          "name": "capture_final_9",
+          "request": {
+            "method": "POST",
+            "path": "/internal/agent/executions/exec_fixture_missing_response/runs/run_fixture_missing_response/usage",
+            "headers": {
+              "Idempotency-Key": "receipt_missing_response_9",
+              "X-Request-Id": "receipt_missing_response_9"
+            },
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_9",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "kind": "CAPTURE_FINAL",
+                "recordId": "fdbcaa51256b9c117c892f73982421a246809c43d8eb2cb86df39e0b5952884c",
+                "sourceRevision": "1",
+                "previousEvidenceSha256": null,
+                "observedAt": 1795435200009,
+                "observation": {
+                  "planEvidenceSha256": "c8a3fc2a204e78ff1c9049e56c7cf8a28221bb97fefed041f5be2448b922e685",
+                  "sourceCount": "1",
+                  "sourcesSha256": "5a750d98aec792fc4dea0a0a3997a09f4b10c8afb0cda6ac37b4ad69ac6156dc",
+                  "closeState": "SEALED_INCOMPLETE",
+                  "reasonCodes": [
+                    "RESPONSE_ID_MISSING"
+                  ]
+                },
+                "evidenceSha256": "23496df639b7536c545ecafc20f6af9440fa773a543a107122d80aa7f1440da1",
+                "receiptId": "receipt_missing_response_9",
+                "expectedRevision": null
+              }
+            }
+          },
+          "ack": {
+            "httpStatus": 200,
+            "body": {
+              "protocolVersion": 1,
+              "requestId": "receipt_missing_response_9",
+              "code": "E0",
+              "msg": "Accepted",
+              "data": {
+                "schemaVersion": 2,
+                "executionId": "exec_fixture_missing_response",
+                "runId": "run_fixture_missing_response",
+                "captureId": "494a8f5ae99ba4ef1f1e8c0a70e46d92c97bcd46d365f4c1569fe166eb5c5089",
+                "receiptId": "receipt_missing_response_9",
+                "recordId": "fdbcaa51256b9c117c892f73982421a246809c43d8eb2cb86df39e0b5952884c",
+                "sourceRevision": "1",
+                "evidenceSha256": "23496df639b7536c545ecafc20f6af9440fa773a543a107122d80aa7f1440da1",
+                "acceptedAt": 1795435300009,
+                "acceptance": "DURABLE",
+                "ledger": null
+              }
+            }
+          }
+        }
+      ],
+      "expectedAfterAllMessages": {
+        "coverageState": "INCOMPLETE",
+        "fullTokenTotal": null,
+        "observedPartialTokenTotal": "120",
+        "actualBillingPriced": false,
+        "businessTaskEligible": false
+      },
+      "businessTaskEligibleReason": "No trusted task lifecycle/member-set acceptance supplied by these Runtime messages."
+    }
+  ],
+  "replayCases": [
+    {
+      "id": "final_before_response",
+      "baseCase": "complete",
+      "order": "CAPTURE_FINAL and SOURCE_FINAL first; then all remaining messages, preserving RESPONSE dependency handling",
+      "expectedBeforeDependencies": "WAITING_EVIDENCE",
+      "expectedAfterDependencies": "COMPLETE",
+      "note": "Persisted final ACK alone never admits a sample; premature RESPONSE ACK is 409 USAGE_ACK_PENDING, same request can retry after dependencies."
+    },
+    {
+      "id": "lost_final_ack",
+      "baseCase": "complete",
+      "operation": "Replay the final request unchanged after its ACK is lost",
+      "expected": "Original ACK byte-identical; no extra evidence revision or sample count"
+    },
+    {
+      "id": "same_identity_different_content",
+      "baseCase": "complete",
+      "operation": "Reuse receiptId with modified request observation",
+      "expected": "409 USAGE_CAPTURE_CONFLICT; never reinterpret as a new model attempt"
+    },
+    {
+      "id": "ledger_commit_before_ack_crash",
+      "baseCase": "complete",
+      "operation": "Crash after UsageCostService commit and before saved RESPONSE ACK",
+      "expected": "Replay original ledger receipt, persist original successful ledger result in durable ACK; no second attempt"
+    },
+    {
+      "id": "projection_crash",
+      "baseCase": "complete",
+      "operation": "Crash after evidence/input revision commit and before sample projection CAS",
+      "expected": "Sample stays WAITING_EVIDENCE; durable recovery can rebuild; no stale READY admission"
+    }
+  ]
+}

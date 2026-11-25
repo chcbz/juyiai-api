@@ -55,6 +55,7 @@ class AgentTaskFormalDeliveryDecisionServiceImplTest {
     private AgentTaskMutationTransaction transaction;
     private AgentTaskEventWriter eventWriter;
     private AgentTaskFormalDeliveryDecisionServiceImpl service;
+    private final cn.jia.agent.dao.TaskExecutionClosureDao closure=org.mockito.Mockito.mock(cn.jia.agent.dao.TaskExecutionClosureDao.class);
     private TaskBillingService billing;
     private boolean rootLocked;
 
@@ -74,7 +75,7 @@ class AgentTaskFormalDeliveryDecisionServiceImplTest {
                     try { return mutation.apply(root()); } finally { rootLocked = false; }
                 });
         service = new AgentTaskFormalDeliveryDecisionServiceImpl(deliveryDao, taskMetaDao,
-                memberDao, workItemDao, transaction, eventWriter, billing, () -> 2_000L);
+                memberDao, workItemDao, transaction, eventWriter, billing, closure, () -> 2_000L);
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -95,6 +96,7 @@ class AgentTaskFormalDeliveryDecisionServiceImplTest {
         var result = service.decide(TENANT, CLIENT, TASK, OWNER, command);
 
         assertEquals("changes_requested", result.getState());
+        org.mockito.Mockito.verifyNoInteractions(closure);
         org.mockito.Mockito.verifyNoInteractions(billing);
         assertEquals(5L, result.getTaskVersion());
         assertEquals(9L, result.getWorkItemVersion());
@@ -138,6 +140,7 @@ class AgentTaskFormalDeliveryDecisionServiceImplTest {
         var result = service.decide(TENANT, CLIENT, TASK, OWNER, accepted());
 
         assertEquals("accepted", result.getState());
+        verify(closure).closeTaskMembers(TENANT,CLIENT,OWNER,TASK,cn.jia.agent.dao.TaskExecutionClosureDao.Outcome.ACCEPTED,DELIVERY,5,2_000L);
         var order = org.mockito.Mockito.inOrder(billing, deliveryDao);
         order.verify(billing).capture(billingTask());
         order.verify(deliveryDao).reviewByVersion(TENANT, CLIENT, DELIVERY, "submitted", 0L,

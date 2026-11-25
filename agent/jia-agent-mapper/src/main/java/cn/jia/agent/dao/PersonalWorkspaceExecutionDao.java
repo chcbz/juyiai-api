@@ -7,7 +7,7 @@ import cn.jia.agent.entity.PersonalWorkspaceExecutionOutputEntity;
 import java.util.List;
 
 /** Exact owner-scoped persistence boundary for private execution grants and output receipts. */
-public interface PersonalWorkspaceExecutionDao {
+public interface PersonalWorkspaceExecutionDao extends TaskExecutionClosureDao {
     /** Current reads under the task root; immutable terminal executions are not rewritten. */
     List<PersonalWorkspaceExecutionEntity> findUnfinishedTaskExecutions(
             String tenantId, String clientId, String ownerJiacn, String taskId);
@@ -15,6 +15,8 @@ public interface PersonalWorkspaceExecutionDao {
 
     PersonalWorkspaceExecutionEntity findForRuntime(String tenantId,String clientId,String executorOwner,
             String agentId,String executionId,String runId);
+
+    String admittedCaptureProfile(String tenant,String client,String owner,String task,String agent,String execution,String run);
 
     /** Historical native cost authority, not active execution admission. */
     PersonalWorkspaceExecutionEntity findForNativeUsageCost(String tenantId, String clientId, String executorOwner,
@@ -43,6 +45,11 @@ public interface PersonalWorkspaceExecutionDao {
             Long afterCreatedAt, String afterExecutionId, int limit);
     /** True only when the follow-up-v3 execution protocol column is present in the current catalog. */
     boolean hasExecutionProtocolVersionColumn();
+    void registerTaskMember(PersonalWorkspaceExecutionEntity execution,String captureId);
+    record MemberIdentity(String tenantId,String clientId,String ownerJiacn,String taskId,
+                          String executionId,String runId,String requestHash) { }
+    boolean hasMemberCapture(MemberIdentity member,String captureId);
+    void appendMember(MemberIdentity member,String captureId);
     void insert(PersonalWorkspaceExecutionEntity execution);
     void update(PersonalWorkspaceExecutionEntity execution);
     void insertInput(PersonalWorkspaceExecutionInputEntity input);

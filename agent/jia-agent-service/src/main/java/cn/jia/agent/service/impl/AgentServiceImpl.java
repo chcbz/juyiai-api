@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.agent.exception.AgentTaskCollaborationException;
 import cn.jia.agent.cache.AgentPersonaCatalogCache;
 import cn.jia.agent.cache.AgentPersonaCatalogCache.CatalogEntry;
 import cn.jia.agent.common.AgentConstants;
@@ -109,7 +110,7 @@ import java.util.regex.Pattern;
 
 @Service
 @Slf4j
-public class AgentServiceImpl implements AgentService {
+public class AgentServiceImpl implements AgentService, cn.jia.agent.service.recommendation.DeclaredCapabilityFacts {
     private static final String SINGLE_TENANT_ID = "0";
     private cn.jia.core.security.FixedTenantAdmissionPolicy processTenant;
 
@@ -222,6 +223,13 @@ public class AgentServiceImpl implements AgentService {
         if (skillAgentVersions != null) skillAgentVersions.observe(row);
     }
 
+    private ObjectProvider<cn.jia.agent.service.recommendation.DeclaredCapabilityFacts.Changes> capabilityChanges;
+    @Autowired public void setCapabilityChanges(ObjectProvider<cn.jia.agent.service.recommendation.DeclaredCapabilityFacts.Changes> changes){this.capabilityChanges=changes;}
+    private void capabilityChanged(AgentRuntimeEntity row){
+        if(capabilityChanges==null||row.getId()==null)return;
+        var tenant=row.getTenantId();var client=row.getClientId();long id=row.getId();
+        publishOptionalAfterCommit("capability-index-dirty",()->capabilityChanges.ifAvailable(listener->listener.changed(tenant,client,id)));
+    }
     private volatile FundedBountyService fundedBountyService;
     private volatile FundedBountyLegacyGuard fundedBountyLegacyGuard =
             FundedBountyLegacyGuard.unconfigured();
@@ -421,6 +429,7 @@ public class AgentServiceImpl implements AgentService {
             agentRuntimeDao.updateRegistration(entity);
             observeSkillLifecycle(entity);
         }
+        capabilityChanged(entity);
         publishAgentSnapshotAfterCommit("agent-register", tenantId, clientId, jiacn,
                 entity.getAgentId(), requireBindingId(entity));
         return new AgentRegisterResultDTO(entity.getAgentId(), null, entity.getStatus());
@@ -829,6 +838,7 @@ public class AgentServiceImpl implements AgentService {
         if (agentRuntimeDao.updateById(entity) != 1) {
             throw new AgentBizException(AgentErrorConstants.AGENT_ERROR, "Agent abilities update failed");
         }
+        capabilityChanged(entity);
         publishAgentSnapshotAfterCommit("agent-abilities", tenantId, clientId, jiacn,
                 entity.getAgentId(), requireBindingId(entity));
         return toRuntimeDTO(entity);
@@ -1298,14 +1308,28 @@ public class AgentServiceImpl implements AgentService {
     @Override
     public AgentTaskDTO getTaskRecommendationInput(String taskId) {
         var meta = requireTask(taskId);
+        var scope = new AgentTaskExecutionGrantService.Scope(meta.getTenantId(),meta.getClientId(),meta.getOwnerJiacn());
+        return recommendationInput(meta,requirementSnapshots.readCurrent(scope,taskId));
+    }
+
+    @Override
+    public AgentTaskDTO getTaskRecommendationInputWithinLockedTask(String taskId, AgentTaskMetaEntity root) {
+        var scope = new AgentTaskExecutionGrantService.Scope(resolveCurrentTenantId(),resolveCurrentClientId(),resolveCurrentJiacn());
+        return recommendationInput(root,requirementSnapshots.readCurrentWithinLockedTask(scope,taskId,root));
+    }
+
+    private AgentTaskDTO recommendationInput(AgentTaskMetaEntity meta, AgentTaskRequirementSnapshotService.CurrentSnapshot current) {
         var dto = new AgentTaskDTO();
         dto.setId(meta.getTaskId());
-        dto.setTitle(meta.getTaskId());
         dto.setStatus(meta.getRewardStatus());
         dto.setTaskVersion(meta.getTaskVersion() == null ? null : Long.toString(meta.getTaskVersion()));
         dto.setRequiredAbilities(parseList(meta.getRequiredAbilities()));
-        enrichTaskPlan(dto, meta);
-        enrichCurrentRequirement(dto, meta);
+        // Ranking uses the authoritative requirement, never the short display plan or an ID as text.
+        if (!Objects.equals(meta.getTaskVersion(), current.taskVersion()))
+            throw new AgentTaskCollaborationException(AgentTaskCollaborationException.Reason.VERSION_CONFLICT,
+                    "Task changed during recommendation observation");
+        dto.setTitle(current.title());
+        dto.setDescription(current.description());
         return dto;
     }
 
@@ -1406,17 +1430,44 @@ public class AgentServiceImpl implements AgentService {
         String clientId = resolveCurrentClientId();
         String ownerJiacn = resolveCurrentJiacn();
         var scope = new cn.jia.agent.service.AgentTaskExecutionGrantService.Scope(resolveCurrentTenantId(), clientId, ownerJiacn);
-        var candidates = new java.util.LinkedHashMap<String, AgentTaskAssigneeCandidateDTO>();
-        for (var authorized : externalServicePolicies.recommendationCandidates(scope, taskId)) {
-            var candidate = authorized.target();
-            List<String> abilities = List.of();
-            if (candidate.isMine()) {
-                var owned = requireOwnedAgentCapabilities(scope.tenantId(), clientId, ownerJiacn, candidate.agentId());
-                abilities = List.copyOf(Optional.ofNullable(owned.getAbilities()).orElseGet(List::of));
+        var rows=externalServicePolicies.recommendationCandidates(scope,taskId);
+        var owned=rows.stream().filter(r->r.target().isMine()).map(r->r.target().agentId()).toList();
+        var abilities=ownedAbilities(scope.tenantId(),clientId,ownerJiacn,owned);
+        return rows.stream().map(r->new AgentTaskAssigneeCandidateDTO(r.target(),
+                r.target().isMine()?abilities.get(r.target().agentId()):List.of(),r.skillProviderOwnerJiacn())).toList();
+    }
+    @Override @Transactional(readOnly=true)
+    public Optional<Snapshot> declaredCapabilities(String tenant,String client,long runtimeId){
+        processTenant.requireAdmitted(tenant,client);
+        var hint=agentRuntimeDao.capabilityOwner(tenant,client,runtimeId);
+        if(hint==null)return Optional.empty();
+        var owner=hint.getOwnerJiacn();var id=hint.getAgentId();
+        var current=ownedAbilities(tenant,client,owner,List.of(id));
+        return Optional.of(new Snapshot(tenant,client,owner,id,current.get(id)));
+    }
+    private Map<String,List<String>> ownedAbilities(String tenant,String clientId,String ownerJiacn,List<String> owned){
+        var abilities=new LinkedHashMap<String,List<String>>();
+        Map<String,AgentPersonaEntity> personas=null;
+        for (int start=0; start<owned.size(); start+=128) {
+            var ids=Set.copyOf(owned.subList(start,Math.min(start+128,owned.size())));
+            var bindings=agentIdentityService.activeBindingsForCandidates(tenant,clientId,ownerJiacn,ids);
+            for (var runtime:agentRuntimeDao.findOwnedCapabilityRows(tenant,clientId,ownerJiacn,ids)) {
+                var id=runtime.getAgentId(); var binding=bindings.get(id);
+                if (binding==null || !ids.contains(id)) throw personaCatalogForbidden("Unexpected candidate runtime");
+                requireExactRuntime(runtime,tenant,id,clientId,ownerJiacn,binding);
+                String raw=runtime.getAbilities();
+                if (!StringUtil.isBlank(runtime.getPersonaCode())) {
+                    if (personas==null) personas=loadPersonaCatalog(new AgentOwnerScope(tenant,clientId,ownerJiacn))
+                            .stream().collect(java.util.stream.Collectors.toMap(AgentPersonaEntity::getPersonaCode,java.util.function.Function.identity()));
+                    var persona=personas.get(runtime.getPersonaCode());
+                    if (persona==null) throw personaCatalogForbidden("Candidate persona is unavailable");
+                    if (StringUtil.isBlank(raw)) raw=persona.getAbilities();
+                }
+                if (abilities.put(id,List.copyOf(parseList(raw)))!=null) throw personaCatalogForbidden("Duplicate candidate runtime");
             }
-            candidates.put(candidate.agentId(), new AgentTaskAssigneeCandidateDTO(candidate, abilities, authorized.skillProviderOwnerJiacn()));
+            if (!abilities.keySet().containsAll(ids)) throw personaCatalogForbidden("Candidate runtime missing");
         }
-        return List.copyOf(candidates.values());
+        return abilities;
     }
 
     @Override
@@ -2839,16 +2890,7 @@ public class AgentServiceImpl implements AgentService {
         }
     }
 
-    private List<String> parseList(String json) {
-        if (StringUtil.isBlank(json) || "[]".equals(json.trim())) {
-            return Collections.emptyList();
-        }
-        List<String> parsed = JsonUtil.jsonToList(json, String.class);
-        if (!parsed.isEmpty()) {
-            return parsed;
-        }
-        return Arrays.stream(json.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
-    }
+    private List<String> parseList(String json) {return cn.jia.agent.common.AgentTaskStoredLists.read(json);}
 
     private List<String> parseAssignedAgentIds(String value) {
         return parseList(value);

@@ -11,6 +11,7 @@ public final class EconomyUsageCostSchemaInitializer implements InitializingBean
     public EconomyUsageCostSchemaInitializer(DataSource dataSource) { this.dataSource = dataSource; }
     @Override
     public void afterPropertiesSet() {
-        new ResourceDatabasePopulator(new ClassPathResource("db/economy-usage-cost.sql")).execute(dataSource);
+        new ResourceDatabasePopulator(new ClassPathResource("db/economy-usage-cost.sql"),
+                new ClassPathResource("db/economy-usage-capture.sql")).execute(dataSource);
     }
 }

@@ -44,6 +44,9 @@ import static cn.jia.agent.service.AgentTaskExecutionGrantException.Reason;
 
 @Named
 public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecutionGrantService {
+    @org.springframework.beans.factory.annotation.Autowired
+    private cn.jia.agent.service.TaskAssigneeAdmission admission = new cn.jia.agent.service.TaskAssigneeAdmission(false);
+
     static final String ACTION = "assign_and_start";
     static final String POLICY_REVISION = "MMD_U1_V1";
     static final String TOOL_POLICY = "NO_TOOLS_V1";
@@ -128,7 +131,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
         try {
             return transactions.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),
                     scope.ownerJiacn(),valid.taskId(),root -> assignLocked(scope,valid,canonicalAgent,
-                            requestHash,actionId,root,payerUserId,false));
+                            requestHash,actionId,root,payerUserId,AdmissionPath.DIRECT));
         } catch (AgentTaskCollaborationException failure) {
             throw translate(failure);
         }
@@ -164,7 +167,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                 request.setRequestedOperations(List.of("DELIBERATE","EXECUTE_SKILL"));
                 request.setInitialOperation("DELIBERATE"); request.setInputRefs(inputs);
                 ValidAssign valid=validateAssign(scope,taskId,key,request);
-                return assignLocked(scope,valid,canonicalAgent,validatedAssignmentHash(valid,canonicalAgent),actionId,root,payment.payerUserId(),true);
+                return assignLocked(scope,valid,canonicalAgent,validatedAssignmentHash(valid,canonicalAgent),actionId,root,payment.payerUserId(),AdmissionPath.DELIBERATION);
             });
         } catch (AgentTaskCollaborationException failure) { throw translate(failure); }
     }
@@ -223,7 +226,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
         String canonicalAgent=legacyAssignments.resolveAgentId(scope.tenantId(),scope.clientId(),
                 scope.ownerJiacn(),valid.requestedAgentId());
         return assignLocked(scope,valid,canonicalAgent,validatedAssignmentHash(valid,canonicalAgent),
-                "ASSIGN_AND_START:"+valid.idempotencyKey(),root,payerUserId,false);
+                "ASSIGN_AND_START:"+valid.idempotencyKey(),root,payerUserId,AdmissionPath.CONTROLLED_IMAGE);
     }
 
     private AgentTaskRequirementSnapshotService.Snapshot requireCurrentRequirement(Scope scope, String taskId, long requirementRevision) {
@@ -242,8 +245,10 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
         }
     }
 
+    private enum AdmissionPath { DIRECT, DELIBERATION, CONTROLLED_IMAGE }
+
     private AgentTaskExecutionGrantDTO assignLocked(Scope scope, ValidAssign valid,
-            String canonicalAgent, String requestHash, String actionId, AgentTaskMetaEntity root, String payerUserId, boolean inputsAreTaskCatalogue) {
+            String canonicalAgent, String requestHash, String actionId, AgentTaskMetaEntity root, String payerUserId, AdmissionPath path) {
         // Frozen task-root lock order: requirement latest read -> grant action ->
         // bootstrap action -> target/input rows. Requirement history is append-only.
         // The command-delivery outbox is intentionally not reused: this row coordinates Chat
@@ -276,6 +281,8 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
             throw bad("assign_and_start requires exactly one initial permitted operation");
         }
 
+        if (path != AdmissionPath.CONTROLLED_IMAGE) admission.requireOpen();
+
         AtomicReference<List<InputSnapshot>> snapshot = new AtomicReference<>();
         AtomicReference<cn.jia.agent.service.TaskAssigneeAuthorityService.Target> target = new AtomicReference<>();
         AgentLegacyTaskCompatibilityService.AssignOutcome assignment =
@@ -300,7 +307,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                                 snapshot.set(validateAndSnapshotInputs(scope,valid.taskId(),valid.inputs()));
                                 // Point-and-deliberate already read the complete catalogue under this root.
                                 // Reuse the same snapshots instead of locking/reading every file twice.
-                                var allInputs = inputsAreTaskCatalogue ? valid.inputs()
+                                var allInputs = path == AdmissionPath.DELIBERATION ? valid.inputs()
                                         : canonicalInputs(allTaskMaterials(scope, valid.taskId()));
                                 var catalogue = inputCatalogue(allInputs.equals(valid.inputs()) ? snapshot.get()
                                         : validateAndSnapshotInputs(scope, valid.taskId(), allInputs));
@@ -1070,7 +1077,10 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
 
     private List<InputSnapshot> validateAndSnapshotInputs(Scope scope,String taskId,
             List<ValidInput> inputs) {
-        List<InputSnapshot> result=new ArrayList<>();
+        if (inputs.isEmpty()) return List.of();
+        // Lock each file then relation in the existing canonical order. Only immutable version
+        // metadata is read together, after authorization, inside this same task transaction.
+        var picks=new java.util.LinkedHashSet<PersonalWorkspaceDao.VersionPick>();
         for (ValidInput input:inputs) {
             PersonalWorkspaceFileEntity file=workspace.lockFile(scope.tenantId(),scope.clientId(),
                     scope.ownerJiacn(),input.fileId());
@@ -1078,8 +1088,15 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                     scope.clientId(),scope.ownerJiacn(),taskId,input.fileId(),input.version(),input.purpose());
             if (link==null || !"ACTIVE".equals(link.getLinkState())) throw notFound();
             if (file==null || !"ACTIVE".equals(file.getState())) throw notFound();
-            PersonalWorkspaceVersionEntity version=workspace.findVersion(scope.tenantId(),
-                    scope.clientId(),scope.ownerJiacn(),input.fileId(),input.version());
+            picks.add(new PersonalWorkspaceDao.VersionPick(input.fileId(),input.version()));
+        }
+        // canonicalInputs bounds the selection to MAX_INPUTS before this method is called.
+        var metadata=new java.util.HashMap<PersonalWorkspaceDao.VersionPick,PersonalWorkspaceVersionEntity>();
+        for (var row:workspace.selectedMetadata(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),List.copyOf(picks)))
+            metadata.put(new PersonalWorkspaceDao.VersionPick(row.getFileId(),row.getVersion()),row);
+        List<InputSnapshot> result=new ArrayList<>(inputs.size());
+        for (ValidInput input:inputs) {
+            var version=metadata.get(new PersonalWorkspaceDao.VersionPick(input.fileId(),input.version()));
             if (version==null || version.getContentHash()==null
                     || !version.getContentHash().matches("[0-9a-f]{64}")
                     || version.getContentMimeType()==null || version.getContentMimeType().isBlank()

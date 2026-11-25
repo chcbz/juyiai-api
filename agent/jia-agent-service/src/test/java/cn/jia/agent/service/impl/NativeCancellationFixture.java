@@ -15,7 +15,7 @@ import static org.mockito.ArgumentMatchers.*;
  * is not a claim that the production Chat ACL adapter has been exercised by this slice. */
 final class NativeCancellationFixture {
     private NativeCancellationFixture() { }
-    static SkillExecutionService create(JdbcTemplate jdbc,PersonalWorkspaceExecutionDao executions,SkillExecutionDao skills,
+    static PersonalWorkspaceExecutionServiceImpl create(JdbcTemplate jdbc,PersonalWorkspaceExecutionDao executions,SkillExecutionDao skills,
             ApplicationEventPublisher events,String tenant,String client,String owner,String task,String agent,
             AgentTaskMutationTransaction suppliedRoots) {
         jdbc.execute("CREATE TABLE IF NOT EXISTS native_cancel_conversation_fixture (id BIGINT PRIMARY KEY)");
@@ -47,6 +47,7 @@ final class NativeCancellationFixture {
         var service=new PersonalWorkspaceExecutionServiceImpl(executions,mock(PersonalWorkspaceDao.class),
                 mock(PersonalWorkspaceTaskLinkDao.class),mock(AgentRuntimeDao.class),mock(PersonalWorkspaceStorage.class),
                 mock(PersonalWorkspaceWriteService.class),new PersonalWorkspaceExecutionProperties(List.of("text/plain")));
+        service.setInitialActions(org.mockito.Mockito.mock(cn.jia.agent.service.impl.QuotedInitialActionAdmission.class));
         service.setConversationAdmission(mock(AgentTaskExecutionGrantService.class),roots);
         service.setTaskExecutionDependencies(conversations,mock(AgentTaskWorkItemDao.class),mock(AgentWorkItemLeaseService.class));
         service.setSkillExecutionDependencies(skills,mock(InstalledSkillDescriptorLookup.class),mock(SkillCapabilityLookup.class),mock(TaskSkillPolicyService.class));

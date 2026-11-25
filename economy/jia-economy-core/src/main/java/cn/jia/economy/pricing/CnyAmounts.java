@@ -15,8 +15,13 @@ public final class CnyAmounts {
 
     /** Quote directly from the unrounded estimate: 1 yuan = 100 wen. */
     public static long quoteWen(BigDecimal estimatedYuan) {
-        return nonNegative(estimatedYuan).movePointRight(2)
-                .setScale(0, RoundingMode.CEILING).longValueExact();
+        return quoteWen(estimatedYuan, BigDecimal.ONE);
+    }
+
+    /** Exact rational yuan; avoid rounding an intermediate weighted mean onto the wrong side of a wen. */
+    static long quoteWen(BigDecimal numerator, BigDecimal denominator) {
+        if (denominator.signum() <= 0) throw new IllegalArgumentException("Invalid denominator");
+        return nonNegative(numerator).movePointRight(2).divide(denominator, 0, RoundingMode.CEILING).longValueExact();
     }
 
     static BigDecimal nonNegative(BigDecimal amount) {

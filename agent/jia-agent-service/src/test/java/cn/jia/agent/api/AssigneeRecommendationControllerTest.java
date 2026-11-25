@@ -1,5 +1,6 @@
 package cn.jia.agent.api;
 
+import cn.jia.agent.exception.PersonalWorkspaceException;
 import cn.jia.agent.service.recommendation.AssigneeRecommendationService;
 import cn.jia.core.config.ApiEnvelopeAdvice;
 import cn.jia.core.context.*;
@@ -30,7 +31,57 @@ class AssigneeRecommendationControllerTest {
         mvc = MockMvcBuilders.standaloneSetup(new AssigneeRecommendationController(service))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter()).setControllerAdvice(new ApiEnvelopeAdvice())
                 .addFilters(new RequestIdFilter()).build();
-        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", "资料不足", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of(), new Quotation("AVAILABLE", "quote-1", "recommendation-1", cn.jia.economy.common.Money.wen(13), null))), List.of(), true, new Workload(Workload.Kind.DOCUMENT, 20000, 5000, 1)));
+        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of())), true, "HYBRID", "candidate-rrf-k60-v1", List.of()));
+    }
+    @Test void independentQuoteEndpointUsesHeaderAndOnlyExplicitIdsNotBrowserPrices() throws Exception {
+        var app=mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        var api=MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app)).setMessageConverters(new JacksonJsonHttpMessageConverter())
+                .setControllerAdvice(new ApiEnvelopeAdvice()).addFilters(new RequestIdFilter()).build();
+        var intent=new cn.jia.economy.task.TaskQuoteBatches.Intent("7",List.of("a","z"));
+        var item=new cn.jia.economy.task.TaskQuoteBatches.Item("a",cn.jia.economy.task.TaskQuoteBatches.State.UNAVAILABLE,null,"batch",null,cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE,null);
+        when(app.quote(any(),eq("task"),eq("key"),eq(intent))).thenReturn(new cn.jia.economy.task.TaskQuoteBatches.Result("task","7",12,List.of(item,new cn.jia.economy.task.TaskQuoteBatches.Item("z",cn.jia.economy.task.TaskQuoteBatches.State.UNAVAILABLE,null,"batch",null,cn.jia.economy.task.TaskQuoteBatches.Reason.PRICE_MISSING,null))));
+        String body=BODY.replace("\"7\"","\"7\",\"agentIds\":[\"z\",\"a\",\"z\"]");
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key").header("X-Request-Id","recommend-test"))
+          .andExpect(status().isOk()).andExpect(jsonPath("$.data.quotes[0].unavailableReason").value("NO_BASELINE")).andExpect(header().string("Cache-Control","private, no-store"));
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body.replace("\"agentIds\"","\"amount\":0,\"agentIds\"")).header("Idempotency-Key","key"))
+          .andExpect(status().isBadRequest());
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isBadRequest());
+        when(app.quote(any(),eq("task"),eq("key"),eq(intent))).thenThrow(new cn.jia.agent.service.TaskFeatureEncoder.InvalidResult(),new cn.jia.agent.service.TaskFeatureEncoder.Unavailable());
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isBadGateway()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_INVALID"));
+        api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key")).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value("QUOTE_FEATURE_UNAVAILABLE"));
+    }
+    @Test void quoteRequirementErrorsStayDistinctFromEncoderAndPerCandidateFailures()throws Exception {
+        var app=mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        var api=MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app)).setMessageConverters(new JacksonJsonHttpMessageConverter())
+                .setControllerAdvice(new ApiEnvelopeAdvice()).addFilters(new RequestIdFilter()).build();
+        for(var reason:cn.jia.agent.service.AgentTaskRequirementReadException.Reason.values()){
+            doThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(reason)).when(app).quote(any(),anyString(),anyString(),any());
+            int expected=switch(reason){case NOT_FOUND->404;case RECONFIRM_REQUIRED->409;default->503;};
+            var body=BODY.replace("\"7\"","\"7\",\"agentIds\":[\"a\"]");
+            api.perform(post("/agent/tasks/task/quotes").principal(login).contentType(MediaType.APPLICATION_JSON).content(body).header("Idempotency-Key","key"))
+               .andExpect(status().is(expected)).andExpect(jsonPath("$.code").value(switch(expected){case 404->"QUOTE_NOT_FOUND";case 409->"QUOTE_STALE";default->"QUOTE_UNAVAILABLE";}))
+               .andExpect(jsonPath("$.data.quotes").doesNotExist());
+        }
+    }
+    @Test void recommendationAndQuoteDoNotDiscloseRevokedMaterialsOrHideStorageFailure() throws Exception {
+        var missing = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.NOT_FOUND);
+        var outage = new PersonalWorkspaceException(PersonalWorkspaceException.Reason.STORAGE_UNAVAILABLE);
+        when(service.recommend(any(), eq("task"), any())).thenThrow(missing, outage);
+        var app = mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
+        when(app.quote(any(), eq("task"), eq("key"), any())).thenThrow(missing, outage);
+        var api = MockMvcBuilders.standaloneSetup(new IndependentTaskQuoteController(app))
+                .setMessageConverters(new JacksonJsonHttpMessageConverter()).setControllerAdvice(new ApiEnvelopeAdvice())
+                .addFilters(new RequestIdFilter()).build();
+        for (boolean quote : List.of(false, true)) {
+            var request = post(quote ? "/agent/tasks/task/quotes" : "/agent/tasks/task/recommend").principal(login)
+                    .contentType(MediaType.APPLICATION_JSON).header("Idempotency-Key", "key")
+                    .content(quote ? BODY.replace("\"7\"", "\"7\",\"agentIds\":[\"a\"]") : BODY);
+            var client = quote ? api : mvc;
+            var prefix = quote ? "QUOTE" : "RECOMMENDATION";
+            client.perform(request).andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value(prefix + "_NOT_FOUND"))
+                    .andExpect(header().string("Cache-Control", "private, no-store"));
+            client.perform(request).andExpect(status().isServiceUnavailable()).andExpect(jsonPath("$.code").value(prefix + "_UNAVAILABLE"));
+        }
     }
     @AfterEach void cleanup() { EsContextHolder.clearContext(); }
     @Test void sameEndpointReturnsNewObjectInOneEnvelopeWithoutLegacyScores() throws Exception {
@@ -39,17 +90,16 @@ class AssigneeRecommendationControllerTest {
                 .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "private, no-store"))
                 .andExpect(jsonPath("$.protocolVersion").value(1)).andExpect(jsonPath("$.code").value("E0"))
                 .andExpect(jsonPath("$.data.workload").doesNotExist())
-                .andExpect(jsonPath("$.data.recommendations[0].quote.amount.amountMinor").value("13"))
-                .andExpect(jsonPath("$.data.recommendations[0].quote.amount.currency").value("WEN"))
-                .andExpect(jsonPath("$.data.recommendations[0].quote.quoteId").value("quote-1"))
+                .andExpect(jsonPath("$.data.recommendations[0].quote").doesNotExist())
+                .andExpect(jsonPath("$.data.retrievalMode").value("HYBRID"))
                 .andExpect(jsonPath("$.data.state").value("NO_MATCH")).andExpect(jsonPath("$.data.taskVersion").value("7"))
                 .andExpect(jsonPath("$.data.recommendations[0].recommendationLevel").value("UNKNOWN")).andExpect(jsonPath("$.data.score").doesNotExist());
     }
-    @Test void responseMatchesSharedWebQuoteFixture() throws Exception {
+    @Test void responseMatchesSharedWebRecommendationFixture() throws Exception {
         var response = mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY)
                 .header("X-Request-Id", "recommend-test")).andExpect(status().isOk()).andReturn().getResponse();
         var mapper = new tools.jackson.databind.ObjectMapper();
-        try (var fixture = getClass().getResourceAsStream("/billing/task-recommendation-quote.json")) {
+        try (var fixture = getClass().getResourceAsStream("/billing/task-recommendation.json")) {
             org.junit.jupiter.api.Assertions.assertEquals(mapper.readTree(fixture), mapper.readTree(response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8)));
         }
     }
@@ -70,11 +120,26 @@ class AssigneeRecommendationControllerTest {
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("BAD_REQUEST"));
         verifyNoInteractions(service);
     }
+    @Test void policyTaskLookupLossIsNotAnInfrastructureFailure() throws Exception {
+        when(service.recommend(any(),anyString(),any())).thenThrow(new cn.jia.agent.service.AgentTaskExecutionGrantException(
+                cn.jia.agent.service.AgentTaskExecutionGrantException.Reason.NOT_FOUND,"private"));
+        mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("RECOMMENDATION_NOT_FOUND")).andExpect(jsonPath("$.data.recommendations").doesNotExist());
+    }
     @Test void taskRootAccessLossIsNotDisclosedAsProviderFailure() throws Exception {
         when(service.recommend(any(), anyString(), any())).thenThrow(new cn.jia.agent.exception.AgentTaskCollaborationException(
                 cn.jia.agent.exception.AgentTaskCollaborationException.Reason.NOT_FOUND, "internal"));
         mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
                 .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("RECOMMENDATION_NOT_FOUND"));
+    }
+    @Test void missingRequirementConflictsAndCannotMasqueradeAsNoMatch()throws Exception {
+        for(var reason:cn.jia.agent.service.AgentTaskRequirementReadException.Reason.values()){
+            doThrow(new cn.jia.agent.service.AgentTaskRequirementReadException(reason)).when(service).recommend(any(),anyString(),any());
+            int expected=switch(reason){case NOT_FOUND->404; case RECONFIRM_REQUIRED->409; default->503;};
+            String code=switch(expected){case 404->"RECOMMENDATION_NOT_FOUND";case 409->"RECOMMENDATION_STALE";default->"RECOMMENDATION_UNAVAILABLE";};
+            mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY))
+               .andExpect(status().is(expected)).andExpect(jsonPath("$.code").value(code)).andExpect(jsonPath("$.data.recommendations").doesNotExist());
+        }
     }
     @Test void modelFailureUsesRealFailureNotEmptySuccessfulArray() throws Exception {
         when(service.recommend(any(), anyString(), any())).thenThrow(new Failure(503, "RECOMMENDATION_UNAVAILABLE"));

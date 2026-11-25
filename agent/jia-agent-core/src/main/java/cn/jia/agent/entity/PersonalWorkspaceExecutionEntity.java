@@ -23,6 +23,14 @@ public class PersonalWorkspaceExecutionEntity extends BaseEntity {
     /** Runtime bridge namespace. In TASK mode it is the authoritative business task ID. */
     private String taskId;
     private String runId;
+    /** Immutable metering contract of a newly admitted run; both null on pre-V2 executions. */
+    @com.baomidou.mybatisplus.annotation.TableField(updateStrategy=com.baomidou.mybatisplus.annotation.FieldStrategy.NEVER)
+    private String usageMode;
+    @com.baomidou.mybatisplus.annotation.TableField(updateStrategy=com.baomidou.mybatisplus.annotation.FieldStrategy.NEVER)
+    private String captureProtocol;
+    /** Optional server-selected metering profile commitment, frozen on original admission only. */
+    @com.baomidou.mybatisplus.annotation.TableField(updateStrategy=com.baomidou.mybatisplus.annotation.FieldStrategy.NEVER)
+    private String captureProfileSha256;
     /** PRIVATE bridge and TASK work-item execution are distinct domains; this field never implies delivery. */
     private String executionMode;
     /** Native6 business context: PRIVATE or TASK; historical rows retain NULL. */

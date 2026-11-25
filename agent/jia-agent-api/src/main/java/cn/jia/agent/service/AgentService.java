@@ -45,6 +45,9 @@ public interface AgentService {
     /** Owner-scoped recommendation inputs only; does not load assignment/funding detail. */
     AgentTaskDTO getTaskRecommendationInput(String taskId);
 
+    /** Final recheck only: root from this authenticated owner-scoped transaction callback. */
+    AgentTaskDTO getTaskRecommendationInputWithinLockedTask(String taskId, cn.jia.agent.entity.AgentTaskMetaEntity root);
+
     /**
      * Read-only exact-scope ownership proof for roster/get projection. This does not authorize
      * task, economy, hosting, skill, or any other mutation.
