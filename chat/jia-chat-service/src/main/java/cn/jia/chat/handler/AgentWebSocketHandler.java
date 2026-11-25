@@ -1111,7 +1111,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             event.put("agents", withSessionContext(session, agentService::listCapabilities));
             sendEvent(session, "agent_capability_index", event);
         } catch (Exception e) {
-            sendError(session, payload, errorCode(e), e.getMessage());
+            // Optional roster projection: do not revoke registration or expose the failed query.
+            log.warn("Agent capability index unavailable: {}", e.getClass().getSimpleName());
+            sendError(session, payload, "AGENT_CAPABILITY_INDEX_UNAVAILABLE", "Agent capability index is unavailable");
         }
     }
 
