@@ -132,7 +132,7 @@ public final class AssigneeRecommendationService {
                         ref.doc().text().lines().findFirst().orElseThrow(),ability?"已登记本领，不代表执行准入。":ref.doc().text(),true));
             }
             String level=suitability.level(found.mode(),hit,context,evidence.values(),doc);
-            String reason=level.equals("UNKNOWN")?(evidence.isEmpty()?"当前没有可用于判断匹配度的检索依据。":"现有依据不足以确定匹配等级。") : level.equals("LOW")?"所列公开依据与本事项要求不匹配。" : "按已校准的检索标准，所列公开能力依据与本事项匹配。";
+            String reason=level.equals("UNKNOWN")?suitability.unknownReason(!evidence.isEmpty()) : level.equals("LOW")?"所列公开依据与本事项要求不匹配。" : "按已校准的检索标准，所列公开能力依据与本事项匹配。";
             rows.add(new Recommendation(c.agent,level,reason,List.copyOf(evidence.values()),
                     "online".equalsIgnoreCase(c.agent.status()) ? List.of() : List.of("当前可能需要等待承办人就绪。")));
         }

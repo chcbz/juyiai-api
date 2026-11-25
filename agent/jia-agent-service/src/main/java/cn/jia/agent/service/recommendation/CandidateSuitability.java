@@ -61,6 +61,13 @@ final class CandidateSuitability {
         artifact=a;ranking=fingerprint;lookup=a==null?Map.of():Map.copyOf(groups);
     }
     String rankingVersion(){return ranking;}
+    /** Missing/invalid operator calibration is not evidence that the candidate lacks ability. */
+    String unknownReason(boolean hasEvidence) {
+        if (!hasEvidence) return "当前没有可用于判断匹配度的检索依据。";
+        return artifact == null ? "已找到能力依据，但匹配等级尚未完成校准，暂不判定是否适配。"
+                : "现有依据不足以确定匹配等级。";
+    }
+
     String level(String mode,CandidateRankFusion.Ranked row,Context context,Collection<Evidence> citations,CapabilityDocuments.Doc doc){
         if(artifact==null||doc==null||citations.isEmpty()||context.truncated||!artifact.partition.equals(doc.partition())||!artifact.embedding.equals(doc.embedding()))return "UNKNOWN";
         // A match on just one of several explicit requirements is not positive evidence for the entire task.

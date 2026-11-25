@@ -52,6 +52,22 @@ class AssigneeRecommendationServiceTest {
         byte[] bytes=new tools.jackson.databind.ObjectMapper().writeValueAsBytes(a);var file=java.nio.file.Files.write(directory.resolve("test-calibration.json"),bytes);
         return new CandidateSuitability(file.toString(),forcedPin==null?HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)):forcedPin);
     }
+    @Test void missingCalibrationIsDisclosedWithoutClaimingNoAbilityOrReadiness() {
+        var result=recommend();var item=result.recommendations().getFirst();
+        assertEquals("HYBRID",result.retrievalMode());assertEquals("NO_MATCH",result.state());
+        assertEquals("UNKNOWN",item.recommendationLevel());assertFalse(item.evidence().isEmpty());
+        assertEquals("已找到能力依据，但匹配等级尚未完成校准，暂不判定是否适配。",item.reason());
+        assertTrue(result.degradedReasons().isEmpty());
+    }
+    @Test void invalidCalibrationDisclosesUnavailableCalibrationButKeepsMissingEvidenceDistinct() throws Exception {
+        var rule=new CandidateSuitability.Cell("HYBRID","LEXICAL",false,false,1,1,new CandidateSuitability.Floors(1d,null),null);
+        var invalid=calibration(List.of(rule),"d".repeat(64));
+        assertEquals(new CandidateSuitability("","").unknownReason(true),invalid.unknownReason(true));
+        assertEquals("当前没有可用于判断匹配度的检索依据。",invalid.unknownReason(false));
+        var valid=calibration(List.of(rule),null);
+        assertEquals("现有依据不足以确定匹配等级。",valid.unknownReason(true));
+    }
+
     @Test void calibratedModePromotesExternalAboveUnratedOwnedCandidateWithoutBorrowingHybridPolicy()throws Exception{
         var other=new AgentTaskAssigneeCandidateDTO(new AgentTaskTargetSummaryDTO("b","Other",null,false,"online"),List.of("排版"),"other");
         when(agents.listTaskAssigneeCandidates("task")).thenReturn(List.of(row,other));when(skills.recommendationSkills(eq(actor),anyList())).thenReturn(Map.of("a",List.of(),"b",List.of()));
