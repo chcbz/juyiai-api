@@ -77,7 +77,7 @@ class DatabaseTaskPricingServiceTest {
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var trial=new TaskEstimateCalibration.Trial("fixture",1,1,1,1,1,0.1,0.2,1,1,1,1);
         var policy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy(FrozenCalibrationStudy.VERSION,java.util.List.of(trial),gate,123L)));
         var routes=Map.of("text",Map.<String,TaskReferencePricing.Route>of("model",new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint")));
-        String equalRates="{\"basis\":\"synthetic\",\"yuanPerMillionTokens\":{\"INPUT\":\"1\",\"OUTPUT\":\"1\"}}";
+        String equalRates="{\"basis\":\"synthetic\",\"yuanPerMillionTokens\":{\"INPUT\":\"1\",\"OUTPUT\":\"1\"},\"longContextYuanPerMillionTokens\":{}}";
         price(equalRates);var ref=service.freeze(scope,"book",routes,routes.keySet());
         var reference=keep.apply(study.freezeReference(ref));var members=new java.util.ArrayList<FrozenCalibrationStudy.Member>();
         long t=1;for(var a:assignments){var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var revision=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sid-"+a.task(),1);
