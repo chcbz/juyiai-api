@@ -715,6 +715,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     void denseHistoryPooledInlinePhaseCosts(){profileHistoryPages(false,1025,true);}
     @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.pooledHistoryComparison",matches="true")
     void denseHistoryPooledSharedPhaseCosts(){profileHistoryPages(true,1025,true);}
+    private boolean attachedProbe;
+    private record AttachedQuote(TaskEstimateFeatures reference,MeasuredNeighborEstimate.Estimate expected){}
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.pooledHistoryComparison",matches="true")
+    void denseHistoryPooledAttachedQuote(){attachedProbe=true;profileHistoryPages(true,1025,true);}
     private void profileHistoryPages(boolean shared,int n){profileHistoryPages(shared,n,false);}
     private static String denseDigest(String role,int i){
         try{return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(("synthetic-dense-v2:"+role+":"+i).getBytes(StandardCharsets.UTF_8)));}catch(java.security.NoSuchAlgorithmException e){throw new AssertionError(e);}
@@ -730,6 +734,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var original=prep.features();var vector=new java.util.ArrayList<Float>();
                 if(dense){var random=new java.util.Random(i+42L);vector.add(1f);for(int j=1;j<1024;j++)vector.add((random.nextFloat()-0.5f)*0.01f);}
                 var files=!dense || i%4==0?original.files():List.of(new TaskEstimateFeatures.File(i%2==0?"reference":"input",i%3==0?"text/plain":"image/png",1024L*(i+1),1+i%7));
+                if(attachedProbe && i==105)files=List.of(new TaskEstimateFeatures.File("INPUT","text/plain",7,1));
                 Integer deliverables=dense && i%3!=0?Integer.valueOf(1+i%5):original.requestedDeliverables();
                 var source=dense?new TaskEstimateFeatures(original.featureVersion(),original.templateVersion(),denseDigest("requirement",i),denseDigest("inputs",i),denseDigest("text",i),original.embeddingIdentity(),vector,files,deliverables):original;
                 var storedPrep=dense?new TaskBillingService.MeasuredPreparation(source,prep.group(),prep.estimatorVersion(),prep.calibrationVersion(),prep.qualityStatus(),prep.estimate()):prep;
@@ -938,7 +943,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var requester=new TaskBillingService.Task(reader.scope(),reader.ownerJiacn(),shared?"dense-http-shared":"dense-http-inline");
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var zero=new TaskEstimateEvaluation.Ratio(BigDecimal.ZERO,BigDecimal.ONE);
         var scores=new TaskEstimateEvaluation.Scores(1,1,0,1,0,BigDecimal.ZERO,zero,zero);
-        var fit=new TaskEstimateCalibration.Fit("dense-fixture",params,scores);
+        AttachedQuote attachment=null;
+        if(attachedProbe){var row=historyCatalog.page(reader,group,ids.get(104)).getFirst();var feature=row.features();
+            assertEquals(List.of(new TaskEstimateFeatures.File("INPUT","text/plain",7,1)),feature.files());assertNull(feature.requestedDeliverables());
+            var expected=originalEngine.estimate(reader,group.execution(),feature,pin,richParams,Map.of());assertEquals(ids.get(105),expected.contributions().getFirst().sampleId());
+            assertNotEquals(control.contributions().getFirst().sampleId(),ids.get(105));attachment=new AttachedQuote(feature,expected);
+        }
+        var fit=new TaskEstimateCalibration.Fit("dense-fixture",attachedProbe?richParams:params,scores);
         var report=new TaskEstimateCalibration.Report(group.privateCalibrationGroup(requester),group.execution().routeVersion(),fit,scores,true);
         var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,new cn.jia.economy.service.impl.TaskHistoryCatalogService(original,json));
@@ -948,7 +959,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("INSERT INTO economy_task_estimator_current VALUES(?,?,?,?,1,SHA2(?,256))",TENANT,CLIENT,OWNER,groupSha,encoded);
         var estimator=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,projection,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
         System.out.printf("QUOTE_DENSE_HTTP_START shared=%s histories=%d%n",shared,ids.size());
-        assertDoesNotThrow(()->{verifyHistoryQuoteHttp(study,group,book,requester,estimator,terms,control.wen());});
+        var probe=attachment;assertDoesNotThrow(()->{verifyHistoryQuoteHttp(study,group,book,requester,estimator,terms,control.wen(),probe);});
         System.out.printf("QUOTE_DENSE_HTTP_END shared=%s histories=%d%n",shared,ids.size());
         assertEquals(0,miss[0]);int at=80;String sid=ids.get(at);String cursor=ids.get(at-1);
         // Separate transactions simulate fault injection; restoring exact row bytes permits a clean control read.
@@ -1255,7 +1266,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(new TaskBillingService.Task(query.scope(),"other","offer"),needle,terms));
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
         locked(()->{estimator.lockSelected(query,List.of(available,available));return null;});
-        var pointRecordedQuote=verifyHistoryQuoteHttp(study,group,book,query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms,65);
+        var pointRecordedQuote=verifyHistoryQuoteHttp(study,group,book,query,proxy(estimator,cn.jia.economy.task.TaskBudgetEstimator.class),terms,65,null);
         var quotes=recommendationSql.getMapper(EconomyTaskBillingMapper.class);
         var point=study.confirmedPoint(BILLING_TASK,group,selected,forecast.sha256(),artifacts::get,quotes);
         var mismatch=assertThrows(IllegalArgumentException.class,()->study.confirmedPoint(BILLING_TASK,group,selected,drift.sha256(),driftObjects::get,quotes));
@@ -1900,13 +1911,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.api.TaskInitialActionController initialSelectionController;
     /** The archived sample, cutoff, candidate and terms are deliberately synthetic. Test real HTTP/SQL/commit/replay, not accuracy. */
     private java.util.concurrent.Callable<Void> verifyHistoryQuoteHttp(cn.jia.economy.service.impl.FrozenCalibrationStudy study,cn.jia.economy.task.TaskHistoryCatalog.Group group,cn.jia.economy.service.impl.FrozenCalibrationStudy.Artifact book,TaskBillingService.Task newTask,cn.jia.economy.task.TaskBudgetEstimator estimator,
-                                        cn.jia.economy.task.TaskBudgetEstimator.Terms terms,long expectedWen) throws Exception {
+                                        cn.jia.economy.task.TaskBudgetEstimator.Terms terms,long expectedWen,AttachedQuote attached) throws Exception {
         String id=newTask.taskId();jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",id,OWNER,TENANT,CLIENT);
         var authority=quoteAndRecommendationAuthority();var req=authority.req();String agent="agt_00000000000000000000000000000002";
         jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-point",agent,TENANT,CLIENT);
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         var requirement=roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->req.captureOnCreate(SCOPE,id,"Fixture title","Fixture description"));
+        var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
+        cn.jia.agent.service.recommendation.RecommendationMaterials materials;
+        if(attached==null)materials=mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class);
+        else{var workspace=quoteWorkspace();ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());attachQuoteFile(id,105);
+            materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));}
         var inputs=roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,id,r->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,id));
         // Only the additional 108-member performance roster is synthetic; the selected candidate uses real policy/identity reads.
         var agents=mock(AgentExternalServicePolicyService.class);when(agents.quoteTargets(eq(SCOPE),eq(id),eq(List.of(agent)),anyBoolean())).thenAnswer(i->authority.policies().quoteTargets(SCOPE,id,List.of(agent),i.getArgument(3)));
@@ -1918,11 +1934,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var subject=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(newTask,"0",1,requirement.sha256(),inputs.digest());
         var calls=new java.util.concurrent.atomic.AtomicInteger();var encoder=new cn.jia.agent.service.TaskFeatureEncoder(){
             public Identity identity(){return new Identity("cfg","fixture",1024);}
-            public Vector encode(String text){calls.incrementAndGet();float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);}
+            public Vector encode(String text){calls.incrementAndGet();float[] vec=new float[1024];vec[0]=1;
+                if(attached!=null){assertTrue(text.contains("file-105"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));for(int i=0;i<vec.length;i++)vec[i]=attached.reference().vector().get(i);}
+                return new Vector(identity(),vec);}
         };
         var profile=new QuoteProfile();boolean diagnostic=Boolean.getBoolean("cyf.measuredBatchQuoteLoad");
         java.util.function.Supplier<cn.jia.agent.api.IndependentTaskQuoteController> quoteNode=()->cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
-                mock(cn.jia.agent.service.recommendation.RecommendationMaterials.class),encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
+                materials,encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
         if(diagnostic)independentQuoteController=quoteNode.get(); // Preserve single-listener timing for the load diagnostic.
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var hot=new java.util.ArrayList<Long>();String firstId=null,firstBatch=null;long cold=0,replay=0;
@@ -1975,6 +1993,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
             }
             assertEquals(balance,wallet(independent));assertEquals(charges,count("economy_task_charge"));
+        }
+        if(attached!=null){String snapshot=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,firstId);
+            var raw=mapper.readTree(snapshot);var feature=mapper.treeToValue(raw.at("/preparation/features"),TaskEstimateFeatures.class);
+            assertEquals(requirement.sha256(),feature.requirementSha256());assertEquals(inputs.digest(),feature.inputSnapshotSha256());assertEquals(attached.reference().files(),feature.files());assertNull(feature.requestedDeliverables());assertEquals(feature.digest(),raw.path("featureSha256").asText());
+            assertEquals(mapper.readTree(mapper.writeValueAsString(attached.expected())),raw.at("/preparation/estimate"));verifyNoInteractions(storage,writes);
         }
         assertEquals(frozen.sha256(),jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.initialIntentSha256')) FROM economy_task_quote WHERE quote_id=?",String.class,firstId));
         assertEquals(1,calls.get());verify(source,times(31)).observe(subject,targets);verify(source,times(31)).current(subject,targets,proofs);
