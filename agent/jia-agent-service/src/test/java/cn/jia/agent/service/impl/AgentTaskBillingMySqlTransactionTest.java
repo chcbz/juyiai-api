@@ -669,8 +669,16 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE economy_task_benchmark_sponsorship SET authority_sha=?","0".repeat(64));
         assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->activate(f)));
         jdbc.update("UPDATE economy_task_benchmark_sponsorship SET authority_sha=SHA2(authority_json,256),state='ACTIVE'");
+        assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->activate(f)));
         assertThrows(IllegalStateException.class,()->sponsoredLock(f,()->f.service().settleSponsorship(f.task(),ACCEPTED)));
         assertEquals(0,count("economy_task_cost_sample")); assertSponsorNoMoney();
+    }
+    @Test void sponsorshipCannotRetrofitAnAlreadyEnrolledCase() throws Exception {
+        var f=sponsorshipFixture(true); var m=f.manifest();
+        sponsoredLock(f,()->f.service().enroll(f.task(),m.caseId(),f.manifestSha(),AGENT,m.execution(),m.features()));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->sponsoredLock(f,()->activate(f)));
+        assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertEquals(1,count("economy_task_cost_sample")); assertSponsorNoMoney();
     }
     @Test void sponsorshipCannotSettleOrActivateAlongsideOrdinaryCharge() throws Exception {
         var f=sponsorshipFixture(true); sponsoredLock(f,()->activate(f));

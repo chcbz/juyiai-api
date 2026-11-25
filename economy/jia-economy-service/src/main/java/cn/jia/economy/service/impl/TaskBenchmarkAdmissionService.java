@@ -20,12 +20,23 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
     public TaskBenchmarkAdmissionService(TaskBenchmarkMapper db,ObjectMapper json){this.db=db;this.json=json;}
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public String enroll(TaskBillingService.Task task,String id,String sha,String agent,TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features){
+        return enrollLocked(task,id,sha,agent,actual,features,EnrollmentMode.NORMAL);
+    }
+    private enum EnrollmentMode { NORMAL, NEW_SPONSOR, ACTIVE_SPONSOR }
+    private String enrollLocked(TaskBillingService.Task task,String id,String sha,String agent,
+            TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features,EnrollmentMode mode) {
         var raw=db.approved(task,id,sha);if(raw==null)throw new NotAdmitted();
         try{if(!HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(raw.getBytes(StandardCharsets.UTF_8))).equals(sha))throw new IllegalStateException("Damaged benchmark authority");}
         catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
         var m=json.readValue(raw,Manifest.class);
         if(!task.equals(m.task())||!id.equals(m.caseId())||!agent.equals(m.agentId())||!m.execution().equals(actual)||!m.features().equals(features))throw new NotAdmitted();
-        String existing=db.existing(task,id);if(existing!=null){if(!sha.equals(existing))throw new IllegalStateException("Benchmark identity changed");return existing;}
+        String existing=db.existing(task,id);
+        if(existing!=null){
+            if(!sha.equals(existing))throw new IllegalStateException("Benchmark identity changed");
+            if(mode==EnrollmentMode.NEW_SPONSOR)throw new NotAdmitted(); // never retrospectively sponsor an enrollment
+            return existing;
+        }
+        if(mode==EnrollmentMode.ACTIVE_SPONSOR)throw new IllegalStateException("Missing sponsored benchmark enrollment");
         if(db.seed(task,id,sha,features.requirementSha256(),features.inputSnapshotSha256(),features.digest(),TaskHistoryCatalog.Group.of(actual,features).digest())!=1)throw new NotAdmitted();
         return sha;
     }
@@ -45,12 +56,10 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
         if (funding.state() != SponsorshipState.APPROVED && funding.state() != SponsorshipState.ACTIVE)
             throw new NotAdmitted();
         if (row.withdrawn()) throw new NotAdmitted();
-        if (funding.state() == SponsorshipState.ACTIVE
-                && !manifestSha.equals(db.existing(task, id)))
-            throw new IllegalStateException("Missing sponsored benchmark enrollment");
         // The caller owns the task root. Serialize sponsor -> original case -> sample;
         // never create a quote/charge, provider request or journal entry here.
-        enroll(task, id, manifestSha, agent, group, features);
+        enrollLocked(task, id, manifestSha, agent, group, features,
+                funding.state() == SponsorshipState.ACTIVE ? EnrollmentMode.ACTIVE_SPONSOR : EnrollmentMode.NEW_SPONSOR);
         if (funding.state() == SponsorshipState.ACTIVE) return funding;
         transition(task, funding, SponsorshipState.ACTIVE);
         return new Sponsorship(funding.authoritySha256(), authority, SponsorshipState.ACTIVE);
