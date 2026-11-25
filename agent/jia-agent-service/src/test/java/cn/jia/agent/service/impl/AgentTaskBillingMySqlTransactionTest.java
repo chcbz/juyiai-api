@@ -1201,7 +1201,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private boolean cancelQuotedNativeResult;
     /** One task from a synthetic calibrated quote through the real loopback-backed Runtime
      * result commit to HTTP cancellation/refund. Not production cost or delivery acceptance. */
-    @Test void quotedNativeResultCanCancelAndRefundTheSameTaskExactlyOnce() throws Exception {
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.ownedPickupCodex",matches=".+")
+    void quotedNativeResultCanCancelAndRefundTheSameTaskExactlyOnce() throws Exception {
         assertNotNull(System.getProperty("cyf.ownedPickupCodex"), "Requires the owned Runtime integration fixture");
         cancelQuotedNativeResult = true;
         conflictOnDiscussionRetry = true;
