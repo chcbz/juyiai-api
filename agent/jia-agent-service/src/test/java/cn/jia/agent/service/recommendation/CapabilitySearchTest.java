@@ -105,7 +105,7 @@ class CapabilitySearchTest {
                 result.put("pit_id","view-"+requests.size());
                 if(query.path("size").asInt()==0){
                     result.put("hits",Map.of("total",Map.of("relation","eq","value",present),"hits",List.of()));
-                    result.put("aggregations",Map.of("filter#encoded",Map.of("doc_count",encoded)));
+                    result.put("aggregations",Map.of("filter#encoded",Map.of("doc_count",encoded),"sterms#physical",Map.of("buckets",List.of(Map.of("key",CapabilityIndexWriter.GENERATION,"doc_count",present)))));
                 } else result.put("hits",Map.of("hits",List.of(Map.of("_index",CapabilityIndexWriter.GENERATION,"_id",doc.id(),"_score",0.8))));
                 response=result;
             }

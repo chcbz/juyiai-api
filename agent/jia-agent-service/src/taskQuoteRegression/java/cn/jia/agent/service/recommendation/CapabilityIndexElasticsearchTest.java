@@ -78,6 +78,28 @@ class CapabilityIndexElasticsearchTest {
             assertFalse(writer.encoded(newDoc));assertEquals("UNAVAILABLE",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",()->new CapabilitySearch.QueryVector(vector(next,0),null)).mode());
             writer.publishText(newDoc);es.indices().refresh(b->b.index(index));assertEquals("LEXICAL_ONLY",search.retrieve(Set.of("a"),List.of(newDoc),"合同审查",()->new CapabilitySearch.QueryVector(vector(next,0),null)).mode());
             if(Boolean.getBoolean("cyf.capabilityEsLoad"))measureSearch(search,writer,es);
+            // Deliberately mis-provision this disposable read alias. The write alias stays single-target.
+            String other=index+"_fixture_alt";
+            try(var mapping=getClass().getResourceAsStream("/elasticsearch/agent-capability-evidence-v1.json")){
+                var json=new com.fasterxml.jackson.databind.ObjectMapper();var schema=(com.fasterxml.jackson.databind.node.ObjectNode)json.readTree(mapping);
+                schema.withObject("/aliases").remove(index+"_write");es.indices().create(b->b.index(other).withJson(new java.io.StringReader(json.writeValueAsString(schema))));
+            }
+            var a=authorized.getFirst();var missing=abilities("a",ID,"missing").getFirst().doc();
+            var source=es.get(g->g.index(index).id(a.id()),java.util.Map.class).source();
+            es.index(b->b.index(other).id(a.id()).document(source));es.indices().refresh(b->b.index(other));
+            java.util.function.Supplier<CapabilitySearch.QueryVector> unused=()->{throw new AssertionError("mixed coverage must not encode");};
+            var duplicate=search.retrieve(Set.of("a"),List.of(a,missing),"合同",unused);
+            assertEquals("UNAVAILABLE",duplicate.mode());assertEquals(List.of("CAPABILITY_INDEX_INCOMPLETE"),duplicate.reasons());
+            assertNull(duplicate.rows().getFirst().lexical());
+            // Each batch alone is complete and single-index; the 129th candidate lives in another generation.
+            var across=new ArrayList<CapabilityDocuments.Doc>();var names=new java.util.HashSet<String>();
+            for(int i=0;i<129;i++){
+                String name="cross-"+String.format(java.util.Locale.ROOT,"%03d",i);var doc=abilities(name,ID,"审查").getFirst().doc();across.add(doc);names.add(name);
+                if(i<128)writer.publishText(doc);else es.index(b->b.index(other).id(doc.id()).document(java.util.Map.of("agent_id",name,"partition",doc.partition(),"evidence_key",doc.evidenceKey(),"text",doc.text())));
+            }
+            es.indices().refresh(b->b.index(index,other));var mixed=search.retrieve(names,across,"审查",unused);
+            assertEquals("UNAVAILABLE",mixed.mode());assertEquals(129,mixed.rows().size());assertEquals(List.of("CAPABILITY_INDEX_INCOMPLETE"),mixed.reasons());
+            assertTrue(mixed.rows().stream().allMatch(r->r.lexical()==null&&r.vector()==null));
         }
     }
 }

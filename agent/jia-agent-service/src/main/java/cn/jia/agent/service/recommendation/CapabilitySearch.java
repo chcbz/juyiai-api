@@ -47,11 +47,22 @@ final class CapabilitySearch {
             view.pit = open.id();
             if (open.shards() != null && open.shards().failed().intValue() != 0) throw new IOException("partial PIT");
             boolean vectorsComplete = true;
+            String physicalIndex = null;
             for (var batch : batches) {
                 var coverage = view.search(batch.coverage());
                 var total = coverage.hits().total();
                 if (total == null || total.relation() != TotalHitsRelation.Eq || total.value() != batch.docs.size())
                     return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
+                // Within one physical index the requested IDs are unique. Across indices a duplicate
+                // could hide a missing ID, or different batches could rank incompatible generations.
+                var physical = coverage.aggregations().get("physical");
+                if (physical == null || !physical.isSterms()) return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
+                var buckets = physical.sterms().buckets().array();
+                if (buckets.size() != 1 || buckets.getFirst().docCount() != total.value())
+                    return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
+                var index = buckets.getFirst().key().stringValue();
+                if (physicalIndex != null && !physicalIndex.equals(index)) return unavailable(candidates, "CAPABILITY_INDEX_INCOMPLETE");
+                physicalIndex = index;
                 var count = coverage.aggregations().get("encoded");
                 if (count == null || !count.isFilter() || count.filter().docCount() != total.value()) vectorsComplete = false;
                 readRanked(view,batch,text,null,lexical);
@@ -130,7 +141,7 @@ final class CapabilitySearch {
         private List<Object> filters() { return new ArrayList<>(List.of(Map.of("ids", Map.of("values", docs.keySet())),
                 Map.of("term", Map.of("partition", Map.of("value",partition))))); }
         Map<String,Object> coverage() { return Map.of("size",0,"track_total_hits",true,"query",Map.of("bool",Map.of("filter",filters())),
-                "aggs",Map.of("encoded",Map.of("filter",Map.of("exists",Map.of("field","vector"))))); }
+                "aggs",Map.of("physical",Map.of("terms",Map.of("field","_index","size",1)),"encoded",Map.of("filter",Map.of("exists",Map.of("field","vector"))))); }
         Map<String,Object> ranked(String text, float[] vector) {
             var filters = filters(); Object query;
             if (vector == null) query = Map.of("bool", Map.of("filter",filters,"must",List.of(Map.of("match",Map.of("text",Map.of("query",text))))));
