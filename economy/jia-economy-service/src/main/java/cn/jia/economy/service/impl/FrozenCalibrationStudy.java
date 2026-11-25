@@ -15,6 +15,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.function.Function;
+import cn.jia.economy.service.impl.TaskTariffBook.Book;
 import tools.jackson.databind.ObjectMapper;
 
 /** Offline only. The caller retains the private artifacts and independently pins inputs. No activation, DB discovery or cost authorization. */
@@ -32,7 +33,7 @@ public final class FrozenCalibrationStudy {
     public record Dataset(TaskEstimateCalibration.PrivateGroup group,List<Member> members){}
     public record Policy(String evaluatorVersion,List<TaskEstimateCalibration.Trial> trials,TaskEstimateCalibration.Gate gate,long seed){}
     // Changing scoring, temporal split, trial selection, bootstrap or wire semantics requires a new study version.
-    public static final String VERSION="private-scoped-study-v5";
+    public static final String VERSION="private-scoped-study-v6";
     public record Artifact(String sha256,String json){@Override public String toString(){return "Artifact[private]";}}
     public record Pins(String split,String dataset,String reference,String policy){}
     /** Verified TRAIN observations only. A private commitment, not permission to quote. */
@@ -40,13 +41,9 @@ public final class FrozenCalibrationStudy {
         public TrainingBenchmarks{members=List.copyOf(members);}
     }
     public record Result(TaskCalibrationCatalog.Receipt receipt,TaskEstimateCalibration.EvaluationReport report,Artifact trainingBenchmarks){}
-    private record Rate(String kind,String component,String type,String body){}
-    private record Book(String version,List<Rate> rates){}
     public Artifact freeze(Object value){String body=json.writeValueAsString(value);return new Artifact(hash(body),body);}
     public Artifact freezeReference(MeasuredTaskRepricing.Reference book){
-        var rows=new ArrayList<Rate>();new TreeMap<>(book.byKind()).forEach((k,components)->new TreeMap<>(components).forEach((c,r)->{
-            String type=switch(r){case MeasuredTaskRepricing.TokenRate ignored->"token";case MeasuredTaskRepricing.UnitRate ignored->"unit";case MeasuredTaskRepricing.ExplicitZero ignored->"zero";};
-            rows.add(new Rate(k,c,type,json.writeValueAsString(r)));}));return freeze(new Book(book.version(),rows));
+        String body=TaskTariffBook.encode(book);return new Artifact(TaskTariffBook.sha(body),body);
     }
     /** Offline collector only: freeze every operation in the server-resolved contract in one catalog snapshot. */
     public Artifact freezeContractReference(Task original,cn.jia.economy.task.TaskBudgetEstimator.Terms terms,cn.jia.economy.pricing.TaskReferencePricing prices){

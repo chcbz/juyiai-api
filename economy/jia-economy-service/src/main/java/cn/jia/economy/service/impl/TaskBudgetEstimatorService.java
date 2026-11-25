@@ -31,9 +31,10 @@ public class TaskBudgetEstimatorService implements TaskBudgetEstimator {
         if(terms==null||terms.routes().isEmpty())return new Unavailable(BILLING_ROUTE_MISSING);
         var group=TaskHistoryCatalog.Group.of(terms.execution(),features);var active=calibration.resolve(task,group);
         if(active==null)return new Unavailable(NO_BASELINE);
-        try{var estimate=engine.estimate(task,terms.execution(),features,active.pin(),active.parameters(),terms.routes());
+        try{var estimate=engine.estimate(task,terms.execution(),features,active,terms.routes());
             return new Available(new TaskBillingService.MeasuredPreparation(features,terms.execution(),TaskNeighborSearch.VERSION,active.pin().receiptSha256(),"CALIBRATED",estimate),active.pin());
-        }catch(MeasuredHistoryEstimateEngine.StaleSample changed){throw new Stale();}
+        }catch(MeasuredHistoryEstimateEngine.UncalibratedTariff drift){return new Unavailable(NO_BASELINE);}
+        catch(MeasuredHistoryEstimateEngine.StaleSample changed){throw new Stale();}
         catch(TaskPricingService.Unavailable missing){return switch(missing.reason()){
             case BILLING_ROUTE_MISSING -> new Unavailable(BILLING_ROUTE_MISSING);
             case MODEL_PRICE_MISSING,TOOL_PRICE_MISSING,TOKEN_PRICE_MISSING -> new Unavailable(PRICE_MISSING);

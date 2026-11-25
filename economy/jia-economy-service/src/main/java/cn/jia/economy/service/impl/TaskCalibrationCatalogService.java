@@ -28,7 +28,7 @@ public class TaskCalibrationCatalogService implements TaskCalibrationCatalog {
             if(!commitment.matches("[0-9a-f]{64}"))throw new IllegalStateException("Missing calibration evidence identity");
         if(!TaskNeighborSearch.VERSION.equals(r.estimatorVersion())||report.winner()==null||!report.meetsPointCriteria()
                 ||!r.gate().passes(report.winner().calibration())||!r.gate().passes(report.holdout()))return null;
-        return new Active(new Pin(digest,row.generation(),row.sha()),report.winner().parameters());
+        return new Active(new Pin(digest,row.generation(),row.sha()),report.winner().parameters(),r.referenceBookSha256());
     }
     @Transactional(propagation=Propagation.MANDATORY)
     public boolean lockCurrent(Task task,Pin pin){return db.lockCurrent(task,pin.group(),pin.generation(),pin.receiptSha256())!=null;}

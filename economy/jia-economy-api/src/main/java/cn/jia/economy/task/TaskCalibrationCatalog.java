@@ -8,7 +8,7 @@ public interface TaskCalibrationCatalog {
     record Receipt(String estimatorVersion,String datasetSha256,String splitSha256,String referenceBookSha256,String policySha256,String trainingBenchmarksSha256,
                    TaskEstimateCalibration.Gate gate,TaskEstimateCalibration.Report report){}
     record Pin(String group,long generation,String receiptSha256){}
-    record Active(Pin pin,TaskNeighborSearch.Parameters parameters){}
+    record Active(Pin pin,TaskNeighborSearch.Parameters parameters,String referenceBookSha256){}
     /** Null=no active supported and qualified calibration for that owner and exact group. Storage failures are not absence. */
     Active resolve(TaskBillingService.Task task,TaskHistoryCatalog.Group group);
     /** Recheck only the head under the existing quote transaction. No deserialization or estimation under the lock. */

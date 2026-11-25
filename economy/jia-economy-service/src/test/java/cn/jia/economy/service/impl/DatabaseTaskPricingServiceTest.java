@@ -97,6 +97,24 @@ class DatabaseTaskPricingServiceTest {
         assertEquals(result.report().points().winner(),repriced.winner());assertFalse(repriced.meetsPointCriteria());
         assertEquals(0,new TaskEstimateEvaluation.Ratio(BigDecimal.valueOf(3),BigDecimal.valueOf(4)).compareTo(repriced.holdout().wape()));
         assertEquals(result,study.evaluate(owner,group,pins,objects::get)); // old evidence retains precisely its original meaning
+        // New quotes must use the complete current contract, even when selected neighbors only consume text.
+        var tool=new TaskQuoteCalculator.ToolKey("tools","draw","frame");
+        var contract=new java.util.HashMap<>(routes);contract.put("render",Map.of("frame",new TaskReferencePricing.UnitRoute(tool)));
+        java.util.function.Function<String,MeasuredTaskRepricing.Reference> complete=price->new MeasuredTaskRepricing.Reference("book",Map.of("text",ref.byKind().get("text"),"render",Map.of("frame",new MeasuredTaskRepricing.UnitRate(tool,new TaskQuoteCalculator.ToolPrice("v","fixture",new BigDecimal(price))))));
+        var current=new java.util.concurrent.atomic.AtomicReference<>(complete.apply("0.2500"));var calls=new java.util.concurrent.atomic.AtomicInteger();
+        var history=mock(cn.jia.economy.task.TaskHistoryCatalog.class);var catalog=mock(cn.jia.economy.task.TaskCalibrationCatalog.class);
+        var query=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","new");var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),1,"a".repeat(64));
+        var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision("s",1);var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(execution,contract);
+        when(history.candidatePage(query,group,pin,"")).thenReturn(java.util.List.of(new cn.jia.economy.task.TaskHistoryCatalog.Entry(rev,"historical",features)));
+        when(history.candidateQuantities(query,group,pin,rev)).thenReturn(java.util.List.of(new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("gw","one"),"text","model","proof",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,1000000L)))));
+        var params=result.report().points().winner().parameters();
+        when(catalog.resolve(query,group)).thenReturn(new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,study.freezeReference(complete.apply("0.25")).sha256()));
+        var estimator=new TaskBudgetEstimatorService(catalog,history,new MeasuredHistoryEstimateEngine(history,(scope,v,r,kinds)->{calls.incrementAndGet();assertEquals(contract.keySet(),kinds);return current.get();}));
+        assertEquals(100,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,features,terms)).preparation().estimate().wen());
+        current.set(complete.apply("0.2500000000000000000000001"));
+        assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(query,features,terms));
+        when(catalog.resolve(query,group)).thenReturn(new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,study.freezeReference(current.get()).sha256()));
+        assertEquals(100,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,features,terms)).preparation().estimate().wen());assertEquals(3,calls.get());
         var previousPolicy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy("private-scoped-study-v4",java.util.List.of(trial),gate,123L)));
         assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,dataset,reference,previousPolicy),objects::get));
         var shortSet=keep.apply(study.freeze(new FrozenCalibrationStudy.Dataset(owner,members.subList(0,2))));
