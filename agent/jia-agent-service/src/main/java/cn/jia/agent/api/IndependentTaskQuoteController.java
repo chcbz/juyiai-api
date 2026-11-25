@@ -19,7 +19,7 @@ import tools.jackson.databind.JsonNode;
 
 @RestController
 @RequestMapping("/agent/tasks")
-public final class IndependentTaskQuoteController implements TaskAssigneeAdmissionErrors {
+public final class IndependentTaskQuoteController {
     private final IndependentTaskQuotes quotes;
     public IndependentTaskQuoteController(IndependentTaskQuotes quotes){this.quotes=quotes;}
     @PostMapping("/{taskId}/quotes")

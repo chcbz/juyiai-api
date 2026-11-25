@@ -16,8 +16,6 @@ import java.util.*;
 /** First half of independent quoting. Access is checked even for immutable replays. No wallet, assignment or recommendation call. */
 @Service
 final class TaskQuoteIntentService {
-    @org.springframework.beans.factory.annotation.Autowired
-    private cn.jia.agent.service.TaskAssigneeAdmission admission = new cn.jia.agent.service.TaskAssigneeAdmission(false);
 
     static final class Stale extends RuntimeException {}
     static final class CandidateNotAuthorized extends RuntimeException {}
@@ -40,7 +38,6 @@ final class TaskQuoteIntentService {
         var scope=new AgentTaskExecutionGrantService.Scope(actor.tenantId(),actor.clientId(),actor.ownerJiacn());
         var read=roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
             var stored=batches.replay(key,intent);if(stored!=null)return new Read(stored,null,null,null);
-            admission.requireOpen();
             if(!"open".equals(root.getRewardStatus())||!intent.expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
             return new Read(null,requirements.readCurrentWithinLockedTask(scope,task,root),AgentTaskStoredLists.read(root.getRequiredAbilities()),grants.snapshotTaskInputsWithinLockedTask(scope,task));
         });

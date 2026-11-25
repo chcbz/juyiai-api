@@ -41,7 +41,7 @@ public final class AssigneeRecommendationService {
         var task = transactions.observe(actor.tenantId(),actor.clientId(),actor.ownerJiacn(),taskId,
                 root->{
                     // Recommendation is a read, not admission. Keep owner/version checks while
-                    // assignment, preparation and quote issuance enforce the admission pause.
+                    // Assignment and quote issuance enforce their own authorization and data requirements.
                     return task(agents.getTaskRecommendationInputWithinLockedTask(taskId,root),request.expectedTaskVersion());
                 });
         var observed = observe(actor, taskId,"initial");

@@ -1895,7 +1895,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     private cn.jia.agent.api.AgentController directController;
-    @Test void directAssignmentPausePreservesSignedReplayAndSingleHold() throws Exception {
+    @Test void directAssignmentPreservesSignedReplayAndSingleHold() throws Exception {
         directController=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));
         directController.setTaskExecutionGrants(assignment);startHttp();
         var params=new java.util.LinkedHashMap<String,Object>();params.put("workflowVersion",2);params.put("businessAction","assign_and_start");
@@ -1903,36 +1903,34 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         params.put("recommendationId","recommendation-1");params.put("requestedOperations",List.of("DELIBERATE","EXECUTE_SKILL"));
         params.put("initialOperation","DELIBERATE");params.put("inputRefs",List.of());
         var json=new ObjectMapper();String token=httpToken();
-        try(var beans=new AnnotationConfigApplicationContext();var client=HttpClient.newHttpClient()){
-            beans.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("cutover",Map.of("jia.agent.task-assignee.pause-new-admission","true")));
-            beans.register(TaskAssigneeAdmission.class);beans.refresh();var paused=beans.getBean(TaskAssigneeAdmission.class);assertTrue(paused.paused());
+        try(var client=HttpClient.newHttpClient()){
             class Send {tools.jackson.databind.JsonNode post(String key,int status,String code)throws Exception{
                 var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/assign")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","direct-assign").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("protocolVersion",1,"requestId","direct-assign","data",params)))).build();
                 var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());
                 assertTrue(response.headers().allValues("Cache-Control").stream().anyMatch(v->v.contains("no-store")));
                 var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());assertEquals("direct-assign",env.path("requestId").asText());return env.path("data");
-            }}var send=new Send();ReflectionTestUtils.setField(assignment,"admission",paused);
-            httpPost("/assign",json.writeValueAsString(params),"direct",false,401);send.post("direct",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");assertAssignmentAbsent();
-            ReflectionTestUtils.setField(assignment,"admission",new TaskAssigneeAdmission(false));var first=send.post("direct",200,"E0");assertFalse(first.path("grantId").asText().isBlank());
-            ReflectionTestUtils.setField(assignment,"admission",paused);assertEquals(first,send.post("direct",200,"E0"));send.post("different-key",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+            }}var send=new Send();
+            httpPost("/assign",json.writeValueAsString(params),"direct",false,401);assertAssignmentAbsent();
+            var first=send.post("direct",200,"E0");assertFalse(first.path("grantId").asText().isBlank());
+            assertEquals(first,send.post("direct",200,"E0"));
             params.put("initialOperation","EXECUTE_SKILL");send.post("direct",409,"AGENT_GRANT_IDEMPOTENCY_CONFLICT");
             assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
         }
     }
 
-    /** Independent listeners and admission services; SQL, signing authority and external test observations are shared. */
+    /** Independent listeners and application services; SQL, signing authority and external test observations are shared. */
     private final class AssignmentNode implements AutoCloseable {
         final Tomcat server=new Tomcat(); final AnnotationConfigWebApplicationContext app=new AnnotationConfigWebApplicationContext();
         cn.jia.agent.api.AssigneeRecommendationController recommendation;
         NativeTaskPreparationService selection;
         String base;
-        void start(String name,boolean paused) throws Exception {start(name,paused,null);}
-        void start(String name,boolean paused,cn.jia.agent.api.IndependentTaskQuoteController quote) throws Exception {
+        void start(String name) throws Exception {start(name,null);}
+        void start(String name,cn.jia.agent.api.IndependentTaskQuoteController quote) throws Exception {
             Path dir=Files.createDirectory(httpDirectory.resolve(name));server.setBaseDir(dir.toString());server.setPort(0);
             server.getConnector().setProperty("address","127.0.0.1");
             var context=server.addContext("",Files.createDirectory(dir.resolve("webroot")).toString());context.setParentClassLoader(getClass().getClassLoader());
-            app.setServletContext(context.getServletContext());app.getEnvironment().getPropertySources().addFirst(new org.springframework.core.env.MapPropertySource("node",Map.of("jia.agent.task-assignee.pause-new-admission",Boolean.toString(paused))));
-            app.register(HttpApp.class,TaskAssigneeAdmission.class);
+            app.setServletContext(context.getServletContext());
+            app.register(HttpApp.class);
             var service=newAssignment.get();var controller=new cn.jia.agent.api.AgentController(mock(AgentService.class),mock(AbilityEvaluationService.class));controller.setTaskExecutionGrants(service);
             var decoder=NimbusJwtDecoder.withSecretKey(new SecretKeySpec(signingKey,"HmacSHA256")).macAlgorithm(MacAlgorithm.HS256).build();decoder.setJwtValidator(JwtValidators.createDefaultWithIssuer("cyf-agent-billing-fixture"));
             app.addBeanFactoryPostProcessor(f->{f.registerSingleton("decoder",decoder);f.registerSingleton("direct",controller);if(quote!=null)f.registerSingleton("quotes",quote);
@@ -1940,14 +1938,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 if(recommendation!=null)f.registerSingleton("recommendation",recommendation);
                 f.registerSingleton("point",new AgentTaskDeliberationOperationController(operationReads,service));
                 f.registerSingleton("cancel",new AgentTaskCancellationController(cancellation));});
-            app.refresh();ReflectionTestUtils.setField(service,"admission",app.getBean(TaskAssigneeAdmission.class));
-            if(quote!=null)ReflectionTestUtils.setField(ReflectionTestUtils.getField(ReflectionTestUtils.getField(quote,"quotes"),"intents"),"admission",app.getBean(TaskAssigneeAdmission.class));
-            if(selection!=null)ReflectionTestUtils.setField(selection,"admission",app.getBean(TaskAssigneeAdmission.class));
+            app.refresh();
             installDispatcher(context,app);server.start();base="http://127.0.0.1:"+server.getConnector().getLocalPort();
         }
         public void close() throws Exception {try {if(base!=null)server.stop();}finally{try{server.destroy();}finally{app.close();}}}
     }
-    @Test void directAssignmentMixedAdmissionNodesRequireWithdrawalOfOpenListener() throws Exception {
+    @Test void directAssignmentAcrossNodesAndRestartHasSingleHold() throws Exception {
         signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
         var params=Map.of("workflowVersion",2,"businessAction","assign_and_start","expectedTaskVersion",0,"requirementRevision",1,"agentId",AGENT,"quoteId",quoteId,"recommendationId","recommendation-1","requestedOperations",List.of("DELIBERATE","EXECUTE_SKILL"),"initialOperation","DELIBERATE","inputRefs",List.of());
         String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","node-cutover","data",params));
@@ -1955,21 +1951,21 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             class Send {tools.jackson.databind.JsonNode post(AssignmentNode node,String key,int status,String code)throws Exception {
                 var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+TASK+"/assign")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","node-cutover").POST(HttpRequest.BodyPublishers.ofString(body)).build();
                 var res=client.send(req,HttpResponse.BodyHandlers.ofString());assertEquals(status,res.statusCode(),res.body());var env=json.readTree(res.body());assertEquals(code,env.path("code").asText());assertEquals("node-cutover",env.path("requestId").asText());return env.path("data");
-            }}var send=new Send();String paused="TASK_ASSIGNEE_ADMISSION_PAUSED";a.start("a",true);tools.jackson.databind.JsonNode first;
-            try(var b=new AssignmentNode()){b.start("b",false);assertNotEquals(a.base,b.base);send.post(a,"original",503,paused);assertAssignmentAbsent();first=send.post(b,"original",200,"E0");assertFalse(first.path("grantId").asText().isBlank());}
-            try(var replacement=new AssignmentNode()){replacement.start("replacement",true);assertNotEquals(a.base,replacement.base);
-                for(var node:List.of(a,replacement)){send.post(node,"new-intent",503,paused);assertEquals(first,send.post(node,"original",200,"E0"));}}
+            }}var send=new Send();a.start("a");tools.jackson.databind.JsonNode first;
+            try(var b=new AssignmentNode()){b.start("b");assertNotEquals(a.base,b.base);assertAssignmentAbsent();first=send.post(b,"original",200,"E0");assertFalse(first.path("grantId").asText().isBlank());}
+            try(var replacement=new AssignmentNode()){replacement.start("replacement");assertNotEquals(a.base,replacement.base);
+                for(var node:List.of(a,replacement)){assertEquals(first,send.post(node,"original",200,"E0"));}}
             assertEquals(50,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
         }
     }
 
-    @Test void recommendationRemainsReadableOnPausedNodesWithoutAdmissionOrWalletWrites() throws Exception {
+    @Test void recommendationReadsAcrossNodesWithoutWalletWrites() throws Exception {
         signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
         jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('other-rec','foreign-owner',?,?)",TENANT,CLIENT);
         try(var a=new AssignmentNode();var b=new AssignmentNode();var client=HttpClient.newHttpClient()){
             var first=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.readOnly(roots,TASK);
             var second=cn.jia.agent.service.recommendation.RecommendationHttpTestWiring.readOnly(roots,TASK);
-            a.recommendation=first.controller();b.recommendation=second.controller();a.start("a",true);b.start("b",true);assertNotEquals(a.base,b.base);
+            a.recommendation=first.controller();b.recommendation=second.controller();a.start("a");b.start("b");assertNotEquals(a.base,b.base);
             for(var node:List.of(a,b))for(var task:List.of(TASK,"other-rec","missing-rec"))for(var version:List.of("0","999")){
                 String id="recommend-stop";String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId",id,"data",Map.of("expectedTaskVersion",version)));
                 var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+token).header("Content-Type","application/json").header("X-Request-Id",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();
@@ -1985,34 +1981,33 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_meta WHERE task_id IN (?,?) AND task_version=0 AND reward_status='open'",Integer.class,TASK,"other-rec"));
         }
     }
-    @Test void pointAssignmentStoppedNodesReplayReadAndCancelOriginalGrant() throws Exception {
+    @Test void pointAssignmentAcrossNodesReplaysReadsAndCancelsOriginalGrant() throws Exception {
         prepareCancellation();signingKey=new byte[32];new SecureRandom().nextBytes(signingKey);String token=httpToken();var json=new ObjectMapper();
-        String point="/point-and-deliberate", paused="TASK_ASSIGNEE_ADMISSION_PAUSED";
+        String point="/point-and-deliberate";
         try(var client=HttpClient.newHttpClient();var a=new AssignmentNode()) {
             class Wire {tools.jackson.databind.JsonNode send(AssignmentNode node,String route,String key,String data,int status,String code)throws Exception {
                 var req=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+TASK+route)).header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id","point-cutover");
                 if(data!=null)req.header("Content-Type","application/json").POST(HttpRequest.BodyPublishers.ofString(json.writeValueAsString(Map.of("protocolVersion",1,"requestId","point-cutover","data",json.readTree(data)))));
                 var res=client.send(req.build(),HttpResponse.BodyHandlers.ofString());assertEquals(status,res.statusCode(),res.body());var env=json.readTree(res.body());assertEquals(code,env.path("code").asText());assertEquals("point-cutover",env.path("requestId").asText());
                 if(status==503){var cache=String.join(",",res.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);}return env.path("data");
-            }}var wire=new Wire();a.start("a",true);tools.jackson.databind.JsonNode original;
-            try(var open=new AssignmentNode()){open.start("open",false);wire.send(a,point,"point",pointBody(),503,paused);assertAssignmentAbsent();original=wire.send(open,point,"point",pointBody(),200,"E0");assertFalse(original.path("grantId").asText().isBlank());}
-            try(var b=new AssignmentNode()){b.start("b",true);for(var node:List.of(a,b)){
-                wire.send(node,point,"fresh",pointBody(),503,paused);assertEquals(original,wire.send(node,point,"point",pointBody(),200,"E0"));assertEquals(original,wire.send(node,point+"/request","point",null,200,"E0"));}
+            }}var wire=new Wire();a.start("a");tools.jackson.databind.JsonNode original;
+            try(var open=new AssignmentNode()){open.start("open");assertAssignmentAbsent();original=wire.send(open,point,"point",pointBody(),200,"E0");assertFalse(original.path("grantId").asText().isBlank());}
+            try(var b=new AssignmentNode()){b.start("b");for(var node:List.of(a,b)){
+                assertEquals(original,wire.send(node,point,"point",pointBody(),200,"E0"));assertEquals(original,wire.send(node,point+"/request","point",null,200,"E0"));}
                 assertEquals(50,wallet(independent));assertEquals(1,count("economy_transaction"));assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
                 prepareRetry();for(var node:List.of(b,a)){wire.send(node,"/cancel","cancel-point","{\"expectedTaskVersion\":\"1\"}",200,"E0");assertCancelled();}
             }
         }
     }
 
-    @Test void pausedAssignmentRejectsNewIntentButPreservesReplayAndCancellation() throws Exception {
+    @Test void assignmentAuthenticatesAndPreservesReplayAndCancellation() throws Exception {
         prepareCancellation(); startHttp();
-        var pause = new cn.jia.agent.service.TaskAssigneeAdmission(true);
-        ReflectionTestUtils.setField(assignment,"admission",pause);
+
         httpPost("/point-and-deliberate",pointBody(),"assign-http",false,401);
-        pointHttp(503); assertAssignmentAbsent();
-        ReflectionTestUtils.setField(assignment,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(false));
+        assertAssignmentAbsent();
+
         pointHttp(200);
-        ReflectionTestUtils.setField(assignment,"admission",pause); pointHttp(200);
+        pointHttp(200);
         assertEquals(1,count("economy_transaction")); assertEquals(1,count("agent_task_execution_grant"));
         prepareRetry(); httpPost("/cancel","{\"expectedTaskVersion\":\"1\"}","cancel-http",true,200); assertCancelled();
     }
@@ -2033,7 +2028,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(49, wallet(independent)); assertEquals("open", taskState());
         assertEquals(0, count("economy_transaction")); assertEquals(0, count("agent_task_execution_grant"));
         jdbc.update("UPDATE economy_account SET balance_wen=100 WHERE account_id='wallet'");
-        failBootstrap = true; pointHttp(503); assertAssignmentAbsent();
+        failBootstrap = true; assertAssignmentAbsent();
         failBootstrap = false; pointHttp(200);
         assertEquals(50, wallet(independent)); assertEquals("HELD", charge());
     }
@@ -2142,7 +2137,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var window=QuoteWireWindow.paid(id,agent,group.digest(),book.sha256(),privateKeys);
         TaskQuoteBatches.Result observedFirst=null,observedOther=null;
         try(var client=HttpClient.newHttpClient();var open=diagnostic?null:new AssignmentNode()){
-            if(open!=null)open.start("quote-open",false,quoteNode.get());String quoteOrigin=open==null?origin:open.base;
+            if(open!=null)open.start("quote-open",quoteNode.get());String quoteOrigin=open==null?origin:open.base;
             for(int i=0;i<32;i++){
                 String key=i==31?privateKeys.get(0):i<2?privateKeys.get(i):"fixture-"+i;
                 String rawBody="{\"protocolVersion\":1,\"requestId\":\"quote-http\",\"data\":{\"expectedTaskVersion\":\"0\",\"agentIds\":[\""+agent+"\"]}}";
@@ -2163,14 +2158,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             long balance=wallet(independent);int charges=count("economy_task_charge");var original=observedFirst;
             String foreign=id+"-foreign";jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",foreign,"other-owner",TENANT,CLIENT);
             try(var a=new AssignmentNode();var b=new AssignmentNode();var client=HttpClient.newHttpClient()){
-                a.start("quote-stopped-a",true,quoteNode.get());b.start("quote-stopped-b",true,quoteNode.get());assertNotEquals(a.base,b.base);
+                a.start("quote-peer-a",quoteNode.get());b.start("quote-peer-b",quoteNode.get());assertNotEquals(a.base,b.base);
                 class Wire {void post(AssignmentNode node,String task,String key,String version,int status,String code)throws Exception{
                     var data=Map.of("expectedTaskVersion",version,"agentIds",List.of(agent));String rid="quote-cutover";
                     var request=HttpRequest.newBuilder(URI.create(node.base+"/agent/tasks/"+task+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("Idempotency-Key",key).header("X-Request-Id",rid).POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId",rid,"data",data)))).build();
                     var response=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(status,response.statusCode(),response.body());var env=mapper.readTree(response.body());assertEquals(code,env.path("code").asText());assertEquals(rid,env.path("requestId").asText());String cache=String.join(",",response.headers().allValues("Cache-Control"));assertTrue(cache.contains("private")&&cache.contains("no-store"),cache);
                     if(status==200)assertEquals(original,mapper.treeToValue(env.path("data"),TaskQuoteBatches.Result.class));
                 }}var wire=new Wire();for(var node:List.of(a,b)){
-                    wire.post(node,foreign,privateKeys.getFirst(),"0",404,"QUOTE_NOT_FOUND");wire.post(node,id,"fresh-stopped","0",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+                    wire.post(node,foreign,privateKeys.getFirst(),"0",404,"QUOTE_NOT_FOUND");wire.post(node,id,"fresh-stale","999",409,"QUOTE_STALE");
                     wire.post(node,id,privateKeys.getFirst(),"1",409,"QUOTE_IDEMPOTENCY_CONFLICT");wire.post(node,id,privateKeys.getFirst(),"0",200,"E0");
                 }
             }
@@ -2944,7 +2939,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             ctx.registerBean(NativeTaskConfigurationProbe.class,()->probe);
             var reader=new cn.jia.agent.service.recommendation.PreparedTaskTermsReader(service,sessions,ctx.getDefaultListableBeanFactory().getBeanProvider(NativeTaskConfigurationProbe.class));
             var queued=new java.util.concurrent.atomic.AtomicInteger();var release=new java.util.concurrent.CountDownLatch(1);
-            // Occupy the original worker until both HTTP admission surfaces are paused. Do not stop its event context.
+            // Occupy the original worker until cross-node replay has completed. Do not stop its event context.
             pool.submit(()->{release.await();return null;});
             try {
                 ctx.registerBean(cn.jia.agent.service.recommendation.SelectedTaskComparison.class,()->new cn.jia.agent.service.recommendation.SelectedTaskComparison(job->{queued.incrementAndGet();pool.execute(job);},reader));ctx.refresh();service.setSelectionEvents(ctx);
@@ -2965,15 +2960,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     if(key!=null)req.header("Idempotency-Key",key);var data=Map.of("choice",choice,"selectionVersion",version);
                     req.header("Content-Type","application/json").PUT(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","selection","data",data))));}
                 var r=client.send(req.build(),HttpResponse.BodyHandlers.ofString());assertEquals(expected,r.statusCode(),r.body());var env=mapper.readTree(r.body());assertEquals(code,env.path("code").asText());assertEquals("selection",env.path("requestId").asText());String cache=String.join(",",r.headers().allValues("Cache-Control"));assertTrue(cache.contains("no-store")&&cache.contains("private"),cache);return env.path("data");
-            }}var call=new Call();a.selection=peer.get();a.start("paused-a",true);var empty=call.run(a,null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt"),frozen=count("agent_task_native_preparation");
-            call.run(a,"one","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");assertEquals(before,count("agent_task_native_selection_receipt"));assertEquals(frozen,count("agent_task_native_preparation"));
+            }}var call=new Call();a.selection=peer.get();a.start("peer-a");var empty=call.run(a,null,null,null,200,"E0");String stamp=empty.path("selectionVersion").asText();int before=count("agent_task_native_selection_receipt"),frozen=count("agent_task_native_preparation");
             tools.jackson.databind.JsonNode saved;
-            try(var open=new AssignmentNode()){open.selection=original;open.start("open",false);assertEquals(empty,call.run(open,null,null,null,200,"E0"));call.run(open,null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");saved=call.run(open,"one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());}
-            b.selection=peer.get();b.start("paused-b",true);assertNotEquals(a.base,b.base);
-            for(var node:List.of(a,b)){assertEquals(saved,call.run(node,null,null,null,200,"E0"));assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));call.run(node,"new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");}
+            try(var open=new AssignmentNode()){open.selection=original;open.start("open");assertEquals(empty,call.run(open,null,null,null,200,"E0"));call.run(open,null,"LOCAL_ANSWER",stamp,400,"BAD_REQUEST");saved=call.run(open,"one","LOCAL_ANSWER",stamp,200,"E0");assertEquals("LOCAL_ANSWER",saved.path("choice").asText());}
+            b.selection=peer.get();b.start("peer-b");assertNotEquals(a.base,b.base);
+            for(var node:List.of(a,b)){assertEquals(saved,call.run(node,null,null,null,200,"E0"));assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));}
             drain.call();jdbc.update("UPDATE agent_task_meta SET task_version=task_version+1 WHERE task_id=?",TASK);
-            for(var node:List.of(b,a)){assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));call.run(node,"one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");call.run(node,"new","LOCAL_ANSWER",stamp,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");}
-            try(var reopened=new AssignmentNode()){reopened.selection=peer.get();reopened.start("reopened",false);call.run(reopened,"new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");}
+            for(var node:List.of(b,a)){assertEquals(saved,call.run(node,"one","LOCAL_ANSWER",stamp,200,"E0"));call.run(node,"one","LOCAL_TEXT_FILE",stamp,409,"INITIAL_ACTION_IDEMPOTENCY_CONFLICT");}
+            try(var reopened=new AssignmentNode()){reopened.selection=peer.get();reopened.start("reopened");call.run(reopened,"new","LOCAL_ANSWER",stamp,409,"INITIAL_ACTION_STALE");}
             assertEquals(before+1,count("agent_task_native_selection_receipt"));assertEquals(frozen+1,count("agent_task_native_preparation"));
         }
     }
@@ -3138,11 +3132,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
             assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
             if(window!=null)window.seal();
-            var intents=ReflectionTestUtils.getField(ReflectionTestUtils.getField(independentQuoteController,"quotes"),"intents");
-            ReflectionTestUtils.setField(intents,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(true));
             assertEquals(original,http.post(agent,key,200,"E0"));
             http.post("changed-target",key,409,"QUOTE_IDEMPOTENCY_CONFLICT");
-            http.post(agent,"paused-intent",503,"TASK_ASSIGNEE_ADMISSION_PAUSED");
+            http.post(agent,"another-fresh-intent",404,"QUOTE_NOT_FOUND");
         }
         assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
@@ -3337,10 +3329,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     checkRecError(task,503,"RECOMMENDATION_UNAVAILABLE");
                     jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES('foreign-rec','different-owner',?,?)",TENANT,CLIENT);
                     checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");assertEquals(before,es.encodes.get());
-                    var svc=ReflectionTestUtils.getField(recommendationController,"recommendations");
-                    ReflectionTestUtils.setField(svc,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(true));
-                    checkRecError(task,503,"TASK_ASSIGNEE_ADMISSION_PAUSED");checkRecError("foreign-rec",404,"RECOMMENDATION_NOT_FOUND");
-                    assertEquals(before,es.encodes.get());ReflectionTestUtils.setField(svc,"admission",new cn.jia.agent.service.TaskAssigneeAdmission(false));
                     String other=expected.stream().skip(9).findFirst().orElseThrow();var ids=java.util.Set.of(onlySkill,other);
                     assertEquals(ids,auth.currentRegisteredProofs(TENANT,CLIENT,ids).keySet());
                     // Same fence and even the same socket ID after disconnect are not the same observed binding.

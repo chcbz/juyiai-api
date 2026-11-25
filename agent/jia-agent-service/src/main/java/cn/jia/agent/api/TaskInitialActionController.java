@@ -14,7 +14,7 @@ import tools.jackson.databind.JsonNode;
 @RestController
 @RequestMapping("/agent/tasks/{taskId}/initial-actions/{agentId}")
 @ConditionalOnProperty(name="jia.agent.task-quotes.prepared-observations-enabled",havingValue="true")
-public final class TaskInitialActionController implements TaskAssigneeAdmissionErrors {
+public final class TaskInitialActionController {
     private final TaskInitialActionSelection choices;
     public TaskInitialActionController(TaskInitialActionSelection choices){this.choices=choices;}
     private HostingRentHttp.Actor actor(Authentication authentication){var a=HostingRentHttp.actor(authentication);var c=EsContextHolder.getContext();

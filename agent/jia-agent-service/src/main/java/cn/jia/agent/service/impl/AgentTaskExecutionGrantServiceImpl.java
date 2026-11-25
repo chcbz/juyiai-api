@@ -44,8 +44,6 @@ import static cn.jia.agent.service.AgentTaskExecutionGrantException.Reason;
 
 @Named
 public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecutionGrantService {
-    @org.springframework.beans.factory.annotation.Autowired
-    private cn.jia.agent.service.TaskAssigneeAdmission admission = new cn.jia.agent.service.TaskAssigneeAdmission(false);
 
     static final String ACTION = "assign_and_start";
     static final String POLICY_REVISION = "MMD_U1_V1";
@@ -281,7 +279,6 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
             throw bad("assign_and_start requires exactly one initial permitted operation");
         }
 
-        if (path != AdmissionPath.CONTROLLED_IMAGE) admission.requireOpen();
 
         AtomicReference<List<InputSnapshot>> snapshot = new AtomicReference<>();
         AtomicReference<cn.jia.agent.service.TaskAssigneeAuthorityService.Target> target = new AtomicReference<>();

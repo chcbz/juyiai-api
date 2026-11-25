@@ -42,7 +42,7 @@ import java.util.Objects;
 @RequestMapping("/agent/tasks")
 @ConditionalOnProperty(prefix = "agent.task-deliberation-operation", name = "read-enabled",
         havingValue = "true")
-public final class AgentTaskDeliberationOperationController implements TaskAssigneeAdmissionErrors {
+public final class AgentTaskDeliberationOperationController {
     static final String CACHE_CONTROL = "private, no-store";
     private static final Set<String> POINT_FIELDS = Set.of(
             "targetAgentId", "expectedTaskVersion", "requirementRevision", "quoteId", "recommendationId");
