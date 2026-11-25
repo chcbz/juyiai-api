@@ -38,6 +38,19 @@ class SkillPackagePublicationControllerTest {
 
         verifyNoMoreInteractions(service);
     }
+    @Test void multipartMetadataIsNotMistakenForAQueryAndWaiverIsExplicit() throws Exception {
+        var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
+        var request=new MockHttpServletRequest("POST","/agent/skill-maintenance/product-versions");
+        request.setParameter("metadata",metadata("")); // Servlet multipart fields appear in the parameter map.
+        var file=new MockMultipartFile("package","skill.zip","application/zip",new byte[]{1});
+        controller.publish(actor(false),request,metadata(",\"coveredUpgradeFromProductVersionId\":\"source\",\"waiveUpgradeOperationFee\":true"),file);
+        verify(service).publish(any(),any(),argThat(c->c.waiveUpgradeOperationFee()&&"source".equals(c.coveredUpgradeFromProductVersionId())),any());
+        request.setQueryString("unexpected=1");
+        assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(""),file));
+        request.setQueryString(null);
+        assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(",\"waiveUpgradeOperationFee\":\"true\""),file));
+        verifyNoMoreInteractions(service);
+    }
     @Test void adminRoleDoesNotReplaceRequiredAppointment() {
         var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
         var request=new MockHttpServletRequest("POST","/agent/skill-maintenance/product-versions");

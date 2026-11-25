@@ -993,6 +993,8 @@ def skillManagementContractSourceSet = sourceSets.create('skillManagementContrac
     java.include 'cn/jia/agent/skill/SkillInstallRecoveryServiceTest.java'
     java.include 'cn/jia/agent/skill/SkillExecutionSchemaMySqlTest.java'
     java.include 'cn/jia/agent/skill/SkillTransportStorageAssertions.java'
+    java.include 'cn/jia/agent/skill/SkillPackagePublicationServiceTest.java'
+    java.include 'cn/jia/agent/api/SkillPackagePublicationControllerTest.java'
     resources.setSrcDirs(['src/skillManagementContract/resources'])
     compileClasspath += sourceSets.main.output
     runtimeClasspath += output + compileClasspath
@@ -1024,7 +1026,7 @@ dependencies {
 tasks.register('skillManagementContract', Test) {
     group = 'verification'
     description = 'Strict SM-C1 wire, actual HTTP adapter and private MySQL transactions; never production DB.'
-    filter { includeTestsMatching 'cn.jia.agent.skill.SkillManagement*'; includeTestsMatching 'cn.jia.agent.skill.SkillInstallRecoveryServiceTest'; includeTestsMatching 'cn.jia.agent.service.AgentStatusMonitorTest'; includeTestsMatching 'cn.jia.agent.config.AgentStatusSchedulingConfigurationTest' }
+    filter { includeTestsMatching 'cn.jia.agent.skill.SkillPackagePublicationServiceTest'; includeTestsMatching 'cn.jia.agent.api.SkillPackagePublicationControllerTest'; includeTestsMatching 'cn.jia.agent.skill.SkillManagement*'; includeTestsMatching 'cn.jia.agent.skill.SkillInstallRecoveryServiceTest'; includeTestsMatching 'cn.jia.agent.service.AgentStatusMonitorTest'; includeTestsMatching 'cn.jia.agent.config.AgentStatusSchedulingConfigurationTest' }
     dependsOn tasks.named(skillManagementContractSourceSet.classesTaskName)
     testClassesDirs = skillManagementContractSourceSet.output.classesDirs
     classpath = skillManagementContractSourceSet.runtimeClasspath

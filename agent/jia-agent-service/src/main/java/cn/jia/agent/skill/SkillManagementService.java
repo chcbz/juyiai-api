@@ -452,7 +452,8 @@ public final class SkillManagementService {
                 require(!ref(src).get("productVersionId").equals(data.get("targetProductVersionId")),409,"SKILL_STATE_CONFLICT");
                 String policy=db.upgradePolicy(a.tenantId(),a.clientId(),text(ref(src),"productVersionId"),text(data,"targetProductVersionId"));
                 require(policy!=null,409,"SKILL_UPGRADE_POLICY_UNSET");require(!"NOT_ALLOWED".equals(policy),409,"SKILL_UPGRADE_NOT_ALLOWED");
-                require(Set.of("COVERED","PAID").contains(policy),409,"SKILL_UPGRADE_POLICY_UNSET");
+                require(Set.of("COVERED","PAID","COVERED_NO_FEE").contains(policy),409,"SKILL_UPGRADE_POLICY_UNSET");
+                if("COVERED_NO_FEE".equals(policy))price=0;
             }
             long now=System.currentTimeMillis();String quote=id("sq_");
             var result=map("quoteId",quote,"action",data.get("action"),"agentId",agent,"skillKey",state.getSkillKey(),
@@ -501,15 +502,17 @@ public final class SkillManagementService {
                         &&prepared.target().get("packageSha256").equals(quote.get("targetPackageSha256")),409,"SKILL_QUOTE_MISMATCH");
                 require(json(data.get("approvedPermissions")).equals(json(prepared.details().get("requiredPermissions"))),409,"SKILL_PERMISSIONS_MISMATCH");
                 require(trade.orderForQuote(a.tenantId(),a.clientId(),q.getQuoteId())==null,409,"SKILL_QUOTE_MISMATCH");
+                long expectedPrice=SkillOperationFees.forAction(text(data,"action"));
                 if(src!=null) {
                     String policy=db.upgradePolicy(a.tenantId(),a.clientId(),text(ref(src),"productVersionId"),text(data,"targetProductVersionId"));
                     require(policy!=null,409,"SKILL_UPGRADE_POLICY_UNSET");require(!"NOT_ALLOWED".equals(policy),409,"SKILL_UPGRADE_NOT_ALLOWED");
-                    require(Set.of("COVERED","PAID").contains(policy),409,"SKILL_UPGRADE_POLICY_UNSET");
+                    require(Set.of("COVERED","PAID","COVERED_NO_FEE").contains(policy),409,"SKILL_UPGRADE_POLICY_UNSET");
+                    if("COVERED_NO_FEE".equals(policy))expectedPrice=0;
                 }
                 // Unaccepted old/free quotes cannot open a new operation after the fee switch.
                 // Already accepted operations replay above with their original frozen funding facts.
                 require("PURCHASE".equals(quote.get("coverage"))
-                        && Long.toString(SkillOperationFees.forAction(text(data,"action")))
+                        && Long.toString(expectedPrice)
                         .equals(text(object(quote.get("price")),"amountMinor")),409,"SKILL_QUOTE_MISMATCH");
                 target=decode(q.getTargetJson(),"PackageRef");details=decode(q.getDetailsJson(),"VersionDetails");permissions=json(data.get("approvedPermissions"));
             } else {target=ref(src);details=decode(src.getDetailsJson(),"VersionDetails");permissions=src.getPermissionsJson();}
@@ -796,7 +799,7 @@ public final class SkillManagementService {
                 String eligibility="NOT_APPLICABLE";
                 if(auth!=null&&candidate!=null&&!ref(auth).get("productVersionId").equals(candidate.target().get("productVersionId"))) {
                     String policy=db.upgradePolicy(a.tenantId(),a.clientId(),text(ref(auth),"productVersionId"),text(candidate.target(),"productVersionId"));
-                    eligibility=policy==null?"POLICY_UNSET":"NOT_ALLOWED".equals(policy)?"NOT_ALLOWED":policy;
+                    eligibility=policy==null?"POLICY_UNSET":"COVERED_NO_FEE".equals(policy)?"COVERED":policy;
                 }
                 var runtime=runtime(a,agent,s,auth,catalog,connected,relationship);
                 var allowed=new ArrayList<String>(List.of("VIEW"));var denied=new ArrayList<Map<String,Object>>();

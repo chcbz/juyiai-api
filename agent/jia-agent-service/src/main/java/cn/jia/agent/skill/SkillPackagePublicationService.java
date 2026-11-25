@@ -20,7 +20,15 @@ import static cn.jia.agent.skill.SkillMarketplaceException.require;
 public final class SkillPackagePublicationService {
     public record Publish(String productId,String productVersionId,String name,String description,String skillKey,
             String skillVersion,long priceWen,String deploymentRestriction,String approvedPermissionsManifest,
-            String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId) { }
+            String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId,
+            boolean waiveUpgradeOperationFee) {
+        public Publish(String productId,String productVersionId,String name,String description,String skillKey,
+                String skillVersion,long priceWen,String deploymentRestriction,String approvedPermissionsManifest,
+                String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId) {
+            this(productId,productVersionId,name,description,skillKey,skillVersion,priceWen,deploymentRestriction,
+                    approvedPermissionsManifest,packageSha256,manifestSha256,expectedProductVersion,coveredUpgradeFromProductVersionId,false);
+        }
+    }
     public record Receipt(String productId,String productVersionId,long productVersion,String packageSha256,
             String manifestSha256,String disposition,String coveredUpgradeFromProductVersionId) { }
     private final SkillCatalogMapper market;
@@ -181,14 +189,18 @@ public final class SkillPackagePublicationService {
                 &&"APPROVED".equals(source.getReviewStatus())&&source.getVersionSequence()!=null
                 &&source.getVersionSequence()<target.getVersionSequence(),409,"SKILL_UPGRADE_SOURCE_INVALID");
         String policy=market.selectUpgradePolicy(actor.tenantId(),actor.clientId(),sourceId,command.productVersionId());
-        if(policy==null)one(market.insertCoveredUpgradePolicy(actor.tenantId(),actor.clientId(),sourceId,command.productVersionId()));
-        else require("COVERED".equals(policy),409,"SKILL_UPGRADE_POLICY_CONFLICT");
+        String expected=command.waiveUpgradeOperationFee()?"COVERED_NO_FEE":"COVERED";
+        if(policy==null) {
+            if(command.waiveUpgradeOperationFee())one(market.insertNoFeeUpgradePolicy(actor.tenantId(),actor.clientId(),sourceId,command.productVersionId()));
+            else one(market.insertCoveredUpgradePolicy(actor.tenantId(),actor.clientId(),sourceId,command.productVersionId()));
+        } else require(expected.equals(policy),409,"SKILL_UPGRADE_POLICY_CONFLICT");
     }
     private static boolean matches(Scope a,Publish c,SkillProductVersionEntity v,byte[] hash,byte[] permissions,long byteLength) {return a.tenantId().equals(v.getTenantId())&&a.clientId().equals(v.getClientId())&&c.productId().equals(v.getProductId())&&c.productVersionId().equals(v.getProductVersionId())&&c.skillKey().equals(v.getSkillKey())&&c.skillVersion().equals(v.getSkillVersion())&&Objects.equals(c.priceWen(),v.getPriceWen())&&Arrays.equals(hash,v.getPackageSha256())&&Objects.equals(byteLength,v.getPackageSize())&&Arrays.equals(permissions,v.getApprovedPermissionsSha256())&&c.approvedPermissionsManifest().equals(v.getApprovedPermissionsManifest())&&c.deploymentRestriction().equals(v.getDeploymentRestriction())&&"APPROVED".equals(v.getReviewStatus());}
     private static Receipt receipt(Publish c,long version,String disposition){return new Receipt(c.productId(),c.productVersionId(),version,c.packageSha256(),c.manifestSha256(),disposition,c.coveredUpgradeFromProductVersionId());}
     private static void one(int count){require(count==1,409,"SKILL_PRODUCT_CHANGED");}
     private static void validate(Publish c,byte[] archive) {
         require(c!=null&&archive!=null&&archive.length>0&&archive.length<=SkillPackageStore.MAX_PACKAGE_BYTES,400,"SKILL_PACKAGE_INVALID");
+        require(!c.waiveUpgradeOperationFee()||c.coveredUpgradeFromProductVersionId()!=null,400,"SKILL_UPGRADE_SOURCE_REQUIRED");
         for(String id:Arrays.asList(c.productId(),c.productVersionId()))require(id!=null&&id.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}"),400,"BAD_REQUEST");
         require(c.coveredUpgradeFromProductVersionId()==null||c.coveredUpgradeFromProductVersionId().matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,99}"),400,"BAD_REQUEST");
         for(String id:Arrays.asList(c.skillKey(),c.skillVersion()))require(id!=null&&id.matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,63}"),400,"BAD_REQUEST");

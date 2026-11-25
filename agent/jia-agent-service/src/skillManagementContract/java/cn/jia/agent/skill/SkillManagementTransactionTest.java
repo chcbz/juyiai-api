@@ -901,6 +901,35 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         catalog(current(upgrade));assertEquals("SUCCEEDED",current(upgrade).get("status"));assertEquals("CAPTURED",current(upgrade).get("fundingStatus"));
         assertEquals(2,count("economy_skill_order"));assertEquals(99_999_930L,wallet());
     }
+    @Test void explicitNoFeeUpgradeSettlesWithoutWalletOrLedgerMutationAndReplays() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        publishExecutable("2.0.0",2);
+        tx.execute(status->{assertEquals(1,market.insertNoFeeUpgradePolicy("0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2"));return null;});
+        long balance=wallet();int transactions=count("economy_transaction"),escrows=count("economy_escrow");
+        var request=map("action","UPGRADE","agentId",AGENT,"skillKey","pdf-export","sourceSkillInstallationId",object(first.get("target")).get("skillInstallationId"),"targetProductVersionId","spv_pdf_2",
+                "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",first.get("skillRevision"),"approvedPermissions",List.of());
+        var q=service.quote(ACTOR,"free-quote",request,false);assertEquals("0",object(q.get("price")).get("amountMinor"));
+        var body=creation(q,request);var upgrade=service.create(ACTOR,AGENT,"free-create","request",body,false);
+        assertEquals("NONE",upgrade.get("fundingStatus"));assertNotNull(upgrade.get("orderId"));
+        assertEquals(upgrade.get("skillChangeId"),service.create(ACTOR,AGENT,"free-create","request",body,false).get("skillChangeId"));
+        finishInstall(upgrade);assertEquals("SUCCEEDED",current(upgrade).get("status"));assertEquals("NONE",current(upgrade).get("fundingStatus"));
+        assertEquals(balance,wallet());assertEquals(transactions,count("economy_transaction"));assertEquals(escrows,count("economy_escrow"));
+        assertEquals(0L,jdbc.queryForObject("SELECT price_wen FROM economy_skill_order WHERE order_id=?",Long.class,upgrade.get("orderId")));
+    }
+    @Test void feeWaiverQuoteCannotSurvivePolicyChangeOrEscapeItsExactPair() throws Exception {
+        publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
+        publishExecutable("2.0.0",2);
+        jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","COVERED_NO_FEE");
+        var row=((List<?>)service.skills(ACTOR,AGENT,false).get("items")).stream().map(SkillManagementCodec::object).filter(x->"pdf-export".equals(x.get("skillKey"))).findFirst().orElseThrow();
+        assertEquals("COVERED",row.get("upgradeEligibility"));assertTrue(((List<?>)row.get("allowedActions")).contains("UPGRADE"));
+        var request=map("action","UPGRADE","agentId",AGENT,"skillKey","pdf-export","sourceSkillInstallationId",object(first.get("target")).get("skillInstallationId"),"targetProductVersionId","spv_pdf_2",
+                "expectedAgentVersion",Long.toString(versions.readOwned(ACTOR,AGENT)),"expectedSkillRevision",first.get("skillRevision"),"approvedPermissions",List.of());
+        var q=service.quote(ACTOR,"waiver-before",request,false);assertEquals("0",object(q.get("price")).get("amountMinor"));
+        jdbc.update("UPDATE agent_skill_upgrade_policy SET policy='COVERED' WHERE source_product_version_id='spv_pdf_1' AND target_product_version_id='spv_pdf_2'");
+        assertEquals("SKILL_QUOTE_MISMATCH",assertThrows(SkillMarketplaceException.class,()->service.create(ACTOR,AGENT,"stale-free","request",creation(q,request),false)).code());
+        assertEquals("20",object(service.quote(ACTOR,"normal-after",request,false).get("price")).get("amountMinor"));
+        assertEquals(1,count("economy_skill_order"));assertEquals(99_999_950L,wallet());
+    }
     @Test void notAllowedUpgradeCannotCreateQuoteOrderOrInstallation() throws Exception {
         publishExecutable("1.0.0",1);var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);
         publishExecutable("2.0.0",2);jdbc.update("INSERT INTO agent_skill_upgrade_policy VALUES (?,?,?,?,?)","0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2","NOT_ALLOWED");

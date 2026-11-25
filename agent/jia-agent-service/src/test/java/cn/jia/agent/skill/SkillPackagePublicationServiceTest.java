@@ -85,6 +85,20 @@ class SkillPackagePublicationServiceTest {
                 ()->service.publish(actor,grant,covered("v2",2,"v2"),original.bytes())).code());
         verify(mapper,never()).insertCoveredUpgradePolicy(anyString(),anyString(),anyString(),anyString());
     }
+    @Test void explicitFeeWaiverIsPairBoundAndDoesNotRewriteCoveredOrPaidPolicy() {
+        service.publish(actor,grant,request("v1",0),original.bytes());
+        var c=covered("v2",2,"v1");
+        var free=new SkillPackagePublicationService.Publish(c.productId(),c.productVersionId(),c.name(),c.description(),c.skillKey(),c.skillVersion(),c.priceWen(),c.deploymentRestriction(),c.approvedPermissionsManifest(),c.packageSha256(),c.manifestSha256(),c.expectedProductVersion(),c.coveredUpgradeFromProductVersionId(),true);
+        when(mapper.insertNoFeeUpgradePolicy("0","client","v1","v2")).thenReturn(1);
+        assertEquals("PUBLISHED",service.publish(actor,grant,free,original.bytes()).disposition());
+        when(mapper.selectUpgradePolicy("0","client","v1","v2")).thenReturn("COVERED_NO_FEE");
+        assertEquals("RECORDED",service.publish(actor,grant,free,original.bytes()).disposition());
+        verify(mapper,times(1)).insertNoFeeUpgradePolicy("0","client","v1","v2");
+        when(mapper.selectUpgradePolicy("0","client","v1","v2")).thenReturn("COVERED");
+        assertEquals("SKILL_UPGRADE_POLICY_CONFLICT",assertThrows(SkillMarketplaceException.class,()->service.publish(actor,grant,free,original.bytes())).code());
+        var noSource=new SkillPackagePublicationService.Publish(c.productId(),c.productVersionId(),c.name(),c.description(),c.skillKey(),c.skillVersion(),c.priceWen(),c.deploymentRestriction(),c.approvedPermissionsManifest(),c.packageSha256(),c.manifestSha256(),c.expectedProductVersion(),null,true);
+        assertEquals("SKILL_UPGRADE_SOURCE_REQUIRED",assertThrows(SkillMarketplaceException.class,()->service.publish(actor,grant,noSource,original.bytes())).code());
+    }
     @Test void revokedAppointmentBetweenPreparationAndCommitCannotPublish() {
         when(positions.withSkillManagementAuthority(eq(actor),eq(grant),any()))
                 .thenAnswer(i->((Supplier<?>)i.getArgument(2)).get())

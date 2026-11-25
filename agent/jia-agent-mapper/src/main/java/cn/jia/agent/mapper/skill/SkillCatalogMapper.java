@@ -48,6 +48,10 @@ public interface SkillCatalogMapper {
     @Insert("INSERT INTO agent_skill_upgrade_policy(tenant_id,client_id,source_product_version_id,target_product_version_id,policy) VALUES(#{tenantId},#{clientId},#{source},#{target},'COVERED')")
     int insertCoveredUpgradePolicy(@Param("tenantId") String tenant,@Param("clientId") String client,@Param("source") String source,@Param("target") String target);
 
+    /** Explicit operation-fee waiver for this immutable source/target pair only. */
+    @Insert("INSERT INTO agent_skill_upgrade_policy(tenant_id,client_id,source_product_version_id,target_product_version_id,policy) VALUES(#{tenantId},#{clientId},#{source},#{target},'COVERED_NO_FEE')")
+    int insertNoFeeUpgradePolicy(@Param("tenantId") String tenant,@Param("clientId") String client,@Param("source") String source,@Param("target") String target);
+
     @Select("SELECT policy FROM agent_skill_upgrade_policy WHERE " + EXACT_SCOPE + " AND source_product_version_id=#{source} AND target_product_version_id=#{target} FOR UPDATE")
     String selectUpgradePolicy(@Param("tenantId") String tenant,@Param("clientId") String client,@Param("source") String source,@Param("target") String target);
 
