@@ -1198,6 +1198,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private static cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder textFixture(java.util.function.Function<cn.jia.economy.usage.ConfirmedSampleEvidence.Response,MeasuredTaskRepricing.Fact> fn){
         return new cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder(){public boolean coversAllOperations(String group,String policy){return "NATIVE_DISPATCH_GROUP_V1".equals(group)&&"cp".equals(policy);} public MeasuredTaskRepricing.Fact decode(cn.jia.economy.usage.ConfirmedSampleEvidence.Response r){return fn.apply(r);}};
     }
+    private boolean cancelQuotedNativeResult;
+    /** One task from a synthetic calibrated quote through the real loopback-backed Runtime
+     * result commit to HTTP cancellation/refund. Not production cost or delivery acceptance. */
+    @Test void quotedNativeResultCanCancelAndRefundTheSameTaskExactlyOnce() throws Exception {
+        assertNotNull(System.getProperty("cyf.ownedPickupCodex"), "Requires the owned Runtime integration fixture");
+        cancelQuotedNativeResult = true;
+        conflictOnDiscussionRetry = true;
+        verifyCurrentMemberEligibility();
+    }
     private boolean conflictOnDiscussionRetry;
     @Test void sameDeviceDiscussionFinalStillDoesNotProveMeteredUsage() throws Exception {
         verifyCurrentMemberEligibility();
@@ -2119,6 +2128,33 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(created.executionId(),jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation WHERE intent_sha=?",String.class,frozen.sha256()));assertEquals(created.runId(),jdbc.queryForObject("SELECT run_id FROM agent_task_execution_member WHERE execution_id=? AND task_id=?",String.class,created.executionId(),id));
                 verifyNativePickup(authority,service,created,pending);
                 assertEquals(balance-expectedWen,wallet(independent));assertEquals(posts+1,count("economy_transaction"));assertEquals(grants+1,count("agent_task_execution_grant"));
+                if (cancelQuotedNativeResult) {
+                    for (String ddl : List.of("agent-task-funding-v0.sql", "agent-selected-output-finalization-v1.sql",
+                            "agent-task-provider-cost-consent-v1.sql"))
+                        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(ddl))).execute(jdbc.getDataSource());
+                    for (String table : List.of("agent_command_delivery", "agent_outbox_event"))
+                        createTable(DDL.resolve("schema.sql"), table, true);
+                    ReflectionTestUtils.setField(cancellation, "executions", proxy(
+                            new TaskExecutionCancellationServiceImpl(executionRows, nativeActions), TaskExecutionCancellationService.class));
+                    long version = independent.queryForObject("SELECT task_version FROM agent_task_meta WHERE task_id=?", Long.class, id);
+                    String requestId = "cancel-quoted-native";
+                    var cancelRequest = HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+id+"/cancel"))
+                            .header("Authorization", "Bearer "+token).header("X-Request-Id", requestId)
+                            .header("Idempotency-Key", requestId).header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of(
+                                    "protocolVersion", 1, "requestId", requestId,
+                                    "data", Map.of("expectedTaskVersion", Long.toString(version)))))).build();
+                    for (int replay=0; replay<2; replay++) {
+                        var cancelled=client.send(cancelRequest,HttpResponse.BodyHandlers.ofString());
+                        assertEquals(200,cancelled.statusCode(),cancelled.body());
+                        assertEquals(balance,wallet(independent));
+                        assertEquals(posts+2,count("economy_transaction"));
+                        assertEquals("cancelled",independent.queryForObject("SELECT reward_status FROM agent_task_meta WHERE task_id=?",String.class,id));
+                        assertEquals("RELEASED",independent.queryForObject("SELECT state FROM economy_task_charge WHERE task_id=?",String.class,id));
+                        assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_grant WHERE task_id=? AND state='ACTIVE'",Integer.class,id));
+                    }
+                    System.out.println("QUOTED_NATIVE_CANCEL sameTask=true resultCommitted=true refundOnce=true replay=true");
+                }
             }return null;
         };
     }
