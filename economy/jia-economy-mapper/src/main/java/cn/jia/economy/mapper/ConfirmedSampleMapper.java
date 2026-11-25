@@ -2,6 +2,8 @@ package cn.jia.economy.mapper;
 
 import cn.jia.economy.task.TaskBillingService.Task;
 import java.util.List;
+import org.apache.ibatis.annotations.Arg;
+import org.apache.ibatis.annotations.ConstructorArgs;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Update;
@@ -74,6 +76,15 @@ public interface ConfirmedSampleMapper {
     record CompactRow(String id,long revision,String taskId,String featureSha,String metadata,byte[] vector,Integer sourceValid,String inlineSha){
         @Override public String toString(){return "CompactRow[private]";}
     }
+    // This small, fixed binary vector is consumed as bytes. Do not materialize a JDBC Blob
+    // just to copy it to a byte array; keep this mapping local to the derived read model.
+    @ConstructorArgs({
+        @Arg(column="sample_id",javaType=String.class), @Arg(column="projection_revision",javaType=long.class),
+        @Arg(column="task_id",javaType=String.class), @Arg(column="initial_feature_sha256",javaType=String.class),
+        @Arg(column="feature_meta",javaType=String.class),
+        @Arg(column="vector_bytes",javaType=byte[].class,typeHandler=org.apache.ibatis.type.ByteArrayTypeHandler.class),
+        @Arg(column="source_valid",javaType=Integer.class), @Arg(column="inline_sha",javaType=String.class)
+    })
     // Start at eligible samples, not projection rows. A missing or stale projection must not shorten a keyset page.
     @Select("""
         SELECT s.sample_id,s.projection_revision,s.task_id,s.initial_feature_sha256,x.feature_meta,x.vector_bytes,
@@ -81,8 +92,8 @@ public interface ConfirmedSampleMapper {
           AND CASE WHEN FIND_IN_SET(BINARY x.envelope_sha,#{knownInline})>0 THEN TRUE
                    ELSE JSON_CONTAINS_PATH(q.snapshot_json,'one','$.preparation.features') END)
           OR (x.preparation_sha IS NOT NULL AND q.snapshot_json->>'$.preparation'=x.preparation_sha
-          AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256))),
-          IF(x.preparation_sha IS NULL,x.envelope_sha,NULL)
+          AND q.snapshot_json->>'$.binding.recommendationId'=x.recommendation_id AND p.preparation_sha=SHA2(p.preparation_json,256))) AS source_valid,
+          IF(x.preparation_sha IS NULL,x.envelope_sha,NULL) AS inline_sha
         FROM economy_task_cost_sample s LEFT JOIN economy_history_feature_projection x ON x.sample_id=s.sample_id
           AND x.sample_revision=s.projection_revision AND x.quote_id=s.quote_id
         LEFT JOIN economy_task_quote q ON q.tenant_id=s.tenant_id AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn
