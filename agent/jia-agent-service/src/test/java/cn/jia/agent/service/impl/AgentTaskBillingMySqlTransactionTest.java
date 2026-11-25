@@ -2145,7 +2145,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                             .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(Map.of(
                                     "protocolVersion", 1, "requestId", requestId,
                                     "data", Map.of("expectedTaskVersion", Long.toString(version)))))).build();
-                    for (int replay=0; replay<2; replay++) {
+                    for (int cancelAttempt=0; cancelAttempt<2; cancelAttempt++) {
                         var cancelled=client.send(cancelRequest,HttpResponse.BodyHandlers.ofString());
                         assertEquals(200,cancelled.statusCode(),cancelled.body());
                         assertEquals(balance,wallet(independent));
@@ -2228,6 +2228,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         for(String table:List.of("chat_request","chat_message","chat_turn","chat_dispatch_outbox","chat_context_snapshot","chat_typed_admission")) assertEquals(0,count(table),table);
         assertEquals(0,independent.queryForObject("SELECT COUNT(*) FROM agent_task_execution_member WHERE task_id=?",Integer.class,intent.taskId()));
         deliberation.setTaskMembers(membership);
+        if (cancelQuotedNativeResult) ReflectionTestUtils.setField(cancellation, "discussions",
+                proxy(deliberation, cn.jia.chat.service.TaskDiscussionCancellation.class));
         // Exercise explicit enrollment in a rollback-only copy of this new admission. Baseline flow stays unmetered.
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/chat-task-dispatch-origin-v1.sql")).execute(jdbc.getDataSource());
         var enrolledWire = new java.util.concurrent.atomic.AtomicReference<byte[]>();
