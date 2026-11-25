@@ -1139,6 +1139,9 @@ tasks.register('taskQuoteRegression', Test) {
     dependsOn tasks.named(taskQuoteRegressionSourceSet.classesTaskName)
     testClassesDirs = taskQuoteRegressionSourceSet.output.classesDirs
     classpath = taskQuoteRegressionSourceSet.runtimeClasspath
+    if (providers.gradleProperty('pooledHistoryComparison').getOrElse('false') != 'true') {
+        filter { excludeTestsMatching '*.denseHistoryPooled*' }
+    }
     systemProperty 'cyf.pooledHistoryComparison', providers.gradleProperty('pooledHistoryComparison').getOrElse('false')
     systemProperty 'cyf.denseQuoteConcurrency', providers.gradleProperty('denseQuoteConcurrency').getOrElse('false')
     systemProperty 'cyf.measuredBatchQuoteLoad', providers.gradleProperty('measuredBatchQuoteLoad').getOrElse('false')

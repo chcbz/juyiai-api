@@ -149,15 +149,22 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
 
     private com.zaxxer.hikari.HikariDataSource ownedHistoryPool;
     private final java.util.concurrent.atomic.AtomicLong physicalConnects=new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong appBorrows=new java.util.concurrent.atomic.AtomicLong();
     // Count actual new physical connections, not pool borrows. Only the application path is counted.
     private javax.sql.DataSource denseDataSource(DriverManagerDataSource owned,boolean pooled){
         var counting=new org.springframework.jdbc.datasource.DelegatingDataSource(owned){
             @Override public java.sql.Connection getConnection() throws java.sql.SQLException {var c=super.getConnection();physicalConnects.incrementAndGet();return c;}
             @Override public java.sql.Connection getConnection(String u,String p) throws java.sql.SQLException {var c=super.getConnection(u,p);physicalConnects.incrementAndGet();return c;}
         };
-        if(!pooled)return counting;
+        javax.sql.DataSource managed=counting;
+        if(pooled){
         var cfg=new com.zaxxer.hikari.HikariConfig();cfg.setDataSource(counting);cfg.setMinimumIdle(5);cfg.setMaximumPoolSize(15);cfg.setConnectionTestQuery("SELECT 1");
-        ownedHistoryPool=new com.zaxxer.hikari.HikariDataSource(cfg);return ownedHistoryPool;
+        ownedHistoryPool=new com.zaxxer.hikari.HikariDataSource(cfg);managed=ownedHistoryPool;
+        }
+        return new org.springframework.jdbc.datasource.DelegatingDataSource(managed){
+            @Override public java.sql.Connection getConnection() throws java.sql.SQLException {var c=super.getConnection();appBorrows.incrementAndGet();return c;}
+            @Override public java.sql.Connection getConnection(String u,String p) throws java.sql.SQLException {var c=super.getConnection(u,p);appBorrows.incrementAndGet();return c;}
+        };
     }
     private final io.micrometer.observation.ObservationRegistry quoteWrites=io.micrometer.observation.ObservationRegistry.create();
     @BeforeEach
@@ -2963,7 +2970,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     var env=mapper.readTree(res.body());assertEquals(key,env.path("requestId").asText());assertEquals("E0",env.path("code").asText());return new Sample(200,elapsed,env.path("data"));
                 }catch(java.io.IOException failure){return new Sample(0,System.nanoTime()-start,null);}
             }}
-            var wire=new Wire();long connectsBefore=physicalConnects.get();Sample first=null;var statuses=new java.util.TreeMap<Integer,Integer>();
+            var wire=new Wire();long connectsBefore=physicalConnects.get(),borrowsBefore=appBorrows.get();Sample first=null;var statuses=new java.util.TreeMap<Integer,Integer>();
             for(int base=0;base<30;base+=lanes){var gate=new java.util.concurrent.CyclicBarrier(lanes);var pending=new java.util.ArrayList<java.util.concurrent.Future<Sample>>();
                 for(int i=0;i<lanes;i++){int index=base+i;pending.add(pool.submit(()->{gate.await(15,java.util.concurrent.TimeUnit.SECONDS);return wire.send(index);}));}
                 for(var job:pending){var sample=job.get(50,java.util.concurrent.TimeUnit.SECONDS);samples.add(sample.nanos());statuses.merge(sample.status(),1,Integer::sum);if(sample.status()!=200){errors++;continue;}
@@ -2973,9 +2980,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                         else{assertEquals("UNAVAILABLE",row.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",row.path("unavailableReason").asText());assertFalse(row.path("amount").isObject());}}
                 }
             }
-            long opened=physicalConnects.get()-connectsBefore;
-            System.out.printf("DENSE_CONNECTIONS history=%s candidates=%d lanes=%d pooled=%s physicalOpens=%d%n",task,ids.size(),lanes,ownedHistoryPool!=null,opened);
-            if(ownedHistoryPool!=null)assertTrue(ownedHistoryPool.getHikariPoolMXBean().getTotalConnections()<=15);else assertTrue(opened>=17L*30);
+            long opened=physicalConnects.get()-connectsBefore,borrowed=appBorrows.get()-borrowsBefore;
+            System.out.printf("DENSE_CONNECTIONS history=%s candidates=%d lanes=%d pooled=%s physicalOpens=%d logicalBorrows=%d%n",task,ids.size(),lanes,ownedHistoryPool!=null,opened,borrowed);
+            assertTrue(borrowed>0);
+            if(ownedHistoryPool!=null){assertTrue(ownedHistoryPool.getHikariPoolMXBean().getTotalConnections()<=15);assertTrue(opened<borrowed);}
+            else assertEquals(borrowed,opened); // page mapper calls and actual connection borrows are different units
             samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"DENSE_QUOTE_CONCURRENT history=%s candidates=%d lanes=%d n=%d errors=%d p50ms=%.3f p95ms=%.3f maxms=%.3f encodes=%d prepareMs=%.3f selectedMs=%.3f storeMs=%.3f statuses=%s%n",task,ids.size(),lanes,samples.size(),errors,samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,encodes.get()-before,profile.ms("prepare"),profile.ms("lockSelected"),profile.ms("storeMeasuredBatch"),statuses);
             var end=recShapes().get(compactStatementDigest);double server=(end.picos()-sqlBefore.picos())/1e9,fetch=denseCalls.ms("compactHistory"),page=denseCalls.ms("cyf.task.quote.history.projection.page"),estimate=denseCalls.ms("cyf.task.quote.estimate");
             long pages=denseCalls.count("compactHistory"),digestCalls=end.calls()-sqlBefore.calls(),sent=end.sent()-sqlBefore.sent();
