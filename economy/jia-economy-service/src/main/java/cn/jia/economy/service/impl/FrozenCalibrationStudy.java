@@ -32,7 +32,7 @@ public final class FrozenCalibrationStudy {
     public record Dataset(TaskEstimateCalibration.PrivateGroup group,List<Member> members){}
     public record Policy(String evaluatorVersion,List<TaskEstimateCalibration.Trial> trials,TaskEstimateCalibration.Gate gate,long seed){}
     // Changing scoring, temporal split, trial selection, bootstrap or wire semantics requires a new study version.
-    public static final String VERSION="private-scoped-study-v4";
+    public static final String VERSION="private-scoped-study-v5";
     public record Artifact(String sha256,String json){@Override public String toString(){return "Artifact[private]";}}
     public record Pins(String split,String dataset,String reference,String policy){}
     /** Verified TRAIN observations only. A private commitment, not permission to quote. */

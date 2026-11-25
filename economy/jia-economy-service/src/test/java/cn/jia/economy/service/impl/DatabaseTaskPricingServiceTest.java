@@ -76,10 +76,12 @@ class DatabaseTaskPricingServiceTest {
         var roster=keep.apply(study.freeze(new FrozenCalibrationStudy.Roster(owner,assignments)));
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var trial=new TaskEstimateCalibration.Trial("fixture",1,1,1,1,1,0.1,0.2,1,1,1,1);
         var policy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy(FrozenCalibrationStudy.VERSION,java.util.List.of(trial),gate,123L)));
-        price(DATA);var ref=service.freeze(scope,"book",Map.of("text",Map.of("model",new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint"))),java.util.Set.of("text"));
+        var routes=Map.of("text",Map.<String,TaskReferencePricing.Route>of("model",new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint")));
+        String equalRates="{\"basis\":\"synthetic\",\"yuanPerMillionTokens\":{\"INPUT\":\"1\",\"OUTPUT\":\"1\"}}";
+        price(equalRates);var ref=service.freeze(scope,"book",routes,routes.keySet());
         var reference=keep.apply(study.freezeReference(ref));var members=new java.util.ArrayList<FrozenCalibrationStudy.Member>();
         long t=1;for(var a:assignments){var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner",a.task());var revision=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sid-"+a.task(),1);
-            var op=new ProjectedTaskOperation(1,"capture",1,"record","source","f".repeat(64),new MeasuredTaskRepricing.Operation("gw",a.task()),"text","model","TOKEN",json.valueToTree(new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,1000000L))));
+            var op=new ProjectedTaskOperation(1,"capture",1,"record","source","f".repeat(64),new MeasuredTaskRepricing.Operation("gw",a.task()),"text","model","TOKEN",json.valueToTree(new MeasuredTaskRepricing.Tokens("disjoint",Map.of(a.split()==TaskEstimateEvaluation.Split.HOLDOUT?ModelTokenPrice.Category.OUTPUT:ModelTokenPrice.Category.INPUT,1000000L))));
             when(db.selectedForCalibration(task,group.digest(),revision.sampleId(),1)).thenReturn(new cn.jia.economy.mapper.ConfirmedSampleMapper.CalibrationRow("confirmed-quote","confirmed-agent",25L,t,"r","i",features.digest(),json.writeValueAsString(features),json.writeValueAsString(execution),json.writeValueAsString(java.util.List.of(op))));
             when(db.observedByMillis()).thenReturn(t+1);t+=2;
             var f=obs.freezeConfirmed(task,group,revision,a.family(),a.split());objects.put(f.sha256(),f.json());members.add(new FrozenCalibrationStudy.Member(a.task(),revision,f.sha256()));}
@@ -87,6 +89,16 @@ class DatabaseTaskPricingServiceTest {
         clearInvocations(db,mapper);var result=study.evaluate(owner,group,pins,objects::get);assertTrue(result.report().points().meetsPointCriteria());assertEquals(1,result.report().points().holdout().quoted());
         assertEquals(123L,result.report().uncertainty().seed());assertEquals(reference,result.receipt().referenceBookSha256());assertEquals(dataset,result.receipt().datasetSha256());
         assertEquals(result,study.evaluate(owner,group,pins,objects::get));verifyNoInteractions(db,mapper);
+        // Only the current output tariff changes. Same routes, measured operations, features, split, trial and policy.
+        price(equalRates.replace("\"OUTPUT\":\"1\"","\"OUTPUT\":\"4\"")).setPriceVersion("v2");
+        var changed=keep.apply(study.freezeReference(service.freeze(scope,"book",routes,routes.keySet())));
+        var repriced=study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,dataset,changed,policy),objects::get).report().points();
+        assertNotEquals(reference,changed);assertEquals(result.report().points().referenceVersion(),repriced.referenceVersion());
+        assertEquals(result.report().points().winner(),repriced.winner());assertFalse(repriced.meetsPointCriteria());
+        assertEquals(0,new TaskEstimateEvaluation.Ratio(BigDecimal.valueOf(3),BigDecimal.valueOf(4)).compareTo(repriced.holdout().wape()));
+        assertEquals(result,study.evaluate(owner,group,pins,objects::get)); // old evidence retains precisely its original meaning
+        var previousPolicy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy("private-scoped-study-v4",java.util.List.of(trial),gate,123L)));
+        assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,dataset,reference,previousPolicy),objects::get));
         var shortSet=keep.apply(study.freeze(new FrozenCalibrationStudy.Dataset(owner,members.subList(0,2))));
         assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,new FrozenCalibrationStudy.Pins(roster,shortSet,reference,policy),objects::get));
         for(String sha:java.util.List.of(roster,dataset,reference,policy,members.getLast().observationSha256())){
