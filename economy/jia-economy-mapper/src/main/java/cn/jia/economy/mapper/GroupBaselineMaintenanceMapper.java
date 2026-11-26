@@ -23,6 +23,7 @@ public interface GroupBaselineMaintenanceMapper {
     int waitForInput(@Param("w") Work w,@Param("claim") String claim);
     @Update("UPDATE economy_budget_group_head SET status='RETRY',claim_id=NULL,lease_until=NULL,next_at=TIMESTAMPADD(SECOND,#{delay},CURRENT_TIMESTAMP(3)),updated_at=CURRENT_TIMESTAMP(3) WHERE "+OWN)
     int retry(@Param("w") Work w,@Param("claim") String claim,@Param("delay") int delay);
+    @Select("SELECT book_epoch FROM economy_budget_domain_epoch WHERE tenant_id=#{tenantId} AND client_id=#{clientId}") Long readDomainEpoch(EconomyScope domain);
     @Select("SELECT book_epoch FROM economy_budget_domain_epoch WHERE tenant_id=#{tenantId} AND client_id=#{clientId} FOR SHARE") Long lockDomain(EconomyScope domain);
     @Select("SELECT generation FROM economy_budget_group_head WHERE "+OWN+" FOR UPDATE") Long lockOwned(@Param("w") Work w,@Param("claim") String claim);
     @Insert("INSERT INTO economy_budget_group_revision(tenant_id,client_id,group_sha,revision,book_epoch,tariff_sha,policy_sha,sample_count,sum_cost_yuan,evidence_sha,built_at) VALUES " +
