@@ -423,6 +423,25 @@ class TaskBillingServiceMySqlTest {
         assertEquals(4, count("economy_entry"));
     }
 
+    @Test void pricePointerChangeWithdrawsOldBaselineAtomicallyIncludingRawMaintenanceSql() {
+        var ddl = new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-v1.sql"));
+        ddl.execute(jdbc.getDataSource());
+        var triggers = new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-price-invalidation-v1.sql"));
+        triggers.setSeparator("$$"); triggers.execute(jdbc.getDataSource());
+        String model=route("0.1"), key="a".repeat(64), tenant=SCOPE.tenantId(), client=SCOPE.clientId();
+        jdbc.update("INSERT INTO economy_budget_domain_epoch VALUES(?,?,7)",tenant,client);
+        jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,active_revision,status,tariff_sha,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,3,3,'ACTIVE',?,7,0,?,CURRENT_TIMESTAMP(3))",tenant,client,key,"b".repeat(64),"c".repeat(64));
+        String where=" WHERE tenant_id=? AND client_id=? AND model=?";
+        assertEquals(1,jdbc.update("UPDATE economy_model_price_current SET updated_at=updated_at+1"+where,tenant,client,model));
+        assertEquals(7L,jdbc.queryForObject("SELECT book_epoch FROM economy_budget_domain_epoch",Long.class));
+        tx.executeWithoutResult(st -> { assertEquals(1,jdbc.update("DELETE FROM economy_model_price_current"+where,tenant,client,model));
+            assertEquals("DIRTY",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));st.setRollbackOnly(); });
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));
+        assertEquals(7L,jdbc.queryForObject("SELECT book_epoch FROM economy_budget_domain_epoch",Long.class));
+        assertEquals(1,jdbc.update("DELETE FROM economy_model_price_current"+where,tenant,client,model));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE generation=4 AND book_epoch=8 AND status='DIRTY' AND active_revision IS NULL AND claim_id IS NULL",Integer.class));
+    }
+
     @Test void inlineMeanAndFixedBatchReserveOnlyTheWinningSample() {
         new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(jdbc.getDataSource());
         var group=new TaskBillingService.MeasuredGroup("dispatch","a".repeat(64),"b".repeat(64),"1","c".repeat(64),"capture");
