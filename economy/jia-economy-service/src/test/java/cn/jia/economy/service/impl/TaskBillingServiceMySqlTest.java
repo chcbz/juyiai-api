@@ -493,9 +493,10 @@ class TaskBillingServiceMySqlTest {
     }
     private String importTestApproval(Object raw,ObjectMapper json){String body=json.writeValueAsString(raw),sha=GroupPublicationEnrollment.digest(body);jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,body);return sha;}
     @SuppressWarnings("unchecked") private <T> T transactional(T target){var proxy=new ProxyFactory(target);proxy.setProxyTargetClass(true);proxy.addAdvice(new TransactionInterceptor(tx.getTransactionManager(),new AnnotationTransactionAttributeSource()));return (T)proxy.getProxy();}
-    @Test void approvedStudyRepricesStoredRosterAndWithdrawnStudyImmediatelyStopsNewOffers() throws Exception { verifyReviewedReprice(false); }
-    @Test void concurrentPriceWithdrawalDuringReviewedRepriceCannotPublishObsoleteMean() throws Exception { verifyReviewedReprice(true); }
-    private void verifyReviewedReprice(boolean changeBook) throws Exception {
+    @Test void approvedStudyRepricesStoredRosterAndWithdrawnStudyImmediatelyStopsNewOffers() throws Exception { verifyReviewedReprice(false,false); }
+    @Test void concurrentPriceWithdrawalDuringReviewedRepriceCannotPublishObsoleteMean() throws Exception { verifyReviewedReprice(true,false); }
+    @Test void unchangedGroupsRemainQuotableAcrossRealPublication() throws Exception { verifyReviewedReprice(false,true); }
+    private void verifyReviewedReprice(boolean changeBook,boolean batchReads) throws Exception {
         installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),a="a".repeat(64),b="b".repeat(64);var json=new ObjectMapper();var op="edit";
         var buckets=new GroupMeanPricing.Buckets(op,List.of(new GroupMeanPricing.Bucket("one",Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,new GroupMeanPricing.Range(1,2)))));
@@ -518,7 +519,7 @@ class TaskBillingServiceMySqlTest {
             jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,task.ownerJiacn(),task.taskId(),caseId,a,b,features.digest());
             jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
             String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),task.ownerJiacn(),task.taskId(),caseId,sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));
-            if(!changeBook && n==1)delayed=approval;else enroll.register(SCOPE,approval);
+            if(!changeBook && !batchReads && n==1)delayed=approval;else enroll.register(SCOPE,approval);
             org.mockito.Mockito.when(evidence.measureReviewed(task,caseId,sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
         }
         var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",minSupport,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
@@ -526,7 +527,7 @@ class TaskBillingServiceMySqlTest {
         // Interpose only on the second access to the already-frozen book, after the first real cost was calculated.
         var publisher=new GroupBaselinePublisher(maintenance,json){
             @Override Prepared calculate(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.Work w,String claim,cn.jia.economy.pricing.GroupTariffSnapshot tariff,List<Eligible> members,int min,String approval){
-                if(!changeBook)return super.calculate(w,claim,tariff,members,min,approval);
+                if(!changeBook && !batchReads)return super.calculate(w,claim,tariff,members,min,approval);
                 assertEquals(2,members.size());assertNotEquals(members.get(0).sampleId(),members.get(1).sampleId());
                 var observed=org.mockito.Mockito.spy(tariff);var calls=new java.util.concurrent.atomic.AtomicInteger();
                 org.mockito.Mockito.doAnswer(inv->{if(calls.incrementAndGet()==2){reading.countDown();assertTrue(release.await(20,TimeUnit.SECONDS));}return tariff.reference();}).when(observed).reference();
@@ -535,6 +536,34 @@ class TaskBillingServiceMySqlTest {
         };
         var service=new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(TaskPricingTestFixture.service(jdbc),maintenance)),transactional(new GroupReviewedUsage(maintenance,enroll,originals,evidence)),transactional(publisher),json);
         var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
+        if(batchReads){
+            // Synthetic, already active neighbours in the SAME domain. Only k is rebuilt from the two reviewed members.
+            var keys=new java.util.LinkedHashSet<GroupBudgetQuotes.Key>();keys.add(k);
+            long epoch=maintenance.readDomainEpoch(SCOPE);
+            for(int i=1;i<108;i++){
+                var neighbour=GroupPublicationEnrollment.digest("neighbour-"+i);keys.add(new GroupBudgetQuotes.Key(neighbour));
+                jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,active_revision,status,tariff_sha,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,1,1,'ACTIVE',?,?,1,?,CURRENT_TIMESTAMP(3))",t,c,neighbour,a,epoch,policy.sha());
+                jdbc.update("INSERT INTO economy_budget_group_revision VALUES(?,?,?,1,?,?,?,2,0.60,?,CURRENT_TIMESTAMP(3))",t,c,neighbour,epoch,a,policy.sha(),b);
+            }
+            var pool=Executors.newSingleThreadExecutor();try{
+                var job=pool.submit(()->service.runDue(t,c,decoder));assertTrue(reading.await(20,TimeUnit.SECONDS));
+                int fixed=0,mean=0;boolean published=false;var times=new java.util.ArrayList<Long>();
+                for(int round=0;round<32;round++){
+                    if(round==1)release.countDown();if(round==31)job.get(20,TimeUnit.SECONDS);
+                    long begin=System.nanoTime();var batch=reader.prepare(SCOPE,keys);times.add(System.nanoTime()-begin);
+                    assertEquals(keys,batch.keySet());
+                    for(var entry:batch.entrySet()){
+                        if(entry.getKey().equals(k)&&entry.getValue() instanceof GroupBudgetQuotes.Fixed){assertFalse(published);fixed++;continue;}
+                        var value=assertInstanceOf(GroupBudgetQuotes.Mean.class,entry.getValue());
+                        boolean changed=entry.getKey().equals(k);assertEquals(changed?60:30,value.amountWen());if(changed)published=true;mean++;
+                    }
+                    if(round==0)assertEquals(1,fixed);if(round==31)assertTrue(published);
+                }
+                var first=times.removeFirst();var last=times.removeLast();times.sort(Long::compare);
+                System.out.printf(java.util.Locale.ROOT,"SHARED_REPRICE_READER groups=108 batches=32 prePublishMs=%.3f racing30P95Ms=%.3f postPublishMs=%.3f fixed=%d mean=%d%n",first/1e6,times.get(28)/1e6,last/1e6,fixed,mean);
+                assertEquals(32*108,mean+fixed);assertEquals(1,count("economy_budget_group_build_evidence"));
+            }finally{release.countDown();pool.shutdownNow();}return;
+        }
         if(changeBook){
             var pool=Executors.newSingleThreadExecutor();try{
                 long epoch=maintenance.readDomainEpoch(SCOPE);
