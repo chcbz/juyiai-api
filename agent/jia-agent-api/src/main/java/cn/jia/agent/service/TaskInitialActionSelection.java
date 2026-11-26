@@ -4,7 +4,9 @@ package cn.jia.agent.service;
 public interface TaskInitialActionSelection {
     enum Choice { LOCAL_ANSWER, LOCAL_TEXT_FILE }
     record View(String taskVersion,String agentId,String selectionVersion,String choice){}
-    record SkillChoice(String installationId,String mimeType) {}
+    record SkillChoice(String optionRef,String mimeType) {}
+    record Option(String ref,String title) {}
+    java.util.List<Option> skillOptions(AgentTaskExecutionGrantService.Scope scope,String task,String agent);
     View chooseSkill(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String selectionVersion,SkillChoice choice,String principal,String key);
     record Selected(NativeTaskPreparation.Binding binding){}
     final class KeyConflict extends RuntimeException {}

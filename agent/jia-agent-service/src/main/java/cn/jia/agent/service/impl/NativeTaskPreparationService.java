@@ -137,12 +137,27 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}
     private InstalledSkillDescriptorLookup installations;
     @org.springframework.beans.factory.annotation.Autowired public void setInstallations(InstalledSkillDescriptorLookup lookup){installations=Objects.requireNonNull(lookup);}
-    private Instruction installed(Binding b,String installationId){
-        var t=b.target();var runtime=new SkillCapabilityLookup.Scope(b.scope().tenantId(),b.scope().clientId(),t.provider(),t.agent());
-        var found=installations.readCurrent(runtime).skills().stream().filter(d->installationId.equals(d.installationId())
-            && d.verifiedNative() && d.manifestSha256()==null && !d.domainApi()).toList();
-        if(found.size()!=1)throw new Missing();var d=found.getFirst();
-        return new Instruction(d.installationId(),d.skillKey(),d.skillVersion(),d.packageSha256(),d.instructionPolicy());
+    private cn.jia.agent.skill.SkillManagementService skillCatalog;
+    @org.springframework.beans.factory.annotation.Autowired public void setSkillCatalog(cn.jia.agent.skill.SkillManagementService source){skillCatalog=Objects.requireNonNull(source);}
+    private record Offered(Option option,Instruction pin) {}
+    private List<Offered> offered(AgentTaskExecutionGrantService.Scope scope,String task,AgentExternalServicePolicyService.QuoteTarget t){
+        var runtime=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),t.provider(),t.agent());
+        var publicFacts=skillCatalog.citableSkillPurposes(scope.tenantId(),scope.clientId(),t.agent());
+        if(publicFacts.isEmpty())return List.of();
+        var byId=installations.readCurrent(runtime).skills().stream().collect(java.util.stream.Collectors.groupingBy(InstalledSkillDescriptorLookup.Descriptor::installationId));
+        var options=new ArrayList<Offered>();
+        for(var fact:publicFacts){
+            var matches=byId.get(fact.installationId());if(matches==null||matches.size()!=1||!fact.available()||!"INSTRUCTION".equals(fact.kind()))continue;
+            var d=matches.getFirst();if(!d.verifiedNative()||d.manifestSha256()!=null||d.domainApi()||!d.skillKey().equals(fact.skillKey())||!d.skillVersion().equals(fact.skillVersion()))continue;
+            var pin=new Instruction(d.installationId(),d.skillKey(),d.skillVersion(),d.packageSha256(),d.instructionPolicy());
+            // Presentation ordinals and private installation identifiers are not wire selection keys.
+            String ref=hash(json.writeValueAsString(List.of("prepared-skill-option-v1",scope,task,t,fact.factDigest(),pin)));
+            options.add(new Offered(new Option(ref,fact.title()),pin));
+        }return List.copyOf(options);
+    }
+    public List<Option> skillOptions(AgentTaskExecutionGrantService.Scope scope,String task,String agent){
+        var targets=candidates.quoteTargets(scope,task,List.of(agent),false);if(targets.size()!=1)throw new Missing();
+        return offered(scope,task,targets.getFirst()).stream().map(Offered::option).toList();
     }
     public View chooseSkill(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,SkillChoice choice,String principal,String key){
         var targets=candidates.quoteTargets(scope,task,List.of(agent),false);
@@ -161,7 +176,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
             String op=null,input=null;
             if(writing){
                 op=hash(json.writeValueAsString(List.of("initial-action-selection-v1",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),principal,task,agent,key)));
-                input=hash(json.writeValueAsString(skill==null?List.of(version,choice.name()):List.of(version,INSTRUCTION,skill.installationId(),skill.mimeType())));
+                input=hash(json.writeValueAsString(skill==null?List.of(version,choice.name()):List.of(version,INSTRUCTION,skill.optionRef(),skill.mimeType())));
                 var saved=db.query("SELECT input_sha,task_version,selection_version,selected_choice FROM agent_task_native_selection_receipt WHERE operation_sha=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)},op);
                 if(!saved.isEmpty()){var r=saved.getFirst();if(!input.equals(r[0]))throw new KeyConflict();return new View(r[1],agent,r[2],r[3]);}
                 // A first selection schedules a post-commit device probe; GET and committed receipts do not.
@@ -169,7 +184,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
             if(!"open".equals(root.getRewardStatus()))throw new Changed();var req=requirements.readCurrentWithinLockedTask(scope,task,root);
             var b=new Binding(scope,task,root.getTaskVersion(),req.requirementRevision(),req.sha256(),grants.snapshotTaskInputsWithinLockedTask(scope,task).digest(),targets.getFirst());
             String stamp=key(b);if(writing&&!stamp.equals(version))throw new Changed();var prior=find(b);
-            if(writing){var decision=skill==null?new Intent(LOCAL,b,output(choice)):new Intent(INSTRUCTION,b,new Output(Mode.ARTIFACTS,List.of(skill.mimeType())),installed(b,skill.installationId()));
+            if(writing){var decision=skill==null?new Intent(LOCAL,b,output(choice)):new Intent(INSTRUCTION,b,new Output(Mode.ARTIFACTS,List.of(skill.mimeType())),offered(scope,task,b.target()).stream().filter(o->o.option().ref().equals(skill.optionRef())).map(Offered::pin).findFirst().orElseThrow(Missing::new));
                 if(prior!=null&&!prior.intent().equals(decision))throw new Changed();
                 if(prior==null){prior=insert(decision);events.publishEvent(new Selected(b));}
             }
@@ -183,7 +198,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         var req=requirements.readCurrentWithinLockedTask(scope,b.task(),root);
         if(req.requirementRevision()!=b.requirementRevision()||!req.sha256().equals(b.requirementSha())||!grants.snapshotTaskInputsWithinLockedTask(scope,b.task()).digest().equals(b.inputSha())
            ||!List.of(b.target()).equals(candidates.quoteTargets(scope,b.task(),List.of(b.target().agent()),true)))throw new IllegalStateException("Stale dispatch inputs or candidate");
-        if(intent.instruction()!=null&&!intent.instruction().equals(installed(b,intent.instruction().installationId())))throw new Changed();
+        if(intent.instruction()!=null&&offered(scope,b.task(),b.target()).stream().noneMatch(o->intent.instruction().equals(o.pin())))throw new Changed();
         var prior=find(b);if(prior!=null){if(!intent.equals(prior.intent()))throw new IllegalStateException("Different initial execution already fixed");return prior;}
         return insert(intent);
     });}

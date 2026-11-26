@@ -2833,7 +2833,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(installations.withPreparedRead(eq(runtime),any())).thenAnswer(i->((java.util.function.Supplier<?>)i.getArgument(1)).get());
         service.setInstallations(installations);service.setSelectionEvents(mock(org.springframework.context.ApplicationEventPublisher.class));
         var version=service.view(SCOPE,TASK,agent).selectionVersion();
-        var chosen=new TaskInitialActionSelection.SkillChoice("install-draw","image/png");
+        var catalog=mock(cn.jia.agent.skill.SkillManagementService.class);service.setSkillCatalog(catalog);
+        var fact=new cn.jia.agent.skill.SkillManagementService.RecommendationSkill("install-draw","drawing","2.0","绘图",null,true,"NOT_EXECUTABLE","INSTRUCTION","key","fact");
+        when(catalog.citableSkillPurposes(TENANT,CLIENT,agent)).thenReturn(List.of(fact));
+        var options=service.skillOptions(SCOPE,TASK,agent);assertEquals(1,options.size());assertEquals("绘图",options.getFirst().title());
+        assertTrue(options.getFirst().ref().matches("[a-f0-9]{64}"));assertFalse(options.toString().contains("install-draw"));
+        var chosen=new TaskInitialActionSelection.SkillChoice(options.getFirst().ref(),"image/png");
         var unknown=new TaskInitialActionSelection.SkillChoice("unknown","image/png");
         assertThrows(TaskInitialActionSelection.Missing.class,()->service.chooseSkill(SCOPE,TASK,agent,version,unknown,PAYER,"missing"));
         var view=service.chooseSkill(SCOPE,TASK,agent,version,chosen,PAYER,"pick");assertEquals("INSTALLED_SKILL",view.choice());
