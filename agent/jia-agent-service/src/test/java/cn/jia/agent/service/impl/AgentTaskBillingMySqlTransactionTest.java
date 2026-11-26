@@ -3067,10 +3067,32 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             java.util.concurrent.locks.LockSupport.parkNanos(5_000_000);
         }while(!writer.isDone()&&System.nanoTime()<until);fail("expected a real preparation row lock wait");
     }
+    private void verifyRegisteredPricingProfile(String agent,long binding,AgentManagedSessionLookup.SessionFence fence){
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-runtime-pricing-profiles-v1.sql"))).execute(jdbc.getDataSource());
+        var repo=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc);var target=new AgentExternalServicePolicyService.QuoteTarget(agent,OWNER,binding,0);
+        var h="a".repeat(64);
+        var row=new java.util.LinkedHashMap<String,String>();var keys=cn.jia.agent.service.NativePricingProfiles.FIELDS;
+        var values=List.of("edit","native-image-context-1",h,h,"NATIVE_PINNED_IMAGE_V1","parent",h,"c","image","base","openai-images-modalities-v1","RESPONSES_TEXT_TOKENS_V1",h);
+        for(int i=0;i<keys.size();i++)row.put(keys.get(i),values.get(i));
+        var arr=List.of(row);String bytes=new ObjectMapper().writeValueAsString(arr);String sha=cn.jia.agent.service.NativePricingProfiles.digest(bytes);
+        java.util.function.BiFunction<String,Boolean,Map<String,Object>> report=(seq,empty)->Map.of("version","NATIVE_PRICING_PROFILES_V1","sequence",seq,"profiles",empty?List.of():arr,"sha256",empty?cn.jia.agent.service.NativePricingProfiles.digest("[]"):sha);
+        java.util.function.Consumer<Map<String,Object>> send=wire->locked(()->{repo.observe(TENANT,CLIENT,OWNER,agent,fence,wire);return null;});
+        java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> read=()->repo.read(TENANT,CLIENT,List.of(target),false);
+        send.accept(report.apply("2",false));assertEquals(sha,read.get().get(agent).sha());send.accept(report.apply("1",true));assertEquals(sha,read.get().get(agent).sha());
+        assertTrue(repo.read(TENANT,CLIENT,List.of(new AgentExternalServicePolicyService.QuoteTarget(agent,"other",binding,0)),false).isEmpty());
+        jdbc.update("UPDATE agent_runtime SET status='offline' WHERE agent_id=?",agent);assertEquals(read.get(),locked(()->repo.read(TENANT,CLIENT,List.of(target),true)));
+        assertEquals(sha,read.get().get(agent).sha());send.accept(report.apply("2",true));assertTrue(read.get().isEmpty());send.accept(report.apply("2",false));assertTrue(read.get().isEmpty());
+        send.accept(report.apply("3",false));assertEquals(sha,read.get().get(agent).sha());
+        var unauth=new java.util.HashMap<>(report.apply("3",false));unauth.put("unexpected","never persist");send.accept(unauth);assertTrue(read.get().isEmpty());
+        send.accept(report.apply("4",false));jdbc.update("UPDATE agent_runtime SET status='online',runtime_session_generation=runtime_session_generation+1 WHERE agent_id=?",agent);
+        assertTrue(read.get().isEmpty());assertThrows(IllegalStateException.class,()->send.accept(report.apply("99",true)));
+        jdbc.update("UPDATE agent_runtime SET runtime_session_generation=? WHERE agent_id=?",fence.sessionGeneration(),agent);
+    }
     private void verifyPreparedEpochLock(String agent,long binding,AgentManagedSessionLookup.SessionFence fence)throws Exception{
         for(String f:List.of("agent-runtime-v1-schema.sql","agent-runtime-session-fence-v1.sql","agent-runtime-prepared-profile-v1.sql"))new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve(f))).execute(jdbc.getDataSource());
         jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'test',?,UNHEX(?),1,'ACTIVE',?,?)",fence.runtimeInstallationId(),agent,"a".repeat(64),"a".repeat(64),TENANT,CLIENT);
         jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation) VALUES(?,'test',?,?,?,?,'online',?,?,?,?)",agent,TENANT,CLIENT,OWNER,binding,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
+        verifyRegisteredPricingProfile(agent,binding,fence);
         var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);var epoch=new cn.jia.agent.security.PreparedRuntimeEpochFence.Epoch(agent,OWNER,binding,fence,new NativeTaskConfigurationProbe.Profile(1,"4".repeat(64)));
         java.util.function.Supplier<Boolean> exact=()->guard.lock(TENANT,CLIENT,List.of(epoch));assertFalse(locked(exact));
         guard.report(TENANT,CLIENT,agent,OWNER,fence,epoch.profile());assertTrue(locked(exact));

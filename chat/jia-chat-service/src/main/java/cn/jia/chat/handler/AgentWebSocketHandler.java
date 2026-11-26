@@ -939,7 +939,14 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
             request.setEndpoint(asString(payload.get("endpoint")));
             request.setExecutionModel(payload.get("executionModel") instanceof String model ? model : null);
             stage = "runtime_register";
-            AgentRegisterResultDTO result = withSessionContext(session, () -> runtimeAuthentication.withFence(sessionProof(session), true, () -> agentService.register(request)));
+            AgentRegisterResultDTO result = withSessionContext(session, () -> runtimeAuthentication.withFence(proof, true, () -> {
+                var registered=agentService.register(request);
+                if(pricingProfiles!=null && registered!=null && agentId.equals(registered.getAgentId())){
+                    pricingProfiles.observe(proof.scope().tenantId(),proof.scope().clientId(),proof.scope().ownerJiacn(),agentId,
+                        new cn.jia.agent.service.AgentManagedSessionLookup.SessionFence(proof.installationId(),proof.hostId(),proof.scope().runtimeInstanceId(),proof.sessionGeneration()),payload.get("pricingProfiles"));
+                }
+                return registered;
+            }));
             if (result == null || !agentId.equals(result.getAgentId())) {
                 throw new IllegalStateException("Agent registration returned a mismatched canonical identity");
             }
@@ -3046,6 +3053,9 @@ public class AgentWebSocketHandler extends TextWebSocketHandler
         }
         return count==1;
     }
+    private cn.jia.agent.service.NativePricingProfiles pricingProfiles;
+    @org.springframework.beans.factory.annotation.Autowired(required=false)
+    public void setPricingProfiles(cn.jia.agent.service.NativePricingProfiles profiles){this.pricingProfiles=profiles;}
     private cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder preparedProfiles;
     @org.springframework.beans.factory.annotation.Autowired(required=false)
     public void setPreparedProfiles(cn.jia.agent.service.NativeTaskConfigurationProbe.ProfileRecorder recorder){this.preparedProfiles=recorder;}
