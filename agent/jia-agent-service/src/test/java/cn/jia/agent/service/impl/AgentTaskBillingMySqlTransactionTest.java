@@ -2979,7 +2979,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         locked(()->{admit.admit(SCOPE,TASK,granted,"first",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,List.of(),output.commandOutputs());return null;});
         assertNull(locked(()->admit.pending(SCOPE,TASK,agent)));
         locked(()->{admit.admit(SCOPE,TASK,granted,"followup",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY,List.of(Map.of()),Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
-        verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
+        var httpCandidates=List.of(agent,ids.get(1));
+        verifyPreparedQuoteHttp(authority,workspace,source,httpCandidates,()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
         assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
 
         service.reserveComparisons(SCOPE,TASK,req.taskVersion(),ids); // timeout/no reply cannot leave yesterday's observation current
@@ -2989,7 +2990,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
-        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1+2*ids.size(),count("economy_task_quote")); // one measured hold and two unique HTTP batches
+        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1+2*httpCandidates.size(),count("economy_task_quote")); // one measured hold and two unique HTTP batches
         assertEquals(executions,count("agent_personal_workspace_execution"));
         verifySignedSelectionWorker(service,ids.get(1),()->new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper()));
     }

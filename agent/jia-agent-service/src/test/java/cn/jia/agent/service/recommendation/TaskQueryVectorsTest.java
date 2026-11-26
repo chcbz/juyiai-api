@@ -89,7 +89,7 @@ class TaskQueryVectorsTest {
     }
     @Test void ordinaryBudgetBatchesAllCandidatesAndReplayNeverWrites(){
         var intents=mock(TaskQuoteIntentService.class);var billing=mock(TaskBillingService.class);
-        var app=new IndependentTaskQuotes(intents,billing);var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
+        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
         var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
         var facts=new QuoteFeaturePreparation.LocalFacts(1,"a".repeat(64),"b".repeat(64),List.of(),null,null);
         var targets=intent.agentIds().stream().map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();
@@ -102,6 +102,27 @@ class TaskQueryVectorsTest {
         assertTrue(result.quotes().stream().allMatch(q->q.amount().equals(cn.jia.economy.common.Money.wen(1))));
         verify(billing).storeOffersBatch(task,OWNER.actorId(),writes);verifyNoMoreInteractions(billing);clearInvocations(billing);
         when(intents.begin(OWNER,"task","key",intent)).thenReturn(new TaskQuoteIntentService.Replay(result));assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(billing);
+    }
+    @Test void structuredBatchSharesGroupReadButNeverSharesQuoteOrExecutionCommitments(){
+        var groups=mock(cn.jia.economy.task.GroupBudgetQuotes.class);var billing=mock(TaskBillingService.class);var offers=new CandidateGroupOffers(groups,billing);
+        var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var intent=new TaskQuoteBatches.Intent("3",List.of("a","b","c"));
+        var targets=intent.agentIds().stream().map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();
+        var sha="a".repeat(64);var facts=new QuoteFeaturePreparation.LocalFacts(1,sha,sha,List.of(),null,"edit");
+        var fresh=new TaskQuoteIntentService.Fresh(new TaskQuoteBatches.Key(task,OWNER.actorId(),"key"),intent,facts,targets,List.of());
+        var measured=new TaskBillingService.MeasuredGroup("d",sha,sha,"v",sha,"coverage");
+        var group=new cn.jia.economy.pricing.GroupMeanPricing.Group("f1","edit",sha,"B0","ctx","1","tool","capture",List.of(
+            new cn.jia.economy.pricing.GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","chan","text","base","RESPONSES_TEXT_TOKENS_V1"),
+            new cn.jia.economy.pricing.GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","edit","chan","image","base","openai-images-modalities-v1")));
+        var key=new cn.jia.economy.task.GroupBudgetQuotes.Key(cn.jia.economy.pricing.GroupMeanPricing.key(group));var pin=new cn.jia.economy.task.GroupBudgetQuotes.Pin(key,3,4,4,sha,sha,2,new java.math.BigDecimal("0.59"));
+        var mean=new cn.jia.economy.task.GroupBudgetQuotes.Mean(pin,30);when(groups.prepare(task.scope(),java.util.Set.of(key))).thenReturn(Map.of(key,mean));
+        var missing=new CandidateGroupOffers.Missing(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING);
+        var batch=offers.prepare(fresh,Map.of("a",new CandidateGroupOffers.ComparableGroup(group,measured,null),"b",new CandidateGroupOffers.ComparableGroup(group,measured,sha),"c",missing));
+        when(billing.storeOffersBatch(eq(task),eq(OWNER.actorId()),any())).thenAnswer(call->{List<TaskBillingService.OfferWrite> writes=call.getArgument(2);
+            assertNull(((TaskBillingService.MeanWrite)writes.get(0)).initialIntentSha256());assertEquals(sha,((TaskBillingService.MeanWrite)writes.get(1)).initialIntentSha256());
+            assertEquals(missing.reason(),((TaskBillingService.FixedWrite)writes.get(2)).price().reason());return List.of(new TaskBillingService.StoredQuote("a1",30),new TaskBillingService.StoredQuote("b1",30),new TaskBillingService.StoredQuote("c1",1));});
+        var rows=offers.issue(batch,"batch");assertEquals(List.of("a1","b1","c1"),rows.stream().map(TaskQuoteBatches.Item::quoteId).toList());
+        assertEquals(List.of("GROUP_MEAN","GROUP_MEAN","FIXED_FALLBACK"),rows.stream().map(r->r.estimateSummary().method()).toList());
+        verify(groups).prepare(task.scope(),java.util.Set.of(key));verify(groups).lockSelected(task.scope(),java.util.Set.of(pin));verifyNoMoreInteractions(groups);
     }
     @Test void featureStageObservationsDistinguishHitFromEncodeAcrossBothOperations() {
         var registry=io.micrometer.observation.ObservationRegistry.create();

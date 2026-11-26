@@ -20,6 +20,6 @@ public final class QuoteHttpTestWiring {
             AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,AgentExternalServicePolicyService agents,
             RecommendationMaterials materials,TaskBillingService billing){
         var intents=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials);
-        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,billing));
+        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing)));
     }
 }
