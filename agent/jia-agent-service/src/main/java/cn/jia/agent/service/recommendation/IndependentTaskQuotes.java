@@ -30,7 +30,7 @@ public final class IndependentTaskQuotes {
         // future structured input to an ordinary fixed offer without evaluating its cost group.
         if(facts.operation()!=null)throw new IllegalStateException("Structured quote requires an evaluated cost group");
         var bases=new HashMap<String,CandidateGroupOffers.Basis>();
-        for(var candidate:fresh.candidates())bases.put(candidate.agent(),new CandidateGroupOffers.Missing(TaskQuoteBatches.Reason.OUT_OF_DISTRIBUTION));
+        for(var candidate:fresh.candidates())bases.put(candidate.agent(),CandidateGroupOffers.classify(facts,null,null,null,null));
         var prepared=offers.prepare(fresh,bases);
         return intents.finish(actor,fresh,batch->offers.issue(prepared,batch));
     }

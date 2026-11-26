@@ -14,6 +14,21 @@ final class CandidateGroupOffers {
     record ComparableGroup(GroupMeanPricing.Group group,TaskBillingService.MeasuredGroup execution,String initialIntentSha) implements Basis {
         ComparableGroup { Objects.requireNonNull(group);Objects.requireNonNull(execution); }
     }
+    /** Backend-only classification. Call with cost configuration already resolved for this authorized target;
+     * policy is the approved immutable definition for this operation, not a browser-supplied version. */
+    static Basis classify(QuoteFeaturePreparation.LocalFacts facts,GroupMeanPricing.Policy policy,GroupMeanPricing.Configuration config,
+                          TaskBillingService.MeasuredGroup execution,String initialIntentSha){
+        var op=facts.operation();
+        if(op==null)return new Missing(TaskQuoteBatches.Reason.OUT_OF_DISTRIBUTION);
+        if(config==null || execution==null || !config.supportsImage(op))return new Missing(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING);
+        if(policy==null)return new Missing(TaskQuoteBatches.Reason.OUT_OF_DISTRIBUTION);
+        var dimensions=new EnumMap<GroupMeanPricing.Dimension,Long>(GroupMeanPricing.Dimension.class);
+        dimensions.put(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,(long)facts.files().size());
+        long bytes=0;for(var f:facts.files()){if(f.byteLength()<0)throw new IllegalStateException("Invalid input metadata");bytes=Math.addExact(bytes,f.byteLength());}
+        dimensions.put(GroupMeanPricing.Dimension.TOTAL_INPUT_BYTES,bytes);
+        if(facts.requestedDeliverables()!=null)dimensions.put(GroupMeanPricing.Dimension.REQUESTED_DELIVERABLES,facts.requestedDeliverables().longValue());
+        return policy.classify(op,dimensions,config).<Basis>map(g->new ComparableGroup(g,execution,initialIntentSha)).orElseGet(()->new Missing(TaskQuoteBatches.Reason.OUT_OF_DISTRIBUTION));
+    }
     private record Offer(String agent,ComparableGroup comparable,GroupBudgetQuotes.Decision price) {}
     static final class Prepared {
         private final TaskQuoteIntentService.Fresh fresh; private final List<Offer> offers;

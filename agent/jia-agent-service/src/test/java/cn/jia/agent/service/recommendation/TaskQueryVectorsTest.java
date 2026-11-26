@@ -11,7 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import cn.jia.economy.pricing.TaskReferencePricing;
+import cn.jia.economy.pricing.GroupMeanPricing;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -110,13 +110,15 @@ class TaskQueryVectorsTest {
         var sha="a".repeat(64);var facts=new QuoteFeaturePreparation.LocalFacts(1,sha,sha,List.of(),null,"edit");
         var fresh=new TaskQuoteIntentService.Fresh(new TaskQuoteBatches.Key(task,OWNER.actorId(),"key"),intent,facts,targets,List.of());
         var measured=new TaskBillingService.MeasuredGroup("d",sha,sha,"v",sha,"coverage");
-        var group=new cn.jia.economy.pricing.GroupMeanPricing.Group("f1","edit",sha,"B0","ctx","1","tool","capture",List.of(
-            new cn.jia.economy.pricing.GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","chan","text","base","RESPONSES_TEXT_TOKENS_V1"),
-            new cn.jia.economy.pricing.GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","edit","chan","image","base","openai-images-modalities-v1")));
-        var key=new cn.jia.economy.task.GroupBudgetQuotes.Key(cn.jia.economy.pricing.GroupMeanPricing.key(group));var pin=new cn.jia.economy.task.GroupBudgetQuotes.Pin(key,3,4,4,sha,sha,2,new java.math.BigDecimal("0.59"));
+        var routes=List.of(new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","chan","text","base","RESPONSES_TEXT_TOKENS_V1"),
+            new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","edit","chan","image","base","openai-images-modalities-v1"));
+        var policy=new GroupMeanPricing.Policy("f1","rule","context-compat",new GroupMeanPricing.Buckets("edit",List.of(new GroupMeanPricing.Bucket("B0",Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,new GroupMeanPricing.Range(0,2))))),2);
+        var config=new GroupMeanPricing.Configuration("ctx","1","tool","capture",routes);
+        var a=CandidateGroupOffers.classify(facts,policy,config,measured,null);var b=CandidateGroupOffers.classify(facts,policy,config,measured,sha);
+        var group=((CandidateGroupOffers.ComparableGroup)a).group();var key=new cn.jia.economy.task.GroupBudgetQuotes.Key(GroupMeanPricing.key(group));var pin=new cn.jia.economy.task.GroupBudgetQuotes.Pin(key,3,4,4,sha,policy.sha(),2,new java.math.BigDecimal("0.59"));
         var mean=new cn.jia.economy.task.GroupBudgetQuotes.Mean(pin,30);when(groups.prepare(task.scope(),java.util.Set.of(key))).thenReturn(Map.of(key,mean));
         var missing=new CandidateGroupOffers.Missing(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING);
-        var batch=offers.prepare(fresh,Map.of("a",new CandidateGroupOffers.ComparableGroup(group,measured,null),"b",new CandidateGroupOffers.ComparableGroup(group,measured,sha),"c",missing));
+        var batch=offers.prepare(fresh,Map.of("a",a,"b",b,"c",missing));
         when(billing.storeOffersBatch(eq(task),eq(OWNER.actorId()),any())).thenAnswer(call->{List<TaskBillingService.OfferWrite> writes=call.getArgument(2);
             assertNull(((TaskBillingService.MeanWrite)writes.get(0)).initialIntentSha256());assertEquals(sha,((TaskBillingService.MeanWrite)writes.get(1)).initialIntentSha256());
             assertEquals(missing.reason(),((TaskBillingService.FixedWrite)writes.get(2)).price().reason());return List.of(new TaskBillingService.StoredQuote("a1",30),new TaskBillingService.StoredQuote("b1",30),new TaskBillingService.StoredQuote("c1",1));});

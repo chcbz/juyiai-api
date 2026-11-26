@@ -29,6 +29,23 @@ class GroupMeanPricingTest {
         assertTrue(buckets.match("edit",java.util.Map.of(files,1L,bytes,1048576L)).isEmpty());
         assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.Buckets("edit",List.of(b,new GroupMeanPricing.Bucket("duplicate",b.ranges()))));
     }
+    @Test void policyIdentityCommitsToBoundsAndAdmissionButNotDeclarationOrder(){
+        var d=GroupMeanPricing.Dimension.INPUT_FILE_COUNT;
+        var a=new GroupMeanPricing.Bucket("A",java.util.Map.of(d,new GroupMeanPricing.Range(0,2)));
+        var b=new GroupMeanPricing.Bucket("B",java.util.Map.of(d,new GroupMeanPricing.Range(2,3)));
+        var first=new GroupMeanPricing.Buckets("edit",List.of(a,b));var second=new GroupMeanPricing.Buckets("edit",List.of(b,a));
+        var p=new GroupMeanPricing.Policy("f","r","c",first,3);
+        assertEquals(p.sha(),new GroupMeanPricing.Policy("f","r","c",second,3).sha());assertNotEquals(p.sha(),new GroupMeanPricing.Policy("f","r","c",second,2).sha());
+        assertNotEquals(p.sha(),new GroupMeanPricing.Policy("f","r","c",new GroupMeanPricing.Buckets("edit",List.of(b)),3).sha());
+        var cfg=new GroupMeanPricing.Configuration("ctx","1","tool","cap",List.of(image,parent));assertTrue(cfg.supportsImage("edit"));assertFalse(cfg.supportsImage("generate"));
+        assertEquals("B",p.classify("edit",java.util.Map.of(d,2L),cfg).orElseThrow().bucketId());assertTrue(p.classify(null,java.util.Map.of(d,2L),cfg).isEmpty());
+    }
+    @Test void specificationVectorMatchesIndependentEncoder(){
+        var g=new GroupMeanPricing.Group("f1","edit","0".repeat(64),"B0","ctx","1","tool1","capture1",List.of(
+            new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","edit","chan","image","base","openai-images-modalities-v1"),
+            new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","chan","text","base","RESPONSES_TEXT_TOKENS_V1")));
+        assertEquals("d7da1d2e639f6ef11e4ea2aa701e3b058af14ca20500b9558f2744e0575d6b15",GroupMeanPricing.key(g));
+    }
     @Test void roundsOnceInWenAndRejectsInvalidTotals() {
         assertEquals(30,GroupMeanPricing.amountWen(new BigDecimal("0.590"),2));
         assertEquals(2,GroupMeanPricing.amountWen(new BigDecimal("0.020000000001"),2));
