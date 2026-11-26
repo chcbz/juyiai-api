@@ -57,6 +57,8 @@ class TaskBillingServiceMySqlTest {
     private static final Binding BINDING = new Binding(1, "requirement-sha", "input-sha", "agent-1", "recommendation-1");
     private final EconomyMySqlTestFixture fixture = new EconomyMySqlTestFixture();
     private TaskBillingService billing;
+    private cn.jia.economy.mapper.GroupBaselineMaintenanceMapper maintenance;
+    private cn.jia.economy.mapper.GroupBaselineMapper baselines;
     private TransactionTemplate tx;
     private JdbcTemplate jdbc;
 
@@ -79,10 +81,14 @@ class TaskBillingServiceMySqlTest {
         config.setMapUnderscoreToCamelCase(true);
         config.addMapper(EconomyLedgerMapper.class);
         config.addMapper(EconomyTaskBillingMapper.class);
+        config.addMapper(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class);
+        config.addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var factory = new SqlSessionFactoryBean();
         factory.setDataSource(db.dataSource());
         factory.setConfiguration(config);
         var session = new SqlSessionTemplate(factory.getObject());
+        maintenance=session.getMapper(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class);
+        baselines=session.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var manager = new DataSourceTransactionManager(db.dataSource());
         tx = new TransactionTemplate(manager);
         var ledger = session.getMapper(EconomyLedgerMapper.class);
@@ -423,11 +429,40 @@ class TaskBillingServiceMySqlTest {
         assertEquals(4, count("economy_entry"));
     }
 
-    @Test void pricePointerChangeWithdrawsOldBaselineAtomicallyIncludingRawMaintenanceSql() {
+    private void installGroupSchema() {
         var ddl = new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-v1.sql"));
         ddl.execute(jdbc.getDataSource());
         var triggers = new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-price-invalidation-v1.sql"));
         triggers.setSeparator("$$"); triggers.execute(jdbc.getDataSource());
+    }
+    @Test void competingPriceCommitPreventsLateWorkerPublicationAndNewQuotes() throws Exception {
+        installGroupSchema();String key="a".repeat(64), policy="c".repeat(64);
+        jdbc.update("INSERT INTO economy_budget_domain_epoch VALUES(?,?,7)",SCOPE.tenantId(),SCOPE.clientId());
+        jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,book_epoch,attempt,policy_sha,next_at,updated_at) VALUES(?,?,?,3,'DIRTY',7,0,?,CURRENT_TIMESTAMP(3),CURRENT_TIMESTAMP(3))",SCOPE.tenantId(),SCOPE.clientId(),key,policy);
+        var w=maintenance.due(2).getFirst();String claim=java.util.UUID.randomUUID().toString();
+        assertEquals(1,maintenance.claim(w,claim,60));assertEquals(0,maintenance.claim(w,claim,60));
+        var pub=new GroupBaselinePublisher(maintenance,new ObjectMapper());
+        var rate=new cn.jia.economy.pricing.MeasuredTaskRepricing.ExplicitZero("included");
+        var book=cn.jia.economy.pricing.GroupTariffSnapshot.capture(new cn.jia.economy.pricing.MeasuredTaskRepricing.Reference("r1",Map.of("generate",Map.of("tool",rate))));
+        var fact=new cn.jia.economy.pricing.MeasuredTaskRepricing.Fact(new cn.jia.economy.pricing.MeasuredTaskRepricing.Operation("image","call1"),"generate","tool",key,cn.jia.economy.pricing.MeasuredTaskRepricing.Zero.EXPLICIT_ZERO);
+        var prepared=pub.calculate(w,claim,book,List.of(new GroupBaselinePublisher.Eligible(key,1,key,key,key,key,List.of(fact))),1);
+        tx.executeWithoutResult(st->pub.publish(prepared));
+        var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
+        var mean=(GroupBudgetQuotes.Mean)reader.prepare(SCOPE,java.util.Set.of(k)).get(k);assertEquals(0,mean.amountWen());
+        // Keep this connection open while a separate connection commits maintenance; emulate preparation then signing.
+        var executor=Executors.newSingleThreadExecutor();try {
+            tx.executeWithoutResult(st->{assertEquals(7L,maintenance.readDomainEpoch(SCOPE));
+                var other=executor.submit(()->jdbc.update("DELETE FROM economy_model_price_current WHERE tenant_id=? AND client_id=? AND model=?",SCOPE.tenantId(),SCOPE.clientId(),route("0.1")));
+                try{assertEquals(1,other.get(10,TimeUnit.SECONDS));}catch(Exception e){throw new AssertionError(e);}
+                assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->reader.lockSelected(SCOPE,List.of(mean.pin())));
+            });
+        } finally {executor.shutdownNow();}
+        assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->tx.executeWithoutResult(st->pub.publish(prepared)));
+        assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
+        assertEquals(1,count("economy_budget_group_revision"));assertEquals(1,count("economy_budget_group_build_evidence"));
+    }
+    @Test void pricePointerChangeWithdrawsOldBaselineAtomicallyIncludingRawMaintenanceSql() {
+        installGroupSchema();
         String model=route("0.1"), key="a".repeat(64), tenant=SCOPE.tenantId(), client=SCOPE.clientId();
         jdbc.update("INSERT INTO economy_budget_domain_epoch VALUES(?,?,7)",tenant,client);
         jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,active_revision,status,tariff_sha,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,3,3,'ACTIVE',?,7,0,?,CURRENT_TIMESTAMP(3))",tenant,client,key,"b".repeat(64),"c".repeat(64));
