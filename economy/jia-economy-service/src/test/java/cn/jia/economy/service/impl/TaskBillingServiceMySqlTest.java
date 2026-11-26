@@ -504,25 +504,36 @@ class TaskBillingServiceMySqlTest {
         var g=policy.classify(op,Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),config).orElseThrow();var key=GroupMeanPricing.key(g);
         var v=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));v.set(0,1f);
         var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture",a,b,a,new TaskEstimateFeatures.Identity("fixture","model",1024),v,List.of(new TaskEstimateFeatures.File("INPUT","image/png",32,1)),null);
-        var manifest=new TaskBenchmarkAdmission.Manifest("benchmark-case-v1",TASK,"case","agent","test","review",new TaskBillingService.MeasuredGroup("ver",a,b,"1",a,"capture"),features,new TaskBenchmarkAdmission.GroupInput(op,config));
-        var raw=json.writeValueAsString(manifest);String sample=GroupPublicationEnrollment.digest(raw);
-        var review=json.writeValueAsString(new BenchmarkSampleEvidence.Review("benchmark-review-v1","case",sample,"terminal",a,"ACCEPTED","test","artifact"));String rev=GroupPublicationEnrollment.digest(review);
-        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,'case',?,?)",t,c,TASK.ownerJiacn(),TASK.taskId(),raw,sample);
-        jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,'case','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,TASK.ownerJiacn(),TASK.taskId(),a,b,features.digest());
-        jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
-        var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),TASK.ownerJiacn(),TASK.taskId(),"case",sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));enroll.register(SCOPE,approval);
-        var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",1,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
         // The two associated responses are fixture inputs, not provider traffic or an accuracy observation.
         var evidence=org.mockito.Mockito.mock(BenchmarkSampleEvidence.class);var decoder=org.mockito.Mockito.mock(ConfirmedSampleEvidence.Decoder.class);
         var ops=config.routes().stream().map(r->new ConfirmedSampleEvidence.Operation(1,"capture",1,r.kind(),"1",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation(r.kind(),"one"),r.kind(),r.component(),a,new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,1_000_000L))))).toList();
-        org.mockito.Mockito.when(evidence.measureReviewed(TASK,"case",sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
-        var service=new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(TaskPricingTestFixture.service(jdbc),maintenance)),transactional(new GroupReviewedUsage(maintenance,enroll,originals,evidence)),transactional(new GroupBaselinePublisher(maintenance,json)),json);
+        var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));
+        for(int n=0;n<(changeBook?2:1);n++){
+            var task=n==0?TASK:new TaskBillingService.Task(SCOPE,TASK.ownerJiacn(),"race-task-2");String caseId="case-"+n;
+            var manifest=new TaskBenchmarkAdmission.Manifest("benchmark-case-v1",task,caseId,"agent","test","review",new TaskBillingService.MeasuredGroup("ver",a,b,"1",a,"capture"),features,new TaskBenchmarkAdmission.GroupInput(op,config));
+            var raw=json.writeValueAsString(manifest);String sample=GroupPublicationEnrollment.digest(raw);
+            var review=json.writeValueAsString(new BenchmarkSampleEvidence.Review("benchmark-review-v1",caseId,sample,"terminal",a,"ACCEPTED","test","artifact"));String rev=GroupPublicationEnrollment.digest(review);
+            jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",t,c,task.ownerJiacn(),task.taskId(),caseId,raw,sample);
+            jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,task.ownerJiacn(),task.taskId(),caseId,a,b,features.digest());
+            jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
+            String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),task.ownerJiacn(),task.taskId(),caseId,sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));enroll.register(SCOPE,approval);
+            org.mockito.Mockito.when(evidence.measureReviewed(task,caseId,sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
+        }
+        var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",1,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
+        var reading=new CountDownLatch(1);var release=new CountDownLatch(1);
+        // Interpose only on the second access to the already-frozen book, after the first real cost was calculated.
+        var publisher=new GroupBaselinePublisher(maintenance,json){
+            @Override Prepared calculate(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.Work w,String claim,cn.jia.economy.pricing.GroupTariffSnapshot tariff,List<Eligible> members,int min,String approval){
+                if(!changeBook)return super.calculate(w,claim,tariff,members,min,approval);
+                assertEquals(2,members.size());assertNotEquals(members.get(0).sampleId(),members.get(1).sampleId());
+                var observed=org.mockito.Mockito.spy(tariff);var calls=new java.util.concurrent.atomic.AtomicInteger();
+                org.mockito.Mockito.doAnswer(inv->{if(calls.incrementAndGet()==2){reading.countDown();assertTrue(release.await(20,TimeUnit.SECONDS));}return tariff.reference();}).when(observed).reference();
+                var calculated=super.calculate(w,claim,observed,members,min,approval);assertEquals(2,calls.get());assertEquals(0,calculated.total().compareTo(new BigDecimal("1.2")));return calculated;
+            }
+        };
+        var service=new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(TaskPricingTestFixture.service(jdbc),maintenance)),transactional(new GroupReviewedUsage(maintenance,enroll,originals,evidence)),transactional(publisher),json);
         var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
         if(changeBook){
-            var reading=new CountDownLatch(1);var release=new CountDownLatch(1);
-            var measured=evidence.measureReviewed(TASK,"case",sample,"terminal",rev,decoder);
-            org.mockito.Mockito.doAnswer(inv->{reading.countDown();assertTrue(release.await(20,TimeUnit.SECONDS));return measured;})
-                .when(evidence).measureReviewed(TASK,"case",sample,"terminal",rev,decoder);
             var pool=Executors.newSingleThreadExecutor();try{
                 long epoch=maintenance.readDomainEpoch(SCOPE);
                 var active=pool.submit(()->service.runDue(t,c,decoder));assertTrue(reading.await(20,TimeUnit.SECONDS));
