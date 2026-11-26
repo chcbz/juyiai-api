@@ -75,15 +75,18 @@ class TaskQueryVectorsTest {
         var different=new cn.jia.economy.task.TaskQuoteBatches.Intent("4",List.of("agent"));when(batches.replay(any(),eq(different))).thenThrow(new cn.jia.economy.task.TaskQuoteBatches.IntentConflict());
         assertThrows(cn.jia.economy.task.TaskQuoteBatches.IntentConflict.class,()->service.begin(OWNER,"task","key",different));verifyNoInteractions(requirements,grants,agents,materials,features);
     }
-    @Test void independentBudgetSeparatesPrepareFromCommitAndDoesNotTouchBillingForUnavailableOrReplayedIntent(){
+    @Test void independentBudgetIssuesFixedQuoteOnceAndDoesNotTouchBillingOnReplay(){
         var intents=mock(TaskQuoteIntentService.class);var budget=mock(TaskBudgetEstimator.class);var billing=mock(TaskBillingService.class);
         var app=new IndependentTaskQuotes(intents,java.util.Optional.empty(),budget,billing);var intent=new TaskQuoteBatches.Intent("3",List.of("agent"));
         var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
         var f=mock(cn.jia.economy.pricing.TaskEstimateFeatures.class);var fresh=new TaskQuoteIntentService.Fresh(key,intent,1,f,List.of(new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget("agent","owner",7,0)),List.of());
         when(intents.begin(OWNER,"task","key",intent)).thenReturn(fresh);when(budget.prepare(task,f,null)).thenReturn(new TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING));
         when(intents.finish(eq(OWNER),eq(fresh),any())).thenAnswer(call->{var items=call.<java.util.function.Function<String,List<TaskQuoteBatches.Item>>>getArgument(2).apply("batch");return new TaskQuoteBatches.Result("task","3",12,items);});
-        var result=app.quote(OWNER,"task","key",intent);assertEquals(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING,result.quotes().getFirst().unavailableReason());assertNull(result.quotes().getFirst().amount());
-        verify(budget).lockSelected(task,List.of());verifyNoInteractions(billing);clearInvocations(budget);
+        when(f.requirementSha256()).thenReturn("a".repeat(64));when(f.inputSnapshotSha256()).thenReturn("b".repeat(64));
+        var binding=new TaskBillingService.Binding(1,f.requirementSha256(),f.inputSnapshotSha256(),"agent","batch");
+        when(billing.storeFixedFallback(task,binding,OWNER.actorId(),TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING)).thenReturn(new TaskBillingService.StoredQuote("fixed",1));
+        var result=app.quote(OWNER,"task","key",intent);assertEquals("fixed",result.quotes().getFirst().quoteId());assertEquals(cn.jia.economy.common.Money.wen(1),result.quotes().getFirst().amount());
+        verify(budget).lockSelected(task,List.of());verify(billing).storeFixedFallback(task,binding,OWNER.actorId(),TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING);clearInvocations(budget,billing);
         when(intents.begin(OWNER,"task","key",intent)).thenReturn(new TaskQuoteIntentService.Replay(result));assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
         when(intents.begin(OWNER,"task","key",intent)).thenThrow(new TaskFeatureEncoder.Unavailable());when(intents.replay(OWNER,"task","key",intent)).thenReturn(result);
         assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(budget,billing);
