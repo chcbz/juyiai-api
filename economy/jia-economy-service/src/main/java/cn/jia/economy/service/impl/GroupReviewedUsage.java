@@ -33,14 +33,18 @@ public class GroupReviewedUsage {
         var manifest=CANON.readValue(originals.manifest(),TaskBenchmarkAdmission.Manifest.class);
         var review=CANON.readValue(originals.review(),BenchmarkSampleEvidence.Review.class);
         require(task.equals(manifest.task())&&m.caseId().equals(manifest.caseId())&&manifest.groupInput()!=null);
+        var group=classify(manifest,policy);
+        require(w.groupSha().equals(GroupMeanPricing.key(group))&&manifest.execution().capturePolicyVersion().equals(group.capturePolicyVersion()));
+        var measured=evidence.measureReviewed(task,m.caseId(),m.manifestSha(),review.terminalFactId(),m.reviewSha(),decoder);
+        return measured(m,review.terminalFactId(),group,measured);
+    }
+    static GroupMeanPricing.Group classify(TaskBenchmarkAdmission.Manifest manifest,GroupMeanPricing.Policy policy){
+        require(manifest.groupInput()!=null);
         var basis=manifest.groupInput();var features=manifest.features();var dims=new EnumMap<GroupMeanPricing.Dimension,Long>(GroupMeanPricing.Dimension.class);
         long bytes=0;for(var f:features.files()){require(f.byteLength()>=0);bytes=Math.addExact(bytes,f.byteLength());}
         dims.put(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,(long)features.files().size());dims.put(GroupMeanPricing.Dimension.TOTAL_INPUT_BYTES,bytes);
         if(features.requestedDeliverables()!=null)dims.put(GroupMeanPricing.Dimension.REQUESTED_DELIVERABLES,features.requestedDeliverables().longValue());
-        var group=policy.classify(basis.operation(),dims,basis.configuration()).orElseThrow(GroupBaselinePublisher.MoreInputRequired::new);
-        require(w.groupSha().equals(GroupMeanPricing.key(group))&&manifest.execution().capturePolicyVersion().equals(group.capturePolicyVersion()));
-        var measured=evidence.measureReviewed(task,m.caseId(),m.manifestSha(),review.terminalFactId(),m.reviewSha(),decoder);
-        return measured(m,review.terminalFactId(),group,measured);
+        return policy.classify(basis.operation(),dims,basis.configuration()).orElseThrow(GroupBaselinePublisher.MoreInputRequired::new);
     }
     static GroupBaselinePublisher.Eligible measured(Member m,String terminal,GroupMeanPricing.Group group,ConfirmedSampleEvidence.Measured measured){
         require(measured!=null);var a=measured.assessment();

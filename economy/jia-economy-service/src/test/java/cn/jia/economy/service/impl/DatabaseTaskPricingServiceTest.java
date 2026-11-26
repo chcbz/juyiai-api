@@ -149,6 +149,31 @@ class DatabaseTaskPricingServiceTest {
         for(String sha:java.util.List.of(roster,dataset,reference,policy,members.getLast().observationSha256())){
             var bytes=objects.get(sha);objects.put(sha,bytes+" ");assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,pins,objects::get));objects.put(sha,bytes);}
     }
+    @Test void groupPairedRosterReplaysOnlyAuthorizedBenchmarkInputsBeforeOpeningTruth(){
+        var json=new ObjectMapper();var study=new FrozenCalibrationStudy(json,null);
+        var store=new java.util.HashMap<String,String>();java.util.function.Function<Object,String> keep=v->{var a=study.freeze(v);store.put(a.sha256(),a.json());return a.sha256();};
+        var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),1);
+        var execution=new cn.jia.economy.task.TaskBillingService.MeasuredGroup("v1","1".repeat(64),"2".repeat(64),"route","3".repeat(64),"cp");
+        var cfg=new GroupMeanPricing.Configuration("ctx","1","2","cp",java.util.List.of(new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","c","m","t","basis"),new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","generate","c","m","t","basis")));
+        var input=new cn.jia.economy.task.TaskBenchmarkAdmission.GroupInput("generate",cfg);
+        var buckets=new GroupMeanPricing.Buckets("generate",java.util.List.of(new GroupMeanPricing.Bucket("b",Map.of())));
+        var policy=new GroupMeanPricing.Policy("f","p","c",buckets,1);
+        var domain=new GroupHoldoutForecast.Domain(scope.tenantId(),scope.clientId(),GroupMeanPricing.key(policy.classify("generate",Map.of(),cfg).orElseThrow()));
+        var r=new MeasuredTaskRepricing.TokenRate("basis",new ModelTokenPrice("c","m","t","v","fixture",Map.of(ModelTokenPrice.Category.INPUT,BigDecimal.valueOf(10000)),null,Map.of()));
+        var reference=new MeasuredTaskRepricing.Reference("book",Map.of("MODEL_RESPONSE",Map.of("INFERENCE",r),"NATIVE_PROVIDER_CALL",Map.of("generate",r)));
+        var book=study.freezeReference(reference);store.put(book.sha256(),book.json());String tariff=GroupTariffSnapshot.capture(reference).tariffSha();
+        java.util.function.Function<String,String> manifest=id->keep.apply(new cn.jia.economy.task.TaskBenchmarkAdmission.Manifest("benchmark-case-v1",new cn.jia.economy.task.TaskBillingService.Task(scope,"operator",id),id,"agent","fixture","whole",execution,f,input));
+        String train=manifest.apply("train"),held=manifest.apply("hold");
+        var review=new cn.jia.economy.usage.BenchmarkSampleEvidence.Review("benchmark-review-v1","train",train,"terminal","a".repeat(64),"ACCEPTED","reviewer","artifact");var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision(train,2);
+        var ops=cfg.routes().stream().map(route->new ProjectedTaskOperation(1,"capture",1,route.kind(),"source","1".repeat(64),new MeasuredTaskRepricing.Operation("fixture",route.kind()),route.kind(),route.component(),"TOKEN",json.valueToTree(new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,2L))))).toList();
+        var rs=keep.apply(review);var src=new FrozenBenchmarkObservation("benchmark-observation-v1",new TaskEstimateEvaluation.Case("train","f1",1,2,TaskEstimateEvaluation.Split.TRAIN),rev,store.get(train),store.get(rs),ops);
+        var member=new FrozenCalibrationStudy.Member("train",rev,keep.apply(src),new cn.jia.economy.usage.BenchmarkSampleEvidence.Pin("train",train,"terminal",rs));
+        var trial=new TaskEstimateCalibration.Trial("fixed",1,1,1,1,1,.1,.5,1,1,1,1);
+        var plan=new FrozenCalibrationStudy.GroupPlan("group-comparison-plan-v1",domain,"operator",book.sha256(),tariff,"f","p","c",buckets,1,trial,java.util.List.of(new FrozenCalibrationStudy.GroupTrain(member,"f1")),java.util.List.of(new FrozenCalibrationStudy.GroupHeld("hold","f2",held,3)));
+        String pin=keep.apply(plan);var artifact=study.groupForecasts(scope,"operator",pin,store::get);var result=json.readValue(artifact.json(),FrozenCalibrationStudy.GroupForecasts.class);
+        assertEquals(new GroupHoldoutForecast.Pair(4L,4L),result.rows().getFirst().pair());assertEquals(pin,result.planSha());assertEquals(tariff,result.tariffSha());assertEquals(held,result.rows().getFirst().manifestSha());assertEquals(artifact,study.groupForecasts(scope,"operator",pin,store::get));
+        assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"another",pin,store::get));store.put(held,store.get(train));assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"operator",pin,store::get));
+    }
     @Test void frozenMixedAndBenchmarkOnlyStudiesRejectReplacementApprovalsAndForeignOwners(){
         var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         var observations=new TaskHistoryCatalogService(db,json);var study=new FrozenCalibrationStudy(json,observations);

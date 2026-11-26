@@ -1,6 +1,10 @@
 package cn.jia.economy.service.impl;
 
 import cn.jia.economy.pricing.MeasuredTaskRepricing;
+import cn.jia.economy.pricing.GroupHoldoutForecast;
+import cn.jia.economy.pricing.GroupMeanPricing;
+import cn.jia.economy.pricing.GroupTariffSnapshot;
+import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.economy.pricing.TaskEstimateCalibration;
 import cn.jia.economy.pricing.TaskEstimateEvaluation;
 import cn.jia.economy.pricing.TaskEstimateEvaluation.Split;
@@ -96,6 +100,53 @@ public final class FrozenCalibrationStudy {
         if(!group.execution().routeVersion().equals(book.version()))throw new IllegalArgumentException("Wrong reference version");
         verifyQuoteRates(q.getSnapshotJson(),book);
         return freeze(new OfferedHoldout(t,family,group.digest(),feature,q.getQuoteId(),agent,q.getAmountWen(),priceBook.sha256()));
+    }
+    // Independently preregistered benchmark-only roster: a held case has no slot for a result or review.
+    public record GroupTrain(Member source,String family){}
+    public record GroupHeld(String task,String family,String manifestSha,long featuresAt){}
+    public record GroupPlan(String schema,GroupHoldoutForecast.Domain domain,String operator,String referenceSha,String tariffSha,
+            String featureVersion,String pricingRule,String configRule,GroupMeanPricing.Buckets buckets,int minSupport,
+            TaskEstimateCalibration.Trial frozenTrial,List<GroupTrain> train,List<GroupHeld> held){}
+    public record GroupPrediction(String task,String agent,String family,String manifestSha,String featureSha,GroupHoldoutForecast.Pair pair){}
+    public record GroupForecasts(String schema,String planSha,String referenceSha,String tariffSha,List<GroupPrediction> rows){}
+    /** Offline use with externally approved plan and operator-scoped objects only. The caller must retain
+     * the returned digest before releasing holdouts to execution. Computing it later cannot prove chronology. */
+    public Artifact groupForecasts(EconomyScope scope,String operator,String approvedPlanSha,Function<String,String> objects){
+        var plan=read(objects,approvedPlanSha,GroupPlan.class);var domain=plan.domain();
+        if(!"group-comparison-plan-v1".equals(plan.schema())||!operator.equals(plan.operator())||!scope.tenantId().equals(domain.tenant())||!scope.clientId().equals(domain.client())||plan.held().isEmpty())throw new IllegalArgumentException("Wrong group study roster");
+        var policy=new GroupMeanPricing.Policy(plan.featureVersion(),plan.pricingRule(),plan.configRule(),plan.buckets(),plan.minSupport());
+        var book=reference(read(objects,plan.referenceSha(),Book.class));
+        if(!GroupTariffSnapshot.capture(book).tariffSha().equals(plan.tariffSha()))throw new IllegalArgumentException("Wrong group study tariff");
+        var training=new ArrayList<GroupHoldoutForecast.Training>();
+        for(var row:plan.train()){
+            var member=row.source();var pin=Objects.requireNonNull(member.benchmark());var task=new Task(scope,operator,member.task());
+            var manifest=read(objects,pin.manifestSha(),TaskBenchmarkAdmission.Manifest.class);
+            verifyStudyManifest(manifest,task,domain,policy,book);
+            var snapshot=read(objects,member.observationSha256(),FrozenBenchmarkObservation.class);
+            var sample=snapshot.sample(json,task,TaskHistoryCatalog.Group.of(manifest.execution(),manifest.features()),member.source(),pin,row.family(),Split.TRAIN);
+            training.add(new GroupHoldoutForecast.Training(domain,sample.id(),sample.split(),sample.revision(),sample.features(),sample.facts()));
+        }
+        var model=new GroupHoldoutForecast(domain,book,training,plan.minSupport(),plan.frozenTrial());
+        var rows=new ArrayList<GroupPrediction>();var seen=new HashSet<String>();
+        for(var held:plan.held()){
+            if(!seen.add(held.task()))throw new IllegalArgumentException("Repeated holdout task");
+            var m=read(objects,held.manifestSha(),TaskBenchmarkAdmission.Manifest.class);
+            verifyStudyManifest(m,new Task(scope,operator,held.task()),domain,policy,book);
+            var pair=model.predict(domain,held.task(),held.family(),held.featuresAt(),m.features());
+            rows.add(new GroupPrediction(held.task(),m.agentId(),held.family(),held.manifestSha(),m.features().digest(),pair));
+        }
+        return freeze(new GroupForecasts("group-paired-forecast-v1",approvedPlanSha,plan.referenceSha(),plan.tariffSha(),List.copyOf(rows)));
+    }
+    private static void verifyStudyManifest(TaskBenchmarkAdmission.Manifest m,Task task,GroupHoldoutForecast.Domain domain,GroupMeanPricing.Policy policy,MeasuredTaskRepricing.Reference book){
+        if(!task.equals(m.task())||m.groupInput()==null)throw new IllegalArgumentException("Wrong benchmark task");
+        var g=GroupReviewedUsage.classify(m,policy);
+        if(!GroupMeanPricing.key(g).equals(domain.groupSha())||!m.execution().capturePolicyVersion().equals(g.capturePolicyVersion()))throw new IllegalArgumentException("Wrong benchmark group");
+        var routes=new HashSet<List<String>>();for(var r:g.routes()){
+            var rate=book.byKind().getOrDefault(r.kind(),Map.of()).get(r.component());
+            if(!(rate instanceof MeasuredTaskRepricing.TokenRate t)||!r.normalizationBasis().equals(t.normalizationBasis())||!r.channel().equals(t.reference().channel())||!r.model().equals(t.reference().model())||!r.tier().equals(t.reference().tier()))throw new IllegalArgumentException("Wrong benchmark price route");
+            routes.add(List.of(r.kind(),r.component()));
+        }
+        if(routes.size()!=book.byKind().values().stream().mapToInt(Map::size).sum())throw new IllegalArgumentException("Foreign benchmark price component");
     }
     public record ConfirmedPoint(TaskEstimateEvaluation.Prediction point,TaskCalibrationObservations.Frozen source) {
         @Override public String toString(){return "ConfirmedPoint[private]";}}
