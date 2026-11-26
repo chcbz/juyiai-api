@@ -435,6 +435,21 @@ class TaskBillingServiceMySqlTest {
         var triggers = new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-price-invalidation-v1.sql"));
         triggers.setSeparator("$$"); triggers.execute(jdbc.getDataSource());
     }
+    @Test void rosterSnapshotKeepsUnprovenMembersAcrossPageBoundaryButRejectsLostClaims(){
+        installGroupSchema();String key="a".repeat(64),policy="b".repeat(64);
+        jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,book_epoch,attempt,policy_sha,next_at,updated_at) VALUES(?,?,?,1,'DIRTY',1,0,?,CURRENT_TIMESTAMP(3),CURRENT_TIMESTAMP(3))",SCOPE.tenantId(),SCOPE.clientId(),key,policy);
+        var w=maintenance.due(1).getFirst();String claim=java.util.UUID.randomUUID().toString();assertEquals(1,maintenance.claim(w,claim,60));
+        var rows=new java.util.ArrayList<Object[]>();var ids=new java.util.TreeSet<String>();
+        for(int i=0;i<131;i++){
+            String id=GroupPublicationEnrollment.digest("sample-"+i);if(i!=0)ids.add(id);
+            rows.add(new Object[]{SCOPE.tenantId(),SCOPE.clientId(),key,id,"t-"+i,id,key,policy,i!=0});
+        }
+        jdbc.batchUpdate("INSERT INTO economy_budget_group_member VALUES(?,?,?,?,'owner',?,1,?,?,?,?,CURRENT_TIMESTAMP(3))",rows);
+        var roster=new GroupRosterSnapshot(maintenance);
+        var pins=tx.execute(st->roster.freeze(w,claim));assertEquals(List.copyOf(ids),pins.stream().map(p->p.sampleId()).toList());
+        assertTrue(pins.stream().allMatch(p->p.sourceTask().startsWith("t-")&&policy.equals(p.approvalSha())));
+        assertEquals(1,maintenance.waitForInput(w,claim));assertThrows(cn.jia.economy.task.TaskBudgetEstimator.Stale.class,()->tx.execute(st->roster.freeze(w,claim)));
+    }
     @Test void competingPriceCommitPreventsLateWorkerPublicationAndNewQuotes() throws Exception {
         installGroupSchema();String key="a".repeat(64), policy="c".repeat(64);
         jdbc.update("INSERT INTO economy_budget_domain_epoch VALUES(?,?,7)",SCOPE.tenantId(),SCOPE.clientId());

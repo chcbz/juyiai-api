@@ -34,6 +34,13 @@ public interface GroupBaselineMaintenanceMapper {
     int insertEvidence(@Param("w") Work w,@Param("json") String json,@Param("evidence") String evidence);
     @Update("UPDATE economy_budget_group_head SET active_revision=generation,status='ACTIVE',tariff_sha=#{tariff},claim_id=NULL,lease_until=NULL,next_at=NULL,updated_at=CURRENT_TIMESTAMP(3) WHERE "+OWN)
     int publish(@Param("w") Work w,@Param("claim") String claim,@Param("tariff") String tariff);
+    @Select("SELECT generation FROM economy_budget_group_head WHERE "+OWN)
+    Long observedClaim(@Param("w") Work w,@Param("claim") String claim);
+    record SourcePin(String sampleId,String sourceOwner,String sourceTask,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha){}
+    // No joins against reviews or approvals: a missing/revoked source must NOT silently shrink the denominator.
+    @Select("SELECT sample_id,source_owner,source_task_id AS source_task,evidence_revision,manifest_sha,review_sha,publish_approval_sha AS approval_sha FROM economy_budget_group_member WHERE "+ID+
+        " AND enabled AND sample_id>#{after} ORDER BY sample_id LIMIT 128")
+    List<SourcePin> sourcePage(@Param("w") Work work,@Param("after") String after);
     /** All source identity comes from original maintenance approval bytes, not from the quoting actor. */
     record Member(String tenant,String client,String groupSha,String policySha,String sourceOwner,String sourceTask,String caseId,
         String sampleId,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha) {}
