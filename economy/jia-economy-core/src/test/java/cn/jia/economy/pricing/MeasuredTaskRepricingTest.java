@@ -58,6 +58,25 @@ class MeasuredTaskRepricingTest {
         return new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),vector,
                 Collections.nCopies(files,new TaskEstimateFeatures.File("INPUT","text/plain",1024,1)),deliverables);
     }
+    @Test void pairedGroupForecastHasOneBookOnePopulationAndNoHoldoutOutcome(){
+        var group=new GroupHoldoutForecast.Domain("tenant","client","a".repeat(64));
+        var other=new GroupHoldoutForecast.Domain("tenant","other","a".repeat(64));
+        var book=new Reference("frozen",Map.of("render",Map.of("frames",frames)));
+        var q=features(1,0,2);var trial=new TaskEstimateCalibration.Trial("frozen",1,1,1,1,1,.1,.5,1,1,0,1);
+        var train=TaskEstimateEvaluation.Split.TRAIN;
+        var a=new GroupHoldoutForecast.Training(group,new TaskEstimateEvaluation.Case("a","first",1,2,train),1,q,List.of(fact("a","render","frames",new Units(image,BigDecimal.ONE))));
+        var b=new GroupHoldoutForecast.Training(group,new TaskEstimateEvaluation.Case("b","second",2,3,train),2,features(-1,0,2),List.of(fact("b","render","frames",new Units(image,BigDecimal.TEN))));
+        var fit=new GroupHoldoutForecast(group,book,List.of(b,a),2,trial);
+        assertEquals(new GroupHoldoutForecast.Pair(9L,2L),fit.predict(group,"new","third",4,q));
+        assertEquals(new GroupHoldoutForecast.Pair(9L,null),fit.predict(group,"new","third",4,features(1,1,2)));
+        assertEquals(new GroupHoldoutForecast.Pair(null,2L),new GroupHoldoutForecast(group,book,List.of(a),2,trial).predict(group,"new","third",4,q));
+        assertEquals(new GroupHoldoutForecast.Pair(9L,null),new GroupHoldoutForecast(group,book,List.of(a,b),2,null).predict(group,"new","third",4,q));
+        assertThrows(IllegalArgumentException.class,()->fit.predict(other,"new","third",4,q));
+        assertThrows(IllegalArgumentException.class,()->fit.predict(group,"a","third",4,q));
+        assertThrows(IllegalArgumentException.class,()->fit.predict(group,"new","second",4,q));
+        assertThrows(IllegalArgumentException.class,()->fit.predict(group,"new","third",3,q));
+        assertThrows(IllegalArgumentException.class,()->new GroupHoldoutForecast(group,book,List.of(a,a),2,trial));
+    }
     @Test void structuralRadiusRejectionStillCountsEvidenceAndKeepsExactBoundary(){
         var q=features(1,0,2);var params=new TaskNeighborSearch.Parameters(new TaskNeighborSearch.Scales(0,0,1),1,1,1,1,1,.1,.5,2,2,1,1);
         var search=new TaskNeighborSearch(q,params);search.accept("a",1,features(1,1,2));
