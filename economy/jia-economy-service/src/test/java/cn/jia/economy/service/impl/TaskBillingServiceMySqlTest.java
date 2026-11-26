@@ -493,7 +493,9 @@ class TaskBillingServiceMySqlTest {
     }
     private String importTestApproval(Object raw,ObjectMapper json){String body=json.writeValueAsString(raw),sha=GroupPublicationEnrollment.digest(body);jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,body);return sha;}
     @SuppressWarnings("unchecked") private <T> T transactional(T target){var proxy=new ProxyFactory(target);proxy.setProxyTargetClass(true);proxy.addAdvice(new TransactionInterceptor(tx.getTransactionManager(),new AnnotationTransactionAttributeSource()));return (T)proxy.getProxy();}
-    @Test void approvedStudyRepricesStoredRosterAndWithdrawnStudyImmediatelyStopsNewOffers(){
+    @Test void approvedStudyRepricesStoredRosterAndWithdrawnStudyImmediatelyStopsNewOffers() throws Exception { verifyReviewedReprice(false); }
+    @Test void concurrentPriceWithdrawalDuringReviewedRepriceCannotPublishObsoleteMean() throws Exception { verifyReviewedReprice(true); }
+    private void verifyReviewedReprice(boolean changeBook) throws Exception {
         installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),a="a".repeat(64),b="b".repeat(64);var json=new ObjectMapper();var op="edit";
         var buckets=new GroupMeanPricing.Buckets(op,List.of(new GroupMeanPricing.Bucket("one",Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,new GroupMeanPricing.Range(1,2)))));
@@ -515,7 +517,25 @@ class TaskBillingServiceMySqlTest {
         var ops=config.routes().stream().map(r->new ConfirmedSampleEvidence.Operation(1,"capture",1,r.kind(),"1",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation(r.kind(),"one"),r.kind(),r.component(),a,new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,1_000_000L))))).toList();
         org.mockito.Mockito.when(evidence.measureReviewed(TASK,"case",sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
         var service=new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(TaskPricingTestFixture.service(jdbc),maintenance)),transactional(new GroupReviewedUsage(maintenance,enroll,originals,evidence)),transactional(new GroupBaselinePublisher(maintenance,json)),json);
-        service.runDue(t,c,decoder);var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
+        var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
+        if(changeBook){
+            var reading=new CountDownLatch(1);var release=new CountDownLatch(1);
+            var measured=evidence.measureReviewed(TASK,"case",sample,"terminal",rev,decoder);
+            org.mockito.Mockito.doAnswer(inv->{reading.countDown();assertTrue(release.await(20,TimeUnit.SECONDS));return measured;})
+                .when(evidence).measureReviewed(TASK,"case",sample,"terminal",rev,decoder);
+            var pool=Executors.newSingleThreadExecutor();try{
+                long epoch=maintenance.readDomainEpoch(SCOPE);
+                var active=pool.submit(()->service.runDue(t,c,decoder));assertTrue(reading.await(20,TimeUnit.SECONDS));
+                assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
+                assertEquals(1,jdbc.update("DELETE FROM economy_model_price_current WHERE tenant_id=? AND client_id=? AND model=?",t,c,route("0.1")));
+                assertEquals(epoch+1,maintenance.readDomainEpoch(SCOPE));release.countDown();active.get(20,TimeUnit.SECONDS);
+                assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL AND claim_id IS NULL",Integer.class));
+                assertEquals(0,count("economy_budget_group_revision"));assertEquals(0,count("economy_budget_group_build_evidence"));
+                service.runDue(t,c,decoder);assertEquals("WAIT_INPUT",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));
+                assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
+            } finally {release.countDown();pool.shutdownNow();}return;
+        }
+        service.runDue(t,c,decoder);
         assertEquals(60,assertInstanceOf(GroupBudgetQuotes.Mean.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k)).amountWen());
         assertEquals(study,jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(roster_json,'$.studyApprovalSha')) FROM economy_budget_group_build_evidence",String.class));
         jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=TRUE WHERE approval_sha=?",study);assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
