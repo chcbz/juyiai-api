@@ -87,7 +87,8 @@ final class NativeCaptureCoverage {
         if(plan==null||close==null)waiting=true;
         if(plan!=null){var root=groups.get(new Source(plan.get("rootSourceId").asText(),"0"));if(root==null||root.source==null)waiting=true;
             if(approved==null&&(trusted==null||!trusted.configSha().equals(plan.get("executionConfigSha256").asText())||!trusted.engine().equals(plan.get("engineVersion").asText())||!trusted.policy().equals(plan.get("coveragePolicyVersion").asText())))incomplete=true;}
-        if(close!=null){count(close,"sourceCount",groups.size());if(!Objects.equals(planSha,close.get("planEvidenceSha256").asText())||!finals.finish().equals(close.get("sourcesSha256").asText())||!drained(close))incomplete=true;}
+        if(close!=null){if(close.has("imageInvocation") && (plan==null || !"NATIVE_PINNED_IMAGE_V1".equals(plan.path("coveragePolicyVersion").asText())))incomplete=true;
+            count(close,"sourceCount",groups.size());if(!Objects.equals(planSha,close.get("planEvidenceSha256").asText())||!finals.finish().equals(close.get("sourcesSha256").asText())||!drained(close))incomplete=true;}
         for(var g:groups.values()){
             if(g.source==null||g.closed==null)waiting=true;
             if(g.source!=null&&(matchesAdmittedGroup(g)||trusted!=null&&trusted.adapter().equals(g.source.get("adapterVersion").asText())&&trusted.channelNamespace().equals(g.source.get("channelNamespace").asText()))&&"METERED_HTTP_RESPONSES_V1".equals(g.source.get("sourceKind").asText()))observed=observed.add(g.quantity);else incomplete=true;

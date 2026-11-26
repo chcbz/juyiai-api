@@ -18,6 +18,14 @@ class NativeCaptureEvidenceTest {
         group.put("providerUrl","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));group.remove("providerUrl");
         group.put("routeSha256","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));
     }
+    @Test void closedImageSourcePinsExactInvocationAndBothPhaseDigests(){
+        var img=new HashMap<String,Object>(Map.of("invocationId","11111111-1111-4111-8111-111111111111","operation","generate","childRouteSha256","a".repeat(64),"startedSha256","b".repeat(64),"terminalSha256","c".repeat(64)));
+        var o=new HashMap<String,Object>(Map.of("planEvidenceSha256","d".repeat(64),"sourceCount","1","sourcesSha256","e".repeat(64),"closeState","SEALED_INCOMPLETE","reasonCodes",List.of(),"imageInvocation",img));
+        NativeCaptureEvidence.captureFinalKeys(o);var original=NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",o,List.of());
+        img.put("terminalSha256","d".repeat(64));assertNotEquals(original,NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",o,List.of()));
+        img.put("url","secret");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys(o));img.remove("url");
+        img.put("invocationId","other/run");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys(o));
+    }
     @Test void requestOutcomeCanChangeButAttemptCannot(){
         var identity=List.of("source","0","1");var o=new HashMap<String,Object>();o.put("attemptId","a");o.put("resolution","PENDING");
         String first=NativeCaptureEvidence.bindingDigest("REQUEST",o,identity);o.put("resolution","RESPONSE");

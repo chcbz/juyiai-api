@@ -37,13 +37,20 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
           case "REQUEST" -> {keys(o,"sourceId","epoch","sequence","attemptId","resolution","sourceAttemptId","reasonCodes");identity=List.of(field(o,"sourceId",ID),field(o,"epoch",DEC),field(o,"sequence",POS));field(o,"attemptId",ID);String res=text(o,"resolution");check(Set.of("PENDING","RESPONSE","UNRESOLVED").contains(res));check(!revision.equals("1")||res.equals("PENDING"));nullableSha(o,"sourceAttemptId");check(res.equals("RESPONSE")== (o.get("sourceAttemptId")!=null));reasons(o);check(!res.equals("UNRESOLVED")||!((List<?>)o.get("reasonCodes")).isEmpty());}
           case "RESPONSE" -> {keys(o,"sourceId","epoch","sourceAttemptId","providerResponseId","reportedUsage","measuredQuantities","actualBillingIdentity","reasonCodes");source(o);text(o,"providerResponseId");identity=List.of(field(o,"sourceAttemptId",SHA));reasons(o);checkQuantities(o);}
           case "SOURCE_FINAL" -> {keys(o,"sourceId","epoch","reservedSequenceHighWatermark","requestCount","responseCount","recordsSha256","closeState","reasonCodes");identity=source(o);for(String k:List.of("reservedSequenceHighWatermark","requestCount","responseCount"))field(o,k,DEC);field(o,"recordsSha256",SHA);close(o);}
-          case "CAPTURE_FINAL" -> {keys(o,"planEvidenceSha256","sourceCount","sourcesSha256","closeState","reasonCodes");field(o,"planEvidenceSha256",SHA);field(o,"sourceCount",DEC);field(o,"sourcesSha256",SHA);close(o);identity=List.of();}
+          case "CAPTURE_FINAL" -> {captureFinalKeys(o);field(o,"planEvidenceSha256",SHA);field(o,"sourceCount",DEC);field(o,"sourcesSha256",SHA);close(o);identity=List.of();}
           default -> throw new IllegalArgumentException("USAGE_CAPTURE_INVALID");
         }
         String record=field(d,"recordId",SHA);check(record.equals(digest(List.of("USAGE_RECORD_V2",cap,kind,identity))));var evidence=new HashMap<>(d);
         for(String key:List.of("receiptId","expectedRevision","evidenceSha256"))evidence.remove(key);
         String sha=field(d,"evidenceSha256",SHA);check(sha.equals(digest(evidence)));
         return new NativeCaptureEvidence(cap,record,receipt,kind,revision,(String)d.get("expectedRevision"),(String)d.get("previousEvidenceSha256"),sha,SkillCanonicalJson.write(evidence),bindingDigest(kind,o,identity),"PLAN".equals(kind)?(String)o.get("snapshotSha256"):null);
+    }
+    static void captureFinalKeys(Map<?,?> o){
+        if(!o.containsKey("imageInvocation")){keys(o,"planEvidenceSha256","sourceCount","sourcesSha256","closeState","reasonCodes");return;}
+        keys(o,"planEvidenceSha256","sourceCount","sourcesSha256","closeState","reasonCodes","imageInvocation");
+        var i=obj(o.get("imageInvocation"));keys(i,"invocationId","operation","childRouteSha256","startedSha256","terminalSha256");
+        field(i,"invocationId","[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}");field(i,"operation","generate|edit");
+        for(var k:List.of("childRouteSha256","startedSha256","terminalSha256"))field(i,k,SHA);
     }
     // The old PLAN config hash fences an individual run. Optional dispatch facts are configuration-only;
     // they never prove complete coverage, an actual billing route, or entitlement to a tariff.
@@ -68,7 +75,7 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
             case "REQUEST" -> List.of(identity,o.get("attemptId"));
             case "RESPONSE" -> List.of(identity,o.get("sourceId"),o.get("epoch"),o.get("providerResponseId"));
             case "SOURCE_FINAL" -> List.of(identity,o.get("reservedSequenceHighWatermark"));
-            case "CAPTURE_FINAL" -> List.of(identity,o.get("sourceCount"));
+            case "CAPTURE_FINAL" -> o.containsKey("imageInvocation") ? List.of(identity,o.get("sourceCount"),o.get("imageInvocation")) : List.of(identity,o.get("sourceCount"));
             default -> throw new IllegalArgumentException("USAGE_CAPTURE_INVALID");
         };
         return digest(List.of(kind,facts));
