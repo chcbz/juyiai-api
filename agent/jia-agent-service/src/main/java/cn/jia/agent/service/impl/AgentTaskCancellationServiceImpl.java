@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.agent.common.TaskEventPayload;
 import cn.jia.agent.dao.AgentTaskCancellationDao;
 import cn.jia.agent.dao.AgentTaskExecutionGrantDao;
@@ -32,6 +33,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
     private final AgentTaskCancellationDao cancellation;
     private final cn.jia.agent.dao.TaskExecutionClosureDao closure;
     private final TaskBillingService billing;
+    private final TaskBenchmarkAdmission benchmarks;
     private final cn.jia.agent.service.TaskExecutionCancellationService executions;
     private final cn.jia.chat.service.TaskDiscussionCancellation discussions;
     private final cn.jia.agent.service.AgentWorkItemLeaseService leases;
@@ -40,7 +42,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
     @Inject
     public AgentTaskCancellationServiceImpl(AgentTaskMutationTransaction transactions,
             AgentTaskStateService states, AgentTaskWorkItemDao workItems,
-            AgentTaskExecutionGrantDao grants, AgentTaskCancellationDao cancellation, TaskBillingService billing,
+            AgentTaskExecutionGrantDao grants, AgentTaskCancellationDao cancellation, TaskBillingService billing, TaskBenchmarkAdmission benchmarks,
             cn.jia.agent.service.TaskExecutionCancellationService executions,
             cn.jia.chat.service.TaskDiscussionCancellation discussions,
             cn.jia.agent.service.AgentWorkItemLeaseService leases,
@@ -51,6 +53,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
         this.workItems=Objects.requireNonNull(workItems);
         this.grants=Objects.requireNonNull(grants);
         this.cancellation=Objects.requireNonNull(cancellation);
+        this.benchmarks = Objects.requireNonNull(benchmarks);
         this.billing=Objects.requireNonNull(billing);
         this.executions=Objects.requireNonNull(executions);
         this.discussions=Objects.requireNonNull(discussions);
@@ -161,7 +164,7 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
             // State-idempotent closed-root readback, including the original version after a lost response.
             // No separate public idempotency key/receipt is claimed or created.
             if (replay) return new Receipt(taskId,"cancelled",root.getTaskVersion());
-            // Assignment facts require an explicit HELD/LEGACY_FREE bill; missing money is not free.
+            // Without activated sponsorship, assignment facts require an explicit HELD/LEGACY_FREE bill; missing money is not free.
             // Only a never-assigned task may cancel without a bill. Release joins this root transaction.
             boolean assigned = Set.of("assigned","running","reviewing","blocked","failed").contains(root.getRewardStatus()) || root.getAssignedAgentId()!=null
                     || root.getAssignedAt()!=null || !taskGrants.isEmpty()
@@ -171,7 +174,10 @@ public class AgentTaskCancellationServiceImpl implements AgentTaskCancellationSe
             executions.cancelTaskExecutions(tenant,client,owner,taskId);
             consents.cancelForTask(new cn.jia.agent.service.AgentTaskProviderCostConsentService.Scope(tenant,client,owner),taskId);
             discussions.cancelTaskDiscussions(tenant,client,owner,taskId);
-            billing.release(new TaskBillingService.Task(new EconomyScope(tenant,client),owner,taskId),assigned);
+            var fundingTask = new TaskBillingService.Task(new EconomyScope(tenant, client), owner, taskId);
+            if (!benchmarks.settleSponsorship(fundingTask, TaskBenchmarkAdmission.SponsorshipState.CANCELLED)) {
+                billing.release(fundingTask, assigned);
+            }
             for (var member:members) {
                 String target=switch (member.getMemberStatus()) {
                     case "invited" -> "rejected";

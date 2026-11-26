@@ -307,9 +307,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         membershipDelivery=new cn.jia.agent.service.usage.TaskMembershipDelivery(executionRows,receipts,beans.getBeanProvider(cn.jia.task.scheduling.ScheduleService.class),fixed);
         recovery=new cn.jia.agent.service.usage.ConfirmedSampleRecovery(sampleProjection,new cn.jia.agent.service.usage.NativeSampleResponseDecoder(),fixed,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         membershipSweep=new cn.jia.agent.service.usage.TaskMembershipSweep(executionRows,fixed,manager,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
+        new ResourceDatabasePopulator(
+                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql"),
+                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-sponsorship-v1.sql"))
+                .execute(jdbc.getDataSource());
+        recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
+        benchmarks = proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(
+                recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()),
+                TaskBenchmarkAdmission.class);
         decisions = proxy(new AgentTaskFormalDeliveryDecisionServiceImpl(
                 new AgentTaskFormalDeliveryDaoImpl(sql.getMapper(AgentTaskFormalDeliveryMapper.class)),
-                meta, members, work, roots, events, billing,executionRows), AgentTaskFormalDeliveryDecisionService.class);
+                meta, members, work, roots, events, billing, benchmarks, executionRows), AgentTaskFormalDeliveryDecisionService.class);
         var cancelDao = spy(new AgentTaskCancellationDaoImpl(sql.getMapper(AgentTaskCancellationMapper.class)));
         doAnswer(call -> {
             Object changed = call.callRealMethod();
@@ -328,7 +336,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assignment,roots,mock(ControlledImageProviderOperatorPolicy.class),new ObjectMapper()), AgentTaskProviderCostConsentService.class);
         cancellation = new AgentTaskCancellationServiceImpl(roots,
                 new AgentTaskStateServiceImpl(meta, members, work, roots, events), work,
-                new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)), cancelDao, billing,
+                new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)), cancelDao, billing, benchmarks,
                 executionCancellation,
                 mock(cn.jia.chat.service.TaskDiscussionCancellation.class),
                 proxy(leases,AgentWorkItemLeaseService.class),consentCancellation,executionRows);
@@ -550,19 +558,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     private String fixtureBookPin(MeasuredTaskRepricing.Reference reference){return new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),null).freezeReference(reference).sha256();}
     private Map<String,Map<String,cn.jia.economy.pricing.TaskReferencePricing.Route>> fixtureDrawRoutes(){return Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame"))));}
+    private TaskBenchmarkAdmission benchmarks;
     private record SponsoredFixture(TaskBenchmarkAdmission service, TaskBillingService.Task task,
             TaskBenchmarkAdmission.Manifest manifest, String manifestSha,
             TaskBenchmarkAdmission.SponsorshipAuthority authority) {}
 
     private SponsoredFixture sponsorshipFixture(boolean approved) throws Exception {
-        new ResourceDatabasePopulator(
-                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql"),
-                new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-sponsorship-v1.sql"))
-                .execute(jdbc.getDataSource());
-        recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
-        var service = proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(
-                recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()),
-                TaskBenchmarkAdmission.class);
         var task = new TaskBillingService.Task(BILLING_TASK.scope(),OWNER,"sponsored-benchmark");
         jdbc.update("INSERT INTO agent_task_meta(task_id,owner_jiacn,tenant_id,client_id) VALUES(?,?,?,?)",
                 task.taskId(),OWNER,TENANT,CLIENT);
@@ -585,7 +586,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             jdbc.update("INSERT INTO economy_task_benchmark_sponsorship(tenant_id,client_id,owner_jiacn,task_id,authority_json,authority_sha) VALUES(?,?,?,?,?,SHA2(?,256))",
                     TENANT,CLIENT,OWNER,task.taskId(),body,body);
         }
-        return new SponsoredFixture(service,task,manifest,sha,authority);
+        return new SponsoredFixture(benchmarks,task,manifest,sha,authority);
     }
     private <T> T sponsoredLock(SponsoredFixture f, java.util.function.Supplier<T> work) {
         return roots.executeWithLockedTaskRootInOwnerScope(TENANT,CLIENT,OWNER,f.task().taskId(),root -> work.get());
@@ -698,7 +699,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     @Test void benchmarkCaseMemberProjectionInvalidatesTheWholeOffer() throws Exception {benchmarkOfferFence("usage");}
     private void benchmarkOfferFence(String scenario) throws Exception {
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
-        var cfg=recommendationSql.getConfiguration();cfg.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
+        var cfg=recommendationSql.getConfiguration();
         var json=new ObjectMapper();var svc=proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),json),cn.jia.economy.task.TaskBenchmarkAdmission.class);
         var exec=new TaskBillingService.MeasuredGroup("NATIVE_DISPATCH_GROUP_V1","c".repeat(64),"f".repeat(64),"r1","d".repeat(64),"cp");
         var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture","a".repeat(64),"b".repeat(64),"c".repeat(64),new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),List.of(),null);

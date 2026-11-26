@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.agent.common.TaskEventPayload;
 import cn.jia.agent.common.TaskEventType;
 import cn.jia.agent.dao.AgentTaskFormalDeliveryDao;
@@ -58,6 +59,7 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
     private final AgentTaskMutationTransaction mutationTransaction;
     private final AgentTaskEventWriter eventWriter;
     private final TaskBillingService billing;
+    private final TaskBenchmarkAdmission benchmarks;
     private final cn.jia.agent.dao.TaskExecutionClosureDao closure;
     private final LongSupplier clock;
 
@@ -65,21 +67,22 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
     public AgentTaskFormalDeliveryDecisionServiceImpl(AgentTaskFormalDeliveryDao deliveryDao,
             AgentTaskMetaDao taskMetaDao, AgentTaskMemberDao memberDao,
             AgentTaskWorkItemDao workItemDao, AgentTaskMutationTransaction mutationTransaction,
-            AgentTaskEventWriter eventWriter, TaskBillingService billing, cn.jia.agent.dao.TaskExecutionClosureDao closure) {
-        this(deliveryDao, taskMetaDao, memberDao, workItemDao, mutationTransaction, eventWriter, billing, closure,
+            AgentTaskEventWriter eventWriter, TaskBillingService billing, TaskBenchmarkAdmission benchmarks, cn.jia.agent.dao.TaskExecutionClosureDao closure) {
+        this(deliveryDao, taskMetaDao, memberDao, workItemDao, mutationTransaction, eventWriter, billing, benchmarks, closure,
                 System::currentTimeMillis);
     }
 
     AgentTaskFormalDeliveryDecisionServiceImpl(AgentTaskFormalDeliveryDao deliveryDao,
             AgentTaskMetaDao taskMetaDao, AgentTaskMemberDao memberDao,
             AgentTaskWorkItemDao workItemDao, AgentTaskMutationTransaction mutationTransaction,
-            AgentTaskEventWriter eventWriter, TaskBillingService billing, cn.jia.agent.dao.TaskExecutionClosureDao closure, LongSupplier clock) {
+            AgentTaskEventWriter eventWriter, TaskBillingService billing, TaskBenchmarkAdmission benchmarks, cn.jia.agent.dao.TaskExecutionClosureDao closure, LongSupplier clock) {
         this.deliveryDao = Objects.requireNonNull(deliveryDao, "deliveryDao");
         this.taskMetaDao = Objects.requireNonNull(taskMetaDao, "taskMetaDao");
         this.memberDao = Objects.requireNonNull(memberDao, "memberDao");
         this.workItemDao = Objects.requireNonNull(workItemDao, "workItemDao");
         this.mutationTransaction = Objects.requireNonNull(mutationTransaction, "mutationTransaction");
         this.eventWriter = Objects.requireNonNull(eventWriter, "eventWriter");
+        this.benchmarks = Objects.requireNonNull(benchmarks);
         this.billing = Objects.requireNonNull(billing, "billing");
         this.closure=Objects.requireNonNull(closure);
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -133,7 +136,10 @@ public class AgentTaskFormalDeliveryDecisionServiceImpl implements AgentTaskForm
         // Fixed quote settlement joins the existing root-lock transaction. Rework keeps the hold;
         // replay above is read-only and must not retroactively charge historical completion facts.
         if (decision.state() == AgentTaskFormalDeliveryState.ACCEPTED) {
-            billing.capture(new TaskBillingService.Task(new EconomyScope(tenantId, clientId), ownerJiacn, taskId));
+            var fundingTask = new TaskBillingService.Task(new EconomyScope(tenantId, clientId), ownerJiacn, taskId);
+            if (!benchmarks.settleSponsorship(fundingTask, TaskBenchmarkAdmission.SponsorshipState.ACCEPTED)) {
+                billing.capture(fundingTask);
+            }
         }
         long decidedAt = now();
         int reviewed = deliveryDao.reviewByVersion(tenantId, clientId, delivery.getDeliveryId(),

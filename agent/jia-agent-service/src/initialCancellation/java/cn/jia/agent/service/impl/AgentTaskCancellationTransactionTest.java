@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.agent.dao.*;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.agent.api.AgentTaskCancellationController;
@@ -106,7 +107,7 @@ class AgentTaskCancellationTransactionTest {
         tx=new AgentTaskMutationTransactionImpl(roots,new DataSourceTransactionManager(ds));
         states=new AgentTaskStateServiceImpl(roots,members,items,tx,events);
         var billing=mock(TaskBillingService.class);
-        service=new AgentTaskCancellationServiceImpl(tx,states,items,grants,dao,billing,
+        service=new AgentTaskCancellationServiceImpl(tx,states,items,grants,dao,billing,mock(TaskBenchmarkAdmission.class),
                 mock(cn.jia.agent.service.TaskExecutionCancellationService.class),
                 mock(cn.jia.chat.service.TaskDiscussionCancellation.class),
                 mock(cn.jia.agent.service.AgentWorkItemLeaseService.class),

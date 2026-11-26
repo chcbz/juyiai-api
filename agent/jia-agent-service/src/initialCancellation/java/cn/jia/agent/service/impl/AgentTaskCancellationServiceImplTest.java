@@ -1,5 +1,6 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.agent.dao.*;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.agent.entity.*;
@@ -22,6 +23,7 @@ class AgentTaskCancellationServiceImplTest {
     AgentTaskExecutionGrantDao grants;
     AgentTaskCancellationDao dao;
     AgentTaskCancellationServiceImpl service;
+    final TaskBenchmarkAdmission benchmarks = mock(TaskBenchmarkAdmission.class);
     TaskBillingService billing;
     TaskExecutionCancellationService executions=mock(TaskExecutionCancellationService.class);
     cn.jia.chat.service.TaskDiscussionCancellation discussions=mock(cn.jia.chat.service.TaskDiscussionCancellation.class);
@@ -52,7 +54,7 @@ class AgentTaskCancellationServiceImplTest {
             var state=new AgentTaskStateDTO(); state.setTaskId("417"); state.setStatus("cancelled"); state.setVersion(2L);
             return state;
         });
-        service=new AgentTaskCancellationServiceImpl(tx,states,items,grants,dao,billing,
+        service=new AgentTaskCancellationServiceImpl(tx,states,items,grants,dao,billing,benchmarks,
                 executions, discussions, leases, consents, mock(cn.jia.agent.dao.TaskExecutionClosureDao.class));
     }
     @Test void assignedCancellationReleasesInRootTransactionBeforeStateWrites() {
@@ -60,6 +62,13 @@ class AgentTaskCancellationServiceImplTest {
         var order=inOrder(billing,states);
         order.verify(billing).release(argThat(t -> t.taskId().equals("417")),eq(true));
         order.verify(states).transitionMember(anyString(),anyString(),anyString(),anyString(),anyString(),any());
+    }
+    @Test void sponsoredCancellationClosesFundingWithoutReleasingUserMoney() {
+        var task = new TaskBillingService.Task(new cn.jia.economy.service.EconomyScope("0", "client"), "owner", "417");
+        when(benchmarks.settleSponsorship(task, TaskBenchmarkAdmission.SponsorshipState.CANCELLED)).thenReturn(true);
+        assertEquals("cancelled", cancel().status());
+        verify(benchmarks).settleSponsorship(task, TaskBenchmarkAdmission.SponsorshipState.CANCELLED);
+        verifyNoInteractions(billing);
     }
     @Test void neverAssignedCancellationAllowsMissingBill() {
         root.setRewardStatus("open");
@@ -96,7 +105,7 @@ class AgentTaskCancellationServiceImplTest {
     }
     AgentTaskCancellationService.Receipt cancel() { return service.cancel("0","client","owner","actor","417",1); }
     void noWrites() {
-        verifyNoInteractions(states,grants,billing);
+        verifyNoInteractions(states,grants,billing,benchmarks);
         verify(dao,never()).releaseTaskOccupation(anyString(),anyString(),anyString(),anyString(),anyLong());
         verify(dao,never()).cancelUnadmittedBootstrap(anyString(),anyString(),anyString(),anyString(),anyLong(),anyLong(),anyLong());
     }
