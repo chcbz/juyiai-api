@@ -499,7 +499,8 @@ class TaskBillingServiceMySqlTest {
         installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),a="a".repeat(64),b="b".repeat(64);var json=new ObjectMapper();var op="edit";
         var buckets=new GroupMeanPricing.Buckets(op,List.of(new GroupMeanPricing.Bucket("one",Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,new GroupMeanPricing.Range(1,2)))));
-        var policy=new GroupMeanPricing.Policy("v","rule","config",buckets,1);var config=new GroupMeanPricing.Configuration("ctx","1","tool","capture",List.of(
+        int minSupport=changeBook?1:2;String delayed=null;
+        var policy=new GroupMeanPricing.Policy("v","rule","config",buckets,minSupport);var config=new GroupMeanPricing.Configuration("ctx","1","tool","capture",List.of(
             new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","test-channel",route("0.1"),"standard","basis"),new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL",op,"test-channel",route("0.5"),"standard","basis")));
         var g=policy.classify(op,Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),config).orElseThrow();var key=GroupMeanPricing.key(g);
         var v=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));v.set(0,1f);
@@ -508,7 +509,7 @@ class TaskBillingServiceMySqlTest {
         var evidence=org.mockito.Mockito.mock(BenchmarkSampleEvidence.class);var decoder=org.mockito.Mockito.mock(ConfirmedSampleEvidence.Decoder.class);
         var ops=config.routes().stream().map(r->new ConfirmedSampleEvidence.Operation(1,"capture",1,r.kind(),"1",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation(r.kind(),"one"),r.kind(),r.component(),a,new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,1_000_000L))))).toList();
         var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));
-        for(int n=0;n<(changeBook?2:1);n++){
+        for(int n=0;n<2;n++){
             var task=n==0?TASK:new TaskBillingService.Task(SCOPE,TASK.ownerJiacn(),"race-task-2");String caseId="case-"+n;
             var manifest=new TaskBenchmarkAdmission.Manifest("benchmark-case-v1",task,caseId,"agent","test","review",new TaskBillingService.MeasuredGroup("ver",a,b,"1",a,"capture"),features,new TaskBenchmarkAdmission.GroupInput(op,config));
             var raw=json.writeValueAsString(manifest);String sample=GroupPublicationEnrollment.digest(raw);
@@ -516,10 +517,11 @@ class TaskBillingServiceMySqlTest {
             jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",t,c,task.ownerJiacn(),task.taskId(),caseId,raw,sample);
             jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,?,'TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,task.ownerJiacn(),task.taskId(),caseId,a,b,features.digest());
             jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
-            String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),task.ownerJiacn(),task.taskId(),caseId,sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));enroll.register(SCOPE,approval);
+            String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),task.ownerJiacn(),task.taskId(),caseId,sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));
+            if(!changeBook && n==1)delayed=approval;else enroll.register(SCOPE,approval);
             org.mockito.Mockito.when(evidence.measureReviewed(task,caseId,sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
         }
-        var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",1,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
+        var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",minSupport,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
         var reading=new CountDownLatch(1);var release=new CountDownLatch(1);
         // Interpose only on the second access to the already-frozen book, after the first real cost was calculated.
         var publisher=new GroupBaselinePublisher(maintenance,json){
@@ -546,7 +548,16 @@ class TaskBillingServiceMySqlTest {
                 assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
             } finally {release.countDown();pool.shutdownNow();}return;
         }
-        service.runDue(t,c,decoder);
+        long generation=maintenance.dueFor(t,c).getFirst().generation();
+        for(int poll=0;poll<10;poll++)service.runDue(t,c,decoder);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE generation=? AND status='WAIT_INPUT' AND attempt=1 AND next_at IS NULL AND active_revision IS NULL",Integer.class,generation));
+        assertEquals(0,count("economy_budget_group_revision"));assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
+        assertNotNull(delayed);enroll.register(SCOPE,delayed);enroll.register(SCOPE,delayed);
+        assertEquals(generation+1,maintenance.dueFor(t,c).getFirst().generation());
+        for(int poll=0;poll<10;poll++)service.runDue(t,c,decoder);
+        assertEquals(1,count("economy_budget_group_revision"));assertEquals(1,count("economy_budget_group_build_evidence"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE' AND generation=? AND active_revision=generation AND attempt=1",Integer.class,generation+1));
+        assertEquals(2,jdbc.queryForObject("SELECT sample_count FROM economy_budget_group_revision",Integer.class));
         assertEquals(60,assertInstanceOf(GroupBudgetQuotes.Mean.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k)).amountWen());
         assertEquals(study,jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(roster_json,'$.studyApprovalSha')) FROM economy_budget_group_build_evidence",String.class));
         jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=TRUE WHERE approval_sha=?",study);assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
