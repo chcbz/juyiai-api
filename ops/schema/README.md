@@ -133,3 +133,7 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 `economy-task-benchmark-sponsorship-v1.sql`同样仅供维护窗口创建空表，不自动安装。它与原case备案分开：操作方事前导入`TaskBenchmarkAdmission.SponsorshipAuthority`原文及SHA，包含任务、case/manifest SHA、Agent、原派发action及完整请求SHA、首动作SHA、真实支出批准引用。不是报价、0元charge、LEGACY_FREE，也不授权浏览器自助免费派发。
 
 应用仅SELECT及UPDATE(state, updated_at)，不授INSERT/DELETE或authority_json/authority_sha/withdrawn修改权限；维护方可新增批准或withdrawn，原文不可覆写。状态APPROVED→ACTIVE→ACCEPTED/CANCELLED由同任务根事务控制；ACTIVE/终态原事实保留，撤回不妨碍取消/结算。样本READY/闭包仍沿原验证链。本轮只实现内部资金原语，未导入生产批准、未安装此表、未新增公开端点；Agent首派、重放、初始执行和验收/取消尚未接通，不能启用基准或解除受理暂停。
+
+## 共享报价：登记已经获准的基准（维护入口）
+
+独立维护进程 `cn.jia.maintenance.SharedBudgetEnrollment` 只接受已导入的聚合训练批准原文 SHA-256，启动方式沿上文 `PropertiesLauncher`，参数为 `--register-approved APPROVAL_SHA256`。使用固定 tenant/client 和专用维护数据源；不以 HTTP 请求提交批准、不传用户正文或数据库口令。它不能导入/签发批准、运行事项、发钱、发布研究结论或改已有订单。登记事务核对原件、域、事项、评审、证据修订；同一原件重放不推进代次。成功标记 `REGISTERED_OR_IDENTICAL_REPLAY` 只证明登记，不证明重价发布或生产精度。

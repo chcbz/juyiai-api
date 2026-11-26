@@ -32,8 +32,9 @@ public class GroupPublicationEnrollment {
         return new Member(a.tenant(),a.client(),a.groupSha(),a.policySha(),a.sourceOwner(),a.sourceTask(),a.caseId(),a.sampleId(),a.evidenceRevision(),a.manifestSha(),a.reviewSha(),sha);
     }
     @Transactional(propagation=Propagation.REQUIRES_NEW)
-    public void register(String approvalSha){
+    public void register(cn.jia.economy.service.EconomyScope scope,String approvalSha){
         var m=read(approvalSha);
+        if(!m.tenant().equals(scope.tenantId())||!m.client().equals(scope.clientId()))throw new NotApproved();
         if(!m.manifestSha().equals(db.lockCase(m))||!m.reviewSha().equals(db.lockReview(m))||!Objects.equals(m.evidenceRevision(),db.lockSample(m)))throw new NotApproved();
         db.ensureDomain(m);var h=db.lockMemberHead(m);
         if(h!=null&&("RETIRED".equals(h.status())||!m.policySha().equals(h.policySha())))throw new NotApproved();

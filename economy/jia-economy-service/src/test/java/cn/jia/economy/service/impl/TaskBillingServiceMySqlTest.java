@@ -508,7 +508,7 @@ class TaskBillingServiceMySqlTest {
         jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,'case',?,?)",t,c,TASK.ownerJiacn(),TASK.taskId(),raw,sample);
         jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,'case','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,TASK.ownerJiacn(),TASK.taskId(),a,b,features.digest());
         jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
-        var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),TASK.ownerJiacn(),TASK.taskId(),"case",sample,1,sample,rev,"fixture"),json);enroll.register(approval);
+        var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),TASK.ownerJiacn(),TASK.taskId(),"case",sample,1,sample,rev,"fixture"),json);assertThrows(GroupPublicationEnrollment.NotApproved.class,()->enroll.register(new EconomyScope(t,"different-client"),approval));enroll.register(SCOPE,approval);
         var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",1,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
         // The two associated responses are fixture inputs, not provider traffic or an accuracy observation.
         var evidence=org.mockito.Mockito.mock(BenchmarkSampleEvidence.class);var decoder=org.mockito.Mockito.mock(ConfirmedSampleEvidence.Decoder.class);
@@ -545,11 +545,11 @@ class TaskBillingServiceMySqlTest {
         jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,policy);
         jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
         var refusal=GroupPublicationEnrollment.NotApproved.class;
-        assertThrows(refusal,()->tx.executeWithoutResult(st->enrollment.register(policy)));
+        assertThrows(refusal,()->tx.executeWithoutResult(st->enrollment.register(SCOPE,policy)));
         for(var fields:List.of(List.of("TRAIN_ONLY","TRAIN","owner"),List.of("GROUP_AGGREGATE","HOLDOUT","owner"),List.of("GROUP_AGGREGATE","TRAIN","foreign"),List.of("GROUP_AGGREGATE","TRAIN","owner"))){
             String raw=json.writeValueAsString(new GroupPublicationEnrollment.Approval(fields.get(0),fields.get(1),t,c,key,policy,fields.get(2),"task","case",sample,1,sample,rev,"fixture"));
             String sha=GroupPublicationEnrollment.digest(raw);jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,raw);
-            Runnable register=()->tx.executeWithoutResult(st->enrollment.register(sha));
+            Runnable register=()->tx.executeWithoutResult(st->enrollment.register(SCOPE,sha));
             if(!fields.equals(List.of("GROUP_AGGREGATE","TRAIN","owner"))){assertThrows(refusal,register::run);assertEquals(0,count("economy_budget_group_head"));continue;}
             register.run();register.run();assertEquals(1,count("economy_budget_group_member"));assertEquals(1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL",Integer.class));
             jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertThrows(refusal,register::run);
