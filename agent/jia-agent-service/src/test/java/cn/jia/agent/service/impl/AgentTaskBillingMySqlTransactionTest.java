@@ -3301,6 +3301,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var mapper=new ObjectMapper();var times=new java.util.ArrayList<Long>();var ids=new java.util.HashSet<String>();
         var base=groupPerf();var writes=readQuoteWrites(TASK);var sql=readRecSql();
         record Reply(HttpResponse<String> response,long nanos){}
+        var waitObjects=new java.util.TreeMap<String,Long>();
         for(int start=0;start<30;start+=lanes){
             var pending=new java.util.ArrayList<java.util.concurrent.CompletableFuture<Reply>>();
             for(int i=start;i<start+lanes;i++){
@@ -3310,7 +3311,19 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();long t=System.nanoTime();
                 pending.add(http.sendAsync(req,HttpResponse.BodyHandlers.ofString()).thenApply(r->new Reply(r,System.nanoTime()-t)));
             }
-            java.util.concurrent.CompletableFuture.allOf(pending.toArray(java.util.concurrent.CompletableFuture<?>[]::new)).get(50,java.util.concurrent.TimeUnit.SECONDS);
+            var wave=java.util.concurrent.CompletableFuture.allOf(pending.toArray(java.util.concurrent.CompletableFuture<?>[]::new));
+            // Sample only this isolated database. No row keys, SQL text, user data or production monitoring.
+            for(int tick=0;tick<3 && !wave.isDone();tick++){
+                Thread.sleep(12);
+                admin.query("""
+                    SELECT l.OBJECT_NAME,COALESCE(l.INDEX_NAME,'-'),l.LOCK_MODE,COUNT(*)
+                    FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l
+                    ON l.ENGINE=w.ENGINE AND l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
+                    WHERE l.OBJECT_SCHEMA=? GROUP BY l.OBJECT_NAME,l.INDEX_NAME,l.LOCK_MODE
+                    """,(org.springframework.jdbc.core.RowCallbackHandler)rs->waitObjects.merge(
+                        rs.getString(1)+":"+rs.getString(2)+":"+rs.getString(3),rs.getLong(4),Long::sum),database);
+            }
+            wave.get(50,java.util.concurrent.TimeUnit.SECONDS);
             for(var job:pending){var sample=job.join();var response=sample.response();assertEquals(200,response.statusCode());times.add(sample.nanos());
                 var rows=mapper.readTree(response.body()).at("/data/quotes");assertEquals(agents.size(),rows.size());
                 for(int i=0;i<agents.size();i++){var row=rows.get(i);assertEquals(agents.get(i),row.path("agentId").asText());assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());
@@ -3319,6 +3332,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         var end=groupPerf();var saved=readQuoteWrites(TASK);var locks=readRecSql().minus(sql);times.sort(Long::compare);
         assertEquals(0,end[2]-base[2]);assertEquals(30L*agents.size(),saved.rows()-writes.rows());
+        assertEquals(30L*((agents.size()+31)/32),saved.calls()-writes.calls());
+        System.out.printf("SHARED_WAIT_SAMPLE candidates=%d groups=%d concurrency=%d insertCalls=%d observations=%s%n",
+            agents.size(),distinct?agents.size():1,lanes,saved.calls()-writes.calls(),waitObjects);
         System.out.printf(java.util.Locale.ROOT,"SHARED_PARALLEL_HTTP candidates=%d groups=%d concurrency=%d samples=30 p95ms=%.3f examined=%d privateReads=%d lockWaits=%d lockMs=%d%n",
             agents.size(),distinct?agents.size():1,lanes,times.get(28)/1e6,end[1]-base[1],end[2]-base[2],locks.waits(),locks.waitMillis());
     }
