@@ -89,7 +89,7 @@ class TaskQueryVectorsTest {
     }
     @Test void ordinaryBudgetBatchesAllCandidatesAndReplayNeverWrites(){
         var intents=mock(TaskQuoteIntentService.class);var billing=mock(TaskBillingService.class);
-        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
+        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing),org.mockito.Mockito.mock(RegisteredGroupQuoteInputs.class));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
         var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
         var facts=new QuoteFeaturePreparation.LocalFacts(1,"a".repeat(64),"b".repeat(64),List.of(),null,null);
         var targets=intent.agentIds().stream().map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();

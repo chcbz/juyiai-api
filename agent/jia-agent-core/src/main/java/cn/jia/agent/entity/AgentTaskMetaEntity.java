@@ -38,6 +38,10 @@ public class AgentTaskMetaEntity extends BaseEntity {
     private Integer maxAgents;
     private String coordinatorAgentId;
     private Boolean reviewRequired;
+    // Only exact owner-scoped SELECT * uses this read-only maintenance pointer. No generic ORM write/DTO.
+    @com.baomidou.mybatisplus.annotation.TableField(exist=false)
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private String pricingExperimentSha;
     private Long taskVersion;
     private Long currentEventVersion;
 }
