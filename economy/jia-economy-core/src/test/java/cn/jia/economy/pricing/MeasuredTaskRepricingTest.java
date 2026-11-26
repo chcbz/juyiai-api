@@ -64,13 +64,15 @@ class MeasuredTaskRepricingTest {
         var book=new Reference("frozen",Map.of("render",Map.of("frames",frames)));
         var q=features(1,0,2);var trial=new TaskEstimateCalibration.Trial("frozen",1,1,1,1,1,.1,.5,1,1,0,1);
         var train=TaskEstimateEvaluation.Split.TRAIN;
-        var a=new GroupHoldoutForecast.Training(group,new TaskEstimateEvaluation.Case("a","first",1,2,train),1,q,List.of(fact("a","render","frames",new Units(image,BigDecimal.ONE))));
-        var b=new GroupHoldoutForecast.Training(group,new TaskEstimateEvaluation.Case("b","second",2,3,train),2,features(-1,0,2),List.of(fact("b","render","frames",new Units(image,BigDecimal.TEN))));
+        var a=new GroupHoldoutForecast.Training(group,"source-z",new TaskEstimateEvaluation.Case("a","first",1,2,train),1,q,List.of(fact("a","render","frames",new Units(image,BigDecimal.ONE))));
+        var b=new GroupHoldoutForecast.Training(group,"source-a",new TaskEstimateEvaluation.Case("b","second",2,3,train),2,features(-1,0,2),List.of(fact("b","render","frames",new Units(image,BigDecimal.TEN))));
         var fit=new GroupHoldoutForecast(group,book,List.of(b,a),2,trial);
         assertEquals(new GroupHoldoutForecast.Pair(9L,2L),fit.predict(group,"new","third",4,q));
         assertEquals(new GroupHoldoutForecast.Pair(9L,null),fit.predict(group,"new","third",4,features(1,1,2)));
         assertEquals(new GroupHoldoutForecast.Pair(null,2L),new GroupHoldoutForecast(group,book,List.of(a),2,trial).predict(group,"new","third",4,q));
         assertEquals(new GroupHoldoutForecast.Pair(9L,null),new GroupHoldoutForecast(group,book,List.of(a,b),2,null).predict(group,"new","third",4,q));
+        var sameVector=new GroupHoldoutForecast.Training(group,b.sampleId(),b.source(),2,q,b.facts());
+        assertEquals(new GroupHoldoutForecast.Pair(9L,15L),new GroupHoldoutForecast(group,book,List.of(a,sameVector),2,trial).predict(group,"new","third",4,q));
         assertThrows(IllegalArgumentException.class,()->fit.predict(other,"new","third",4,q));
         assertThrows(IllegalArgumentException.class,()->fit.predict(group,"a","third",4,q));
         assertThrows(IllegalArgumentException.class,()->fit.predict(group,"new","second",4,q));
