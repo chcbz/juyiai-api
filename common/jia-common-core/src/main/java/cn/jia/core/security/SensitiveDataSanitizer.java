@@ -1,5 +1,6 @@
 package cn.jia.core.security;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Array;
@@ -120,11 +121,11 @@ public final class SensitiveDataSanitizer {
             }
             try {
                 Object fieldValue = field.get(source);
-                // A protocol event has exactly five fields. Reflection must not restore the
-                // NON_NULL reply fields that Jackson intentionally omits; payload sanitizing stays on.
-                if (source instanceof cn.jia.core.entity.ProtocolMessage<?> && fieldValue == null
-                        && Set.of("correlationId", "code", "msg").contains(field.getName())) {
-                    continue;
+                // Preserve explicit field-level wire omissions. A redacted non-null secret
+                // still uses its configured strategy; ordinary/ALWAYS nulls remain present.
+                if (fieldValue == null) {
+                    JsonInclude inclusion = field.getAnnotation(JsonInclude.class);
+                    if (inclusion != null && inclusion.value() == JsonInclude.Include.NON_NULL) continue;
                 }
                 result.put(field.getName(), applyDecision(fieldValue, decision, config, visited, depth));
             } catch (IllegalAccessException e) {

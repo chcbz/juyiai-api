@@ -37,12 +37,17 @@ class ConversationLeaseWireHttpTest {
         nativeAuth=mock(AgentRuntimeAuthenticationService.class);
         when(nativeAuth.withNativeFence(any(),any())).thenAnswer(invocation->invocation.getArgument(1,Supplier.class).get());
         auth=new AgentRuntimeAuthentication(new AgentRuntimeAuthentication.Scope("tenant","client","owner","agent","runtime"));
+        mvc = http(false);
+    }
+    private MockMvc http(boolean withSanitizer) {
+        var advice=new ArrayList<Object>(List.of(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice(),new ExceptionHandlerAdvice()));
+        if(withSanitizer) advice.add(new cn.jia.core.security.SensitiveResponseBodyAdvice(new cn.jia.core.security.SensitiveResponseProperties()));
         var converters=new ArrayList<HttpMessageConverter<?>>();
         converters.add(new StringHttpMessageConverter(java.nio.charset.StandardCharsets.UTF_8));
         converters.add(new JacksonJsonHttpMessageConverter());
         new ApiEnvelopeJsonConfig().extendMessageConverters(converters);
-        mvc=MockMvcBuilders.standaloneSetup(new PersonalWorkspaceConversationRuntimeController(executions,nativeAuth))
-                .setControllerAdvice(new ApiEnvelopeAdvice(),new ApiRequestEnvelopeAdvice(),new ExceptionHandlerAdvice())
+        return MockMvcBuilders.standaloneSetup(new PersonalWorkspaceConversationRuntimeController(executions,nativeAuth))
+                .setControllerAdvice(advice.toArray())
                 .setMessageConverters(converters.toArray(HttpMessageConverter[]::new))
                 .addFilters(new RequestIdFilter()).build();
     }
@@ -156,6 +161,23 @@ class ConversationLeaseWireHttpTest {
         call("/result-commits/manifest",data.replace("\"9007199254740993\"","1")).andExpect(status().isBadRequest());
     }
 
+    @Test void commandWirePreservesMeteringPresenceAndNestedRedaction() throws Exception {
+        mvc=http(true);
+        for(boolean metered:List.of(false,true)) {
+            var view=new SkillExecutionService.Command(6,"execution","run",new SkillExecutionService.ScopeView("PRIVATE","42","1",null),"cmd","msg",List.of(),
+                    "a".repeat(64),java.util.Map.of("password","fixture-secret"),"draw",List.of(),java.util.Map.of(),SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,
+                    metered?"RESPONSE_V2":null,metered?"METERED_CAPTURE_V2":null);
+            when(executions.runtimeConversationCommandViews(any(),eq(16))).thenAnswer(i->List.of(view));
+            String wire=mvc.perform(get("/internal/agent/executions/commands").principal(auth).header("X-Request-Id","lease-test"))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            var item=tools.jackson.databind.json.JsonMapper.builder().build().readTree(wire).path("data").path("items").get(0);
+            assertTrue(item.path("scope").path("taskId").isNull());
+            assertTrue(item.path("parameters").path("password").isNull());
+            assertFalse(wire.contains("fixture-secret"));
+            assertEquals(metered,item.has("usageMode")); assertEquals(metered,item.has("captureProtocol"));
+            if(metered){assertEquals("RESPONSE_V2",item.path("usageMode").asText());assertEquals("METERED_CAPTURE_V2",item.path("captureProtocol").asText());}
+        }
+    }
     @Test void v6EmptySkillCommandAndResultUseTheSharedExactWireFixture() throws Exception {
         var mapper=tools.jackson.databind.json.JsonMapper.builder().build();
         var fixture=mapper.readTree(new org.springframework.core.io.ClassPathResource("contracts/native-execution-v6-local-files.json")

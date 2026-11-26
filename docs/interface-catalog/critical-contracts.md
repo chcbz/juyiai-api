@@ -640,6 +640,15 @@ API继续使用现有独立绑定持久化列`task_skill_binding_json`（历史�
 | POST | `/effects/{effectId}/start`、`/effects/{effectId}/result` | 原获准外部效果合同；不因迁址增加付费授权 |
 | POST | `/usage`、`/provider-usage` | 迁移原用量合同及回执，不能遗漏task定位依赖 |
 
+**队列项的计量标记（协议6，API → Runtime）。** 标记是可选字符串，不含提示词、token 数或报价。API 创建新执行时固定模式，轮询/重投读取原值，不重新判断。只允许以下两种报文（示例仅列计量字段）：
+
+| 条件 | `data.items[]` 上的字段 | Runtime 行为 |
+|---|---|---|
+| 通用采集开启；或事项已预占报价绑定本 Agent 的首轮生图计量约定，实际首次执行匹配并消费该约定（单个获准原生脚本技能） | `"usageMode":"RESPONSE_V2","captureProtocol":"METERED_CAPTURE_V2"` | 按供应商响应记录用量，并按本次 execution/run 关联和核对调用。缺失用量不能记成零。 |
+| 两者都不满足，包括通用采集关闭且仅有无计量绑定的固定兜底报价 | **两个键都省略** | 正常执行并沿原用量回执路径；不声称逐请求采集完整。 |
+
+是否生图、报价金额或是否已预占本身均非触发条件。V2 区分逐响应与整执行的证据口径，不是客户端版本或执行授权。显式 `null`、仅传一个键、未知值均为非法，Runtime 拒绝该指令，不得补值、猜测版本或据此重跑模型。API 的最终 HTTP JSON 必须保留缺省与明确 null 的区别，包括经过响应脱敏之后；不要全局删除 null（例如私人 scope 的 `taskId:null` 应保留）。回归入口：`ConversationLeaseWireHttpTest.commandWirePreservesMeteringPresenceAndNestedRedaction`、Runtime `parseSkillCommand`。
+
 `/failure`运行时回执以`executionId`、`runId`、`scope`（与Command相同四字段）、`targetAgentId`、`state`和`failureCode`绑定本次执行。Runtime只有在四字段scope、执行/run/Agent均匹配且state=FAILED、failureCode=AGENT_DELIVERY_FAILED时确认失败；state=QUEUED表示效果尚未明确，仍保留未知/恢复，不重跑模型。该运行时投影不沿用历史owner ExecutionView的顶层taskId作为必填，不改变历史只读DTO。
 
 原`/internal/agent/tasks/conversation-executions/commands`及`/tasks/{taskId}/runs/{runId}/conversation/...`活动映射同候选删除，不设重定向/适配控制器；相关安全白名单、usage消费者、恢复定位、依赖闭包全部更新。其它task业务接口不改。代码处置表所列更早7个旧文件Runtime接口同样删除。
