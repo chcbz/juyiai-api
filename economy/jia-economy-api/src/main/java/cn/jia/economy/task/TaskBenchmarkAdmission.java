@@ -12,7 +12,7 @@ public interface TaskBenchmarkAdmission {
     }
     record Manifest(String schema,TaskBillingService.Task task,String caseId,String agentId,String approvalRef,
             String completionCriterion,TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures features,
-            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) GroupInput groupInput){
+            GroupInput groupInput){
         public Manifest(String schema,TaskBillingService.Task task,String caseId,String agentId,String approvalRef,String completionCriterion,TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures features){this(schema,task,caseId,agentId,approvalRef,completionCriterion,execution,features,null);}
         public Manifest{if(!"benchmark-case-v1".equals(schema))throw new IllegalArgumentException("Unknown benchmark case schema");
             for(String v:java.util.List.of(caseId,agentId,approvalRef,completionCriterion))if(v.isBlank())throw new IllegalArgumentException("Incomplete case");
