@@ -6,8 +6,14 @@ import java.util.Objects;
 /** Internal benchmark enrollment, not permission to dispatch or spend. The caller owns the new benchmark task root
  * and must enroll before admitting any execution. No browser endpoint, inference or synthetic fixed quote. */
 public interface TaskBenchmarkAdmission {
+    /** Optional, operator-approved before execution; never inferred from text or output files. */
+    record GroupInput(String operation,cn.jia.economy.pricing.GroupMeanPricing.Configuration configuration) {
+        public GroupInput { if(configuration==null||!configuration.supportsImage(operation))throw new IllegalArgumentException("Invalid benchmark cost configuration"); }
+    }
     record Manifest(String schema,TaskBillingService.Task task,String caseId,String agentId,String approvalRef,
-            String completionCriterion,TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures features){
+            String completionCriterion,TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures features,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) GroupInput groupInput){
+        public Manifest(String schema,TaskBillingService.Task task,String caseId,String agentId,String approvalRef,String completionCriterion,TaskBillingService.MeasuredGroup execution,TaskEstimateFeatures features){this(schema,task,caseId,agentId,approvalRef,completionCriterion,execution,features,null);}
         public Manifest{if(!"benchmark-case-v1".equals(schema))throw new IllegalArgumentException("Unknown benchmark case schema");
             for(String v:java.util.List.of(caseId,agentId,approvalRef,completionCriterion))if(v.isBlank())throw new IllegalArgumentException("Incomplete case");
             Objects.requireNonNull(task);Objects.requireNonNull(execution);Objects.requireNonNull(features);}

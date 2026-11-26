@@ -45,6 +45,7 @@ public interface GroupBaselineMaintenanceMapper {
     record Member(String tenant,String client,String groupSha,String policySha,String sourceOwner,String sourceTask,String caseId,
         String sampleId,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha) {}
     String MKEY="tenant_id=#{tenant} AND client_id=#{client} AND group_sha=#{groupSha}";
+    @Select("SELECT authority_json FROM economy_budget_publish_approval WHERE approval_sha=#{sha} AND NOT withdrawn") String publicationSnapshot(String sha);
     @Select("SELECT authority_json FROM economy_budget_publish_approval WHERE approval_sha=#{sha} AND NOT withdrawn FOR SHARE") String approvedPublication(String sha);
     @Select("SELECT manifest_sha FROM economy_task_benchmark_case WHERE tenant_id=#{tenant} AND client_id=#{client} AND owner_jiacn=#{sourceOwner} AND task_id=#{sourceTask} AND benchmark_case_id=#{caseId} AND manifest_sha=#{manifestSha} AND SHA2(manifest_json,256)=manifest_sha AND NOT retired FOR SHARE") String lockCase(Member member);
     @Select("SELECT review_sha FROM economy_task_benchmark_review WHERE sample_id=#{sampleId} AND review_sha=#{reviewSha} AND SHA2(review_json,256)=review_sha AND NOT withdrawn AND review_json->>'$.decision'='ACCEPTED' AND review_json->>'$.manifestSha'=#{manifestSha} AND review_json->>'$.caseId'=#{caseId} FOR SHARE") String lockReview(Member member);

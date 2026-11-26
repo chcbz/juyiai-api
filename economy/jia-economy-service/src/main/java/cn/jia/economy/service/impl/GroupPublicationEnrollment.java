@@ -21,7 +21,10 @@ public class GroupPublicationEnrollment {
     static String digest(String text){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));}catch(NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}}
     static final class NotApproved extends RuntimeException{}
     Member read(String sha){
-        if(sha==null||!sha.matches("[0-9a-f]{64}"))throw new NotApproved();var raw=db.approvedPublication(sha);if(raw==null)throw new NotApproved();
+        if(sha==null||!sha.matches("[0-9a-f]{64}"))throw new NotApproved();var raw=db.approvedPublication(sha);return decode(sha,raw);
+    }
+    Member decode(String sha,String raw){
+        if(raw==null)throw new NotApproved();
         if(!sha.equals(digest(raw)))throw new IllegalStateException("Damaged aggregate approval");var a=json.readValue(raw,Approval.class);
         if(!"GROUP_AGGREGATE".equals(a.purpose())||!"TRAIN".equals(a.split())||a.evidenceRevision()<1||!Objects.equals(a.sampleId(),a.manifestSha()))throw new NotApproved();
         for(var v:new String[]{a.groupSha(),a.policySha(),a.sampleId(),a.manifestSha(),a.reviewSha()})if(v==null||!v.matches("[a-f0-9]{64}"))throw new NotApproved();

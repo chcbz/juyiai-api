@@ -4,6 +4,9 @@ import cn.jia.economy.mapper.GroupBaselineMapper;
 import cn.jia.economy.service.EconomyScope;
 import cn.jia.economy.task.*;
 import org.junit.jupiter.api.Test;
+import cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.Member;
+import cn.jia.economy.pricing.*;
+import cn.jia.economy.usage.ConfirmedSampleEvidence.*;
 import java.math.BigDecimal;
 import java.util.*;
 import static org.mockito.Mockito.*;
@@ -17,6 +20,18 @@ class GroupBudgetQuotesServiceTest {
     final GroupBudgetQuotes.Key ka=new GroupBudgetQuotes.Key(a), kb=new GroupBudgetQuotes.Key(b);
     GroupBaselineMapper.Row row(Long revision,Long epoch) {
         return new GroupBaselineMapper.Row(a,3,4,"ACTIVE",4L,tariff,policy,revision,epoch,tariff,policy,2,new BigDecimal("0.590"));
+    }
+    @Test void reviewedImageUsageIncludesBothSidesPinsRevisionAndHasOrderIndependentDigest(){
+        var m=new Member("tenant","client",a,policy,"owner","task","case",a,1,a,b,tariff);
+        var group=new GroupMeanPricing.Group("v","edit",policy,"small","ctx","1","tool","capture",List.of(
+            new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","local","text","t","basis"),new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL","edit","remote","image","t","basis")));
+        var ok=new Assessment(a,1,"accepted",1,Verdict.MATCHED);var q=new MeasuredTaskRepricing.Tokens("basis",Map.of());
+        var p=new Operation(1,"capture",2,"parent","r1",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("text","a"),"MODEL_RESPONSE","INFERENCE",a,q));
+        var c=new Operation(1,"capture",2,"child","r2",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("image","b"),"NATIVE_PROVIDER_CALL","edit",b,q));
+        var row=GroupReviewedUsage.measured(m,"accepted",group,new Measured(ok,List.of(c,p)));
+        assertEquals(2,row.facts().size());assertEquals(row,GroupReviewedUsage.measured(m,"accepted",group,new Measured(ok,List.of(p,c))));
+        for(var bad:List.of(new Measured(ok,List.of(c)),new Measured(ok,List.of(p)),new Measured(new Assessment(a,2,"accepted",1,Verdict.MATCHED),List.of(p,c)),new Measured(new Assessment(a,1,"accepted",1,Verdict.USAGE_INCOMPLETE),List.of(p,c))))
+            assertThrows(GroupBaselinePublisher.MoreInputRequired.class,()->GroupReviewedUsage.measured(m,"accepted",group,bad));
     }
     @Test void emptyInputDoesNotHitDatabase() {
         assertTrue(service.prepare(domain,Set.of()).isEmpty());service.lockSelected(domain,List.of());verifyNoInteractions(mapper);
