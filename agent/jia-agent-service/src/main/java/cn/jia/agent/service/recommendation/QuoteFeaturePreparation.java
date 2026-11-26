@@ -10,7 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.util.*;
 
-/** One shared encode per authorized quote intent, regardless of candidate count. No dependency on recommendation results. */
+/** Local validated quote inputs; vector preparation is separate from collecting pricing facts. */
 @Service
 final class QuoteFeaturePreparation {
     private final TaskQueryVectors vectors;
@@ -18,6 +18,16 @@ final class QuoteFeaturePreparation {
     record Input(long requirementRevision,String requirementSha256,InputCatalogue catalogue,TaskRetrievalText text){@Override public String toString(){return "QuoteFeatureInput[private]";}}
     /** Caller supplies one coherent, authorized pre-quote snapshot. Use confirmed requirement, never a mutable plan fallback. */
     Input observe(CurrentSnapshot requirement,List<String> abilities,InputCatalogue catalogue,List<RecommendationMaterials.Observation> metadata){
+        localFacts(requirement,catalogue,metadata);
+        var task=new AgentTaskDTO();task.setTitle(requirement.title());task.setDescription(requirement.description());task.setRequiredAbilities(abilities);
+        return new Input(requirement.requirementRevision(),requirement.sha256(),catalogue,TaskRetrievalText.from(task,metadata));
+    }
+    record LocalFacts(long requirementRevision,String requirementSha256,String inputSnapshotSha256,
+                      List<TaskEstimateFeatures.File> files,Integer requestedDeliverables,String operation){
+        LocalFacts { files=List.copyOf(files); }
+        @Override public String toString(){return "LocalQuoteFacts[private]";}
+    }
+    static LocalFacts localFacts(CurrentSnapshot requirement,InputCatalogue catalogue,List<RecommendationMaterials.Observation> metadata){
         record Version(String file,int version){}
         var observed=new HashMap<Version,RecommendationMaterials.Observation>();
         for(var m:metadata){if(!"ACTIVE".equals(m.material().fileState()))throw new TaskQuoteIntentService.Stale();
@@ -30,8 +40,8 @@ final class QuoteFeaturePreparation {
         if(observed.size()!=catalogue.inputs().size())throw new TaskQuoteIntentService.Stale();
         for(var i:catalogue.inputs()){var m=observed.get(new Version(i.fileId(),i.version()));
             if(m==null||!i.contentHash().equals(m.sha256())||i.byteLength()!=m.byteLength()||!i.contentMimeType().equals(m.material().contentMimeType())||!i.purpose().equals(m.material().role()))throw new TaskQuoteIntentService.Stale();}
-        var task=new AgentTaskDTO();task.setTitle(requirement.title());task.setDescription(requirement.description());task.setRequiredAbilities(abilities);
-        return new Input(requirement.requirementRevision(),requirement.sha256(),catalogue,TaskRetrievalText.from(task,metadata));
+        var files=catalogue.inputs().stream().map(i->new TaskEstimateFeatures.File(i.purpose(),i.contentMimeType(),i.byteLength(),i.version())).toList();
+        return new LocalFacts(requirement.requirementRevision(),requirement.sha256(),catalogue.digest(),files,null,null);
     }
     TaskEstimateFeatures prepare(Actor actor,Input input){
         if(TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Quote encoding must be outside task transaction");

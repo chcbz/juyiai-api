@@ -12,9 +12,8 @@ import org.springframework.stereotype.Service;
 @Service
 public final class RecordedProspectiveTaskExecution implements ProspectiveTaskExecution {
     private final NativeTaskPreparation decisions;private final PreparedRuntimeEpochFence epochs;private final PreparedReferenceRoutes routes;
-    private final SelectedTaskComparison comparisons;
-    public RecordedProspectiveTaskExecution(NativeTaskPreparation decisions,PreparedRuntimeEpochFence epochs,PreparedReferenceRoutes routes,SelectedTaskComparison comparisons){
-        this.decisions=decisions;this.epochs=epochs;this.routes=routes;this.comparisons=comparisons;
+    public RecordedProspectiveTaskExecution(NativeTaskPreparation decisions,PreparedRuntimeEpochFence epochs,PreparedReferenceRoutes routes){
+        this.decisions=decisions;this.epochs=epochs;this.routes=routes;
     }
     public Map<String,Evidence> observe(Inputs input,List<QuoteTarget> targets){return read(input,targets,false);}
     public boolean current(Inputs input,List<QuoteTarget> targets,Map<String,Evidence> before){
@@ -24,7 +23,6 @@ public final class RecordedProspectiveTaskExecution implements ProspectiveTaskEx
         var task=input.task();var scope=new Scope(task.scope().tenantId(),task.scope().clientId(),task.ownerJiacn());long version=Long.parseLong(input.taskVersion());
         var bindings=targets.stream().map(t->new NativeTaskPreparation.Binding(scope,task.taskId(),version,input.requirementRevision(),input.requirementSha(),input.inputSha(),t)).toList();
         var batch=decisions.readBatch(scope,task.taskId(),bindings,locking);
-        if(!locking&&!batch.due().isEmpty())comparisons.request(batch.due());
         var receipts=batch.current();var expected=new ArrayList<PreparedRuntimeEpochFence.Epoch>();
         var available=new HashMap<String,Evidence>();
         receipts.forEach((b,r)->{var m=r.measurement();var t=b.target();

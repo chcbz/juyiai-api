@@ -2950,12 +2950,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var routes=new cn.jia.economy.service.impl.PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(manifest)));
         var terms=routes.resolve(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),config);assertNotNull(terms);
         var guard=new cn.jia.agent.security.PreparedRuntimeEpochFence(jdbc);
-        var scheduler=mock(cn.jia.agent.service.recommendation.SelectedTaskComparison.class);
-        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,routes,scheduler);
+        var source=new cn.jia.agent.service.recommendation.RecordedProspectiveTaskExecution(service,guard,routes);
         var inputs=new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Inputs(new TaskBillingService.Task(new EconomyScope(TENANT,CLIENT),OWNER,TASK),Long.toString(req.taskVersion()),req.requirementRevision(),req.sha256(),input);
         var targets=List.of(target,new AgentExternalServicePolicyService.QuoteTarget(ids.get(1),OWNER,binding+1,target.externalPolicyRevision()));
         var missing=source.observe(inputs,targets);assertTrue(missing.isEmpty());assertTrue(locked(()->source.current(inputs,targets,missing)));
-        verify(scheduler).request(Set.of(bindingKey));verifyNoMoreInteractions(scheduler);
+        // A quote observation does not acquire a ticket or schedule a runtime comparison.
+        assertTrue(service.readBatch(SCOPE,TASK,List.of(bindingKey),false).due().contains(bindingKey));
         var nextTicket=service.reserveDue(bindingKey,Set.of(bindingKey));assertTrue(service.recordMeasurement(nextTicket,agent,m));
         assertTrue(service.reserveDue(bindingKey,Set.of(bindingKey)).decisions().isEmpty());
         var ready=source.observe(inputs,targets);assertEquals(Map.of(agent,new cn.jia.agent.service.recommendation.ProspectiveTaskExecution.Evidence(nextTicket.ticket(),terms,frozen.sha256())),ready);

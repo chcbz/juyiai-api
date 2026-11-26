@@ -61,6 +61,18 @@ class TaskQueryVectorsTest {
         assertNotEquals(features.digest(),quotes.prepare(OWNER,changed).digest());assertEquals(1,calls.get());
         var serialized=new tools.jackson.databind.ObjectMapper().writeValueAsString(features);assertFalse(serialized.contains("秘密"));assertFalse(serialized.contains("private-file"));
     }
+    @Test void editingAndReferenceImagesHaveTheSameLocalSizeFactsButDoNotSupplyAnOperation(){
+        var file=new cn.jia.agent.service.AgentTaskExecutionGrantService.AuthorizedInput("poster",1,"INPUT","image/png",789,"2".repeat(64));
+        var catalogue=new cn.jia.agent.service.AgentTaskExecutionGrantService.InputCatalogue("3".repeat(64),List.of(file));
+        var observation=new RecommendationMaterials.Observation("rel",1,"poster",1,file.contentHash(),789,new RecommendationMaterials.Material("poster","poster","image/png",1,"INPUT","ACTIVE",null));
+        for(var text:List.of("把这张图的日期改成周六","参考这张图另做一张音乐节海报")){
+            var req=new cn.jia.agent.service.AgentTaskRequirementSnapshotService.CurrentSnapshot("task",5,3,"海报",text,"1".repeat(64),"CREATE");
+            var facts=QuoteFeaturePreparation.localFacts(req,catalogue,List.of(observation));
+            assertNull(facts.operation());assertNull(facts.requestedDeliverables());assertEquals(789,facts.files().getFirst().byteLength());
+            assertEquals(req.sha256(),facts.requirementSha256());assertEquals(catalogue.digest(),facts.inputSnapshotSha256());
+            assertThrows(TaskQuoteIntentService.Stale.class,()->QuoteFeaturePreparation.localFacts(req,catalogue,List.of()));
+        }
+    }
     @Test void replayAndConflictOnClosedTaskNeverPrepareOrReadNewInputs(){
         var root=new cn.jia.agent.entity.AgentTaskMetaEntity();root.setRewardStatus("completed");
         var roots=mock(cn.jia.agent.service.AgentTaskMutationTransaction.class);
