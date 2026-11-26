@@ -3261,9 +3261,39 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     assertEquals(fixed?0:62,reads);assertEquals(0,sources);assertEquals(31L*((n+31)/32),saved.calls()-writes.calls());assertEquals(31L*n,saved.rows()-writes.rows());
                     if(!mixed && !fixed)for(int lanes:List.of(5,10))
                         measureConcurrentGroupQuotes(http,token,body,selected,distinct,lanes);
+                    if(scenario.equals("shared") && n==108)measurePrivateHistoryGrowth(http,token,body,selected,
+                        cn.jia.economy.pricing.GroupMeanPricing.key(policy.classify("edit",Map.of(cn.jia.economy.pricing.GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),config).orElseThrow()));
                     if(mixed || fixed)verifyLastQuoteChunkRollback(http,token,body,selected.getLast(),scenario);
                 }
             }
+        }
+    }
+    // Increase private roster history for the very same published group, keeping its public revision fixed.
+    // Synthetic retired rows are cardinality fixtures in this isolated schema, not training approvals.
+    private void measurePrivateHistoryGrowth(HttpClient http,String token,String body,List<String> agents,String group)throws Exception {
+        var mapper=new ObjectMapper();int previous=0;Long headRows=null;var issued=new java.util.HashSet<String>();
+        assertEquals(0,count("economy_budget_group_member"));
+        for(int history:List.of(0,512,4096)) {
+            if(previous<history)jdbc.batchUpdate("""
+                INSERT INTO economy_budget_group_member(tenant_id,client_id,group_sha,sample_id,source_owner,source_task_id,evidence_revision,
+                    manifest_sha,review_sha,publish_approval_sha,enabled,updated_at)
+                VALUES(?,?,?,SHA2(?,256),'load-only',?,1,REPEAT('a',64),REPEAT('b',64),REPEAT('c',64),false,CURRENT_TIMESTAMP(3))
+                """,java.util.stream.IntStream.range(previous,history).boxed().toList(),256,(ps,n)->{
+                ps.setString(1,TENANT);ps.setString(2,CLIENT);ps.setString(3,group);ps.setString(4,"history-"+n);ps.setString(5,"source-"+n);
+            });
+            previous=history;assertEquals(history,count("economy_budget_group_member"));
+            var times=new java.util.ArrayList<Long>();var before=groupPerf();
+            for(int j=0;j<20;j++){
+                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).timeout(java.time.Duration.ofSeconds(45))
+                    .header("Content-Type","application/json").header("X-Request-Id","perf").header("Authorization","Bearer "+token).header("Idempotency-Key","history-"+history+"-"+j)
+                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();long start=System.nanoTime();var response=http.send(req,HttpResponse.BodyHandlers.ofString());times.add(System.nanoTime()-start);
+                assertEquals(200,response.statusCode());var rows=mapper.readTree(response.body()).at("/data/quotes");assertEquals(agents.size(),rows.size());
+                for(int a=0;a<agents.size();a++){var row=rows.get(a);assertEquals(agents.get(a),row.path("agentId").asText());assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());
+                    assertEquals("30",row.at("/amount/amountMinor").asText());String id=row.path("quoteId").asText();assertFalse(id.isBlank());assertTrue(issued.add(id));}
+            }
+            var after=groupPerf();long scanned=after[1]-before[1];assertEquals(40,after[0]-before[0]);assertEquals(0,after[2]-before[2]);
+            if(headRows!=null)assertEquals(headRows.longValue(),scanned);else headRows=scanned;
+            times.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"SHARED_HISTORY_HTTP candidates=%d groups=1 history=%d samples=20 p95ms=%.3f headExamined=%d privateReads=%d%n",agents.size(),history,times.get(18)/1e6,scanned,after[2]-before[2]);
         }
     }
     // Same authorized task, independent batch keys: include task-row contention in client latency.
