@@ -514,6 +514,11 @@ class TaskBillingServiceMySqlTest {
         jdbc.update("INSERT INTO economy_budget_domain_epoch VALUES(?,?,7)",tenant,client);
         jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,active_revision,status,tariff_sha,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,3,3,'ACTIVE',?,7,0,?,CURRENT_TIMESTAMP(3))",tenant,client,key,"b".repeat(64),"c".repeat(64));
         String where=" WHERE tenant_id=? AND client_id=? AND model=?";
+        // Version bytes cannot be edited behind the pointer, even after a pointer is removed.
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_model_price SET price_data_json='{}' WHERE model=?",model));
+        jdbc.update("INSERT INTO economy_tool_price VALUES(?,?,'tool-channel','render','image','v1','{}',1)",tenant,client);
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_tool_price SET price_data_json='[]' WHERE tool='render'"));
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("DELETE FROM economy_tool_price WHERE tool='render'"));
         assertEquals(1,jdbc.update("UPDATE economy_model_price_current SET updated_at=updated_at+1"+where,tenant,client,model));
         assertEquals(7L,jdbc.queryForObject("SELECT book_epoch FROM economy_budget_domain_epoch",Long.class));
         tx.executeWithoutResult(st -> { assertEquals(1,jdbc.update("DELETE FROM economy_model_price_current"+where,tenant,client,model));
@@ -521,6 +526,7 @@ class TaskBillingServiceMySqlTest {
         assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));
         assertEquals(7L,jdbc.queryForObject("SELECT book_epoch FROM economy_budget_domain_epoch",Long.class));
         assertEquals(1,jdbc.update("DELETE FROM economy_model_price_current"+where,tenant,client,model));
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("DELETE FROM economy_model_price WHERE model=?",model));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE generation=4 AND book_epoch=8 AND status='DIRTY' AND active_revision IS NULL AND claim_id IS NULL",Integer.class));
     }
 

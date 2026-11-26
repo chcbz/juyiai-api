@@ -37,3 +37,13 @@ FOR EACH ROW BEGIN
     CALL economy_budget_price_changed(NEW.tenant_id,NEW.client_id);
   END IF;
 END$$
+
+-- A revision names immutable rate bytes. Change price by appending a version and moving the pointer.
+CREATE TRIGGER economy_budget_model_version_no_update BEFORE UPDATE ON economy_model_price
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Published rate version is immutable'$$
+CREATE TRIGGER economy_budget_model_version_no_delete BEFORE DELETE ON economy_model_price
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Published rate version is immutable'$$
+CREATE TRIGGER economy_budget_tool_version_no_update BEFORE UPDATE ON economy_tool_price
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Published rate version is immutable'$$
+CREATE TRIGGER economy_budget_tool_version_no_delete BEFORE DELETE ON economy_tool_price
+FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Published rate version is immutable'$$
