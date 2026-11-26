@@ -461,11 +461,35 @@ class TaskBillingServiceMySqlTest {
         assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
         assertEquals(1,count("economy_budget_group_revision"));assertEquals(1,count("economy_budget_group_build_evidence"));
     }
-    @Test void sourceWithdrawalOrEvidenceChangeRevokesAllAndOnlyRegisteredGroupsInSameCommit(){
+    private void installPublicationSchema(){
         installGroupSchema();for(var f:List.of("economy-usage-capture.sql","economy-task-benchmark-case-v1.sql","economy-task-benchmark-closure-v1.sql","economy-task-benchmark-review-v1.sql")){
             new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+f)).execute(jdbc.getDataSource());}
         var sql=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-source-invalidation-v1.sql"));sql.setSeparator("$$");sql.execute(jdbc.getDataSource());
         var approvals=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-approval-v1.sql"));approvals.setSeparator("$$");approvals.execute(jdbc.getDataSource());
+    }
+    @Test void onlyOwnedTrainingPublicationApprovalCanEnrollAndReplayDoesNotAdvanceGeneration(){
+        installPublicationSchema();
+        var json=new ObjectMapper();var enrollment=new GroupPublicationEnrollment(maintenance,json);
+        String t=SCOPE.tenantId(),c=SCOPE.clientId(), sample=GroupPublicationEnrollment.digest("{}"),policy="f".repeat(64),key="d".repeat(64);
+        String review=json.writeValueAsString(java.util.Map.of("caseId","case","decision","ACCEPTED","manifestSha",sample));
+        String rev=GroupPublicationEnrollment.digest(review);
+        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,'owner','task','case','{}',?)",t,c,sample);
+        jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,'owner','task','case','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,policy,policy,policy);
+        jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,policy);
+        jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
+        var refusal=GroupPublicationEnrollment.NotApproved.class;
+        assertThrows(refusal,()->tx.executeWithoutResult(st->enrollment.register(policy)));
+        for(var fields:List.of(List.of("TRAIN_ONLY","TRAIN","owner"),List.of("GROUP_AGGREGATE","HOLDOUT","owner"),List.of("GROUP_AGGREGATE","TRAIN","foreign"),List.of("GROUP_AGGREGATE","TRAIN","owner"))){
+            String raw=json.writeValueAsString(new GroupPublicationEnrollment.Approval(fields.get(0),fields.get(1),t,c,key,policy,fields.get(2),"task","case",sample,1,sample,rev,"fixture"));
+            String sha=GroupPublicationEnrollment.digest(raw);jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,raw);
+            Runnable register=()->tx.executeWithoutResult(st->enrollment.register(sha));
+            if(!fields.equals(List.of("GROUP_AGGREGATE","TRAIN","owner"))){assertThrows(refusal,register::run);assertEquals(0,count("economy_budget_group_head"));continue;}
+            register.run();register.run();assertEquals(1,count("economy_budget_group_member"));assertEquals(1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL",Integer.class));
+            jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertThrows(refusal,register::run);
+        }
+    }
+    @Test void sourceWithdrawalOrEvidenceChangeRevokesAllAndOnlyRegisteredGroupsInSameCommit(){
+        installPublicationSchema();
         String original="{\"purpose\":\"GROUP_AGGREGATE\",\"approvalRef\":\"test-only\"}";jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(SHA2(?,256),?)",original,original);
         String approval=jdbc.queryForObject("SELECT approval_sha FROM economy_budget_publish_approval",String.class);
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),sample="a".repeat(64),p="b".repeat(64),rev="c".repeat(64);
