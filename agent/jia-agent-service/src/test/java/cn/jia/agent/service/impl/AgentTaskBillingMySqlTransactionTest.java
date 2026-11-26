@@ -3313,7 +3313,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         try{assertTrue(claimed.await(15,TimeUnit.SECONDS));var json=new ObjectMapper();var times=new java.util.ArrayList<Long>();var ids=new java.util.HashSet<String>();int fixed=0,mean=0;
             for(int j=0;j<32;j++){
                 if(j==1)release.countDown();if(j==31)assertTrue(job.get(20,TimeUnit.SECONDS));String id="publish-"+distinct+"-"+agents.size()+"-"+j;
-                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id",id).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","perf").header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();
                 long start=System.nanoTime();var res=http.send(req,HttpResponse.BodyHandlers.ofString());times.add(System.nanoTime()-start);assertEquals(200,res.statusCode(),res.body());var rows=json.readTree(res.body()).at("/data/quotes");assertEquals(agents.size(),rows.size());
                 String first=rows.get(0).at("/estimateSummary/method").asText();for(int i=0;i<agents.size();i++){
                     var row=rows.get(i);assertEquals(agents.get(i),row.path("agentId").asText());assertTrue(ids.add(row.path("quoteId").asText()));String method=row.at("/estimateSummary/method").asText();if(!distinct)assertEquals(first,method);
