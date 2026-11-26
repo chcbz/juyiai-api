@@ -569,6 +569,11 @@ class TaskBillingServiceMySqlTest {
         }
         tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_task_benchmark_case SET retired=true");assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL",Integer.class));st.setRollbackOnly();});
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE'",Integer.class));
+        for(String change:List.of("owner_jiacn='another-owner'","tenant_id='another-tenant'","client_id='another-client'","task_id='new-task'","quote_id='unexpected-confirmed-quote'","sample_definition_version='OTHER'","initial_requirement_sha256=REPEAT('1',64)","initial_input_snapshot_sha256=REPEAT('2',64)","initial_feature_sha256=REPEAT('3',64)")){
+            tx.executeWithoutResult(st->{assertEquals(1,jdbc.update("UPDATE economy_task_cost_sample SET "+change+" WHERE sample_id=?",sample));
+                assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE generation=2 AND status='DIRTY' AND active_revision IS NULL",Integer.class));st.setRollbackOnly();});
+            assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE' AND generation=1",Integer.class));
+        }
         jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=true");jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1");
         assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND generation=3 AND active_revision IS NULL",Integer.class));
         jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true");assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=false"));

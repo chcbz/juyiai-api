@@ -25,7 +25,11 @@ END$$
 CREATE TRIGGER economy_budget_review_delete AFTER DELETE ON economy_task_benchmark_review FOR EACH ROW CALL economy_budget_source_changed(OLD.sample_id)$$
 CREATE TRIGGER economy_budget_sample_update AFTER UPDATE ON economy_task_cost_sample FOR EACH ROW BEGIN
   IF OLD.benchmark_case_id IS NOT NULL AND (OLD.evidence_revision<>NEW.evidence_revision OR OLD.lifecycle_state<>NEW.lifecycle_state OR OLD.sample_state<>NEW.sample_state
-      OR NOT(OLD.benchmark_case_id <=> NEW.benchmark_case_id) OR OLD.sample_id<>NEW.sample_id) THEN
+      OR NOT(OLD.benchmark_case_id <=> NEW.benchmark_case_id) OR OLD.sample_id<>NEW.sample_id
+      OR OLD.tenant_id<>NEW.tenant_id OR OLD.client_id<>NEW.client_id OR OLD.owner_jiacn<>NEW.owner_jiacn OR OLD.task_id<>NEW.task_id
+      OR NOT(OLD.quote_id <=> NEW.quote_id) OR OLD.sample_definition_version<>NEW.sample_definition_version
+      OR OLD.initial_requirement_sha256<>NEW.initial_requirement_sha256 OR OLD.initial_input_snapshot_sha256<>NEW.initial_input_snapshot_sha256
+      OR OLD.initial_feature_sha256<>NEW.initial_feature_sha256) THEN
     CALL economy_budget_source_changed(OLD.sample_id);
   END IF;
 END$$
