@@ -56,7 +56,10 @@ public final class IndependentTaskQuotes {
             });
             var stored = (writes.isEmpty() ? List.<TaskBillingService.StoredQuote>of() : billing.storeMeasuredBatch(task,actor.actorId(),writes)).iterator();
             prepared.forEach((agent,outcome)->{if(outcome instanceof TaskBudgetEstimator.Unavailable unavailable){
-                result.add(new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.UNAVAILABLE,null,batch,null,unavailable.reason(),null));return;}
+                var binding=new TaskBillingService.Binding(fresh.requirementRevision(),f.requirementSha256(),f.inputSnapshotSha256(),agent,batch);
+                var fixed=billing.storeFixedFallback(task,binding,actor.actorId(),unavailable.reason());
+                result.add(new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.AVAILABLE,fixed.quoteId(),batch,Money.wen(fixed.amountWen()),null,
+                        new TaskQuoteBatches.Summary("FIXED_FALLBACK","1",0,"FIXED_PRICE")));return;}
                 var p=((TaskBudgetEstimator.Available)outcome).preparation();
                 var quote=stored.next();var summary=new TaskQuoteBatches.Summary("MEASURED_NEIGHBORS",p.estimatorVersion(),p.estimate().contributions().size(),p.qualityStatus());
                 result.add(new TaskQuoteBatches.Item(agent,TaskQuoteBatches.State.AVAILABLE,quote.quoteId(),batch,Money.wen(quote.amountWen()),null,summary));});return result;

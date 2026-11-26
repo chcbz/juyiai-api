@@ -58,6 +58,7 @@ public interface TaskBillingService {
     record InitialCommitment(String intentSha256,MeasuredGroup group) {}
     InitialCommitment heldInitialCommitment(Task task,String agentId);
     default String heldInitialIntent(Task task,String agentId){var held=heldInitialCommitment(task,agentId);return held==null?null:held.intentSha256();}
+    StoredQuote storeFixedFallback(Task task, Binding binding, String payer, TaskQuoteBatches.Reason reason);
     record StoredQuote(String quoteId, long amountWen) {}
     /** Persist in input order in the existing transaction. Each receipt names a separate immutable quote. */
     java.util.List<StoredQuote> storeMeasuredBatch(Task task, String payerUserId, java.util.List<MeasuredWrite> writes);

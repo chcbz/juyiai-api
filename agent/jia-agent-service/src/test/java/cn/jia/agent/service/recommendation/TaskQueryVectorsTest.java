@@ -106,9 +106,11 @@ class TaskQueryVectorsTest {
         when(estimator.prepare(task,features,different)).thenReturn(new TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.PRICE_MISSING));
         when(intents.finish(eq(OWNER),eq(fresh),any())).thenAnswer(c->new TaskQuoteBatches.Result("task","3",12,
                 c.<java.util.function.Function<String,List<TaskQuoteBatches.Item>>>getArgument(2).apply("batch")));
+        when(features.requirementSha256()).thenReturn(sha);when(features.inputSnapshotSha256()).thenReturn(sha);
+        when(billing.storeFixedFallback(eq(task),any(),eq(OWNER.actorId()),any())).thenAnswer(c->new TaskBillingService.StoredQuote("q_"+c.<TaskBillingService.Binding>getArgument(1).agentId(),1));
         var rows=app.quote(OWNER,"task","key",intent).quotes();assertEquals(intent.agentIds(),rows.stream().map(TaskQuoteBatches.Item::agentId).toList());
-        assertEquals(List.of(TaskQuoteBatches.Reason.NO_BASELINE,TaskQuoteBatches.Reason.NO_BASELINE,TaskQuoteBatches.Reason.PRICE_MISSING),rows.stream().map(TaskQuoteBatches.Item::unavailableReason).toList());
-        verify(estimator).prepare(task,features,terms);verify(estimator).prepare(task,features,different);verify(estimator).lockSelected(task,List.of());verifyNoMoreInteractions(estimator);verifyNoInteractions(billing);
+        assertEquals(List.of("q_a","q_b","q_c"),rows.stream().map(TaskQuoteBatches.Item::quoteId).toList());assertTrue(rows.stream().allMatch(r->r.state()==TaskQuoteBatches.State.AVAILABLE));
+        verify(estimator).prepare(task,features,terms);verify(estimator).prepare(task,features,different);verify(estimator).lockSelected(task,List.of());verifyNoMoreInteractions(estimator);
     }
     @Test void featureStageObservationsDistinguishHitFromEncodeAcrossBothOperations() {
         var registry=io.micrometer.observation.ObservationRegistry.create();

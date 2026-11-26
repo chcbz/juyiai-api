@@ -1299,6 +1299,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertNull(locked(()->billing.heldInitialIntent(new TaskBillingService.Task(BILLING_TASK.scope(),OWNER+"-other",TASK),target)));
         locked(()->billing.release(BILLING_TASK,true));assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
     }
+    private static void assertFixedQuote(tools.jackson.databind.JsonNode row){
+        assertEquals("AVAILABLE",row.path("state").asText());assertEquals("1",row.at("/amount/amountMinor").asText());
+        assertTrue(row.path("quoteId").asText().startsWith("tq_f1_"));assertEquals("FIXED_FALLBACK",row.at("/estimateSummary/method").asText());
+    }
+    @Test void fixedFallbackReservesAndCapturesOneWithoutSeedingMeasuredEvidence(){
+        var binding=new TaskBillingService.Binding(1,"a".repeat(64),"b".repeat(64),AGENT,"fixed-batch");
+        var q=locked(()->billing.storeFixedFallback(BILLING_TASK,binding,PAYER,TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING));
+        var held=locked(()->billing.reserve(BILLING_TASK,q.quoteId(),binding,PAYER));assertEquals(1,held.amountWen());
+        assertEquals(held,locked(()->billing.reserve(BILLING_TASK,q.quoteId(),binding,PAYER)));
+        assertEquals(1,locked(()->billing.capture(BILLING_TASK)).amountWen());assertEquals(0,count("economy_task_cost_sample"));
+    }
     @Test void measuredQuoteSeedsOnlyUponSuccessfulConfirmationAndNeverRepricesOnReplay(){
         var fixture=measuredOffer();var offer=fixture.offer();var features=fixture.features();var binding=fixture.binding();var inputs=binding.inputSnapshotDigest();
         assertEquals(25,offer.amountWen());assertEquals(0,count("economy_task_cost_sample"));
@@ -3049,10 +3060,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 var r=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("Authorization","Bearer "+token).header("X-Request-Id","prepared").header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();
                 var reply=client.send(r,HttpResponse.BodyHandlers.ofString());assertEquals(status,reply.statusCode(),reply.body());var env=mapper.readTree(reply.body());assertEquals(code,env.path("code").asText());return env.path("data");
             }}var post=new Post();var original=post.run("prepared-first",200,"E0");var rows=original.path("quotes");assertEquals(2,rows.size());
-            for(int i=0;i<2;i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertEquals("UNAVAILABLE",row.path("state").asText());assertFalse(row.path("amount").isObject());assertFalse(row.path("quoteId").isString());}
-            assertEquals("NO_BASELINE",rows.get(0).path("unavailableReason").asText());assertEquals("BILLING_ROUTE_MISSING",rows.get(1).path("unavailableReason").asText());
+            for(int i=0;i<2;i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertFixedQuote(row);}
+            assertNotEquals(rows.get(0).path("quoteId"),rows.get(1).path("quoteId"));
             race.set(true);post.run("prepared-racing",409,"QUOTE_STALE");assertFalse(race.get());assertEquals(initial+1,count("economy_task_quote_batch"));
-            assertEquals(original,post.run("prepared-first",200,"E0"));var fresh=post.run("prepared-racing",200,"E0");assertEquals("BILLING_ROUTE_MISSING",fresh.at("/quotes/0/unavailableReason").asText());
+            assertEquals(original,post.run("prepared-first",200,"E0"));var fresh=post.run("prepared-racing",200,"E0");assertFixedQuote(fresh.path("quotes").get(0));
         }assertEquals(1,encodes.get());assertEquals(initial+2,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));verifyNoInteractions(engine);
     }
     private void awaitPreparationRowWait(java.util.concurrent.Future<?> writer){
@@ -3183,8 +3194,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             http.post(agent,key,503,"QUOTE_FEATURE_UNAVAILABLE");assertEquals(batchCount,count("economy_task_quote_batch"));
             http.post(agent,key,409,"QUOTE_STALE");assertEquals(batchCount,count("economy_task_quote_batch"));
             var original=http.post(agent,key,200,"E0");var item=original.path("quotes").get(0);assertEquals(agent,item.path("agentId").asText());
-            assertEquals("UNAVAILABLE",item.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",item.path("unavailableReason").asText());
-            assertFalse(item.path("amount").isObject());assertFalse(item.path("quoteId").isString());assertEquals(3,calls.get());
+            assertFixedQuote(item);assertEquals(3,calls.get());
             assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
             assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
             if(window!=null)window.seal();
@@ -3192,7 +3202,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             http.post("changed-target",key,409,"QUOTE_IDEMPOTENCY_CONFLICT");
             http.post(agent,"another-fresh-intent",404,"QUOTE_NOT_FOUND");
         }
-        assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
+        assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed+1,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
     }
     // Outside measured requests. Count original UTF-8 LONGTEXT bytes, not JSON_EXTRACT's
     // reserialized representation or InnoDB allocation. Never emit content or private digests.
@@ -3201,7 +3211,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var bindings=new java.util.HashSet<String>();var lengths=new java.util.HashMap<String,Integer>();long[] sizes={0,0};
         jdbc.query("""
             SELECT binding_sha256,CAST(snapshot_json AS BINARY) FROM economy_task_quote_resolved
-            WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
+            WHERE JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='MEASURED_TASK_QUOTE_V1' AND tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?
               AND BINARY JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.recommendationId'))=BINARY ?
             """,(org.springframework.jdbc.core.RowCallbackHandler) rs->{
             assertTrue(bindings.add(rs.getString(1)));byte[] raw=rs.getBytes(2);sizes[0]+=raw.length;
@@ -3254,15 +3264,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 assertEquals(200,res.statusCode());var env=mapper.readTree(res.body());assertEquals("E0",env.path("code").asText());var data=env.path("data");if(i==30){replay=elapsed;assertEquals(first,data);break;}
                 samples.add(elapsed);if(i==0)first=data;var items=data.path("quotes");assertEquals(108,items.size());String batch=items.get(0).path("recommendationId").asText();assertFalse(batch.isBlank());
                 for(int j=0;j<ids.size();j++){var item=items.get(j);assertEquals(ids.get(j),item.path("agentId").asText());assertEquals(batch,item.path("recommendationId").asText());
-                    if(j+1==ids.size()){assertEquals("UNAVAILABLE",item.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",item.path("unavailableReason").asText());assertFalse(item.path("amount").isObject());}
+                    if(j+1==ids.size()){assertFixedQuote(item);}
                     else{assertEquals("AVAILABLE",item.path("state").asText());assertEquals(Long.toString(expectedWen),item.at("/amount/amountMinor").asText());String q=item.path("quoteId").asText();assertFalse(q.isBlank());assertTrue(all.add(q));}
                 }
             }
         }
         var end=readQuoteWrites(task);long bytes=end.bytes()-writes.bytes();
         System.out.printf(java.util.Locale.ROOT,"BATCH_QUOTE_COST batches=30 candidates=108 prepareCalls=%d prepareMs=%.3f lockSelectedCalls=%d lockSelectedMs=%.3f storeCalls=%d storeMs=%.3f insertCalls=%d rows=%d insertMs=%.3f snapshotBytes=%d%n",profile.count("prepare"),profile.ms("prepare"),profile.count("lockSelected"),profile.ms("lockSelected"),profile.count("storeMeasuredBatch"),profile.ms("storeMeasuredBatch"),end.calls()-writes.calls(),end.rows()-writes.rows(),(end.dbPicos()-writes.dbPicos())/1e9,bytes);
-        assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertTrue(end.calls()-writes.calls()<3210);assertEquals(3210,end.rows()-writes.rows());assertTrue(bytes>0);
-        assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3210,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
+        assertEquals(60,profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertTrue(end.calls()-writes.calls()<3210);assertEquals(3240,end.rows()-writes.rows());assertTrue(bytes>0);
+        assertEquals(3210,all.size());assertEquals(1,encodes.get());assertEquals(batchCount+30,count("economy_task_quote_batch"));assertEquals(fixed+3240,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));
         verify(source,times(30)).observe(subject,roster);verify(source,times(30)).current(subject,roster,proofs);
         profileFrozenPayload(task,first.path("quotes").get(0).path("recommendationId").asText(),107,1);
         samples.sort(Long::compare);System.out.printf(java.util.Locale.ROOT,"MEASURED_BATCH_QUOTE_HTTP candidates=108 available=107 hotN=30 p50ms=%.3f p95ms=%.3f maxms=%.3f replayMs=%.3f persistedQuotes=%d%n",samples.get(14)/1e6,samples.get(28)/1e6,samples.getLast()/1e6,replay/1e6,all.size());
@@ -3291,7 +3301,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     if(first==null)first=sample;var rows=sample.data().path("quotes");assertEquals(ids.size(),rows.size());var batch=rows.get(0).path("recommendationId").asText();assertFalse(batch.isBlank());assertTrue(batches.add(batch));
                     for(int i=0;i<ids.size();i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertEquals(batch,row.path("recommendationId").asText());
                         if(i<payable){assertEquals("AVAILABLE",row.path("state").asText());assertEquals(Long.toString(wen),row.at("/amount/amountMinor").asText());var quote=row.path("quoteId").asText();assertFalse(quote.isBlank());assertTrue(quoteIds.add(quote));}
-                        else{assertEquals("UNAVAILABLE",row.path("state").asText());assertEquals("BILLING_ROUTE_MISSING",row.path("unavailableReason").asText());assertFalse(row.path("amount").isObject());}}
+                        else{assertFixedQuote(row);}}
                 }
             }
             long opened=physicalConnects.get()-connectsBefore,borrowed=appBorrows.get()-borrowsBefore;
@@ -3307,7 +3317,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(0,errors);assertNotNull(first);assertEquals(first.data(),wire.send(0).data());
         }
         assertEquals(30*(payable==1?1:2),profile.count("prepare"));assertEquals(30,profile.count("lockSelected"));assertEquals(30,profile.count("storeMeasuredBatch"));assertEquals(before,encodes.get());
-        assertEquals(30*payable,quoteIds.size());assertEquals(fixed+quoteIds.size(),count("economy_task_quote"));assertEquals(batchesBefore+30,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));
+        assertEquals(30*payable,quoteIds.size());assertEquals(fixed+30*ids.size(),count("economy_task_quote"));assertEquals(batchesBefore+30,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));
     }
 
     private SqlSessionTemplate recommendationSql;

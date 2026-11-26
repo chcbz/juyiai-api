@@ -200,6 +200,14 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         return List.copyOf(result);
     }
 
+    @Override public StoredQuote storeFixedFallback(Task task, Binding binding, String payer, cn.jia.economy.task.TaskQuoteBatches.Reason reason) {
+        // A commercial fixed price, never measured usage or execution authority.
+        long amount = 1L;
+        var row = insertQuote("tq_f1_" + UUID.randomUUID(), task, bindingHash(binding), Objects.requireNonNull(payer), amount,
+                encode(Map.of("schema", "FIXED_FALLBACK_V1", "binding", binding, "reason", Objects.requireNonNull(reason), "amountWen", amount)));
+        return new StoredQuote(row.quoteId(), row.amountWen());
+    }
+
     private Quote insertQuote(String id, Task task, String bindingHash, String payerUserId, long amountWen, String snapshot) {
         var row = quoteRow(id,task,bindingHash,payerUserId,amountWen,snapshot);
         mapper.insertQuote(row);
