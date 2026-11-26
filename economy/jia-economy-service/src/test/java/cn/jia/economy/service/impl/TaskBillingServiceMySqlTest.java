@@ -465,18 +465,23 @@ class TaskBillingServiceMySqlTest {
         installGroupSchema();for(var f:List.of("economy-usage-capture.sql","economy-task-benchmark-case-v1.sql","economy-task-benchmark-closure-v1.sql","economy-task-benchmark-review-v1.sql")){
             new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+f)).execute(jdbc.getDataSource());}
         var sql=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-source-invalidation-v1.sql"));sql.setSeparator("$$");sql.execute(jdbc.getDataSource());
+        var approvals=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-approval-v1.sql"));approvals.setSeparator("$$");approvals.execute(jdbc.getDataSource());
+        String original="{\"purpose\":\"GROUP_AGGREGATE\",\"approvalRef\":\"test-only\"}";jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(SHA2(?,256),?)",original,original);
+        String approval=jdbc.queryForObject("SELECT approval_sha FROM economy_budget_publish_approval",String.class);
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),sample="a".repeat(64),p="b".repeat(64),rev="c".repeat(64);
         jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,'owner','task','case','{}',?)",t,c,sample);
         jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,'owner','task','case','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,p,p,p);
         jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,p);jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,'{}',false)",sample,rev);
         for(String k:List.of("d","e","f")){String key=k.repeat(64);
             jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,active_revision,status,tariff_sha,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,1,1,'ACTIVE',?,1,0,?,CURRENT_TIMESTAMP(3))",t,c,key,p,p);
-            if(!k.equals("f"))jdbc.update("INSERT INTO economy_budget_group_member VALUES(?,?,?,?,'owner','task',1,?,?,?,1,CURRENT_TIMESTAMP(3))",t,c,key,sample,sample,rev,p);
+            if(!k.equals("f"))jdbc.update("INSERT INTO economy_budget_group_member VALUES(?,?,?,?,'owner','task',1,?,?,?,1,CURRENT_TIMESTAMP(3))",t,c,key,sample,sample,rev,approval);
         }
         tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_task_benchmark_case SET retired=true");assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL",Integer.class));st.setRollbackOnly();});
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE'",Integer.class));
         jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=true");jdbc.update("UPDATE economy_task_cost_sample SET evidence_revision=evidence_revision+1");
         assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND generation=3 AND active_revision IS NULL",Integer.class));
+        jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true");assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=false"));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE generation=4 AND status='DIRTY'",Integer.class));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE' AND generation=1",Integer.class));
     }
     @Test void pricePointerChangeWithdrawsOldBaselineAtomicallyIncludingRawMaintenanceSql() {
