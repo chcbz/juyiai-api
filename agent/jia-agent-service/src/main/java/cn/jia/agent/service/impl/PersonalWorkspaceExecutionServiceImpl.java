@@ -112,6 +112,8 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx");
+    private DispatchCaptureBinding dispatchCapture;
+    @Autowired public void setDispatchCapture(DispatchCaptureBinding source){dispatchCapture=Objects.requireNonNull(source);}
     private QuotedInitialActionAdmission initialActions;
     @Autowired public void setInitialActions(QuotedInitialActionAdmission value){initialActions=Objects.requireNonNull(value);}
     private cn.jia.agent.service.NativeConversationWorkDiscovery workDiscovery;
@@ -1423,9 +1425,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
         }
         return List.copyOf(selected);
     }
-    private void verifiedNativeSkills(OwnerScope scope,String agent,Map<String,Object> snapshot,boolean runtimeRequired) {
+    private cn.jia.agent.service.AgentManagedSessionLookup.SessionFence verifiedNativeSkills(OwnerScope scope,String agent,Map<String,Object> snapshot,boolean runtimeRequired) {
         var selections=nativeSelections(snapshot);
-        if(selections.isEmpty())return;
+        if(selections.isEmpty())return null;
         if(installedSkills==null||skillPolicy==null||skillCapabilities==null||skillManagement==null)
             throw failure(Reason.CAPABILITY_UNAVAILABLE);
         var executor=assigneeAuthority.resolveForAssignment(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),agent);
@@ -1494,6 +1496,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             }
         }
         if(runtimeRequired&&!catalog.sameExecutionFacts(skillCapabilities.lookup(runtimeScope,liveFence)))throw failure(Reason.CAPABILITY_UNAVAILABLE);
+        return liveFence;
     }
     private void validateNativeOutputs(Map<String,Object> snapshot) {
         var spec=skillObject(snapshot.get("outputs"));
@@ -1578,7 +1581,7 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
                 .setIdempotencyKey(key).setRequestHash(digest).setCreatedAt(System.currentTimeMillis());scoped(row,scope);
             if(requireSkillConversationScope(access,row).lifecycleGeneration()!=command.scope().conversationGeneration())throw failure(Reason.GRANT_REVOKED);
             if(task!=null)requireConversationGrant(scope,row,"NEW_EXECUTION",null);
-            verifiedNativeSkills(scope,command.targetAgentId(),snapshot,true);
+            var skillFence=verifiedNativeSkills(scope,command.targetAgentId(),snapshot,true);
             long now=System.currentTimeMillis();var bindings=new ArrayList<cn.jia.agent.service.SkillExecutionService.AuthorizedSkill>();
             for(var item:selections) {
                 var selected=skillObject(item.get("skill"));
@@ -1594,7 +1597,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             if(meteredCaptureEnabled && task!=null && selections.isEmpty() && localArtifactMeteringProfile!=null
                     && localArtifactMeteringProfile.matches("[a-f0-9]{64}"))row.setCaptureProfileSha256(localArtifactMeteringProfile);
             if(task!=null){var imageProfile=initialActions.admit(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),task.taskId(),grantTarget,executionId,skillString(snapshot,"toolPolicyRef"),selections,skillObject(snapshot.get("outputs")));
-                if(imageProfile!=null)row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2").setCaptureProfileSha256(imageProfile);
+                var actual=dispatchCapture==null?null:dispatchCapture.forAuthorizedExecution(grantTarget,skillFence,executionId,bindings,snapshot);
+                // A prior financial commitment is never joined to a different new dispatch group.
+                if(actual!=null&&(imageProfile==null||imageProfile.equals(actual)))row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2").setCaptureProfileSha256(actual);
             }
             executions.insert(row);skillExecutions.insertReady(skill);
             if(task!=null) executions.registerTaskMember(row,row.getCaptureProtocol()==null?null:

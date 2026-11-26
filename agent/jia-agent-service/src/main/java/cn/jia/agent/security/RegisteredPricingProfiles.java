@@ -36,18 +36,26 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
             """,seq,sha,json,row.id());
     }
     /** Caller has authorized these targets on this task. Offline status is not revocation of a configuration. */
-    public record Observed(String agent,String provider,long binding,String installation,long generation,long seq,String sha,String canonical){
+    public record Observed(String agent,String provider,long binding,String installation,String host,String instance,long generation,long seq,String sha,String canonical){
         @Override public String toString(){return "RegisteredCostConfiguration[private]";}
     }
     public Map<String,Observed> read(String tenant,String client,List<cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget> authorized,boolean lock){
+        return readSubjects(tenant,client,authorized.stream().map(t->new Subject(t.agent(),t.provider(),t.binding())).toList(),lock);
+    }
+    private record Subject(String agent,String provider,long binding){}
+    public Observed atDispatch(cn.jia.agent.service.TaskAssigneeAuthorityService.Target target,SessionFence fence){
+        var row=readSubjects(target.tenantId(),target.clientId(),List.of(new Subject(target.agentId(),target.ownerJiacn(),target.bindingId())),true).get(target.agentId());
+        return row!=null && row.installation().equals(fence.runtimeInstallationId()) && row.host().equals(fence.hostId()) && row.instance().equals(fence.runtimeInstanceId()) && row.generation()==fence.sessionGeneration()?row:null;
+    }
+    private Map<String,Observed> readSubjects(String tenant,String client,List<Subject> authorized,boolean lock){
         if(lock&&!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
-        var targets=new TreeMap<String,cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget>();
+        var targets=new TreeMap<String,Subject>();
         for(var t:authorized)if(targets.put(t.agent(),t)!=null)throw new IllegalArgumentException("Duplicate candidate");
         var ids=List.copyOf(targets.keySet());var result=new HashMap<String,Observed>();
         for(int i=0;i<ids.size();i+=128){var page=ids.subList(i,Math.min(ids.size(),i+128));var params=new ArrayList<Object>(List.of(tenant,client));params.addAll(page);
             try{
                 var rows=db.query("""
-                    SELECT r.agent_id,r.owner_jiacn,r.binding_id,r.runtime_installation_id,r.runtime_session_generation,r.pricing_sequence,r.pricing_config_sha,r.pricing_profiles_json
+                    SELECT r.agent_id,r.owner_jiacn,r.binding_id,r.runtime_installation_id,r.runtime_host_id,r.runtime_instance_id,r.runtime_session_generation,r.pricing_sequence,r.pricing_config_sha,r.pricing_profiles_json
                     FROM agent_runtime r JOIN agent_runtime_v1_installation n ON n.installation_id=r.runtime_installation_id
                       AND BINARY n.installation_id=BINARY r.runtime_installation_id AND BINARY n.canonical_agent_id=BINARY r.agent_id
                       AND BINARY n.tenant_id=BINARY r.tenant_id AND BINARY n.client_id=BINARY r.client_id AND BINARY n.status='ACTIVE'
@@ -55,7 +63,7 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
                       AND BINARY r.pricing_installation_id=BINARY r.runtime_installation_id AND r.pricing_generation=r.runtime_session_generation
                       AND r.pricing_binding_id=r.binding_id AND r.agent_id IN (
                     """+String.join(",",Collections.nCopies(page.size(),"?"))+") ORDER BY r.agent_id"+(lock?" FOR SHARE NOWAIT":""),
-                    (rs,k)->new Observed(rs.getString(1),rs.getString(2),rs.getLong(3),rs.getString(4),rs.getLong(5),rs.getLong(6),rs.getString(7),rs.getString(8)),params.toArray());
+                    (rs,k)->new Observed(rs.getString(1),rs.getString(2),rs.getLong(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getLong(7),rs.getLong(8),rs.getString(9),rs.getString(10)),params.toArray());
                 for(var row:rows){var t=targets.get(row.agent());if(t==null||!row.provider().equals(t.provider())||row.binding()!=t.binding())continue;
                     if(row.canonical()==null || !row.sha().equals(NativePricingProfiles.digest(row.canonical())))throw new IllegalStateException("Invalid stored pricing configuration");
                     result.put(row.agent(),row);}
