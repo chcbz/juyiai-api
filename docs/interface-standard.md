@@ -224,3 +224,11 @@
 4. `execution0,tools0,execution1,tools1,execution2,tools2,execution3,tools3`：每对均为完整本地派发配置与工具摘要；对应无结构化数据输出的四种文件数量约束，编号 `2*artifactsRequired + multiple`。不是四份报价。API 在校验任务授权、会话和实际技能安装后再选对应编号；资料不符不生成完整计量证明，最终仍由实际 PLAN、父/子回执和 CLOSE 独立验证。
 
 顺序：先安装 `agent-runtime-pricing-profiles-v1.sql`，再发布接收方、发送方。API 在 `agent_runtime` 既有私有归属行存储安装、绑定、代次、序列、配置摘要/正文/时间，不重复复制外部使用授权；消费端复用事项候选授权及其策略修订。无结构化操作的普通报价不查询这份配置。
+
+### 报价前的运营实验来源（私有，非普通事项输入）
+
+`POST /agent/tasks/{taskId}/quotes` 的请求仍只含 `expectedTaskVersion` 和 `agentIds`；不接收 operation、策略、金额、sourceRef 或运行配置。普通事项不绑定实验引用，无需用户决定“生成还是编辑”。先按原任务 ACL、候选范围和输入快照检查，再签发固定报价。价格依据缺失不是权限：不可用备用价格代替身份或资料完整性验证。
+
+受控实验先安装 `agent-task-pricing-experiment-v1.sql` 和 Economy 发布批准原件表。获准的维护人员把**真实已批准**的 UTF-8 原件按既有只读审批导入流程留存，然后在同一维护事务锁定专用事项并绑定 `agent_task_meta.pricing_experiment_sha`。应用无公开写入端点。原件 `purpose=QUOTE_EXPERIMENT_V1`，须指定 `approvalRef, tenant, client, owner, taskId, taskVersion, requirementRevision, requirementSha, inputSha`；`operation, requestedDeliverables`（可空）、`artifactsRequired,multiple` 来自执行前实验约定，不读议事内容或图片猜测；`featureVersion,pricingRule,configRule,buckets,minSupport,policySha` 冻结分类算法，不能让未经发布的组自行生效。该批准仅供询价，不是调用供应商、派单、担保支出或把来源用于共享训练的许可。**不得由实验执行程序自行签发批准。**
+
+新询价只在精确绑定有效时读取已授权候选的本地注册配置。使用确切的派发形状、已固定的父子参考路由和经验证的组读价；有证据的候选按组报价，其他候选各签自己的 1 文报价。提交时复核原件未撤回、事项及候选和使用的注册配置未变化、活动组代次未失效。原件撤回不会修改已签金额或幂等重放。所有私有引用、内部组与技术原因均不增加前端展示字段。本条说明接口语义，不表示已经生产发布或已取得实验批准。

@@ -3212,9 +3212,48 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));
+            if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureSharedQuoteMatrix(agent,token,policy,cfg);
             jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertEquals(quotes,call.send("approved"));var fresh=call.send("after-withdraw");assertFixedQuote(fresh.get(0));assertFixedQuote(fresh.get(1));}
         assertEquals(money,count("economy_transaction"));
     }
+    /** Isolated HTTP/SQL load only. The registration and aggregate fixtures are not accuracy evidence. */
+    private void measureSharedQuoteMatrix(String registered,String token,cn.jia.economy.pricing.GroupMeanPricing.Policy policy,cn.jia.economy.pricing.GroupMeanPricing.Configuration config)throws Exception{
+        var json=new ObjectMapper();var ids=new java.util.ArrayList<String>();String h="a".repeat(64);
+        var canonical=jdbc.queryForObject("SELECT pricing_profiles_json FROM agent_runtime WHERE agent_id=?",String.class,registered);
+        for(int i=0;i<108;i++){
+            String id=String.format(java.util.Locale.ROOT,"agt_%032x",256+i),install="perf-install-"+i;ids.add(id);
+            jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"p-"+i,id,TENANT,CLIENT);
+            long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,id);
+            jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'perf fixture',1,1)",id,CLIENT,OWNER,TENANT,binding);
+            jdbc.update("INSERT INTO agent_runtime_v1_installation(installation_id,canonical_agent_id,manifest_version,manifest_sha256,enrollment_secret_hash,enrollment_expires_at,status,tenant_id,client_id) VALUES(?,?,'test',?,UNHEX(SHA2(?,256)),1,'ACTIVE',?,?)",install,id,h,id,TENANT,CLIENT);
+            jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation,pricing_installation_id,pricing_generation,pricing_binding_id,pricing_sequence,pricing_config_sha,pricing_profiles_json) VALUES(?,'fixture',?,?,?,?,'offline',?,'host','boot',1,?,1,?,1,?,?)",id,TENANT,CLIENT,OWNER,binding,install,install,binding,QuoteWireWindow.digest(canonical),canonical);
+        }
+        try(var http=HttpClient.newHttpClient()){
+            for(boolean distinct:List.of(false,true)){
+                if(distinct)for(int i=0;i<ids.size();i++){
+                    var ctx=QuoteWireWindow.digest("context-"+i);String raw=canonical.replace("\"contextPolicyVersion\":\""+h+"\"","\"contextPolicyVersion\":\""+ctx+"\"");assertNotEquals(canonical,raw);
+                    jdbc.update("UPDATE agent_runtime SET pricing_config_sha=?,pricing_profiles_json=?,pricing_sequence=2 WHERE agent_id=?",QuoteWireWindow.digest(raw),raw,ids.get(i));
+                    var cfg=new cn.jia.economy.pricing.GroupMeanPricing.Configuration(config.contextPolicyId(),ctx,config.toolPolicyVersion(),config.capturePolicyVersion(),config.routes());
+                    String k=cn.jia.economy.pricing.GroupMeanPricing.key(policy.classify("edit",Map.of(cn.jia.economy.pricing.GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),cfg).orElseThrow());
+                    jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,active_revision,book_epoch,tariff_sha,attempt,policy_sha,updated_at) VALUES(?,?,?,1,'ACTIVE',1,1,?,0,?,CURRENT_TIMESTAMP(3))",TENANT,CLIENT,k,h,policy.sha());jdbc.update("INSERT INTO economy_budget_group_revision VALUES(?,?,?,1,1,?,?,2,?,?,CURRENT_TIMESTAMP(3))",TENANT,CLIENT,k,h,policy.sha(),java.math.BigDecimal.valueOf((30+i)*2L,2),h);
+                }
+                for(int n:List.of(6,108)){var selected=ids.subList(0,n);String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","perf","data",Map.of("expectedTaskVersion","0","agentIds",selected)));
+                    var times=new java.util.ArrayList<Long>();var all=new java.util.HashSet<String>();long cold=0;var before=readRecSql();var writes=readQuoteWrites(TASK);var base=groupPerf();
+                    for(int j=0;j<=30;j++){String key="group-perf-"+distinct+"-"+n+"-"+j;var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","perf").header("Authorization","Bearer "+token).header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();long start=System.nanoTime();var reply=http.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-start;if(j==0)cold=elapsed;else times.add(elapsed);
+                        assertEquals(200,reply.statusCode(),reply.body());var rows=json.readTree(reply.body()).at("/data/quotes");assertEquals(n,rows.size());for(int i=0;i<n;i++){var row=rows.get(i);assertEquals(selected.get(i),row.path("agentId").asText());assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());assertEquals(String.valueOf(distinct?30+i:30),row.at("/amount/amountMinor").asText());assertTrue(all.add(row.path("quoteId").asText()));}}
+                    var after=readRecSql().minus(before);var end=groupPerf();var saved=readQuoteWrites(TASK);times.sort(Long::compare);long reads=end[0]-base[0],scanned=end[1]-base[1],sources=end[2]-base[2];
+                    System.out.printf(java.util.Locale.ROOT,"SHARED_QUOTE_HTTP candidates=%d groups=%d firstMs=%.3f hotN=30 p95ms=%.3f meanRows=%d fixedRows=0 groupReads=%d groupExamined=%d privateReads=%d insertCalls=%d lockWaits=%d lockMs=%d%n",n,distinct?n:1,cold/1e6,times.get(28)/1e6,all.size(),reads,scanned,sources,saved.calls()-writes.calls(),after.waits(),after.waitMillis());
+                    assertEquals(62,reads);assertEquals(0,sources);assertEquals(31L*((n+31)/32),saved.calls()-writes.calls());assertEquals(31L*n,saved.rows()-writes.rows());
+                }
+            }
+        }
+    }
+    private long[] groupPerf(){return admin.queryForObject("""
+        SELECT COALESCE(SUM(IF(DIGEST_TEXT LIKE '%economy_budget_group_head%',COUNT_STAR,0)),0),
+               COALESCE(SUM(IF(DIGEST_TEXT LIKE '%economy_budget_group_head%',SUM_ROWS_EXAMINED,0)),0),
+               COALESCE(SUM(IF(DIGEST_TEXT LIKE '%economy_budget_group_member%' OR DIGEST_TEXT LIKE '%economy_usage_capture%' OR DIGEST_TEXT LIKE '%economy_task_cost_sample%',COUNT_STAR,0)),0)
+        FROM performance_schema.events_statements_summary_by_digest WHERE SCHEMA_NAME=? AND DIGEST_TEXT LIKE 'SELECT %'
+        """,(r,n)->new long[]{r.getLong(1),r.getLong(2),r.getLong(3)},database);}
     @Test void signedMaterialQuoteWithoutDispatchConfigurationDistinguishesRetryStaleAndReplay() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
         ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
