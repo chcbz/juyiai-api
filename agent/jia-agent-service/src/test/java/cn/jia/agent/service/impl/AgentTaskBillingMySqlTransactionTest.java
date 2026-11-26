@@ -2989,7 +2989,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("UPDATE agent_personal_workspace_task_file_link SET link_state='DETACHED' WHERE file_id='file-0'");
         assertTrue(service.currentForProbes(SCOPE,TASK,req.taskVersion(),ids).isEmpty());
         assertEquals(frozen,service.find(bindingKey)); // historical intent is intact, but no longer observable as current
-        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1,count("economy_task_quote"));assertEquals(executions,count("agent_personal_workspace_execution"));
+        assertThrows(IllegalStateException.class,()->service.freeze(intent));assertEquals(1,count("agent_task_native_preparation"));assertEquals(quotes+1+2*ids.size(),count("economy_task_quote")); // one measured hold and two unique HTTP batches
+        assertEquals(executions,count("agent_personal_workspace_execution"));
         verifySignedSelectionWorker(service,ids.get(1),()->new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper()));
     }
     private void verifySignedSelectionWorker(NativeTaskPreparationService service,String agent,java.util.function.Supplier<NativeTaskPreparationService> factory)throws Exception{
