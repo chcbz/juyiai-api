@@ -211,3 +211,16 @@
 ## 2026-10-24 全代码校验清理（v1.4）
 
 最新用户要求：没有明确必要性规格的校验不能默认保留。详细保留依据、删除项、失败范围及尚未核实项见[校验必要性规格](interface-catalog/validation-policy.md)。本节覆盖前文“信封默认封闭”和v1.3“仅执行命令可扩展”的范围限制：HTTP/异步外层允许新增无害元数据，生产者仍输出最小现行字段；Web列明的只读投影忽略并剥离额外字段。当前已知字段/语义版本、回复关联、身份与嵌套业务授权合同不放宽。非必要校验应删除，不另建校验框架；全量检索不等于全部命中已逐条裁定。
+
+### 原生图片计价配置：`agent.register.data.pricingProfiles`（共享预算候选，非上线声明）
+
+运行时在现有认证注册/目录变更重注册时报告，不由事项询价触发。传输仍用原安装、host、boot 与 session generation 的认证信封。`pricingProfiles` 是私有能力投影，**不返回给用户，不参与执行授权**，也不是原 `configurationEpoch` 的替代。报文为 `{version:"NATIVE_PRICING_PROFILES_V1", sequence:"1", sha256:"…", profiles:[…]}`；正十进制字符串 `sequence` 仅在本认证代次内单调。按 `operation` 升序，一项操作最多一条（首期 edit/generate），没有可靠配置则报告空数组。相同代次同序同摘要幂等，同序冲突撤下配置直到更高序列；迟到旧代不覆盖新代。短时离线不等同于撤销安装或重新绑定。
+
+`sha256` 为小写 SHA-256，输入是 `profiles` 的紧凑 UTF-8 JSON（空数组为 `[]`）；接收方按下列顺序重建每个对象而不是依赖反序列化 map 顺序。叶子均为非空 ASCII 标识，不发送指令、技能正文、路径、网关 URL 或认证信息。外壳和对象均不接受未知字段：
+
+1. `operation,contextPolicyId,contextPolicyVersion,toolPolicyVersion,capturePolicyVersion`：语义配置，不标识某笔事项的操作。
+2. `parentModel,parentRouteNamespace,childChannel,childModel,childTier,childBasis,parentBasis,referenceRouteSha256`：父、子计费依据和本地配置对照。私有路由摘要不是跨用户共享成本键，也不是单价。
+3. `skillKey,skillInstallationId,packageSha256`：实际受认证的安装/包绑定，只作私有派发核对。
+4. `execution0,tools0,execution1,tools1,execution2,tools2,execution3,tools3`：每对均为完整本地派发配置与工具摘要；对应无结构化数据输出的四种文件数量约束，编号 `2*artifactsRequired + multiple`。不是四份报价。API 在校验任务授权、会话和实际技能安装后再选对应编号；资料不符不生成完整计量证明，最终仍由实际 PLAN、父/子回执和 CLOSE 独立验证。
+
+顺序：先安装 `agent-runtime-pricing-profiles-v1.sql`，再发布接收方、发送方。API 在 `agent_runtime` 既有私有归属行存储安装、绑定、代次、序列、配置摘要/正文/时间，不重复复制外部使用授权；消费端复用事项候选授权及其策略修订。无结构化操作的普通报价不查询这份配置。
