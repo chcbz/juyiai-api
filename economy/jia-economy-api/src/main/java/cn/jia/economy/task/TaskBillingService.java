@@ -55,7 +55,9 @@ public interface TaskBillingService {
         public MeasuredWrite{if(initialIntentSha256!=null&&!initialIntentSha256.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid initial intent commitment");}
     }
     /** Inside the caller's authorized task transaction: only the winning held charge's original intent for this target. */
-    String heldInitialIntent(Task task,String agentId);
+    record InitialCommitment(String intentSha256,MeasuredGroup group) {}
+    InitialCommitment heldInitialCommitment(Task task,String agentId);
+    default String heldInitialIntent(Task task,String agentId){var held=heldInitialCommitment(task,agentId);return held==null?null:held.intentSha256();}
     record StoredQuote(String quoteId, long amountWen) {}
     /** Persist in input order in the existing transaction. Each receipt names a separate immutable quote. */
     java.util.List<StoredQuote> storeMeasuredBatch(Task task, String payerUserId, java.util.List<MeasuredWrite> writes);

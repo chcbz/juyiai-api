@@ -137,8 +137,9 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         return quoteRow(MEASURED_PREFIX + UUID.randomUUID(), task, bindingHash(binding), payer, p.estimate().wen(), encode(snapshot));
     }
 
-    @Override public String heldInitialIntent(Task task,String agentId){
-        return mapper.heldInitialIntent(task.scope().tenantId(),task.scope().clientId(),task.ownerJiacn(),task.taskId(),agentId);
+    @Override public InitialCommitment heldInitialCommitment(Task task,String agentId){
+        var row=mapper.heldInitialCommitment(task.scope().tenantId(),task.scope().clientId(),task.ownerJiacn(),task.taskId(),agentId);
+        return row==null?null:new InitialCommitment(row.intent(),json.readValue(row.groupJson(),MeasuredGroup.class));
     }
 
     @Override public Quote storeMeasured(Task task, Binding binding, String payer, MeasuredPreparation p) {

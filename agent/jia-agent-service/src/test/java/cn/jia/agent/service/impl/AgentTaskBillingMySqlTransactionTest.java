@@ -1294,6 +1294,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var selected=writes.get(1);String target=selected.binding().agentId();assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
         locked(()->billing.reserve(BILLING_TASK,receipts.get(1).quoteId(),selected.binding(),PAYER));
         assertEquals(selected.initialIntentSha256(),locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
+        assertEquals(selected.prepared().group(),locked(()->billing.heldInitialCommitment(BILLING_TASK,target)).group());
         assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,writes.get(2).binding().agentId())));
         assertNull(locked(()->billing.heldInitialIntent(new TaskBillingService.Task(BILLING_TASK.scope(),OWNER+"-other",TASK),target)));
         locked(()->billing.release(BILLING_TASK,true));assertNull(locked(()->billing.heldInitialIntent(BILLING_TASK,target)));
@@ -2856,7 +2857,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(other.selection()),outputs);return null;}));
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(pin.selection()),Map.of());return null;}));
         assertNull(jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
-        locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(pin.selection()),outputs);return null;});
+        var group=new TaskBillingService.MeasuredGroup(measured.version(),measured.executionConfigSha256(),measured.routeSha256(),"r1",measured.toolConfigSha256(),measured.capturePolicyVersion());
+        var winner=mock(TaskBillingService.class);when(winner.heldInitialCommitment(BILLING_TASK,agent)).thenReturn(new TaskBillingService.InitialCommitment(f.sha256(),group));
+        var admission=new QuotedInitialActionAdmission(winner,service);
+        var profile=cn.jia.agent.service.usage.NativeCaptureEvidence.imageProfile(measured.version(),measured.executionConfigSha256(),measured.routeSha256(),measured.toolConfigSha256());
+        assertNotNull(profile);assertEquals(profile,locked(()->admission.admit(SCOPE,TASK,granted,"first",pin.policy(),List.of(pin.selection()),outputs)));
+        assertEquals(profile,locked(()->admission.admit(SCOPE,TASK,granted,"first",pin.policy(),List.of(pin.selection()),outputs)));
+        assertNull(locked(()->admission.admit(SCOPE,TASK,granted,"followup",pin.policy(),List.of(pin.selection()),outputs)));
         assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
         assertEquals(0,count("agent_task_execution_grant"));assertEquals(0,count("economy_transaction"));
     }

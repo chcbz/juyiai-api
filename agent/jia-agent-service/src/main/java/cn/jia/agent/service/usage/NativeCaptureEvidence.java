@@ -23,6 +23,11 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
     private static void reasons(Map<?,?> o){check(o.get("reasonCodes") instanceof List<?> l&&l.stream().allMatch(x->x instanceof String s&&!s.isBlank()));}
     private static long safeCount(Object v){check(v instanceof Integer||v instanceof Long||v instanceof BigInteger);var n=new BigInteger(v.toString());check(n.signum()>=0&&n.compareTo(BigInteger.valueOf(9007199254740991L))<=0);return n.longValueExact();}
     public static String digest(Object value){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(SkillCanonicalJson.write(value).getBytes(StandardCharsets.UTF_8)));}catch(NoSuchAlgorithmException e){throw new IllegalStateException(e);}}
+    /** Only the measured group frozen at first-action financial admission, not a run or current configuration. */
+    public static String imageProfile(String version,String config,String route,String tools){
+        if(!"NATIVE_DISPATCH_GROUP_V1".equals(version)||!List.of(config,route,tools).stream().allMatch(s->s.matches(SHA)))throw new IllegalArgumentException("Invalid admitted image configuration");
+        return digest(List.of("ADMITTED_INITIAL_IMAGE_V1",version,"NATIVE_PINNED_IMAGE_V1",config,route,tools));
+    }
     public static String captureIdentity(String execution,String run){return digest(List.of("CAPTURE_V2",execution,run));}
     public static NativeCaptureEvidence parse(String execution,String run,String idempotencyKey,Map<String,Object> d){
         check(d!=null&&d.keySet().equals(COMMON));if(safeCount(d.get("schemaVersion"))!=2)throw new IllegalArgumentException("USAGE_CAPTURE_VERSION_UNSUPPORTED");

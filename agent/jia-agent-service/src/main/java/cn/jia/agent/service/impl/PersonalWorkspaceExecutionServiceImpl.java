@@ -1593,7 +1593,9 @@ public class PersonalWorkspaceExecutionServiceImpl implements PersonalWorkspaceE
             // Rollout controls observation only, never the permitted tools or the dispatch itself.
             if(meteredCaptureEnabled && task!=null && selections.isEmpty() && localArtifactMeteringProfile!=null
                     && localArtifactMeteringProfile.matches("[a-f0-9]{64}"))row.setCaptureProfileSha256(localArtifactMeteringProfile);
-            if(task!=null)initialActions.admit(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),task.taskId(),grantTarget,executionId,skillString(snapshot,"toolPolicyRef"),selections,skillObject(snapshot.get("outputs")));
+            if(task!=null){var imageProfile=initialActions.admit(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),task.taskId(),grantTarget,executionId,skillString(snapshot,"toolPolicyRef"),selections,skillObject(snapshot.get("outputs")));
+                if(imageProfile!=null)row.setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2").setCaptureProfileSha256(imageProfile);
+            }
             executions.insert(row);skillExecutions.insertReady(skill);
             if(task!=null) executions.registerTaskMember(row,row.getCaptureProtocol()==null?null:
                     cn.jia.agent.service.usage.NativeCaptureEvidence.captureIdentity(executionId,runId));

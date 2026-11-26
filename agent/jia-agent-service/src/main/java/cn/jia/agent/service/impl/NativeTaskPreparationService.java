@@ -112,13 +112,14 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         }return new ReadBatch(result,due);
     }
     /** The caller owns the task root, authorized grant and execution transaction. No current quote/probe read here. */
-    void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,String policy,List<Map<String,Object>> selections,Map<String,Object> outputs){
+    boolean consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,String policy,List<Map<String,Object>> selections,Map<String,Object> outputs){
         if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing native admission transaction");
-        var row=committed(scope,task,sha,true);if(row.execution()!=null&&!row.execution().equals(execution))return;
+        var row=committed(scope,task,sha,true);if(row.execution()!=null&&!row.execution().equals(execution))return false;
         var intent=row.intent();var b=intent.binding();var t=b.target();
         if(!scope.equals(b.scope())||!task.equals(b.task())||!t.agent().equals(target.agentId())||!t.provider().equals(target.ownerJiacn())||t.binding()!=target.bindingId()
             ||!intent.matches(policy,selections,outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
         if(row.execution()==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+COMMITTED+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
+        return true;
     }
     private static final String COMMITTED=" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND intent_sha=?";
     private record Committed(Intent intent,String execution){}
