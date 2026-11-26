@@ -13,6 +13,8 @@ import cn.jia.economy.mapper.EconomyTaskBillingMapper;
 import cn.jia.economy.pricing.ModelTokenPrice;
 import cn.jia.economy.pricing.TaskQuoteCalculator;
 import cn.jia.economy.service.EconomyScope;
+import cn.jia.economy.task.GroupBudgetQuotes;
+import cn.jia.economy.task.TaskQuoteBatches;
 import cn.jia.economy.task.TaskBillingException;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.economy.task.TaskBillingService.Binding;
@@ -419,6 +421,31 @@ class TaskBillingServiceMySqlTest {
         assertEquals(terminal.state() == State.CAPTURED ? 20 : 100, wallet());
         assertEquals(2, count("economy_transaction"));
         assertEquals(4, count("economy_entry"));
+    }
+
+    @Test void inlineMeanAndFixedBatchReserveOnlyTheWinningSample() {
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(jdbc.getDataSource());
+        var group=new TaskBillingService.MeasuredGroup("dispatch","a".repeat(64),"b".repeat(64),"1","c".repeat(64),"capture");
+        var pin=new GroupBudgetQuotes.Pin(new GroupBudgetQuotes.Key("d".repeat(64)),1,2,2,"e".repeat(64),"f".repeat(64),2,new BigDecimal("0.59"));
+        var facts=new TaskBillingService.LocalQuoteFacts("v1","edit","small");
+        var writes=new java.util.ArrayList<TaskBillingService.OfferWrite>();
+        for(int i=0;i<108;i++) {
+            var binding=new Binding(1,"1".repeat(64),"2".repeat(64),"agent-"+i,"batch");
+            writes.add(i%2==0 ? new TaskBillingService.MeanWrite(binding,new GroupBudgetQuotes.Mean(pin,30),facts,group,null) :
+                new TaskBillingService.FixedWrite(binding,new GroupBudgetQuotes.Fixed(TaskQuoteBatches.Reason.NO_BASELINE)));
+        }
+        var receipts=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",writes));
+        assertEquals(108,receipts.stream().map(TaskBillingService.StoredQuote::quoteId).distinct().count());
+        for(int i=0;i<108;i++) assertEquals(i%2==0?30:1,receipts.get(i).amountWen());
+        var id=receipts.get(0).quoteId();assertTrue(id.startsWith("tq_g1_"));
+        assertEquals(jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,id),
+            jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,id));
+        assertEquals(100,wallet());assertEquals(0,count("economy_task_cost_sample"));
+        var held=inTask(TASK,()->billing.reserve(TASK,id,writes.get(0).binding(),"payer-1"));
+        assertEquals(held,inTask(TASK,()->billing.reserve(TASK,id,writes.get(0).binding(),"payer-1")));
+        assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent-0")));
+        assertEquals(70,wallet());assertEquals(1,count("economy_task_cost_sample"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE quote_id=? AND history_group_sha256 IS NULL AND sample_state='WAITING_EVIDENCE'",Integer.class,id));
     }
 
     private Quote quote(Task task, Binding binding, String yuan) {
