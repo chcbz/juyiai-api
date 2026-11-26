@@ -20,16 +20,20 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
     public TaskBenchmarkAdmissionService(TaskBenchmarkMapper db,ObjectMapper json){this.db=db;this.json=json;}
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public String enroll(TaskBillingService.Task task,String id,String sha,String agent,TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features){
-        return enrollLocked(task,id,sha,agent,actual,features,EnrollmentMode.NORMAL);
+        return enrollLocked(task,id,sha,agent,actual,features,EnrollmentMode.NORMAL,null);
+    }
+    @Override @Transactional(propagation=Propagation.MANDATORY)
+    public String enrollStructured(TaskBillingService.Task task,String id,String sha,String agent,TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features,GroupInput observed){
+        if(observed==null)throw new NotAdmitted();return enrollLocked(task,id,sha,agent,actual,features,EnrollmentMode.NORMAL,observed);
     }
     private enum EnrollmentMode { NORMAL, NEW_SPONSOR, ACTIVE_SPONSOR }
     private String enrollLocked(TaskBillingService.Task task,String id,String sha,String agent,
-            TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features,EnrollmentMode mode) {
+            TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features,EnrollmentMode mode,GroupInput observed) {
         var raw=db.approved(task,id,sha);if(raw==null)throw new NotAdmitted();
         try{if(!HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(raw.getBytes(StandardCharsets.UTF_8))).equals(sha))throw new IllegalStateException("Damaged benchmark authority");}
         catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
         var m=json.readValue(raw,Manifest.class);
-        if(!task.equals(m.task())||!id.equals(m.caseId())||!agent.equals(m.agentId())||!m.execution().equals(actual)||!m.features().equals(features))throw new NotAdmitted();
+        if(!task.equals(m.task())||!id.equals(m.caseId())||!agent.equals(m.agentId())||!m.execution().equals(actual)||!m.features().equals(features)||!java.util.Objects.equals(m.groupInput(),observed))throw new NotAdmitted();
         String existing=db.existing(task,id);
         if(existing!=null){
             if(!sha.equals(existing))throw new IllegalStateException("Benchmark identity changed");
@@ -45,6 +49,13 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
     public Sponsorship sponsor(TaskBillingService.Task task, String id, String manifestSha, String agent,
             TaskBillingService.MeasuredGroup group, TaskEstimateFeatures features,
             String action, String assignmentSha, String initialIntentSha) {
+        return authorizeFunding(task,id,manifestSha,agent,group,features,action,assignmentSha,initialIntentSha,null);
+    }
+    @Override @Transactional(propagation=Propagation.MANDATORY)
+    public Sponsorship sponsorStructured(TaskBillingService.Task task,String id,String manifestSha,String agent,TaskBillingService.MeasuredGroup group,TaskEstimateFeatures features,String action,String assignmentSha,String initialIntentSha,GroupInput observed){
+        if(observed==null)throw new NotAdmitted();return authorizeFunding(task,id,manifestSha,agent,group,features,action,assignmentSha,initialIntentSha,observed);
+    }
+    private Sponsorship authorizeFunding(TaskBillingService.Task task,String id,String manifestSha,String agent,TaskBillingService.MeasuredGroup group,TaskEstimateFeatures features,String action,String assignmentSha,String initialIntentSha,GroupInput observed){
         var row = db.funding(task);
         if (row == null) throw new NotAdmitted();
         var funding = decodeFunding(task, row);
@@ -59,7 +70,7 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
         // The caller owns the task root. Serialize sponsor -> original case -> sample;
         // never create a quote/charge, provider request or journal entry here.
         enrollLocked(task, id, manifestSha, agent, group, features,
-                funding.state() == SponsorshipState.ACTIVE ? EnrollmentMode.ACTIVE_SPONSOR : EnrollmentMode.NEW_SPONSOR);
+                funding.state() == SponsorshipState.ACTIVE ? EnrollmentMode.ACTIVE_SPONSOR : EnrollmentMode.NEW_SPONSOR,observed);
         if (funding.state() == SponsorshipState.ACTIVE) return funding;
         transition(task, funding, SponsorshipState.ACTIVE);
         return new Sponsorship(funding.authoritySha256(), authority, SponsorshipState.ACTIVE);

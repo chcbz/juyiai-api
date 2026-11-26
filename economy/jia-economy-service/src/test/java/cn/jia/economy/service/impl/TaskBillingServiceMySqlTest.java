@@ -7,6 +7,12 @@ import cn.jia.economy.config.EconomySchemaInitializer;
 import cn.jia.economy.config.TaskPricingTestFixture;
 import cn.jia.economy.pricing.TaskPricingService;
 import cn.jia.economy.pricing.TaskWorkload;
+import cn.jia.economy.pricing.GroupMeanPricing;
+import cn.jia.economy.pricing.MeasuredTaskRepricing;
+import cn.jia.economy.pricing.TaskEstimateFeatures;
+import cn.jia.economy.task.TaskBenchmarkAdmission;
+import cn.jia.economy.usage.BenchmarkSampleEvidence;
+import cn.jia.economy.usage.ConfirmedSampleEvidence;
 import cn.jia.economy.exception.EconomyPostingException;
 import cn.jia.economy.mapper.EconomyLedgerMapper;
 import cn.jia.economy.mapper.EconomyTaskBillingMapper;
@@ -59,6 +65,7 @@ class TaskBillingServiceMySqlTest {
     private TaskBillingService billing;
     private cn.jia.economy.mapper.GroupBaselineMaintenanceMapper maintenance;
     private cn.jia.economy.mapper.GroupBaselineMapper baselines;
+    private cn.jia.economy.mapper.ConfirmedSampleMapper originals;
     private TransactionTemplate tx;
     private JdbcTemplate jdbc;
 
@@ -79,6 +86,7 @@ class TaskBillingServiceMySqlTest {
                 """);
         var config = new org.apache.ibatis.session.Configuration();
         config.setMapUnderscoreToCamelCase(true);
+        config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(EconomyLedgerMapper.class);
         config.addMapper(EconomyTaskBillingMapper.class);
         config.addMapper(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class);
@@ -87,6 +95,7 @@ class TaskBillingServiceMySqlTest {
         factory.setDataSource(db.dataSource());
         factory.setConfiguration(config);
         var session = new SqlSessionTemplate(factory.getObject());
+        originals=session.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         maintenance=session.getMapper(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class);
         baselines=session.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var manager = new DataSourceTransactionManager(db.dataSource());
@@ -460,7 +469,7 @@ class TaskBillingServiceMySqlTest {
         var rate=new cn.jia.economy.pricing.MeasuredTaskRepricing.ExplicitZero("included");
         var book=cn.jia.economy.pricing.GroupTariffSnapshot.capture(new cn.jia.economy.pricing.MeasuredTaskRepricing.Reference("r1",Map.of("generate",Map.of("tool",rate))));
         var fact=new cn.jia.economy.pricing.MeasuredTaskRepricing.Fact(new cn.jia.economy.pricing.MeasuredTaskRepricing.Operation("image","call1"),"generate","tool",key,cn.jia.economy.pricing.MeasuredTaskRepricing.Zero.EXPLICIT_ZERO);
-        var prepared=pub.calculate(w,claim,book,List.of(new GroupBaselinePublisher.Eligible(key,1,key,key,key,key,List.of(fact))),1);
+        var prepared=pub.calculate(w,claim,book,List.of(new GroupBaselinePublisher.Eligible(key,1,key,key,key,key,List.of(fact))),1,policy);
         tx.executeWithoutResult(st->pub.publish(prepared));
         var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
         var mean=(GroupBudgetQuotes.Mean)reader.prepare(SCOPE,java.util.Set.of(k)).get(k);assertEquals(0,mean.amountWen());
@@ -481,6 +490,35 @@ class TaskBillingServiceMySqlTest {
             new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+f)).execute(jdbc.getDataSource());}
         var sql=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-source-invalidation-v1.sql"));sql.setSeparator("$$");sql.execute(jdbc.getDataSource());
         var approvals=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-approval-v1.sql"));approvals.setSeparator("$$");approvals.execute(jdbc.getDataSource());
+    }
+    private String importTestApproval(Object raw,ObjectMapper json){String body=json.writeValueAsString(raw),sha=GroupPublicationEnrollment.digest(body);jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,body);return sha;}
+    @SuppressWarnings("unchecked") private <T> T transactional(T target){var proxy=new ProxyFactory(target);proxy.setProxyTargetClass(true);proxy.addAdvice(new TransactionInterceptor(tx.getTransactionManager(),new AnnotationTransactionAttributeSource()));return (T)proxy.getProxy();}
+    @Test void approvedStudyRepricesStoredRosterAndWithdrawnStudyImmediatelyStopsNewOffers(){
+        installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
+        String t=SCOPE.tenantId(),c=SCOPE.clientId(),a="a".repeat(64),b="b".repeat(64);var json=new ObjectMapper();var op="edit";
+        var buckets=new GroupMeanPricing.Buckets(op,List.of(new GroupMeanPricing.Bucket("one",Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,new GroupMeanPricing.Range(1,2)))));
+        var policy=new GroupMeanPricing.Policy("v","rule","config",buckets,1);var config=new GroupMeanPricing.Configuration("ctx","1","tool","capture",List.of(
+            new GroupMeanPricing.Route("MODEL_RESPONSE","INFERENCE","test-channel",route("0.1"),"standard","basis"),new GroupMeanPricing.Route("NATIVE_PROVIDER_CALL",op,"test-channel",route("0.5"),"standard","basis")));
+        var g=policy.classify(op,Map.of(GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),config).orElseThrow();var key=GroupMeanPricing.key(g);
+        var v=new java.util.ArrayList<>(java.util.Collections.nCopies(1024,0f));v.set(0,1f);
+        var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"fixture",a,b,a,new TaskEstimateFeatures.Identity("fixture","model",1024),v,List.of(new TaskEstimateFeatures.File("INPUT","image/png",32,1)),null);
+        var manifest=new TaskBenchmarkAdmission.Manifest("benchmark-case-v1",TASK,"case","agent","test","review",new TaskBillingService.MeasuredGroup("ver",a,b,"1",a,"capture"),features,new TaskBenchmarkAdmission.GroupInput(op,config));
+        var raw=json.writeValueAsString(manifest);String sample=GroupPublicationEnrollment.digest(raw);
+        var review=json.writeValueAsString(new BenchmarkSampleEvidence.Review("benchmark-review-v1","case",sample,"terminal",a,"ACCEPTED","test","artifact"));String rev=GroupPublicationEnrollment.digest(review);
+        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,'case',?,?)",t,c,TASK.ownerJiacn(),TASK.taskId(),raw,sample);
+        jdbc.update("INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,lifecycle_state,evidence_revision,sample_state) VALUES(?,?,?,?,?,'case','TASK_LIFECYCLE_V1',?,?,?,'ACCEPTED',1,'MATCHED')",sample,t,c,TASK.ownerJiacn(),TASK.taskId(),a,b,features.digest());
+        jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"terminal");jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,rev,review);
+        var enroll=transactional(new GroupPublicationEnrollment(maintenance,json));String approval=importTestApproval(new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",t,c,key,policy.sha(),TASK.ownerJiacn(),TASK.taskId(),"case",sample,1,sample,rev,"fixture"),json);enroll.register(approval);
+        var study=importTestApproval(new GroupStudyPolicy.Receipt("GROUP_HOLDOUT_RELEASE_A",t,c,"fixture only",a,b,policy.sha(),key,"rule","config",1,buckets,g,2,2,BigDecimal.ONE,BigDecimal.ONE,BigDecimal.ZERO,BigDecimal.ZERO),json);jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,key,study);
+        // The two associated responses are fixture inputs, not provider traffic or an accuracy observation.
+        var evidence=org.mockito.Mockito.mock(BenchmarkSampleEvidence.class);var decoder=org.mockito.Mockito.mock(ConfirmedSampleEvidence.Decoder.class);
+        var ops=config.routes().stream().map(r->new ConfirmedSampleEvidence.Operation(1,"capture",1,r.kind(),"1",new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation(r.kind(),"one"),r.kind(),r.component(),a,new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,1_000_000L))))).toList();
+        org.mockito.Mockito.when(evidence.measureReviewed(TASK,"case",sample,"terminal",rev,decoder)).thenReturn(new ConfirmedSampleEvidence.Measured(new ConfirmedSampleEvidence.Assessment(sample,1,"terminal",1,ConfirmedSampleEvidence.Verdict.MATCHED),ops));
+        var service=new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(TaskPricingTestFixture.service(jdbc),maintenance)),transactional(new GroupReviewedUsage(maintenance,enroll,originals,evidence)),transactional(new GroupBaselinePublisher(maintenance,json)),json);
+        service.runDue(t,c,decoder);var reader=new GroupBudgetQuotesService(baselines);var k=new GroupBudgetQuotes.Key(key);
+        assertEquals(60,assertInstanceOf(GroupBudgetQuotes.Mean.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k)).amountWen());
+        assertEquals(study,jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(roster_json,'$.studyApprovalSha')) FROM economy_budget_group_build_evidence",String.class));
+        jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=TRUE WHERE approval_sha=?",study);assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
     }
     @Test void absentOrWithdrawnStudyCannotPublishAndExpiredFifthClaimDoesNotRunAgain(){
         installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());

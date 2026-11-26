@@ -23,10 +23,11 @@ public class GroupBaselinePublisher {
     record Eligible(String sampleId,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha,
                     String usageSha,List<MeasuredTaskRepricing.Fact> facts) { Eligible {facts=List.copyOf(facts);} }
     record Line(String sampleId,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha,String usageSha,BigDecimal yuan) {}
-    record Evidence(String version,String tariffCanonicalBase64,List<Line> samples) {}
+    record Evidence(String version,String policySha,String studyApprovalSha,String tariffCanonicalBase64,List<Line> samples) {}
     record Prepared(Work work,String claim,String tariffSha,int count,BigDecimal total,String roster,String evidenceSha) {}
     static class MoreInputRequired extends RuntimeException {}
-    Prepared calculate(Work work,String claim,GroupTariffSnapshot tariff,List<Eligible> members,int minSupport) {
+    Prepared calculate(Work work,String claim,GroupTariffSnapshot tariff,List<Eligible> members,int minSupport,String studyApprovalSha) {
+        if(studyApprovalSha==null || !studyApprovalSha.matches("[a-f0-9]{64}"))throw new IllegalArgumentException("Missing reviewed study identity");
         if(minSupport<=0)throw new IllegalArgumentException("Invalid pricing policy");
         if(members.size()<minSupport)throw new MoreInputRequired();
         var lines=new ArrayList<Line>();String last=null;var sum=BigDecimal.ZERO;
@@ -39,7 +40,7 @@ public class GroupBaselinePublisher {
         }
         sum=sum.setScale(30,RoundingMode.UNNECESSARY);if(sum.precision()>65)throw new ArithmeticException("Group total exceeds storage precision");
         GroupMeanPricing.amountWen(sum,lines.size()); // reject a result that cannot be issued in integer wen
-        var roster=json.writeValueAsString(new Evidence("group-roster-1",tariff.canonicalBase64(),lines));
+        var roster=json.writeValueAsString(new Evidence("group-roster-1",work.policySha(),studyApprovalSha,tariff.canonicalBase64(),lines));
         try { return new Prepared(work,claim,tariff.tariffSha(),lines.size(),sum,roster,HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(roster.getBytes(StandardCharsets.UTF_8)))); }
         catch(NoSuchAlgorithmException impossible){throw new AssertionError(impossible);}
     }

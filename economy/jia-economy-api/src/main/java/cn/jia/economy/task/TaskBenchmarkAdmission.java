@@ -21,6 +21,8 @@ public interface TaskBenchmarkAdmission {
     }
     final class NotAdmitted extends RuntimeException{}
     String enroll(TaskBillingService.Task task,String caseId,String expectedManifestSha,String agentId,TaskBillingService.MeasuredGroup actualGroup,TaskEstimateFeatures beforeDispatch);
+    /** Registration-backed, authorized cost configuration observed before dispatch. A manifest cannot attest itself. */
+    String enrollStructured(TaskBillingService.Task task,String caseId,String expectedManifestSha,String agentId,TaskBillingService.MeasuredGroup actualGroup,TaskEstimateFeatures beforeDispatch,GroupInput observed);
     /** Imported by an authorized operator before execution; never written by the application.
      * Provider costs are sponsored, not a zero-WEN quote or an authorization to dispatch. */
     record SponsorshipAuthority(String schema, TaskBillingService.Task task, String caseId,
@@ -45,6 +47,7 @@ public interface TaskBenchmarkAdmission {
     Sponsorship sponsor(TaskBillingService.Task task, String caseId, String manifestSha256,
             String agentId, TaskBillingService.MeasuredGroup group, TaskEstimateFeatures features,
             String actionId, String assignmentSha256, String initialIntentSha256);
+    Sponsorship sponsorStructured(TaskBillingService.Task task,String caseId,String manifestSha256,String agentId,TaskBillingService.MeasuredGroup group,TaskEstimateFeatures features,String actionId,String assignmentSha256,String initialIntentSha256,GroupInput observed);
     /** Read original active/terminal funding under the caller's task lock. APPROVED is not funding.
      * Withdrawal does not erase past spending. This read never authorizes new execution. */
     Sponsorship sponsorship(TaskBillingService.Task task);
