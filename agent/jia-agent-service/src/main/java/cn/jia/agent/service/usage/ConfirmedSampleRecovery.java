@@ -26,10 +26,11 @@ public class ConfirmedSampleRecovery implements ScheduledJobHandler, Application
     private final CronScheduleService cron;
     private final CronSchedule definition;
 
+    private final cn.jia.economy.usage.SharedGroupMaintenance groupMaintenance;
     public ConfirmedSampleRecovery(ConfirmedSampleProjection samples,NativeSampleResponseDecoder decoder,
-            FixedTenantAdmissionPolicy scope,ScheduleService schedules,CronScheduleService cron,
+            FixedTenantAdmissionPolicy scope,ScheduleService schedules,CronScheduleService cron,cn.jia.economy.usage.SharedGroupMaintenance groupMaintenance,
             @Value("${jia.agent.confirmed-sample.recovery-cron:0 * * * * *}") String expression){
-        this.samples=samples;this.decoder=decoder;this.scope=scope;this.schedules=schedules;this.cron=cron;
+        this.groupMaintenance=groupMaintenance;this.samples=samples;this.decoder=decoder;this.scope=scope;this.schedules=schedules;this.cron=cron;
         definition=new CronSchedule(scope.clientId()==null?"":scope.clientId(),NAME,"",expression,"UTC",CronSchedule.Misfire.COALESCE);
     }
     public String getName(){return NAME;}
@@ -40,7 +41,10 @@ public class ConfirmedSampleRecovery implements ScheduledJobHandler, Application
         if(key.matches("[a-f0-9]{64}")){
             scope.requireAdmitted(tenant,k.clientId());samples.refreshPending(tenant,k.clientId(),key,decoder);return;
         }
+        if("group-maintenance".equals(key)&&definition.clientId().equals(k.clientId())){groupMaintenance.runDue(tenant,scope.clientId(),decoder);return;}
         if(!definition.clientId().equals(k.clientId())||!(key.startsWith("cron:")||key.matches("page:[a-f0-9]{64}")))throw new IllegalArgumentException("Invalid discovery key");
+        // Run group maintenance as distinct durable work so slow repricing never prevents sample discovery.
+        if(key.startsWith("cron:"))schedules.signal(new ScheduleKey(k.clientId(),NAME,"group-maintenance",""),System.currentTimeMillis());
         var page=samples.pending(tenant,scope.clientId(),key.startsWith("page:")?key.substring(5):"");
         long now=System.currentTimeMillis();
         for(var row:page){scope.requireAdmitted(tenant,row.client());schedules.signal(new ScheduleKey(row.client(),NAME,row.sampleId(),""),now);}

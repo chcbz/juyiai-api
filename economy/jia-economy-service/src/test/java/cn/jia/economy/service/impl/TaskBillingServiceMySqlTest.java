@@ -482,6 +482,20 @@ class TaskBillingServiceMySqlTest {
         var sql=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-source-invalidation-v1.sql"));sql.setSeparator("$$");sql.execute(jdbc.getDataSource());
         var approvals=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-approval-v1.sql"));approvals.setSeparator("$$");approvals.execute(jdbc.getDataSource());
     }
+    @Test void absentOrWithdrawnStudyCannotPublishAndExpiredFifthClaimDoesNotRunAgain(){
+        installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
+        var t=SCOPE.tenantId();var c=SCOPE.clientId();String k="d".repeat(64),policy="a".repeat(64),raw="{}",sha=GroupPublicationEnrollment.digest(raw);
+        jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,book_epoch,attempt,policy_sha,next_at,updated_at) VALUES(?,?,?,1,'DIRTY',1,0,?,CURRENT_TIMESTAMP(3),CURRENT_TIMESTAMP(3))",t,c,k,policy);
+        var service=new SharedGroupMaintenanceService(maintenance,null,null,null,null,new ObjectMapper());
+        service.runDue(t,c,null);assertEquals("WAIT_INPUT",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));
+        jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(?,?)",sha,raw);
+        jdbc.update("INSERT INTO economy_budget_group_study VALUES(?,?,?,?)",t,c,k,sha);
+        var w=maintenance.dueFor(t,c).getFirst();assertEquals(2,w.generation());assertEquals(raw,maintenance.study(w).body());
+        jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertNull(maintenance.study(w));assertEquals(0,maintenance.claim(w,"superseded",90));
+        jdbc.update("UPDATE economy_budget_group_head SET status='BUILDING',attempt=5,claim_id='dead',next_at=NULL,lease_until=CURRENT_TIMESTAMP(3)-INTERVAL 5 SECOND");service.runDue(t,c,null);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='WAIT_INPUT' AND attempt=5 AND claim_id IS NULL",Integer.class));
+        assertEquals(0,count("economy_budget_group_revision"));
+    }
     @Test void onlyOwnedTrainingPublicationApprovalCanEnrollAndReplayDoesNotAdvanceGeneration(){
         installPublicationSchema();
         var json=new ObjectMapper();var enrollment=new GroupPublicationEnrollment(maintenance,json);

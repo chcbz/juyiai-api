@@ -15,8 +15,10 @@ public interface GroupBaselineMaintenanceMapper {
     @Select("SELECT tenant_id,client_id,group_sha,generation,book_epoch,policy_sha,attempt FROM economy_budget_group_head WHERE "+DUE+
         " ORDER BY COALESCE(next_at,lease_until),tenant_id,client_id,group_sha LIMIT #{limit}") List<Work> due(int limit);
     @Update("UPDATE economy_budget_group_head SET status='BUILDING',claim_id=#{claim},lease_until=TIMESTAMPADD(SECOND,#{seconds},CURRENT_TIMESTAMP(3)),"+
-        "next_at=NULL,attempt=attempt+1,updated_at=CURRENT_TIMESTAMP(3) WHERE "+VERSION+" AND attempt=#{w.attempt} AND "+DUE)
+        "next_at=NULL,attempt=attempt+1,updated_at=CURRENT_TIMESTAMP(3) WHERE "+VERSION+" AND attempt=#{w.attempt} AND attempt<5 AND "+DUE)
     int claim(@Param("w") Work w,@Param("claim") String claim,@Param("seconds") int seconds);
+    @Update("UPDATE economy_budget_group_head SET status='WAIT_INPUT',claim_id=NULL,lease_until=NULL,next_at=NULL,updated_at=CURRENT_TIMESTAMP(3) WHERE "+VERSION+" AND attempt=#{w.attempt} AND attempt>=5 AND "+DUE)
+    int exhaustExpired(@Param("w") Work w);
     @Update("UPDATE economy_budget_group_head SET lease_until=TIMESTAMPADD(SECOND,#{seconds},CURRENT_TIMESTAMP(3)),updated_at=CURRENT_TIMESTAMP(3) WHERE "+OWN)
     int renew(@Param("w") Work w,@Param("claim") String claim,@Param("seconds") int seconds);
     @Update("UPDATE economy_budget_group_head SET status='WAIT_INPUT',claim_id=NULL,lease_until=NULL,next_at=NULL,updated_at=CURRENT_TIMESTAMP(3) WHERE "+OWN)
@@ -34,6 +36,9 @@ public interface GroupBaselineMaintenanceMapper {
     int insertEvidence(@Param("w") Work w,@Param("json") String json,@Param("evidence") String evidence);
     @Update("UPDATE economy_budget_group_head SET active_revision=generation,status='ACTIVE',tariff_sha=#{tariff},claim_id=NULL,lease_until=NULL,next_at=NULL,updated_at=CURRENT_TIMESTAMP(3) WHERE "+OWN)
     int publish(@Param("w") Work w,@Param("claim") String claim,@Param("tariff") String tariff);
+    record StudyBytes(String sha,String body){}
+    @Select("SELECT s.approval_sha AS sha,a.authority_json AS body FROM economy_budget_group_study s JOIN economy_budget_publish_approval a USING(approval_sha) WHERE s.tenant_id=#{tenantId} AND s.client_id=#{clientId} AND s.group_sha=#{groupSha} AND NOT a.withdrawn") StudyBytes study(Work w);
+    @Select("SELECT tenant_id,client_id,group_sha,generation,book_epoch,policy_sha,attempt FROM economy_budget_group_head WHERE tenant_id=#{tenant} AND (#{client} IS NULL OR client_id=#{client}) AND "+DUE+" ORDER BY COALESCE(next_at,lease_until),client_id,group_sha LIMIT 4") List<Work> dueFor(@Param("tenant") String tenant,@Param("client") String client);
     @Select("SELECT generation FROM economy_budget_group_head WHERE "+OWN)
     Long observedClaim(@Param("w") Work w,@Param("claim") String claim);
     record SourcePin(String sampleId,String sourceOwner,String sourceTask,long evidenceRevision,String manifestSha,String reviewSha,String approvalSha){}
