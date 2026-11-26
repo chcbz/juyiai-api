@@ -21,6 +21,6 @@ public interface GroupBaselineMapper {
         "FROM economy_budget_group_head h LEFT JOIN economy_budget_group_revision r ON r.tenant_id=h.tenant_id AND r.client_id=h.client_id " +
         "AND r.group_sha=h.group_sha AND r.revision=h.active_revision" + KEYS + "</script>")
     List<Row> read(@Param("d") EconomyScope domain,@Param("keys") List<String> keys);
-    @Select("<script>" + HEAD + " FROM economy_budget_group_head h" + KEYS + "FOR SHARE</script>")
+    @Select("<script>" + HEAD + " FROM economy_budget_group_head h" + KEYS + "FOR SHARE NOWAIT</script>")
     List<Head> lock(@Param("d") EconomyScope domain,@Param("keys") List<String> keys);
 }

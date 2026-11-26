@@ -3212,6 +3212,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));
+            // Background worker owns this head but has not committed. MVCC prepare sees ACTIVE;
+            // the signer must not wait holding the task root, silently use a fallback, or persist a partial batch.
+            int preQuotes=count("economy_task_quote"),preBatches=count("economy_task_quote_batch");
+            try(var bg=jdbc.getDataSource().getConnection()){
+                bg.setAutoCommit(false);
+                try(var hold=bg.prepareStatement("SELECT generation FROM economy_budget_group_head WHERE tenant_id=? AND client_id=? AND group_sha=? FOR UPDATE")){
+                    hold.setString(1,TENANT);hold.setString(2,CLIENT);hold.setString(3,key);try(var r=hold.executeQuery()){assertTrue(r.next());}
+                    var racing=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).timeout(java.time.Duration.ofSeconds(5)).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key","busy-group").POST(HttpRequest.BodyPublishers.ofString(body)).build();
+                    var conflict=http.send(racing,HttpResponse.BodyHandlers.ofString());assertEquals(409,conflict.statusCode(),conflict.body());assertTrue(conflict.body().contains("QUOTE_STALE"));assertEquals(preQuotes,count("economy_task_quote"));assertEquals(preBatches,count("economy_task_quote_batch"));
+                }finally{bg.rollback();}
+            }
+            var retried=call.send("busy-group");assertEquals("30",retried.get(0).at("/amount/amountMinor").asText());assertFixedQuote(retried.get(1));
             if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureSharedQuoteMatrix(agent,token,policy,cfg);
             jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertEquals(quotes,call.send("approved"));var fresh=call.send("after-withdraw");assertFixedQuote(fresh.get(0));assertFixedQuote(fresh.get(1));}
         assertEquals(money,count("economy_transaction"));

@@ -35,7 +35,13 @@ public class GroupBudgetQuotesService implements GroupBudgetQuotes {
         for(var p:pins) {var old=unique.putIfAbsent(p.key().groupSha(),p); if(old!=null && !old.equals(p))throw new TaskBudgetEstimator.Stale();}
         var keys=List.copyOf(unique.keySet());
         for(int i=0;i<keys.size();i+=PAGE) {
-            var page=keys.subList(i,Math.min(i+PAGE,keys.size())); var rows=mapper.lock(domain,page);
+            var page=keys.subList(i,Math.min(i+PAGE,keys.size())); List<GroupBaselineMapper.Head> rows;
+            try { rows=mapper.lock(domain,page); }
+            catch(org.springframework.dao.DataAccessException failure){
+                // Do not queue behind a background reprice while holding the task root. Other DB errors remain unavailable.
+                for(Throwable cause=failure;cause!=null;cause=cause.getCause())if(cause instanceof java.sql.SQLException sql && sql.getErrorCode()==3572)throw new TaskBudgetEstimator.Stale();
+                throw failure;
+            }
             if(rows.size()!=page.size())throw new TaskBudgetEstimator.Stale();
             for(var h:rows){var p=unique.get(h.groupSha());
                 if(!"ACTIVE".equals(h.status()) || h.bookEpoch()!=p.bookEpoch() || h.generation()!=p.generation() ||
