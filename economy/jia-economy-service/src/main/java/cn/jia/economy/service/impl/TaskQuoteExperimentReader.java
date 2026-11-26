@@ -18,5 +18,8 @@ public class TaskQuoteExperimentReader implements TaskQuoteExperiment {
         var policy=new GroupMeanPricing.Policy(r.featureVersion(),r.pricingRule(),r.configRule(),r.buckets(),r.minSupport());
         return policy.sha().equals(r.policySha())?new Approved(r.operation(),r.requestedDeliverables(),(r.artifactsRequired()?2:0)+(r.multiple()?1:0),policy):null;
     }
-    public boolean current(Subject s,String sha){return sha.equals(db.lockExperiment(s,sha));}
+    public boolean current(Subject s,String sha){
+        try{return sha.equals(db.lockExperiment(s,sha));}
+        catch(org.springframework.dao.DataAccessException e){for(Throwable cause=e;cause!=null;cause=cause.getCause())if(cause instanceof java.sql.SQLException sql&&sql.getErrorCode()==3572)return false;throw e;}
+    }
 }

@@ -10,7 +10,7 @@ import org.apache.ibatis.annotations.Select;
 public interface GroupBaselineMapper {
     String EXPERIMENT=" FROM economy_budget_publish_approval WHERE approval_sha=#{sha} AND NOT withdrawn AND authority_json->>'$.purpose'='QUOTE_EXPERIMENT_V1' AND authority_json->>'$.tenant'=#{s.task.scope.tenantId} AND authority_json->>'$.client'=#{s.task.scope.clientId} AND authority_json->>'$.owner'=#{s.task.ownerJiacn} AND authority_json->>'$.taskId'=#{s.task.taskId} AND authority_json->>'$.taskVersion'=#{s.version} AND authority_json->>'$.requirementRevision'=CAST(#{s.revision} AS CHAR) AND authority_json->>'$.requirementSha'=#{s.requirementSha} AND authority_json->>'$.inputSha'=#{s.inputSha}";
     @Select("SELECT authority_json"+EXPERIMENT) String experiment(@Param("s") cn.jia.economy.task.TaskQuoteExperiment.Subject subject,@Param("sha") String sha);
-    @Select("SELECT approval_sha"+EXPERIMENT+" FOR SHARE") String lockExperiment(@Param("s") cn.jia.economy.task.TaskQuoteExperiment.Subject subject,@Param("sha") String sha);
+    @Select("SELECT approval_sha"+EXPERIMENT+" FOR SHARE NOWAIT") String lockExperiment(@Param("s") cn.jia.economy.task.TaskQuoteExperiment.Subject subject,@Param("sha") String sha);
     record Row(String groupSha,long bookEpoch,long generation,String status,Long activeRevision,String tariffSha,String policySha,
                Long revision,Long revisionEpoch,String revisionTariff,String revisionPolicy,Integer sampleCount,BigDecimal sumCostYuan) {}
     record Head(String groupSha,long bookEpoch,long generation,String status,Long activeRevision,String tariffSha,String policySha) {}
