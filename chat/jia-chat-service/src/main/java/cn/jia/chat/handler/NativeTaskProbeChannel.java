@@ -12,7 +12,7 @@ import java.util.function.Supplier;
 
 /** Correlation exists only while a background comparison is outstanding. No catalog, prices or execution authority. */
 final class NativeTaskProbeChannel {
-    private record Pending(WebSocketSession socket,String message,Map<String,Object> identity,String intent,SessionFence fence,
+    private record Pending(WebSocketSession socket,String message,Map<String,Object> identity,String intent,String comparisonPolicy,SessionFence fence,
                            Supplier<WebSocketSession> current,CompletableFuture<Measurement> result) {}
     private final Map<String,Pending> pending=new ConcurrentHashMap<>();
     private final Semaphore slots=new Semaphore(64);
@@ -33,7 +33,7 @@ final class NativeTaskProbeChannel {
             data.put("outputs",frozen.intent().output().comparisonOutputs());
             var frame=new TextMessage(mapper.writeValueAsString(ProtocolMessage.event(request,"runtime.task.configuration.probe",message,data)));
             if(frame.getPayloadLength()>16384){result.complete(null);return result;}
-            pending.put(request,new Pending(socket,message,identity,frozen.sha256(),fence,current,result));
+            pending.put(request,new Pending(socket,message,identity,frozen.sha256(),frozen.intent().comparisonPolicy(),fence,current,result));
             result.completeOnTimeout(null,5,TimeUnit.SECONDS);
             synchronized(socket){if(!result.isDone() && current.get()==socket)socket.sendMessage(frame);else result.complete(null);}
         }catch(Exception unavailable){result.complete(null);}
@@ -55,7 +55,7 @@ final class NativeTaskProbeChannel {
         Measurement value=null;
         if(d.get("measurement")!=null){
             if(!(d.get("measurement") instanceof Map<?,?> m) || !m.keySet().equals(Set.of("version","executionConfigSha256","routeSha256","toolConfigSha256","capturePolicyVersion"))
-                || !"NATIVE_DISPATCH_GROUP_V1".equals(m.get("version")) || !"NATIVE_LOCAL_ARTIFACT_TEXT_V1".equals(m.get("capturePolicyVersion"))
+                || !"NATIVE_DISPATCH_GROUP_V1".equals(m.get("version")) || !p.comparisonPolicy().equals(m.get("capturePolicyVersion"))
                 || !sha(m.get("executionConfigSha256")) || !sha(m.get("routeSha256")) || !sha(m.get("toolConfigSha256")))return;
             value=new Measurement(p.intent(),p.fence(),(String)m.get("version"),(String)m.get("executionConfigSha256"),(String)m.get("routeSha256"),
                 (String)m.get("toolConfigSha256"),(String)m.get("capturePolicyVersion"),profile);

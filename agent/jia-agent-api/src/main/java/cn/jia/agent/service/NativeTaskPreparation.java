@@ -34,6 +34,8 @@ public interface NativeTaskPreparation {
             @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL) Instruction instruction){
         public Intent(String schema,Binding binding,Output output){this(schema,binding,output,null);}
         public Intent{if (!(instruction==null?LOCAL:INSTRUCTION).equals(schema))throw new IllegalArgumentException("Unknown dispatch intent");Objects.requireNonNull(binding);Objects.requireNonNull(output);}
+        /** A comparison policy identifies the measured configuration, not permission or proof of full cost. */
+        public String comparisonPolicy(){return instruction==null?"NATIVE_LOCAL_ARTIFACT_TEXT_V1":"NATIVE_PINNED_IMAGE_V1";}
         public boolean matches(String policy,List<Map<String,Object>> selections,Map<String,Object> outputs){
             return output.commandOutputs().equals(outputs) && (instruction==null
                     ? SkillExecutionService.NATIVE_LOCAL_FILES_POLICY.equals(policy) && selections.isEmpty()

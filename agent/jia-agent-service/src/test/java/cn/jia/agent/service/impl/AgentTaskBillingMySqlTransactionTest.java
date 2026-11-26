@@ -2850,6 +2850,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var cmp=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),List.of(agent));
         assertFalse(service.recordMeasurement(cmp,agent,new NativeTaskConfigurationProbe.Measurement(f.sha256(),null,"NATIVE_DISPATCH_GROUP_V1","a".repeat(64),"b".repeat(64),"c".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",null)));
         var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,target.provider(),agent,binding,null);
+        var measured=cn.jia.chat.handler.SelectedProbeTestPeer.exchange(f,new AgentManagedSessionLookup.SessionFence("install","host","boot",2)).toCompletableFuture().join();
+        assertNotNull(measured);assertEquals("NATIVE_PINNED_IMAGE_V1",measured.capturePolicyVersion());assertTrue(service.recordMeasurement(cmp,agent,measured));
         var other=new NativeTaskPreparation.Instruction("install-draw",pin.key(),pin.version(),"b".repeat(64),pin.policy());
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(other.selection()),outputs);return null;}));
         assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(pin.selection()),Map.of());return null;}));

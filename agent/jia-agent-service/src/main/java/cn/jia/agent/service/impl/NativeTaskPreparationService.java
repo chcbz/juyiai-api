@@ -80,7 +80,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     private List<Object> observationKey(Frozen decision,String ticket){var b=decision.intent().binding();var scope=b.scope();return List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),key(b),decision.sha256(),ticket);}
     @Override public boolean recordMeasurement(Comparison comparison,String agent,NativeTaskConfigurationProbe.Measurement measurement){
         var decision=comparison.decisions().get(agent);
-        if(decision==null||measurement==null||decision.intent().instruction()!=null && "NATIVE_LOCAL_ARTIFACT_TEXT_V1".equals(measurement.capturePolicyVersion())||!decision.sha256().equals(measurement.intentSha256()))return false;
+        if(decision==null||measurement==null||!decision.intent().comparisonPolicy().equals(measurement.capturePolicyVersion())||!decision.sha256().equals(measurement.intentSha256()))return false;
         String body=json.writeValueAsString(measurement);var args=new ArrayList<Object>(List.of(hash(body),body));args.addAll(observationKey(decision,comparison.ticket()));
         return db.update("UPDATE "+TABLE+" SET measurement_sha=?,measurement_json=?"+EXACT+" AND probe_valid_until>UTC_TIMESTAMP(6) AND measurement_sha IS NULL",args.toArray())==1;
     }
