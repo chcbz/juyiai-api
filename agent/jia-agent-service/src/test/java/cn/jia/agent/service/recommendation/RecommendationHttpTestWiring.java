@@ -59,7 +59,7 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
                 }
             });
             var reg=java.util.Optional.of(registry);
-            controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10),reg),new CapabilitySearch(clients,reg),roots,new CandidateSuitability("",""),reg));
+            controller=new AssigneeRecommendationController(new AssigneeRecommendationService(agents,skills,materials,new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10),reg),new CapabilitySearch(clients,reg),roots,reg));
         }catch(Exception|Error failure){try{client.close();}catch(Exception cleanup){failure.addSuppressed(cleanup);}throw failure;}
     }
     /** Real SQL ownership reader and HTTP endpoint; candidate data is an explicit empty fixture. */
@@ -71,7 +71,7 @@ public final class RecommendationHttpTestWiring implements AutoCloseable {
         var task=new cn.jia.agent.entity.AgentTaskDTO();task.setTaskVersion("0");task.setStatus("open");task.setTitle("Paused admission read fixture");
         org.mockito.Mockito.when(agents.getTaskRecommendationInputWithinLockedTask(org.mockito.ArgumentMatchers.eq(taskId),org.mockito.ArgumentMatchers.any())).thenReturn(task);
         org.mockito.Mockito.when(agents.listTaskAssigneeCandidates(taskId)).thenReturn(java.util.List.of());
-        var service=new AssigneeRecommendationService(agents,skills,materials,vectors,search,roots,new CandidateSuitability("",""));
+        var service=new AssigneeRecommendationService(agents,skills,materials,vectors,search,roots);
         return new ReadOnlyRecommendation(new AssigneeRecommendationController(service),()->{
             org.mockito.Mockito.verify(agents,org.mockito.Mockito.times(3)).getTaskRecommendationInputWithinLockedTask(org.mockito.ArgumentMatchers.eq(taskId),org.mockito.ArgumentMatchers.any());
             org.mockito.Mockito.verify(agents,org.mockito.Mockito.times(2)).listTaskAssigneeCandidates(taskId);

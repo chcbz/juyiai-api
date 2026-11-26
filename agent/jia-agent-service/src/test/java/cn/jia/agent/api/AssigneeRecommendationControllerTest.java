@@ -31,7 +31,7 @@ class AssigneeRecommendationControllerTest {
         mvc = MockMvcBuilders.standaloneSetup(new AssigneeRecommendationController(service))
                 .setMessageConverters(new JacksonJsonHttpMessageConverter()).setControllerAdvice(new ApiEnvelopeAdvice())
                 .addFilters(new RequestIdFilter()).build();
-        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "UNKNOWN", "尚无能力介绍", List.of(), List.of())), true, "HYBRID", "candidate-rrf-k60-v1", List.of()));
+        when(service.recommend(any(), eq("task"), any())).thenReturn(new Result("task", "7", 1000, "NO_MATCH", List.of(new Recommendation(new Agent("a", "Agent", "online", List.of(), true, true, null), "尚无能力介绍", List.of(), List.of())), true, "HYBRID", "candidate-rrf-k60-v1", List.of()));
     }
     @Test void independentQuoteEndpointUsesHeaderAndOnlyExplicitIdsNotBrowserPrices() throws Exception {
         var app=mock(cn.jia.agent.service.recommendation.IndependentTaskQuotes.class);
@@ -93,7 +93,7 @@ class AssigneeRecommendationControllerTest {
                 .andExpect(jsonPath("$.data.recommendations[0].quote").doesNotExist())
                 .andExpect(jsonPath("$.data.retrievalMode").value("HYBRID"))
                 .andExpect(jsonPath("$.data.state").value("NO_MATCH")).andExpect(jsonPath("$.data.taskVersion").value("7"))
-                .andExpect(jsonPath("$.data.recommendations[0].recommendationLevel").value("UNKNOWN")).andExpect(jsonPath("$.data.score").doesNotExist());
+                .andExpect(jsonPath("$.data.recommendations[0].recommendationLevel").doesNotExist()).andExpect(jsonPath("$.data.score").doesNotExist());
     }
     @Test void responseMatchesSharedWebRecommendationFixture() throws Exception {
         var response = mvc.perform(post("/agent/tasks/task/recommend").principal(login).contentType(MediaType.APPLICATION_JSON).content(BODY)

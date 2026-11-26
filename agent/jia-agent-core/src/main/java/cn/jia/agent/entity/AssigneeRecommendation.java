@@ -10,7 +10,7 @@ public final class AssigneeRecommendation {
                         boolean canOperate, boolean boundToMe, String providerDisplayName) { }
     /** available means this observation may be cited, NOT an execution authorization. */
     public record Evidence(String id, String kind, String label, String description, boolean available) { }
-    public record Recommendation(Agent agent, String recommendationLevel, String reason, List<Evidence> evidence, List<String> gaps) { }
+    public record Recommendation(Agent agent, String reason, List<Evidence> evidence, List<String> gaps) { }
     public record Result(String taskId, String taskVersion, long observedAt, String state, List<Recommendation> recommendations,
                          boolean candidateSetComplete, String retrievalMode, String rankingVersion, List<String> degradedReasons) { }
     public static final class Failure extends RuntimeException {

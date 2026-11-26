@@ -3316,7 +3316,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities='[]' WHERE tenant_id=? AND client_id=? AND agent_id=?",TENANT,CLIENT,agent));
                     String key="rec-withdrawn";var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
                             .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\"rec-withdrawn\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
-                    try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var rows=new ObjectMapper().readTree(res.body()).at("/data/recommendations");assertEquals(1,rows.size());var row=rows.get(0);assertEquals(agent,row.at("/agent/agentId").asText());assertTrue(row.path("evidence").isArray());assertEquals(0,row.path("evidence").size());assertEquals("UNKNOWN",row.path("recommendationLevel").asText());}
+                    try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var rows=new ObjectMapper().readTree(res.body()).at("/data/recommendations");assertEquals(1,rows.size());var row=rows.get(0);assertEquals(agent,row.at("/agent/agentId").asText());assertTrue(row.path("evidence").isArray());assertEquals(0,row.path("evidence").size());assertFalse(row.has("recommendationLevel"));}
                     assertEquals(2L,es.documentCount());assertEquals(1,jdbc.update("UPDATE agent_runtime SET abilities=? WHERE tenant_id=? AND client_id=? AND agent_id=?",new ObjectMapper().writeValueAsString(List.of("合同审查 0","合同条款核对 0")),TENANT,CLIENT,agent));
                 }
                 org.mockito.Mockito.verifyNoInteractions(storage,writes);
@@ -3388,7 +3388,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+task+"/recommend")).header("Authorization","Bearer "+httpToken()).header("X-Request-Id",key).header("Content-Type","application/json")
                 .POST(HttpRequest.BodyPublishers.ofString("{\"protocolVersion\":1,\"requestId\":\""+key+"\",\"data\":{\"expectedTaskVersion\":\"0\"}}" )).build();
         try(var client=HttpClient.newHttpClient()){var res=client.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode());var data=new ObjectMapper().readTree(res.body()).path("data");assertEquals("HYBRID",data.path("retrievalMode").asText());var rows=data.path("recommendations");assertEquals(108,rows.size());int matched=0;
-            for(var row:rows)if(agent.equals(row.at("/agent/agentId").asText())){matched++;var evidence=row.path("evidence");assertTrue(evidence.isArray());assertEquals(visible?1:0,evidence.size());if(visible){assertEquals("INSTALLED_SKILL",evidence.get(0).path("kind").asText());assertEquals("合同审查",evidence.get(0).path("label").asText());}else assertEquals("UNKNOWN",row.path("recommendationLevel").asText());}assertEquals(1,matched);}
+            for(var row:rows)if(agent.equals(row.at("/agent/agentId").asText())){matched++;var evidence=row.path("evidence");assertTrue(evidence.isArray());assertEquals(visible?1:0,evidence.size());if(visible){assertEquals("INSTALLED_SKILL",evidence.get(0).path("kind").asText());assertEquals("合同审查",evidence.get(0).path("label").asText());}else assertFalse(row.has("recommendationLevel"));}assertEquals(1,matched);}
     }
     // Attribute physical single-table SELECTs by normalized table name, never log SQL text or parameters.
     private java.util.Map<String,Long> proofSelects(){
@@ -3467,7 +3467,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 long t=System.nanoTime();var res=client.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-t;
                 var env=mapper.readTree(res.body());var data=env.path("data");var rows=data.path("recommendations");var seen=new java.util.HashSet<String>();
                 boolean bad=res.statusCode()!=200||!"E0".equals(env.path("code").asText())||!id.equals(env.path("requestId").asText())||!requested.equals(data.path("taskId").asText())||!"0".equals(data.path("taskVersion").asText())||!data.path("candidateSetComplete").asBoolean()||!rows.isArray();
-                for(var row:rows)if(!seen.add(row.at("/agent/agentId").asText())||row.path("evidence").size()==0||!"UNKNOWN".equals(row.path("recommendationLevel").asText()))bad=true;
+                for(var row:rows)if(!seen.add(row.at("/agent/agentId").asText())||row.path("evidence").size()==0||row.has("recommendationLevel"))bad=true;
                 if(id.startsWith("rec-slow-fail-"))bad|=!"DEGRADED".equals(data.path("state").asText())||!"LEXICAL_ONLY".equals(data.path("retrievalMode").asText())||!data.path("degradedReasons").equals(mapper.valueToTree(List.of("QUERY_VECTOR_UNAVAILABLE")));
                 return new Observation(elapsed,!"HYBRID".equals(data.path("retrievalMode").asText()),bad||!seen.equals(expected));
             }}
