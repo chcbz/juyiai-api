@@ -6,12 +6,10 @@ import cn.jia.agent.service.AgentTaskExecutionGrantService.Scope;
 import cn.jia.agent.service.NativeTaskPreparation;
 import cn.jia.economy.task.PreparedReferenceRoutes;
 import java.util.*;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 /** Consumes only local prepared evidence for targets already authorized by the quote intent. No probe or dispatch. */
 @Service
-@ConditionalOnProperty(name="jia.agent.task-quotes.prepared-observations-enabled",havingValue="true")
 public final class RecordedProspectiveTaskExecution implements ProspectiveTaskExecution {
     private final NativeTaskPreparation decisions;private final PreparedRuntimeEpochFence epochs;private final PreparedReferenceRoutes routes;
     private final SelectedTaskComparison comparisons;

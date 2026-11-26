@@ -5,7 +5,6 @@ import cn.jia.agent.hosting.HostingRentHttp;
 import cn.jia.core.context.EsContextHolder;
 import cn.jia.core.entity.*;
 import java.util.Objects;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
@@ -13,7 +12,6 @@ import tools.jackson.databind.JsonNode;
 
 @RestController
 @RequestMapping("/agent/tasks/{taskId}/initial-actions/{agentId}")
-@ConditionalOnProperty(name="jia.agent.task-quotes.prepared-observations-enabled",havingValue="true")
 public final class TaskInitialActionController {
     private final TaskInitialActionSelection choices;
     public TaskInitialActionController(TaskInitialActionSelection choices){this.choices=choices;}

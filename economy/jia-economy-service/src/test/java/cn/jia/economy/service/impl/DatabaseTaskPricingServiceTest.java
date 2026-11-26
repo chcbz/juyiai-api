@@ -51,6 +51,33 @@ class DatabaseTaskPricingServiceTest {
         assertEquals(terms,first.resolve(task,c));assertNull(load.from(entry,edited).resolve(task,c));
         assertNull(new PinnedReferenceRoutes(file.toString(),"0".repeat(64)).resolve(task,c));assertNull(new PinnedReferenceRoutes("","").resolve(task,c));
     }
+    @Test void pinnedImagePricesParentAndExactChildIndependently(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)throws Exception{
+        var task=new cn.jia.economy.task.TaskBillingService.Task(scope,"owner","example");
+        var c=new cn.jia.economy.task.PreparedReferenceRoutes.Configuration("NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_PINNED_IMAGE_V1");
+        var key=Map.of("tenant","tenant","client","client","owner","owner","configuration",c);
+        var row=new java.util.HashMap<String,Object>(Map.of("key",key,"model","model","channel","channel","tier","standard"));
+        class Load {cn.jia.economy.task.TaskBudgetEstimator.Terms get(String schema)throws Exception{
+            var bytes=new ObjectMapper().writeValueAsBytes(Map.of("schema",schema,"entries",java.util.List.of(row)));
+            var path=dir.resolve("routes");java.nio.file.Files.write(path,bytes);
+            return new PinnedReferenceRoutes(path.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes))).resolve(task,c);
+        }}
+        var load=new Load();String v2="prepared-reference-routes-v2";assertNull(load.get(v2));
+        var child=new java.util.HashMap<>(Map.of("operation","generate","channel","image-channel","model","image-model","tier","standard"));row.put("image",child);
+        assertNull(load.get("prepared-reference-routes-v1"));var terms=load.get(v2);assertNotNull(terms);
+        assertEquals(new TaskReferencePricing.TokenRoute("image-channel","image-model","standard","openai-images-modalities-v1"),terms.routes().get("NATIVE_PROVIDER_CALL").get("generate"));
+        child.put("operation","edit");assertNotEquals(terms.execution().routeVersion(),load.get(v2).execution().routeVersion());
+        child.put("operation","unknown");assertNull(load.get(v2));
+        price(DATA);var kinds=terms.routes().keySet();assertEquals(MODEL_PRICE_MISSING,assertThrows(TaskPricingService.Unavailable.class,()->service.freeze(scope,"book",terms.routes(),kinds)).reason());
+        var image=new EconomyModelPriceRow();image.setChannel("image-channel");image.setModel("image-model");image.setTier("standard");image.setPriceVersion("i1");
+        image.setPriceDataJson("{\"basis\":\"fixture\",\"yuanPerMillionTokens\":{\"IMAGE_OUTPUT\":\"100\"},\"longContextYuanPerMillionTokens\":{}}");
+        when(mapper.findCurrentModel("tenant","client","image-channel","image-model","standard")).thenReturn(image);
+        var book=service.freeze(scope,terms.execution().routeVersion(),terms.routes(),kinds);
+        var parentFact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("parent","p"),"MODEL_RESPONSE","INFERENCE","e1",new MeasuredTaskRepricing.Tokens("RESPONSES_TEXT_TOKENS_V1",Map.of(ModelTokenPrice.Category.OUTPUT,1L)));
+        var childFact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("child","c"),"NATIVE_PROVIDER_CALL","generate","e2",new MeasuredTaskRepricing.Tokens("openai-images-modalities-v1",Map.of(ModelTokenPrice.Category.IMAGE_OUTPUT,1000L)));
+        var result=MeasuredTaskRepricing.reprice(book,java.util.List.of(parentFact,childFact,childFact));assertEquals(2,result.lines().size());assertEquals(0,new BigDecimal("0.100003343950").compareTo(result.yuan()));
+        var wrong=new MeasuredTaskRepricing.Fact(childFact.operation(),childFact.kind(),"edit",childFact.evidenceSha(),childFact.quantity());
+        assertThrows(MeasuredTaskRepricing.Unavailable.class,()->MeasuredTaskRepricing.reprice(book,java.util.List.of(parentFact,wrong)));
+    }
     @Test void licensedAndConfirmedKeysetsMergeAcrossInterleavedPagesAndOneSourceTail(){
         var json=new ObjectMapper();var db=mock(cn.jia.economy.mapper.ConfirmedSampleMapper.class);var catalog=new TaskHistoryCatalogService(db,json,true);
         var features=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","t",new TaskEstimateFeatures.Identity("fixture","test",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),null);
