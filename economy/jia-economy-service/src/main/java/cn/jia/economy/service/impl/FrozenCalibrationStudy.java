@@ -124,6 +124,7 @@ public final class FrozenCalibrationStudy {
             verifyStudyManifest(manifest,task,domain,policy,book);
             var snapshot=read(objects,member.observationSha256(),FrozenBenchmarkObservation.class);
             var sample=snapshot.sample(json,task,TaskHistoryCatalog.Group.of(manifest.execution(),manifest.features()),member.source(),pin,row.family(),Split.TRAIN);
+            requireImageComponents(manifest,snapshot.operations());
             training.add(new GroupHoldoutForecast.Training(domain,sample.id(),sample.split(),sample.revision(),sample.features(),sample.facts()));
         }
         var model=new GroupHoldoutForecast(domain,book,training,plan.minSupport(),plan.frozenTrial());
@@ -136,6 +137,47 @@ public final class FrozenCalibrationStudy {
             rows.add(new GroupPrediction(held.task(),m.agentId(),held.family(),held.manifestSha(),m.features().digest(),pair));
         }
         return freeze(new GroupForecasts("group-paired-forecast-v1",approvedPlanSha,plan.referenceSha(),plan.tariffSha(),List.copyOf(rows)));
+    }
+    /** A missing outcome has an explicit reason and no source, not a synthetic zero cost. */
+    public record GroupTruth(String task,String reason,Member source){}
+    public record GroupOutcomes(String schema,String forecastSha,List<GroupTruth> rows){}
+    public record GroupComparison(int eligible,long meanCovered,long neighborCovered,long measured,long bothMeasured,
+            TaskEstimateEvaluation.Scores meanErrors,TaskEstimateEvaluation.Scores neighborErrors,
+            TaskEstimateEvaluation.Scores pairedMeanErrors,TaskEstimateEvaluation.Scores pairedNeighborErrors){}
+    /** Read independently pinned forecasts, then reviewed HOLDOUT observations. Never refit a model using outcomes. */
+    public GroupComparison compareGroups(EconomyScope scope,String operator,String approvedPlanSha,String beforeExecutionForecastSha,
+            String outcomeRosterSha,Function<String,String> objects){
+        var plan=read(objects,approvedPlanSha,GroupPlan.class);var predictions=read(objects,beforeExecutionForecastSha,GroupForecasts.class);
+        var outcomes=read(objects,outcomeRosterSha,GroupOutcomes.class);
+        if(!"group-comparison-plan-v1".equals(plan.schema())||!scope.tenantId().equals(plan.domain().tenant())||!scope.clientId().equals(plan.domain().client())||!operator.equals(plan.operator())
+                ||!"group-paired-forecast-v1".equals(predictions.schema())||!approvedPlanSha.equals(predictions.planSha())||!plan.tariffSha().equals(predictions.tariffSha())||!plan.referenceSha().equals(predictions.referenceSha())
+                ||!"group-reviewed-outcomes-v1".equals(outcomes.schema())||!beforeExecutionForecastSha.equals(outcomes.forecastSha())||plan.held().isEmpty()||plan.held().size()!=predictions.rows().size())throw new IllegalArgumentException("Foreign group comparison");
+        var book=reference(read(objects,plan.referenceSha(),Book.class));if(!plan.tariffSha().equals(GroupTariffSnapshot.capture(book).tariffSha()))throw new IllegalArgumentException("Wrong outcome price book");
+        var byTask=new HashMap<String,GroupTruth>();for(var t:outcomes.rows())if(byTask.put(t.task(),t)!=null)throw new IllegalArgumentException("Repeated outcome");
+        long a=0,b=0,measured=0;var ea=new ArrayList<TaskEstimateEvaluation.Prediction>();var eb=new ArrayList<TaskEstimateEvaluation.Prediction>();
+        var pa=new ArrayList<TaskEstimateEvaluation.Prediction>();var pb=new ArrayList<TaskEstimateEvaluation.Prediction>();
+        for(int i=0;i<plan.held().size();i++){
+            var h=plan.held().get(i);var p=predictions.rows().get(i);var o=byTask.remove(h.task());
+            if(o==null||!p.task().equals(h.task())||!p.family().equals(h.family())||!p.manifestSha().equals(h.manifestSha()))throw new IllegalArgumentException("Unmatched holdout row");
+            Long am=p.pair().meanWen(),bn=p.pair().neighborWen();if(am!=null)a++;if(bn!=null)b++;
+            if(!"MEASURED".equals(o.reason())){if(o.source()!=null||!Set.of("NOT_EXECUTED","NOT_ACCEPTED","CANCELLED","USAGE_INCOMPLETE","REFERENCE_PRICE_MISSING","EVIDENCE_UNAVAILABLE").contains(o.reason()))throw new IllegalArgumentException("Ambiguous missing outcome");continue;}
+            var member=Objects.requireNonNull(o.source());var pin=Objects.requireNonNull(member.benchmark());var task=new Task(scope,operator,h.task());
+            if(!member.task().equals(h.task())||!pin.manifestSha().equals(h.manifestSha()))throw new IllegalArgumentException("Wrong holdout revision");
+            var m=read(objects,h.manifestSha(),TaskBenchmarkAdmission.Manifest.class);var end=read(objects,member.observationSha256(),FrozenBenchmarkObservation.class);
+            if(!p.agent().equals(m.agentId())||!p.featureSha().equals(m.features().digest())||end.assignment().featuresAt()!=h.featuresAt())throw new IllegalArgumentException("Outcome differs from frozen input");
+            var sample=end.sample(json,task,TaskHistoryCatalog.Group.of(m.execution(),m.features()),member.source(),pin,h.family(),Split.HOLDOUT);
+            requireImageComponents(m,end.operations());var truth=MeasuredTaskRepricing.reprice(book,sample.facts()).yuan();measured++;
+            var av=new TaskEstimateEvaluation.Prediction(h.task(),truth,am);var bv=new TaskEstimateEvaluation.Prediction(h.task(),truth,bn);
+            if(am!=null)ea.add(av);if(bn!=null)eb.add(bv);if(am!=null&&bn!=null){pa.add(av);pb.add(bv);}
+        }
+        if(!byTask.isEmpty())throw new IllegalArgumentException("Surplus outcomes");
+        return new GroupComparison(plan.held().size(),a,b,measured,pa.size(),TaskEstimateEvaluation.pairedErrors(ea),TaskEstimateEvaluation.pairedErrors(eb),TaskEstimateEvaluation.pairedErrors(pa),TaskEstimateEvaluation.pairedErrors(pb));
+    }
+    private static void requireImageComponents(TaskBenchmarkAdmission.Manifest m,List<ProjectedTaskOperation> operations){
+        var expected=Set.of(List.of("MODEL_RESPONSE","INFERENCE"),List.of("NATIVE_PROVIDER_CALL",m.groupInput().operation()));
+        // Per-member closure and whether a child was expected belong to the reviewed evidence reader.
+        var seen=new HashSet<List<String>>();for(var op:operations)seen.add(List.of(op.kind(),op.component()));
+        if(!expected.equals(seen))throw new IllegalArgumentException("Incomplete benchmark image components");
     }
     private static void verifyStudyManifest(TaskBenchmarkAdmission.Manifest m,Task task,GroupHoldoutForecast.Domain domain,GroupMeanPricing.Policy policy,MeasuredTaskRepricing.Reference book){
         if(!task.equals(m.task())||m.groupInput()==null)throw new IllegalArgumentException("Wrong benchmark task");

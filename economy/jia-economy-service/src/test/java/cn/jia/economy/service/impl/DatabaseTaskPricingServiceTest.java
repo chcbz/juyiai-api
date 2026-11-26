@@ -172,6 +172,20 @@ class DatabaseTaskPricingServiceTest {
         var plan=new FrozenCalibrationStudy.GroupPlan("group-comparison-plan-v1",domain,"operator",book.sha256(),tariff,"f","p","c",buckets,1,trial,java.util.List.of(new FrozenCalibrationStudy.GroupTrain(member,"f1")),java.util.List.of(new FrozenCalibrationStudy.GroupHeld("hold","f2",held,3)));
         String pin=keep.apply(plan);var artifact=study.groupForecasts(scope,"operator",pin,store::get);var result=json.readValue(artifact.json(),FrozenCalibrationStudy.GroupForecasts.class);
         assertEquals(new GroupHoldoutForecast.Pair(4L,4L),result.rows().getFirst().pair());assertEquals(pin,result.planSha());assertEquals(tariff,result.tariffSha());assertEquals(held,result.rows().getFirst().manifestSha());assertEquals(artifact,study.groupForecasts(scope,"operator",pin,store::get));
+        store.put(artifact.sha256(),artifact.json());var holdRev=new cn.jia.economy.task.TaskHistoryCatalog.Revision(held,3);
+        var hReview=new cn.jia.economy.usage.BenchmarkSampleEvidence.Review("benchmark-review-v1","hold",held,"done","b".repeat(64),"ACCEPTED","reviewer","artifact");var hr=keep.apply(hReview);
+        // Two completed rounds, whole-task price 8 wen; prediction was 4 wen and is not regenerated.
+        var all=new java.util.ArrayList<>(ops);for(var op:ops)all.add(new ProjectedTaskOperation(2,"second",2,"second-"+op.recordId(),"src2",op.evidenceSha256(),new MeasuredTaskRepricing.Operation("fixture2",op.kind()),op.kind(),op.component(),op.basis(),op.quantity()));
+        var end=new FrozenBenchmarkObservation("benchmark-observation-v1",new TaskEstimateEvaluation.Case("hold","f2",3,4,TaskEstimateEvaluation.Split.HOLDOUT),holdRev,store.get(held),store.get(hr),all);
+        var truth=new FrozenCalibrationStudy.Member("hold",holdRev,keep.apply(end),new cn.jia.economy.usage.BenchmarkSampleEvidence.Pin("hold",held,"done",hr));
+        java.util.function.Function<java.util.List<FrozenCalibrationStudy.GroupTruth>,String> inventory=rows->keep.apply(new FrozenCalibrationStudy.GroupOutcomes("group-reviewed-outcomes-v1",artifact.sha256(),rows));
+        var observed=new FrozenCalibrationStudy.GroupTruth("hold","MEASURED",truth);var after=inventory.apply(java.util.List.of(observed));
+        var comparison=study.compareGroups(scope,"operator",pin,artifact.sha256(),after,store::get);assertEquals(1,comparison.bothMeasured());assertEquals(1,comparison.pairedMeanErrors().underestimates());
+        assertEquals(0,comparison.meanErrors().wape().compareTo(new TaskEstimateEvaluation.Ratio(BigDecimal.ONE,BigDecimal.valueOf(2))));
+        var miss=study.compareGroups(scope,"operator",pin,artifact.sha256(),inventory.apply(java.util.List.of(new FrozenCalibrationStudy.GroupTruth("hold","USAGE_INCOMPLETE",null))),store::get);
+        assertEquals(1,miss.eligible());assertEquals(1,miss.meanCovered());assertEquals(0,miss.measured());assertNull(miss.meanErrors().wape());
+        assertThrows(IllegalArgumentException.class,()->study.compareGroups(scope,"operator",pin,artifact.sha256(),inventory.apply(java.util.List.of()),store::get));
+        assertThrows(IllegalArgumentException.class,()->study.compareGroups(scope,"operator",pin,artifact.sha256(),inventory.apply(java.util.List.of(observed,observed)),store::get));
         assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"another",pin,store::get));store.put(held,store.get(train));assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"operator",pin,store::get));
     }
     @Test void frozenMixedAndBenchmarkOnlyStudiesRejectReplacementApprovalsAndForeignOwners(){
