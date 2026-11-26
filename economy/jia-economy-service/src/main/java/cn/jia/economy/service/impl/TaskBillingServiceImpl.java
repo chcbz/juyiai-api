@@ -182,13 +182,18 @@ public class TaskBillingServiceImpl implements TaskBillingService {
             requireTransition(mapper.insertPreparation(task,payer,key.batch(),sha,key.json()));
             references.put(key,encode(sha));
         }
+        return persistChunked(writes,write -> {
+            var frozen=cache.computeIfAbsent(write.prepared(),this::freeze);
+            String payload=references.isEmpty()?frozen.json():references.getOrDefault(new Content(write.binding().recommendationId(),frozen.json()),frozen.json());
+            return measuredRow(task,payer,write,frozen,payload);
+        });
+    }
+    private <T> List<StoredQuote> persistChunked(List<T> writes,java.util.function.Function<T,EconomyTaskQuoteEntity> rowFor) {
         var result = new java.util.ArrayList<StoredQuote>(writes.size());
         var chunk = new java.util.ArrayList<EconomyTaskQuoteEntity>(CHUNK_ROWS);
         long bytes = 0;
-        for (var write : writes) {
-            var frozen=cache.computeIfAbsent(write.prepared(),this::freeze);
-            String payload=references.isEmpty()?frozen.json():references.getOrDefault(new Content(write.binding().recommendationId(),frozen.json()),frozen.json());
-            var row = measuredRow(task,payer,write,frozen,payload);
+        for(var write:writes) {
+            var row=rowFor.apply(write);
             int size = row.getSnapshotJson().getBytes(StandardCharsets.UTF_8).length;
             if (!chunk.isEmpty() && (chunk.size() >= CHUNK_ROWS || bytes + size > CHUNK_SNAPSHOT_BYTES)) {
                 mapper.insertQuotes(chunk); chunk.clear(); bytes = 0;
@@ -200,12 +205,27 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         return List.copyOf(result);
     }
 
+    private static final String GROUP_PREFIX="tq_g1_", GROUP_SCHEMA="GROUP_MEAN_TASK_QUOTE_V1";
+    @Override public List<StoredQuote> storeOffersBatch(Task task,String payer,List<OfferWrite> writes) {
+        Objects.requireNonNull(payer);
+        return observedWrite(() -> persistChunked(writes,write -> {
+            if(write instanceof FixedWrite fixed)return fixedRow(task,payer,fixed.binding(),fixed.price().reason());
+            var mean=(MeanWrite)write; var pin=mean.price().pin(); var binding=mean.binding(); var facts=mean.facts();
+            var digest=cn.jia.economy.pricing.GroupMeanPricing.featureDigest(facts.version(),facts.operation(),facts.bucketId(),binding.requirementSha256(),binding.inputSnapshotDigest());
+            var data=new java.util.LinkedHashMap<String,Object>(); data.put("schema",GROUP_SCHEMA); data.put("binding",binding);
+            data.put("basis",Map.of("method","GROUP_MEAN","version","1","groupSha",pin.key().groupSha(),"tariffSha",pin.tariffSha(),
+                    "policySha",pin.policySha(),"revision",pin.revision(),"generation",pin.generation(),"sampleCount",pin.n()));
+            data.put("featureSha256",digest); data.put("facts",facts); data.put("preparation",Map.of("group",mean.observedGroup()));
+            if(mean.initialIntentSha256()!=null)data.put("initialIntentSha256",mean.initialIntentSha256());
+            return quoteRow(GROUP_PREFIX+UUID.randomUUID(),task,bindingHash(binding),payer,mean.price().amountWen(),encode(data));
+        }));
+    }
+    private EconomyTaskQuoteEntity fixedRow(Task task,String payer,Binding binding,cn.jia.economy.task.TaskQuoteBatches.Reason reason) {
+        return quoteRow("tq_f1_"+UUID.randomUUID(),task,bindingHash(binding),Objects.requireNonNull(payer),1L,
+            encode(Map.of("schema","FIXED_FALLBACK_V1","binding",binding,"reason",Objects.requireNonNull(reason),"amountWen",1L)));
+    }
     @Override public StoredQuote storeFixedFallback(Task task, Binding binding, String payer, cn.jia.economy.task.TaskQuoteBatches.Reason reason) {
-        // A commercial fixed price, never measured usage or execution authority.
-        long amount = 1L;
-        var row = insertQuote("tq_f1_" + UUID.randomUUID(), task, bindingHash(binding), Objects.requireNonNull(payer), amount,
-                encode(Map.of("schema", "FIXED_FALLBACK_V1", "binding", binding, "reason", Objects.requireNonNull(reason), "amountWen", amount)));
-        return new StoredQuote(row.quoteId(), row.amountWen());
+        var row=fixedRow(task,payer,binding,reason); mapper.insertQuote(row); return new StoredQuote(row.getQuoteId(),row.getAmountWen());
     }
 
     private Quote insertQuote(String id, Task task, String bindingHash, String payerUserId, long amountWen, String snapshot) {
@@ -260,10 +280,11 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         requireTransition(mapper.markHeld(row));
         // Namespace comes from the validated immutable DB quote, not an unchecked client ID.
         // Old snapshots do not contain initial features. Do not invent them at assignment time.
-        if (quote.getQuoteId().startsWith(MEASURED_PREFIX)) {
+        boolean groupMean=quote.getQuoteId().startsWith(GROUP_PREFIX);
+        if (groupMean || quote.getQuoteId().startsWith(MEASURED_PREFIX)) {
             String sampleId = HexFormat.of().formatHex(digest(encode(List.of("TASK_LIFECYCLE_V1",task.scope().tenantId(),
                     task.scope().clientId(),task.ownerJiacn(),task.taskId(),quote.getQuoteId())).getBytes(StandardCharsets.UTF_8)));
-            requireTransition(mapper.confirmMeasuredSample(quote, sampleId));
+            requireTransition(groupMean ? mapper.confirmGroupMeanSample(quote,sampleId) : mapper.confirmMeasuredSample(quote, sampleId));
         }
         return receipt(row);
     }

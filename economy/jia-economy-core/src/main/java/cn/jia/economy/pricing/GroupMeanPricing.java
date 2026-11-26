@@ -27,10 +27,17 @@ public final class GroupMeanPricing {
         return CnyAmounts.quoteWen(totalYuan, BigDecimal.valueOf(completeTasks));
     }
 
-    public static String key(Group group) {
-        MessageDigest md;
-        try { md = MessageDigest.getInstance("SHA-256"); }
+    public static String featureDigest(String version,String operation,String bucket,String requirement,String inputs) {
+        var md = sha256();
+        for(var field:List.of(version,operation,bucket,requirement,inputs)) put(md,bytes(field));
+        return HexFormat.of().formatHex(md.digest());
+    }
+    private static MessageDigest sha256() {
+        try { return MessageDigest.getInstance("SHA-256"); }
         catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+    }
+    public static String key(Group group) {
+        var md = sha256();
         for (String field : List.of("group-key-1", group.featureVersion(), group.operation(), group.policySha(),
                 group.bucketId(), group.contextPolicyId(), group.contextPolicyVersion(), group.toolPolicyVersion(),
                 group.capturePolicyVersion())) put(md, bytes(field));

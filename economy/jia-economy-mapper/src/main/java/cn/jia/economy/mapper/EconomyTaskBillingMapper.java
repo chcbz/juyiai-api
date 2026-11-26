@@ -64,7 +64,7 @@ public interface EconomyTaskBillingMapper {
           AND BINARY q.owner_jiacn=BINARY c.owner_jiacn AND BINARY q.task_id=BINARY c.task_id AND BINARY q.payer_user_id=BINARY c.payer_user_id
         WHERE c.tenant_id=#{tenant} AND c.client_id=#{client} AND c.owner_jiacn=#{owner} AND c.task_id=#{task} AND c.state='HELD'
           AND BINARY c.tenant_id=BINARY #{tenant} AND BINARY c.client_id=BINARY #{client} AND BINARY c.owner_jiacn=BINARY #{owner} AND BINARY c.task_id=BINARY #{task}
-          AND JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256'))='STRING' AND JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.schema'))='MEASURED_TASK_QUOTE_V1'
+          AND JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256'))='STRING' AND JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.schema')) IN ('MEASURED_TASK_QUOTE_V1','GROUP_MEAN_TASK_QUOTE_V1')
           AND BINARY JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.binding.agentId'))=BINARY #{agent}
         """) InitialCommitmentRow heldInitialCommitment(@Param("tenant") String tenant,@Param("client") String client,@Param("owner") String owner,@Param("task") String task,@Param("agent") String agent);
 
@@ -81,6 +81,19 @@ public interface EconomyTaskBillingMapper {
           AND task_id=#{q.taskId} AND quote_id=#{q.quoteId} AND payer_user_id=#{q.payerUserId}
           AND JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='MEASURED_TASK_QUOTE_V1'
         """) int confirmMeasuredSample(@Param("q") EconomyTaskQuoteEntity quote,@Param("sid") String sampleId);
+
+    @Insert("""
+        INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,
+          initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,history_group_sha256,lifecycle_state,evidence_revision,sample_state)
+        SELECT #{sid},tenant_id,client_id,owner_jiacn,task_id,quote_id,'TASK_LIFECYCLE_V1',
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.requirementSha256')),
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.binding.inputSnapshotDigest')),
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.featureSha256')),
+          NULL,'ACTIVE',1,'WAITING_EVIDENCE'
+        FROM economy_task_quote_resolved WHERE tenant_id=#{q.tenantId} AND client_id=#{q.clientId} AND owner_jiacn=#{q.ownerJiacn}
+          AND task_id=#{q.taskId} AND quote_id=#{q.quoteId} AND payer_user_id=#{q.payerUserId}
+          AND JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='GROUP_MEAN_TASK_QUOTE_V1'
+        """) int confirmGroupMeanSample(@Param("q") EconomyTaskQuoteEntity quote,@Param("sid") String sampleId);
 
     @Select("SELECT * FROM economy_task_charge WHERE " + SCOPE + " FOR UPDATE")
     EconomyTaskChargeEntity lockCharge(@Param("tenantId") String tenant, @Param("clientId") String client,
