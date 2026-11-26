@@ -3213,6 +3213,30 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             System.out.println("OWNED_QUOTE_WIRE_CAPTURE_SHA256="+digest(log));
         }
     }
+    // Isolated load probe only. Callback starts AFTER SELECT FOR UPDATE and validation. Its duration
+    // is a lower bound on lock ownership; the post segment also includes commit and connection cleanup.
+    private record RootTiming(boolean finish,long acquirePath,long callback,long returnPath){}
+    private volatile java.util.Queue<RootTiming> timingWindow;
+    private cn.jia.agent.service.AgentTaskMutationTransaction observedQuoteRoots(){
+        var factory=new ProxyFactory();factory.setInterfaces(cn.jia.agent.service.AgentTaskMutationTransaction.class);factory.setTarget(roots);
+        factory.addAdvice((org.aopalliance.intercept.MethodInterceptor) invocation->{
+            var window=timingWindow;if(window==null||!invocation.getMethod().getName().equals("executeWithLockedTaskRootInOwnerScope"))return invocation.proceed();
+            assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
+            var args=invocation.getArguments();var callback=(cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<?>)args[4];
+            var stamps=new long[2];args[4]=(cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<Object>)root->{
+                stamps[0]=System.nanoTime();try{return callback.apply(root);}finally{stamps[1]=System.nanoTime();}};
+            long start=System.nanoTime();Object result=invocation.proceed();long end=System.nanoTime();assertTrue(stamps[0]>=start&&stamps[1]>=stamps[0]);
+            window.add(new RootTiming(result instanceof TaskQuoteBatches.Result,stamps[0]-start,stamps[1]-stamps[0],end-stamps[1]));return result;
+        });return (cn.jia.agent.service.AgentTaskMutationTransaction)factory.getProxy();
+    }
+    private void reportRootTimings(String scenario,int n,int lanes,int expected){
+        var records=timingWindow;timingWindow=null;assertEquals(2*expected,records.size());
+        for(boolean finish:List.of(false,true)){
+            var rows=records.stream().filter(r->r.finish()==finish).toList();assertEquals(expected,rows.size());int rank=expected-expected/20-1;
+            System.out.printf(java.util.Locale.ROOT,"SHARED_ROOT_PHASE scenario=%s candidates=%d concurrency=%d phase=%s n=%d acquirePathP95Ms=%.3f callbackP95Ms=%.3f returnPathP95Ms=%.3f%n",scenario,n,lanes,finish?"finish":"begin",expected,
+                rows.stream().mapToLong(RootTiming::acquirePath).sorted().toArray()[rank]/1e6,rows.stream().mapToLong(RootTiming::callback).sorted().toArray()[rank]/1e6,rows.stream().mapToLong(RootTiming::returnPath).sorted().toArray()[rank]/1e6);
+        }
+    }
     @Test void signedExperimentPricesRegisteredAgentBeforeSelectionAndWithdrawalPreservesReplay(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
         ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());attachQuoteFile(0);
@@ -3239,7 +3263,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String routeBytes=json.writeValueAsString(Map.of("schema","prepared-reference-routes-v2","entries",List.of(routeEntry)));Path routeFile=tmp.resolve("experiment-routes.json");Files.writeString(routeFile,routeBytes);var resolver=new cn.jia.economy.service.impl.PinnedReferenceRoutes(routeFile.toString(),QuoteWireWindow.digest(routeBytes));
         var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),mock(PersonalWorkspaceStorage.class),mock(PersonalWorkspaceWriteService.class)));
         recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured(roots,batches,authority.req(),assignment,authority.policies(),materials,billing,recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),resolver);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured(Boolean.getBoolean("cyf.measuredBatchQuoteLoad")?observedQuoteRoots():roots,batches,authority.req(),assignment,authority.policies(),materials,billing,recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),resolver);
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));
@@ -3285,8 +3309,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 for(int n:(mixed||fixed?List.of(108):List.of(6,108))){var selected=ids.subList(0,n);String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","perf","data",Map.of("expectedTaskVersion","0","agentIds",selected)));
                     var times=new java.util.ArrayList<Long>();var all=new java.util.HashSet<String>();long cold=0;var before=readRecSql();var writes=readQuoteWrites(TASK);var base=groupPerf();
+                    timingWindow=new java.util.concurrent.ConcurrentLinkedQueue<>();
                     for(int j=0;j<=30;j++){String key="group-perf-"+scenario+"-"+n+"-"+j;var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","perf").header("Authorization","Bearer "+token).header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();long start=System.nanoTime();var reply=http.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-start;if(j==0)cold=elapsed;else times.add(elapsed);
                         assertEquals(200,reply.statusCode(),reply.body());var rows=json.readTree(reply.body()).at("/data/quotes");assertEquals(n,rows.size());for(int i=0;i<n;i++){var row=rows.get(i);assertEquals(selected.get(i),row.path("agentId").asText());if(fixed||(mixed && i%2!=0))assertFixedQuote(row);else {assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());assertEquals(String.valueOf(distinct?30+i:30),row.at("/amount/amountMinor").asText());}assertTrue(all.add(row.path("quoteId").asText()));}}
+                    reportRootTimings(scenario,n,1,31);
                     var after=readRecSql().minus(before);var end=groupPerf();var saved=readQuoteWrites(TASK);times.sort(Long::compare);long reads=end[0]-base[0],scanned=end[1]-base[1],sources=end[2]-base[2];
                     System.out.printf(java.util.Locale.ROOT,"SHARED_QUOTE_HTTP candidates=%d groups=%d firstMs=%.3f hotN=30 p95ms=%.3f meanRows=%d fixedRows=%d groupReads=%d groupExamined=%d privateReads=%d insertCalls=%d lockWaits=%d lockMs=%d%n",n,fixed?0:mixed?n/2:distinct?n:1,cold/1e6,times.get(28)/1e6,fixed?0:mixed?all.size()/2:all.size(),fixed?all.size():mixed?all.size()/2:0,reads,scanned,sources,saved.calls()-writes.calls(),after.waits(),after.waitMillis());
                     assertEquals(fixed?0:62,reads);assertEquals(0,sources);assertEquals(31L*((n+31)/32),saved.calls()-writes.calls());assertEquals(31L*n,saved.rows()-writes.rows());
@@ -3358,6 +3384,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var base=groupPerf();var writes=readQuoteWrites(TASK);var sql=readRecSql();
         record Reply(HttpResponse<String> response,long nanos){}
         var waitObjects=new java.util.TreeMap<String,Long>();
+        timingWindow=new java.util.concurrent.ConcurrentLinkedQueue<>();
         for(int start=0;start<30;start+=lanes){
             var pending=new java.util.ArrayList<java.util.concurrent.CompletableFuture<Reply>>();
             for(int i=start;i<start+lanes;i++){
@@ -3386,6 +3413,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     assertEquals(String.valueOf(distinct?30+i:30),row.at("/amount/amountMinor").asText());String id=row.path("quoteId").asText();assertFalse(id.isBlank());assertTrue(ids.add(id));}
             }
         }
+        reportRootTimings(distinct?"distinct":"shared",agents.size(),lanes,30);
         var end=groupPerf();var saved=readQuoteWrites(TASK);var locks=readRecSql().minus(sql);times.sort(Long::compare);
         assertEquals(0,end[2]-base[2]);assertEquals(30L*agents.size(),saved.rows()-writes.rows());
         assertEquals(30L*((agents.size()+31)/32),saved.calls()-writes.calls());
