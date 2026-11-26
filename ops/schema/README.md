@@ -137,3 +137,12 @@ java -Dloader.main=cn.jia.maintenance.HostingRentCutover \
 ## 共享报价：登记已经获准的基准（维护入口）
 
 独立维护进程 `cn.jia.maintenance.SharedBudgetEnrollment` 只接受已导入的聚合训练批准原文 SHA-256，启动方式沿上文 `PropertiesLauncher`，参数为 `--register-approved APPROVAL_SHA256`。使用固定 tenant/client 和专用维护数据源；不以 HTTP 请求提交批准、不传用户正文或数据库口令。它不能导入/签发批准、运行事项、发钱、发布研究结论或改已有订单。登记事务核对原件、域、事项、评审、证据修订；同一原件重放不推进代次。成功标记 `REGISTERED_OR_IDENTICAL_REPLAY` 只证明登记，不证明重价发布或生产精度。
+
+**分组报价独立留出实验（离线，无数据库或运行时连接）**。复用上述已验证 API JAR 的 `org.springframework.boot.loader.launch.PropertiesLauncher`，将 `-Dloader.main` 设为 `cn.jia.economy.service.impl.GroupBudgetStudyCommand`。只在获授权运营方的私有证据目录（0700）运行，文件名为原文 SHA-256。以下是该 main 的两组参数，不是应用启动参数：
+
+```text
+forecast OBJECT_DIR TENANT CLIENT OPERATOR APPROVED_PLAN_SHA
+compare  OBJECT_DIR TENANT CLIENT OPERATOR APPROVED_PLAN_SHA BEFORE_EXECUTION_FORECAST_SHA OUTCOMES_SHA
+```
+
+先独立冻结 `group-comparison-plan-v1` 名册、原始 TRAIN benchmark 修订、结构化操作/规模策略、实验参数、同一份价本和留出事项的执行前 manifest；不得导入普通用户记录。`forecast` 校验来源、重价并保存双预测，只打印新对象摘要。由实验责任方在**放行留出执行之前**独立保存此摘要及当时的时序证据；命令本身不放行执行，事后重放产生相同摘要也不能补办这一步。完成后提交 `group-reviewed-outcomes-v1`：每条留出事项一行，明确缺真值原因或绑定同一 manifest 的已评审整单修订；`compare` 读取原预测，不重拟合，分别输出所有留出任务上的覆盖计数、可计误差数及两算法共同可计子集。汇总是研究证据，不是上线审批。本入口不下发预算、不采集新样本、不签审批、不发布均价；请勿用生产库凭证或公开目录运行。

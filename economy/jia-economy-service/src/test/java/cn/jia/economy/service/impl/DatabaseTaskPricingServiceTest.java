@@ -149,7 +149,7 @@ class DatabaseTaskPricingServiceTest {
         for(String sha:java.util.List.of(roster,dataset,reference,policy,members.getLast().observationSha256())){
             var bytes=objects.get(sha);objects.put(sha,bytes+" ");assertThrows(IllegalArgumentException.class,()->study.evaluate(owner,group,pins,objects::get));objects.put(sha,bytes);}
     }
-    @Test void groupPairedRosterReplaysOnlyAuthorizedBenchmarkInputsBeforeOpeningTruth(){
+    @Test void groupPairedRosterReplaysOnlyAuthorizedBenchmarkInputsBeforeOpeningTruth(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
         var json=new ObjectMapper();var study=new FrozenCalibrationStudy(json,null);
         var store=new java.util.HashMap<String,String>();java.util.function.Function<Object,String> keep=v->{var a=study.freeze(v);store.put(a.sha256(),a.json());return a.sha256();};
         var f=new TaskEstimateFeatures(TaskEstimateFeatures.VERSION,"template","r","i","text",new TaskEstimateFeatures.Identity("test","fixture",1024),java.util.Collections.nCopies(1024,1f),java.util.List.of(),1);
@@ -186,6 +186,13 @@ class DatabaseTaskPricingServiceTest {
         assertEquals(1,miss.eligible());assertEquals(1,miss.meanCovered());assertEquals(0,miss.measured());assertNull(miss.meanErrors().wape());
         assertThrows(IllegalArgumentException.class,()->study.compareGroups(scope,"operator",pin,artifact.sha256(),inventory.apply(java.util.List.of()),store::get));
         assertThrows(IllegalArgumentException.class,()->study.compareGroups(scope,"operator",pin,artifact.sha256(),inventory.apply(java.util.List.of(observed,observed)),store::get));
+        java.nio.file.Files.setPosixFilePermissions(dir,java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        for(var e:store.entrySet())if(!e.getKey().equals(artifact.sha256()))java.nio.file.Files.writeString(dir.resolve(e.getKey()),e.getValue());
+        String saved=GroupBudgetStudyCommand.run("forecast",dir.toString(),scope.tenantId(),scope.clientId(),"operator",pin);assertEquals(artifact.sha256(),saved);
+        assertEquals(saved,GroupBudgetStudyCommand.run("forecast",dir.toString(),scope.tenantId(),scope.clientId(),"operator",pin));
+        var report=GroupBudgetStudyCommand.run("compare",dir.toString(),scope.tenantId(),scope.clientId(),"operator",pin,saved,after);
+        assertEquals(study.freeze(comparison).json(),java.nio.file.Files.readString(dir.resolve(report)));
+        java.nio.file.Files.writeString(dir.resolve(saved),"corrupt");assertThrows(java.io.IOException.class,()->GroupBudgetStudyCommand.run("forecast",dir.toString(),scope.tenantId(),scope.clientId(),"operator",pin));
         assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"another",pin,store::get));store.put(held,store.get(train));assertThrows(IllegalArgumentException.class,()->study.groupForecasts(scope,"operator",pin,store::get));
     }
     @Test void frozenMixedAndBenchmarkOnlyStudiesRejectReplacementApprovalsAndForeignOwners(){
