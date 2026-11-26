@@ -23,6 +23,36 @@ public final class GroupMeanPricing {
         public Group { routes = List.copyOf(routes); }
     }
 
+    public enum Dimension { INPUT_FILE_COUNT, TOTAL_INPUT_BYTES, REQUESTED_DELIVERABLES }
+    public record Range(long lo,long hi) {
+        public Range { if(lo<0 || hi<=lo)throw new IllegalArgumentException("Invalid cost range"); }
+        boolean contains(Long n) {return n!=null && n>=lo && n<hi;}
+        boolean overlaps(Range other) {return lo<other.hi && other.lo<hi;}
+    }
+    public record Bucket(String id,java.util.Map<Dimension,Range> ranges) {
+        public Bucket { if(id.isBlank())throw new IllegalArgumentException("Missing bucket identity"); ranges=java.util.Map.copyOf(ranges); }
+    }
+    /** Loaded once per validated policy version. Unknown measurements are never mapped to zero. */
+    public record Buckets(String operation,List<Bucket> buckets) {
+        public Buckets {
+            if(operation.isBlank() || buckets.isEmpty())throw new IllegalArgumentException("Missing operation policy");
+            buckets=List.copyOf(buckets); var ids=new java.util.HashSet<String>(); var dims=buckets.get(0).ranges().keySet();
+            for(int i=0;i<buckets.size();i++) {
+                var b=buckets.get(i);
+                if(!ids.add(b.id()) || !dims.equals(b.ranges().keySet()))throw new IllegalArgumentException("Inconsistent bucket policy");
+                for(int j=0;j<i;j++) {
+                    var other=buckets.get(j);
+                    if(dims.stream().allMatch(d -> other.ranges().get(d).overlaps(b.ranges().get(d))))throw new IllegalArgumentException("Overlapping cost buckets");
+                }
+            }
+        }
+        public java.util.Optional<String> match(String knownOperation,java.util.Map<Dimension,Long> observations) {
+            if(!operation.equals(knownOperation))return java.util.Optional.empty();
+            return buckets.stream().filter(b -> b.ranges().entrySet().stream().allMatch(e -> e.getValue().contains(observations.get(e.getKey()))))
+                .map(Bucket::id).findFirst();
+        }
+    }
+
     public static long amountWen(BigDecimal totalYuan, int completeTasks) {
         return CnyAmounts.quoteWen(totalYuan, BigDecimal.valueOf(completeTasks));
     }

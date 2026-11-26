@@ -96,6 +96,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/economy/config/EconomyMySqlTestFixture.java'
         include 'cn/jia/economy/config/TaskPricingTestFixture.java'
         include 'cn/jia/economy/service/impl/DatabaseTaskPricingServiceTest.java'
+        include 'cn/jia/economy/service/impl/GroupBudgetQuotesServiceTest.java'
         include 'cn/jia/economy/service/impl/DatabaseTaskPricingMySqlTest.java'
         include 'cn/jia/economy/service/impl/TaskBillingServiceMySqlTest.java'
         include 'cn/jia/economy/service/impl/EconomyWalletHttpMySqlTest.java'

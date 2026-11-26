@@ -18,6 +18,17 @@ class GroupMeanPricingTest {
         assertThrows(IllegalArgumentException.class, () -> key("1",image,new GroupMeanPricing.Route(image.kind(),image.component(),"other","m","t","b")));
         assertThrows(IllegalArgumentException.class, () -> key("1"));
     }
+    @Test void matchRequiresAllPolicyDimensionsAndNeverGuessesOperation() {
+        var files=GroupMeanPricing.Dimension.INPUT_FILE_COUNT;var bytes=GroupMeanPricing.Dimension.TOTAL_INPUT_BYTES;
+        var b=new GroupMeanPricing.Bucket("small",java.util.Map.of(files,new GroupMeanPricing.Range(1,3),bytes,new GroupMeanPricing.Range(0,1048576)));
+        var buckets=new GroupMeanPricing.Buckets("edit",List.of(b));
+        var inside=java.util.Map.of(files,1L,bytes,1048575L);
+        assertEquals("small",buckets.match("edit",inside).orElseThrow());
+        assertTrue(buckets.match(null,inside).isEmpty());assertTrue(buckets.match("generate",inside).isEmpty());
+        assertTrue(buckets.match("edit",java.util.Map.of(files,1L)).isEmpty());
+        assertTrue(buckets.match("edit",java.util.Map.of(files,1L,bytes,1048576L)).isEmpty());
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.Buckets("edit",List.of(b,new GroupMeanPricing.Bucket("duplicate",b.ranges()))));
+    }
     @Test void roundsOnceInWenAndRejectsInvalidTotals() {
         assertEquals(30,GroupMeanPricing.amountWen(new BigDecimal("0.590"),2));
         assertEquals(2,GroupMeanPricing.amountWen(new BigDecimal("0.020000000001"),2));
