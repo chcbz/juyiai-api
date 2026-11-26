@@ -29,6 +29,7 @@ final class NativeTaskProbeChannel {
                 "agentId",b.target().agent(),"runtimeInstallationId",fence.runtimeInstallationId(),"hostId",fence.hostId(),
                 "runtimeInstanceId",fence.runtimeInstanceId(),"sessionGeneration",Long.toString(fence.sessionGeneration()));
             var data=new HashMap<>(identity);data.put("intentSha256",frozen.sha256());data.put("preparationKind",frozen.intent().schema());
+            if(frozen.intent().instruction()!=null)data.put("instructionSkill",frozen.intent().instruction());
             data.put("outputs",frozen.intent().output().comparisonOutputs());
             var frame=new TextMessage(mapper.writeValueAsString(ProtocolMessage.event(request,"runtime.task.configuration.probe",message,data)));
             if(frame.getPayloadLength()>16384){result.complete(null);return result;}

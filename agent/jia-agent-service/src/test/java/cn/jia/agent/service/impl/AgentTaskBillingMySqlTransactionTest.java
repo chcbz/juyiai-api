@@ -2812,6 +2812,47 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         assertEquals(0,count("economy_transaction"));
     }
+    @Test void installedInstructionChoicePinsPackageAndOutputWithoutGrantOrTextMeasurement() throws Exception {
+        var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
+        ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
+        attachQuoteFile(0);
+        String agent="agt_00000000000000000000000000000001";
+        jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"quote-fixture",agent,TENANT,CLIENT);
+        long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,agent);
+        jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
+        locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
+        new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-personal-workspace-v1_11-executions.sql")),new FileSystemResource(DDL.resolve("agent-task-native-preparation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-observation-expiry-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-initial-admission-v1.sql")),new FileSystemResource(DDL.resolve("agent-task-native-selection-receipt-v1.sql"))).execute(jdbc.getDataSource());
+        var service=new NativeTaskPreparationService(jdbc,roots,authority.req(),assignment,authority.policies(),new ObjectMapper());
+        var req=authority.req().readCurrent(SCOPE,TASK);var target=authority.policies().quoteTargets(SCOPE,TASK,List.of(agent),false).getFirst();
+        var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
+        var bindingKey=new NativeTaskPreparation.Binding(SCOPE,TASK,req.taskVersion(),req.requirementRevision(),req.sha256(),input,target);
+        var installations=mock(InstalledSkillDescriptorLookup.class);
+        var runtime=new SkillCapabilityLookup.Scope(TENANT,CLIENT,target.provider(),agent);
+        var descriptor=new InstalledSkillDescriptorLookup.Descriptor("drawing","2.0","install-draw","a".repeat(64),null,null,"device","host",null);
+        when(installations.readCurrent(runtime)).thenReturn(new InstalledSkillDescriptorLookup.Snapshot(List.of(descriptor)));
+        when(installations.withPreparedRead(eq(runtime),any())).thenAnswer(i->((java.util.function.Supplier<?>)i.getArgument(1)).get());
+        service.setInstallations(installations);service.setSelectionEvents(mock(org.springframework.context.ApplicationEventPublisher.class));
+        var version=service.view(SCOPE,TASK,agent).selectionVersion();
+        var chosen=new TaskInitialActionSelection.SkillChoice("install-draw","image/png");
+        var unknown=new TaskInitialActionSelection.SkillChoice("unknown","image/png");
+        assertThrows(TaskInitialActionSelection.Missing.class,()->service.chooseSkill(SCOPE,TASK,agent,version,unknown,PAYER,"missing"));
+        var view=service.chooseSkill(SCOPE,TASK,agent,version,chosen,PAYER,"pick");assertEquals("INSTALLED_SKILL",view.choice());
+        assertEquals(view,service.chooseSkill(SCOPE,TASK,agent,version,chosen,PAYER,"pick"));
+        assertThrows(TaskInitialActionSelection.KeyConflict.class,()->service.chooseSkill(SCOPE,TASK,agent,version,unknown,PAYER,"pick"));
+        var f=service.find(bindingKey);var intent=f.intent();assertEquals(NativeTaskPreparation.INSTRUCTION,intent.schema());
+        var pin=intent.instruction();assertEquals(descriptor.packageSha256(),pin.packageSha256());
+        var outputs=intent.output().commandOutputs();assertEquals(List.of("image/png"),outputs.get("mimeTypes"));
+        var cmp=service.reserveComparisons(SCOPE,TASK,req.taskVersion(),List.of(agent));
+        assertFalse(service.recordMeasurement(cmp,agent,new NativeTaskConfigurationProbe.Measurement(f.sha256(),null,"NATIVE_DISPATCH_GROUP_V1","a".repeat(64),"b".repeat(64),"c".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1",null)));
+        var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,target.provider(),agent,binding,null);
+        var other=new NativeTaskPreparation.Instruction("install-draw",pin.key(),pin.version(),"b".repeat(64),pin.policy());
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(other.selection()),outputs);return null;}));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(pin.selection()),Map.of());return null;}));
+        assertNull(jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
+        locked(()->{service.consumeFirst(SCOPE,TASK,granted,f.sha256(),"first",pin.policy(),List.of(pin.selection()),outputs);return null;});
+        assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
+        assertEquals(0,count("agent_task_execution_grant"));assertEquals(0,count("economy_transaction"));
+    }
     @Test void explicitNativeTaskIntentFreezesOnlyExactOpenInputsAndCandidateWithoutDispatch() throws Exception {
         var workspace=quoteWorkspace();var authority=quoteAndRecommendationAuthority();
         ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
@@ -2906,13 +2947,13 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(1,count("economy_transaction"));assertEquals(75,wallet(independent));
         var admit=new QuotedInitialActionAdmission(billing,service);var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,OWNER,agent,binding,null);
         assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent)));assertEquals(output,locked(()->admit.pending(SCOPE,TASK,agent))); // projection never consumes
-        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",false,output.commandOutputs());return null;}));
-        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,Map.of());return null;}));
-        assertThrows(InjectedFailure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());throw new InjectedFailure();}));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY,List.of(Map.of()),output.commandOutputs());return null;}));
+        assertThrows(PersonalWorkspaceExecutionService.Failure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,List.of(),Map.of());return null;}));
+        assertThrows(InjectedFailure.class,()->locked(()->{admit.admit(SCOPE,TASK,granted,"first",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,List.of(),output.commandOutputs());throw new InjectedFailure();}));
         assertNull(jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
-        locked(()->{admit.admit(SCOPE,TASK,granted,"first",true,output.commandOutputs());return null;});
+        locked(()->{admit.admit(SCOPE,TASK,granted,"first",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY,List.of(),output.commandOutputs());return null;});
         assertNull(locked(()->admit.pending(SCOPE,TASK,agent)));
-        locked(()->{admit.admit(SCOPE,TASK,granted,"followup",false,Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
+        locked(()->{admit.admit(SCOPE,TASK,granted,"followup",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY,List.of(Map.of()),Map.of());return null;});assertEquals("first",jdbc.queryForObject("SELECT initial_execution_id FROM agent_task_native_preparation",String.class));
         verifyPreparedQuoteHttp(authority,workspace,source,List.of(agent,ids.get(1)),()->guard.retire(TENANT,CLIENT,agent,OWNER,nextFence));
         assertFalse(locked(()->source.current(inputs,targets,ready)));assertEquals(missing,source.observe(inputs,targets));assertTrue(locked(()->source.current(inputs,targets,missing)));
 

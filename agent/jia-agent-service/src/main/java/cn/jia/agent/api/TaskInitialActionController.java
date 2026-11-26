@@ -23,7 +23,14 @@ public final class TaskInitialActionController {
     private AgentTaskExecutionGrantService.Scope scope(HostingRentHttp.Actor a){return new AgentTaskExecutionGrantService.Scope(a.tenantId(),a.clientId(),a.ownerJiacn());}
     @GetMapping public ResponseEntity<?> read(@PathVariable String taskId,@PathVariable String agentId,Authentication auth){return ok(choices.view(scope(actor(auth)),taskId,agentId));}
     @PutMapping public ResponseEntity<?> select(@PathVariable String taskId,@PathVariable String agentId,@RequestBody JsonRequest<JsonNode> req,@RequestHeader(value="Idempotency-Key",required=false) java.util.List<String> keys,Authentication auth){
-        var a=actor(auth);var owner=scope(a);if(keys==null||keys.size()!=1||keys.getFirst().isBlank())return error(400,"BAD_REQUEST");var d=req==null?null:req.data();if(d==null||!d.isObject()||d.size()!=2||!d.path("selectionVersion").isString()||!d.path("selectionVersion").asText().matches("[a-f0-9]{64}")||!d.path("choice").isString())return error(400,"BAD_REQUEST");
+        var a=actor(auth);var owner=scope(a);if(keys==null||keys.size()!=1||keys.getFirst().isBlank())return error(400,"BAD_REQUEST");var d=req==null?null:req.data();if(d==null||!d.isObject()||!d.path("selectionVersion").isString()||!d.path("selectionVersion").asText().matches("[a-f0-9]{64}")||!d.path("choice").isString())return error(400,"BAD_REQUEST");
+        if("INSTALLED_SKILL".equals(d.get("choice").asText())){
+            var id=d.path("installationId");var mime=d.path("mimeType");
+            if(d.size()!=4||!id.isString()||id.asText().isBlank()||id.asText().length()>100||!mime.isString()||mime.asText().length()>127
+                    ||!mime.asText().matches("[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*"))return error(400,"BAD_REQUEST");
+            return ok(choices.chooseSkill(owner,taskId,agentId,d.get("selectionVersion").asText(),new TaskInitialActionSelection.SkillChoice(id.asText(),mime.asText()),a.actorId(),keys.getFirst()));
+        }
+        if(d.size()!=2)return error(400,"BAD_REQUEST");
         final TaskInitialActionSelection.Choice choice;try{choice=TaskInitialActionSelection.Choice.valueOf(d.path("choice").asText());}catch(IllegalArgumentException unknown){return error(400,"BAD_REQUEST");}
         return ok(choices.choose(owner,taskId,agentId,d.path("selectionVersion").asText(),choice,a.actorId(),keys.getFirst()));}
     private ResponseEntity<?> ok(TaskInitialActionSelection.View v){return ResponseEntity.ok().header("Cache-Control","private, no-store").body(JsonResult.success(v));}

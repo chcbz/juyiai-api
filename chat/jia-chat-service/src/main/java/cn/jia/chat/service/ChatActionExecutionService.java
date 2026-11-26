@@ -160,7 +160,7 @@ public class ChatActionExecutionService implements ChatActionDispatchService.Exe
         snapshot.put("taskGrant",Map.of("id",baseline.grantId(),"version",Long.toString(baseline.grantVersion()),"assignmentRevision",Long.toString(baseline.assignmentRevision())));
         snapshot.put("instruction",action.validated().interactionOutcome().action().instruction());snapshot.put("parameters",action.validated().interactionOutcome().action().parameters());
         snapshot.put("inputs",List.copyOf(inputs));snapshot.put("sourceSnapshotDigest",ChatSkillSnapshotJson.sha(inputs));
-        var fixed=capability.skill()==null?initialOutputs.pending(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),parent.taskId(),baseline.targetAgentId()):null;
+        var fixed=initialOutputs.pending(new AgentTaskExecutionGrantService.Scope(scope.tenantId(),scope.clientId(),scope.ownerJiacn()),parent.taskId(),baseline.targetAgentId());
         snapshot.put("outputs",nativeOutputs(action.validated().interactionOutcome().action().parameters(),capability.outputMimeTypes(),fixed));
         if(capability.skill()==null) {
             snapshot.put("toolPolicyRef",SkillExecutionService.NATIVE_LOCAL_FILES_POLICY);snapshot.put("skills",List.of());

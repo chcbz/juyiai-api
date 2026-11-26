@@ -16,8 +16,8 @@ public class QuotedInitialActionAdmission implements cn.jia.agent.service.TaskIn
     public cn.jia.agent.service.NativeTaskPreparation.Output pending(Scope scope,String task,String agent){
         String sha=commitment(scope,task,agent);return sha==null?null:decisions.pendingOutput(scope,task,agent,sha);
     }
-    public void admit(Scope scope,String task,Target target,String execution,boolean localOnly,Map<String,Object> outputs){
+    public void admit(Scope scope,String task,Target target,String execution,String policy,java.util.List<Map<String,Object>> selections,Map<String,Object> outputs){
         String sha=commitment(scope,task,target.agentId());
-        if(sha!=null)decisions.consumeFirst(scope,task,target,sha,execution,localOnly,outputs);
+        if(sha!=null)decisions.consumeFirst(scope,task,target,sha,execution,policy,selections,outputs);
     }
 }

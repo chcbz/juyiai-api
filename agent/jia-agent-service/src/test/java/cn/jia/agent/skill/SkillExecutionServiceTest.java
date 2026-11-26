@@ -194,7 +194,7 @@ public class SkillExecutionServiceTest {
         var result=service.create(owner,new SkillExecutionService.Create("action",new SkillExecutionService.TaskScope("42",1,"task","grant",1,7),"agent",snapshot()));
         var ordering=inOrder(pwe,attachments,hints);
         ordering.verify(pwe).insert(any());ordering.verify(attachments).insertReady(any());
-        verify(initial).admit(eq(new AgentTaskExecutionGrantService.Scope("0","client","owner")),eq("task"),any(),eq(result.executionId()),eq(false),eq(outputs));
+        verify(initial).admit(eq(new AgentTaskExecutionGrantService.Scope("0","client","owner")),eq("task"),any(),eq(result.executionId()),eq((String)snapshot().get("toolPolicyRef")),argThat(v->v.equals(snapshot().get("skills"))),eq(outputs));
         ordering.verify(pwe).registerTaskMember(same(execution),isNull());
         ordering.verify(hints).afterCommit(new NativeConversationWorkAvailable("0","client","agent"));
         assertTrue(result.executionId().matches("pwe_[a-f0-9]{60}"));assertTrue(result.runId().matches("pwe_run_[a-f0-9]{64}"));assertEquals("READY",skill.getPhase());assertNull(execution.getControlledConsentId());assertEquals(6,execution.getExecutionProtocolVersion());assertNull(execution.getOutputContentMimeType());

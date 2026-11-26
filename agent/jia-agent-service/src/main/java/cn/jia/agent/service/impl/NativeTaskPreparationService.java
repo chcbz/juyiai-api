@@ -80,7 +80,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     private List<Object> observationKey(Frozen decision,String ticket){var b=decision.intent().binding();var scope=b.scope();return List.of(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),b.task(),key(b),decision.sha256(),ticket);}
     @Override public boolean recordMeasurement(Comparison comparison,String agent,NativeTaskConfigurationProbe.Measurement measurement){
         var decision=comparison.decisions().get(agent);
-        if(decision==null||measurement==null||!decision.sha256().equals(measurement.intentSha256()))return false;
+        if(decision==null||measurement==null||decision.intent().instruction()!=null && "NATIVE_LOCAL_ARTIFACT_TEXT_V1".equals(measurement.capturePolicyVersion())||!decision.sha256().equals(measurement.intentSha256()))return false;
         String body=json.writeValueAsString(measurement);var args=new ArrayList<Object>(List.of(hash(body),body));args.addAll(observationKey(decision,comparison.ticket()));
         return db.update("UPDATE "+TABLE+" SET measurement_sha=?,measurement_json=?"+EXACT+" AND probe_valid_until>UTC_TIMESTAMP(6) AND measurement_sha IS NULL",args.toArray())==1;
     }
@@ -112,12 +112,12 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         }return new ReadBatch(result,due);
     }
     /** The caller owns the task root, authorized grant and execution transaction. No current quote/probe read here. */
-    void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,boolean localOnly,Map<String,Object> outputs){
+    void consumeFirst(AgentTaskExecutionGrantService.Scope scope,String task,TaskAssigneeAuthorityService.Target target,String sha,String execution,String policy,List<Map<String,Object>> selections,Map<String,Object> outputs){
         if(!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing native admission transaction");
         var row=committed(scope,task,sha,true);if(row.execution()!=null&&!row.execution().equals(execution))return;
         var intent=row.intent();var b=intent.binding();var t=b.target();
         if(!scope.equals(b.scope())||!task.equals(b.task())||!t.agent().equals(target.agentId())||!t.provider().equals(target.ownerJiacn())||t.binding()!=target.bindingId()
-            ||!localOnly||!intent.output().commandOutputs().equals(outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
+            ||!intent.matches(policy,selections,outputs))throw new PersonalWorkspaceExecutionService.Failure(PersonalWorkspaceExecutionService.Reason.TASK_CONFLICT);
         if(row.execution()==null&&db.update("UPDATE "+TABLE+" SET initial_execution_id=?"+COMMITTED+" AND initial_execution_id IS NULL",execution,scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,sha)!=1)throw new IllegalStateException("Initial admission changed");
     }
     private static final String COMMITTED=" WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND intent_sha=?";
@@ -135,29 +135,46 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
     }
     private org.springframework.context.ApplicationEventPublisher events;
     @org.springframework.beans.factory.annotation.Autowired public void setSelectionEvents(org.springframework.context.ApplicationEventPublisher value){events=Objects.requireNonNull(value);}
+    private InstalledSkillDescriptorLookup installations;
+    @org.springframework.beans.factory.annotation.Autowired public void setInstallations(InstalledSkillDescriptorLookup lookup){installations=Objects.requireNonNull(lookup);}
+    private Instruction installed(Binding b,String installationId){
+        var t=b.target();var runtime=new SkillCapabilityLookup.Scope(b.scope().tenantId(),b.scope().clientId(),t.provider(),t.agent());
+        var found=installations.readCurrent(runtime).skills().stream().filter(d->installationId.equals(d.installationId())
+            && d.verifiedNative() && d.manifestSha256()==null && !d.domainApi()).toList();
+        if(found.size()!=1)throw new Missing();var d=found.getFirst();
+        return new Instruction(d.installationId(),d.skillKey(),d.skillVersion(),d.packageSha256(),d.instructionPolicy());
+    }
+    public View chooseSkill(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,SkillChoice choice,String principal,String key){
+        var targets=candidates.quoteTargets(scope,task,List.of(agent),false);
+        if(targets.size()!=1)throw new Missing();var t=targets.getFirst();
+        var runtime=new SkillCapabilityLookup.Scope(scope.tenantId(),scope.clientId(),t.provider(),t.agent());
+        return installations.withPreparedRead(runtime,()->selection(scope,task,agent,Objects.requireNonNull(version),null,
+                Objects.requireNonNull(principal),Objects.requireNonNull(key),Objects.requireNonNull(choice)));
+    }
     private static Output output(Choice c){return switch(c){case LOCAL_ANSWER->new Output(Mode.ANSWER,List.of());case LOCAL_TEXT_FILE->new Output(Mode.ARTIFACTS,List.of("text/plain"));};}
-    public View view(AgentTaskExecutionGrantService.Scope scope,String task,String agent){return selection(scope,task,agent,null,null,null,null);}
-    public View choose(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key){return selection(scope,task,agent,Objects.requireNonNull(version),Objects.requireNonNull(choice),Objects.requireNonNull(principal),Objects.requireNonNull(key));}
-    private View selection(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key){
+    public View view(AgentTaskExecutionGrantService.Scope scope,String task,String agent){return selection(scope,task,agent,null,null,null,null,null);}
+    public View choose(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key){return selection(scope,task,agent,Objects.requireNonNull(version),Objects.requireNonNull(choice),Objects.requireNonNull(principal),Objects.requireNonNull(key),null);}
+    private View selection(AgentTaskExecutionGrantService.Scope scope,String task,String agent,String version,Choice choice,String principal,String key,SkillChoice skill){
+        boolean writing=choice!=null||skill!=null;
         return roots.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),task,root->{
-            var targets=candidates.quoteTargets(scope,task,List.of(agent),choice!=null);if(targets.size()!=1||!agent.equals(targets.getFirst().agent()))throw new Missing();
+            var targets=candidates.quoteTargets(scope,task,List.of(agent),writing);if(targets.size()!=1||!agent.equals(targets.getFirst().agent()))throw new Missing();
             String op=null,input=null;
-            if(choice!=null){
+            if(writing){
                 op=hash(json.writeValueAsString(List.of("initial-action-selection-v1",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),principal,task,agent,key)));
-                input=hash(json.writeValueAsString(List.of(version,choice.name())));
+                input=hash(json.writeValueAsString(skill==null?List.of(version,choice.name()):List.of(version,INSTRUCTION,skill.installationId(),skill.mimeType())));
                 var saved=db.query("SELECT input_sha,task_version,selection_version,selected_choice FROM agent_task_native_selection_receipt WHERE operation_sha=?",(rs,n)->new String[]{rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4)},op);
                 if(!saved.isEmpty()){var r=saved.getFirst();if(!input.equals(r[0]))throw new KeyConflict();return new View(r[1],agent,r[2],r[3]);}
                 // A first selection schedules a post-commit device probe; GET and committed receipts do not.
             }
             if(!"open".equals(root.getRewardStatus()))throw new Changed();var req=requirements.readCurrentWithinLockedTask(scope,task,root);
             var b=new Binding(scope,task,root.getTaskVersion(),req.requirementRevision(),req.sha256(),grants.snapshotTaskInputsWithinLockedTask(scope,task).digest(),targets.getFirst());
-            String stamp=key(b);if(choice!=null&&!stamp.equals(version))throw new Changed();var prior=find(b);
-            if(choice!=null){var decision=new Intent("TASK_NATIVE_LOCAL_FILES_V1",b,output(choice));
+            String stamp=key(b);if(writing&&!stamp.equals(version))throw new Changed();var prior=find(b);
+            if(writing){var decision=skill==null?new Intent(LOCAL,b,output(choice)):new Intent(INSTRUCTION,b,new Output(Mode.ARTIFACTS,List.of(skill.mimeType())),installed(b,skill.installationId()));
                 if(prior!=null&&!prior.intent().equals(decision))throw new Changed();
                 if(prior==null){prior=insert(decision);events.publishEvent(new Selected(b));}
             }
-            String selected=null;if(prior!=null){selected="OTHER_FIXED";for(var c:Choice.values())if(output(c).equals(prior.intent().output()))selected=c.name();}
-            if(choice!=null)db.update("INSERT INTO agent_task_native_selection_receipt(operation_sha,input_sha,task_version,selection_version,selected_choice) VALUES(?,?,?,?,?)",op,input,b.taskVersion(),stamp,selected);
+            String selected=null;if(prior!=null){selected="OTHER_FIXED";if(prior.intent().instruction()!=null)selected="INSTALLED_SKILL";else for(var c:Choice.values())if(output(c).equals(prior.intent().output()))selected=c.name();}
+            if(writing)db.update("INSERT INTO agent_task_native_selection_receipt(operation_sha,input_sha,task_version,selection_version,selected_choice) VALUES(?,?,?,?,?)",op,input,b.taskVersion(),stamp,selected);
             return new View(Long.toString(b.taskVersion()),agent,stamp,selected);
         });
     }
@@ -166,6 +183,7 @@ public class NativeTaskPreparationService implements NativeTaskPreparation,TaskI
         var req=requirements.readCurrentWithinLockedTask(scope,b.task(),root);
         if(req.requirementRevision()!=b.requirementRevision()||!req.sha256().equals(b.requirementSha())||!grants.snapshotTaskInputsWithinLockedTask(scope,b.task()).digest().equals(b.inputSha())
            ||!List.of(b.target()).equals(candidates.quoteTargets(scope,b.task(),List.of(b.target().agent()),true)))throw new IllegalStateException("Stale dispatch inputs or candidate");
+        if(intent.instruction()!=null&&!intent.instruction().equals(installed(b,intent.instruction().installationId())))throw new Changed();
         var prior=find(b);if(prior!=null){if(!intent.equals(prior.intent()))throw new IllegalStateException("Different initial execution already fixed");return prior;}
         return insert(intent);
     });}
