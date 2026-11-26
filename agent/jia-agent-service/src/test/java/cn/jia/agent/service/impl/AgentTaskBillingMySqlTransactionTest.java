@@ -305,7 +305,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var beans=new org.springframework.beans.factory.support.DefaultListableBeanFactory();beans.registerSingleton("sched",schedules);
         var receipts=proxy(new cn.jia.economy.service.impl.TaskMembershipReceiptStore(sql.getMapper(cn.jia.economy.mapper.TaskMembershipReceiptMapper.class)),cn.jia.economy.usage.TaskMembershipReceipt.class);
         membershipDelivery=new cn.jia.agent.service.usage.TaskMembershipDelivery(executionRows,receipts,beans.getBeanProvider(cn.jia.task.scheduling.ScheduleService.class),fixed);
-        recovery=new cn.jia.agent.service.usage.ConfirmedSampleRecovery(sampleProjection,new cn.jia.agent.service.usage.NativeSampleResponseDecoder(),fixed,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
+        recovery=new cn.jia.agent.service.usage.ConfirmedSampleRecovery(sampleProjection,new cn.jia.agent.service.usage.NativeSampleResponseDecoder(org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class)),fixed,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         membershipSweep=new cn.jia.agent.service.usage.TaskMembershipSweep(executionRows,fixed,manager,schedules,mock(cn.jia.task.scheduling.CronScheduleService.class),"0 * * * * *");
         new ResourceDatabasePopulator(
                 new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql"),

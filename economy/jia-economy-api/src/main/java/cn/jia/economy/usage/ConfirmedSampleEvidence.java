@@ -10,8 +10,9 @@ public interface ConfirmedSampleEvidence {
     record Assessment(String sampleId,long evidenceRevision,String terminalFactId,long members,Verdict verdict) {}
     /** Already-associated head only; raw wire JSON is private to the trusted source adapter and not returned. */
     record Response(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
-                    String evidenceSha,String evidenceJson) { @Override public String toString(){return "Response[private]";} }
-    interface Decoder { boolean coversAllOperations(String groupVersion,String capturePolicy); cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decode(Response response); }
+                    String evidenceSha,String evidenceJson,String execution,String run,String kind,boolean expectsChild) { @Override public String toString(){return "Response[private]";} }
+    interface Decoder { boolean coversAllOperations(String groupVersion,String capturePolicy); cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decode(Response response);
+        default cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decodeChild(Task task,Response close){return null;} }
     record Operation(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
                      cn.jia.economy.pricing.MeasuredTaskRepricing.Fact fact) {}
     record Measured(Assessment assessment,java.util.List<Operation> operations) {

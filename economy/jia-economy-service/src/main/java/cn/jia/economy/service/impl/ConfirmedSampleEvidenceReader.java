@@ -95,17 +95,23 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
     }
     private Measured extract(Task task,ConfirmedSampleMapper.Header h,Assessment a,Decoder decoder){
         if(a.verdict()!=MATCHED)return new Measured(a,java.util.List.of());
-        var lines=new java.util.ArrayList<Operation>();long revision=0,seen=0;String after="";
+        var lines=new java.util.ArrayList<Operation>();long revision=0,seen=0;String after="";boolean parent=false,child=false,expects=false;
         while(true){var page=db.responses(task,h.fact(),h.agent(),revision,after);
-            for(var r:page){if(r.memberRevision()!=revision)seen++;revision=r.memberRevision();
+            for(var r:page){if(r.memberRevision()!=revision){
+                    if(seen>0 && (!parent || child!=expects))return incomplete(a);
+                    seen++;revision=r.memberRevision();parent=false;child=false;expects=r.expectsChild();
+                }
                 if(r.recordId()==null)return incomplete(a);
-                after=r.recordId();var fact=decoder.decode(r);if(fact==null)return incomplete(a);
+                after=r.recordId();boolean isChild="CAPTURE_FINAL".equals(r.kind());
+                if(r.expectsChild()!=expects || (isChild ? !expects||child : !"RESPONSE".equals(r.kind())))return incomplete(a);
+                var fact=isChild?decoder.decodeChild(task,r):decoder.decode(r);if(fact==null)return incomplete(a);
+                if(isChild)child=true;else parent=true;
                 if(!r.evidenceSha().equals(fact.evidenceSha()))throw new IllegalStateException("Source measurement evidence mismatch");
                 lines.add(new Operation(revision,r.captureId(),r.captureRevision(),r.recordId(),r.sourceRevision(),fact));
             }
             if(page.size()<TaskMembership.PAGE)break;
         }
-        return seen==a.members()&&!lines.isEmpty()?new Measured(a,lines):incomplete(a);
+        return seen==a.members()&&parent&&child==expects&&!lines.isEmpty()?new Measured(a,lines):incomplete(a);
     }
     private static Measured incomplete(Assessment a){return new Measured(new Assessment(a.sampleId(),a.evidenceRevision(),a.terminalFactId(),a.members(),USAGE_INCOMPLETE),java.util.List.of());}
 }

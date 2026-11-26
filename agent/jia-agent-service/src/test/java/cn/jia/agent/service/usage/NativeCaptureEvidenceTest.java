@@ -26,6 +26,26 @@ class NativeCaptureEvidenceTest {
         img.put("url","secret");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys(o));img.remove("url");
         img.put("invocationId","other/run");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys(o));
     }
+    @Test void sealedImageSampleReadsOnlyTwoPinnedLedgerRevisionsAndNeverWritesACost(){
+        var costs=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class);var decoder=new NativeSampleResponseDecoder(costs);
+        var task=new cn.jia.economy.task.TaskBillingService.Task(new cn.jia.economy.service.EconomyScope("t","c"),"owner","task");
+        String id="11111111-1111-4111-8111-111111111111", cap=NativeCaptureEvidence.captureIdentity("exec","run"),rid=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"CAPTURE_FINAL",List.of()));
+        var binding=new cn.jia.economy.usage.UsageCostService.Binding(task.scope(),"owner","task","NATIVE_PROVIDER_CALL","exec:"+id);
+        var start=new HashMap<String,Object>(Map.of("schemaVersion",1,"invocationId",id,"protocol","openai-images-v1","operation","generate","channel","g","tier","s","requestedModel","im","priceVersion","v1","phase","STARTED"));start.put("evidence",null);
+        var evidence=Map.of("providerRequestId","request1","usage",Map.of("input_tokens_details",Map.of("text_tokens",3,"image_tokens",0),"input_tokens",3,"output_tokens",12,"total_tokens",15));
+        var end=new HashMap<>(start);end.put("evidence",evidence);end.put("phase","TERMINAL");
+        var invocation=new HashMap<String,Object>(Map.of("invocationId",id,"operation","generate","childRouteSha256","a".repeat(64),"startedSha256",NativeCaptureEvidence.digest(start),"terminalSha256",NativeCaptureEvidence.digest(end)));
+        var o=Map.of("closeState","DRAINED","reasonCodes",List.of(),"imageInvocation",invocation);var e=Map.of("executionId","exec","runId","run","kind","CAPTURE_FINAL","captureId",cap,"recordId",rid,"sourceRevision","1","observation",o);
+        java.util.function.Supplier<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> row=()->new cn.jia.economy.usage.ConfirmedSampleEvidence.Response(1,cap,1,rid,"1","final-hash",JSON.writeValueAsString(e),"exec","run","CAPTURE_FINAL",true);
+        var qty=ImageUsageNormalizer.normalize("g","im","s",JSON.valueToTree(evidence));assertNotNull(qty);
+        org.mockito.Mockito.when(costs.observation(binding,"started")).thenReturn(Optional.of(new cn.jia.economy.usage.UsageCostService.Observation(binding,"started",0,JSON.writeValueAsString(start),null,null,1)));
+        assertNull(decoder.decodeChild(task,row.get()));
+        org.mockito.Mockito.when(costs.observation(binding,"terminal")).thenReturn(Optional.of(new cn.jia.economy.usage.UsageCostService.Observation(binding,"terminal",1,JSON.writeValueAsString(end),qty,null,2)));
+        var fact=decoder.decodeChild(task,row.get());assertNotNull(fact);assertEquals("generate",fact.component());assertEquals("NATIVE_PROVIDER_CALL",fact.kind());assertEquals("exec:"+id,fact.operation().externalId());
+        assertEquals(new cn.jia.economy.pricing.MeasuredTaskRepricing.Tokens(qty.normalizationBasis(),qty.tokens()),fact.quantity());assertEquals(fact,decoder.decodeChild(task,row.get()));
+        invocation.put("operation","edit");assertNull(decoder.decodeChild(task,row.get()));invocation.put("operation","generate");invocation.put("terminalSha256","c".repeat(64));assertNull(decoder.decodeChild(task,row.get()));
+        org.mockito.Mockito.verify(costs,org.mockito.Mockito.never()).record(org.mockito.ArgumentMatchers.any());
+    }
     @Test void requestOutcomeCanChangeButAttemptCannot(){
         var identity=List.of("source","0","1");var o=new HashMap<String,Object>();o.put("attemptId","a");o.put("resolution","PENDING");
         String first=NativeCaptureEvidence.bindingDigest("REQUEST",o,identity);o.put("resolution","RESPONSE");
@@ -41,9 +61,9 @@ class NativeCaptureEvidenceTest {
                 records.put(d.get("recordId").asText(),d.toString());
             }
         }
-        var persisted=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var decode=new NativeSampleResponseDecoder();assertFalse(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","NATIVE_EXECUTION_UNVERIFIED_V1"));assertTrue(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","TEXT_MODEL_ONLY_V1"));
+        var persisted=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var decode=new NativeSampleResponseDecoder(org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class));assertFalse(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","NATIVE_EXECUTION_UNVERIFIED_V1"));assertTrue(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","TEXT_MODEL_ONLY_V1"));
         var q=(tools.jackson.databind.node.ObjectNode)persisted.path("observation").path("measuredQuantities");
-        java.util.function.Supplier<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> row=()->new cn.jia.economy.usage.ConfirmedSampleEvidence.Response(1, persisted.get("captureId").asText(),3,persisted.get("recordId").asText(),persisted.get("sourceRevision").asText(),"h",persisted.toString());
+        java.util.function.Supplier<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> row=()->new cn.jia.economy.usage.ConfirmedSampleEvidence.Response(1, persisted.get("captureId").asText(),3,persisted.get("recordId").asText(),persisted.get("sourceRevision").asText(),"h",persisted.toString(),null,null,"RESPONSE",false);
         assertNull(decode.decode(row.get()));q.put("normalizationBasis","RESPONSES_TEXT_TOKENS_V1");var decoded=decode.decode(row.get());assertEquals(id,decoded.operation().externalId());
         assertEquals(100L,((cn.jia.economy.pricing.MeasuredTaskRepricing.Tokens)decoded.quantity()).disjoint().get(cn.jia.economy.pricing.ModelTokenPrice.Category.INPUT));
         assertNull(NativeResponseOrigin.resolve(response,null,k->null).attemptId());
