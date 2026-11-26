@@ -2130,7 +2130,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         };
         var profile=new QuoteProfile();boolean diagnostic=Boolean.getBoolean("cyf.measuredBatchQuoteLoad");
         java.util.function.Supplier<cn.jia.agent.api.IndependentTaskQuoteController> quoteNode=()->cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,req,assignment,agents,
-                materials,encoder,source,diagnostic?profile.wrap(cn.jia.economy.task.TaskBudgetEstimator.class,estimator,java.util.Set.of("prepare","lockSelected")):estimator,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeMeasuredBatch")):billing);
+                materials,diagnostic?profile.wrap(TaskBillingService.class,billing,java.util.Set.of("storeOffersBatch")):billing);
         if(diagnostic)independentQuoteController=quoteNode.get(); // Preserve single-listener timing for the load diagnostic.
         startHttp();int money=count("economy_transaction"),batchCount=count("economy_task_quote_batch"),fixed=count("economy_task_quote");
         var hot=new java.util.ArrayList<Long>();String firstId=null,firstBatch=null;long cold=0,replay=0;
@@ -3044,15 +3044,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String second=ids.getLast();jdbc.update("INSERT INTO agent_persona_binding(jiacn,persona_code,agent_id,bound_at,status,tenant_id,client_id) VALUES(?,?,?,1,1,?,?)",OWNER,"second",second,TENANT,CLIENT);
         long binding=jdbc.queryForObject("SELECT id FROM agent_persona_binding WHERE agent_id=?",Long.class,second);
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'fixture',1,1)",second,CLIENT,OWNER,TENANT,binding);
-        var engine=mock(cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
-        var real=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
-        var race=new java.util.concurrent.atomic.AtomicBoolean();var estimator=new cn.jia.economy.task.TaskBudgetEstimator(){
-            public Outcome prepare(TaskBillingService.Task task,cn.jia.economy.pricing.TaskEstimateFeatures features,Terms terms){var result=real.prepare(task,features,terms);if(terms!=null&&race.compareAndSet(true,false))retire.run();return result;}
-            public void lockSelected(TaskBillingService.Task task,List<Available> offers){real.lockSelected(task,offers);}
-        };
         var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),mock(PersonalWorkspaceStorage.class),mock(PersonalWorkspaceWriteService.class)));
-        var encodes=new java.util.concurrent.atomic.AtomicInteger();var encoder=new TaskFeatureEncoder(){public Identity identity(){return new Identity("cfg","fixture",1024);}public Vector encode(String text){encodes.incrementAndGet();float[] v=new float[1024];v[0]=1;return new Vector(identity(),v);}};
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,encoder,source,estimator,billing);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,billing);
         startHttp();int initial=count("economy_task_quote_batch"),money=count("economy_transaction");String token=httpToken();var mapper=new ObjectMapper();
         var body=mapper.writeValueAsString(Map.of("protocolVersion",1,"requestId","prepared","data",Map.of("expectedTaskVersion","0","agentIds",ids)));
         try(var client=HttpClient.newHttpClient()){
@@ -3062,9 +3055,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             }}var post=new Post();var original=post.run("prepared-first",200,"E0");var rows=original.path("quotes");assertEquals(2,rows.size());
             for(int i=0;i<2;i++){var row=rows.get(i);assertEquals(ids.get(i),row.path("agentId").asText());assertFixedQuote(row);}
             assertNotEquals(rows.get(0).path("quoteId"),rows.get(1).path("quoteId"));
-            race.set(true);post.run("prepared-racing",409,"QUOTE_STALE");assertFalse(race.get());assertEquals(initial+1,count("economy_task_quote_batch"));
+            retire.run();assertEquals(initial+1,count("economy_task_quote_batch"));
             assertEquals(original,post.run("prepared-first",200,"E0"));var fresh=post.run("prepared-racing",200,"E0");assertFixedQuote(fresh.path("quotes").get(0));
-        }assertEquals(1,encodes.get());assertEquals(initial+2,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));verifyNoInteractions(engine);
+        }assertEquals(initial+2,count("economy_task_quote_batch"));assertEquals(money,count("economy_transaction"));
     }
     private void awaitPreparationRowWait(java.util.concurrent.Future<?> writer){
         long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
@@ -3166,20 +3159,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         jdbc.update("INSERT INTO agent_identity_registry(canonical_agent_id,canonical_type,lifecycle_status,client_id,owner_jiacn,tenant_id,binding_id,provisioned_at,activated_at,audit_reason,create_time,update_time) VALUES (?,'OPAQUE','ACTIVE',?,?,?,?,1,1,'quote-fixture',1,1)",agent,CLIENT,OWNER,TENANT,binding);
         locked(()->authority.req().captureOnCreate(SCOPE,TASK,"有附件的事项","核对资料"));
         var storage=mock(PersonalWorkspaceStorage.class);var writes=mock(PersonalWorkspaceWriteService.class);
-        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
-        var calls=new java.util.concurrent.atomic.AtomicInteger();var encoder=new TaskFeatureEncoder(){
-            public Identity identity(){return new Identity("cfg","fixture",1024);}
-            public Vector encode(String text){
-                assertTrue(text.contains("file-31"));assertFalse(text.contains("private:v"));assertFalse(text.contains("b".repeat(64)));
-                int n=calls.incrementAndGet();if(n==1)throw new Unavailable();
-                if(n==2)assertEquals(1,independent.update("UPDATE agent_personal_workspace_file SET display_name='修订后的名称',metadata_revision=2 WHERE file_id='file-0'"));
-                if(n==3)assertTrue(text.contains("修订后的名称"));
-                float[] vec=new float[1024];vec[0]=1;return new Vector(identity(),vec);
-            }
-        };
-        var engine=mock(cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
-        var estimates=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,encoder,null,estimates,billing);
+        var files=spy(new PersonalWorkspaceServiceImpl(workspace.files(),storage,writes));
+        var raced=new java.util.concurrent.atomic.AtomicBoolean();
+        doAnswer(inv->{var snapshot=inv.callRealMethod();if(raced.compareAndSet(false,true))assertEquals(1,independent.update("UPDATE agent_personal_workspace_file SET display_name='修订后的名称',metadata_revision=2 WHERE file_id='file-0'"));return snapshot;}).when(files).selectedVersionsBatch(any(),any());
+        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),files);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.controller(roots,batches,authority.req(),assignment,authority.policies(),materials,billing);
         startHttp();int fixed=count("economy_task_quote"),batchCount=count("economy_task_quote_batch"),money=count("economy_transaction");long balance=wallet(jdbc);
         var json=new ObjectMapper();String token=httpToken();try(var client=HttpClient.newHttpClient()){
             var window=QuoteWireWindow.open(agent);
@@ -3190,11 +3174,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 if(window!=null)window.received(request,body,sent,window.elapsed(),response);
                 assertEquals(status,response.statusCode());var env=json.readTree(response.body());assertEquals(code,env.path("code").asText());return env.path("data");
             }}var http=new Post();String key="same-intent";
-            http.post("not-visible","denied",404,"QUOTE_NOT_FOUND");assertEquals(0,calls.get());
-            http.post(agent,key,503,"QUOTE_FEATURE_UNAVAILABLE");assertEquals(batchCount,count("economy_task_quote_batch"));
+            http.post("not-visible","denied",404,"QUOTE_NOT_FOUND");assertFalse(raced.get());
             http.post(agent,key,409,"QUOTE_STALE");assertEquals(batchCount,count("economy_task_quote_batch"));
             var original=http.post(agent,key,200,"E0");var item=original.path("quotes").get(0);assertEquals(agent,item.path("agentId").asText());
-            assertFixedQuote(item);assertEquals(3,calls.get());
+            assertFixedQuote(item);assertTrue(raced.get());
             assertEquals(1,jdbc.update("UPDATE agent_personal_workspace_file SET state='TRASHED' WHERE file_id='file-0'"));
             assertEquals(original,http.post(agent,key,200,"E0"));http.post(agent,"fresh-intent",404,"QUOTE_NOT_FOUND");
             if(window!=null)window.seal();
@@ -3202,7 +3185,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             http.post("changed-target",key,409,"QUOTE_IDEMPOTENCY_CONFLICT");
             http.post(agent,"another-fresh-intent",404,"QUOTE_NOT_FOUND");
         }
-        assertEquals(3,calls.get());assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed+1,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(engine,storage,writes);
+        assertEquals(batchCount+1,count("economy_task_quote_batch"));assertEquals(fixed+1,count("economy_task_quote"));assertEquals(money,count("economy_transaction"));assertEquals(balance,wallet(jdbc));verifyNoInteractions(storage,writes);
     }
     // Outside measured requests. Count original UTF-8 LONGTEXT bytes, not JSON_EXTRACT's
     // reserialized representation or InnoDB allocation. Never emit content or private digests.

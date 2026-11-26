@@ -18,10 +18,8 @@ public final class QuoteHttpTestWiring {
     public static String template(){return TaskRetrievalText.VERSION;}
     public static IndependentTaskQuoteController controller(AgentTaskMutationTransaction roots,TaskQuoteBatches batches,
             AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,AgentExternalServicePolicyService agents,
-            RecommendationMaterials materials,TaskFeatureEncoder encoder,ProspectiveTaskExecution source,
-            TaskBudgetEstimator estimator,TaskBillingService billing){
-        var vectors=new TaskQueryVectors(encoder,256,8,Duration.ofMinutes(10));
-        var intents=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials,new QuoteFeaturePreparation(vectors));
-        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,Optional.ofNullable(source),estimator,billing));
+            RecommendationMaterials materials,TaskBillingService billing){
+        var intents=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials);
+        return new IndependentTaskQuoteController(new IndependentTaskQuotes(intents,billing));
     }
 }
