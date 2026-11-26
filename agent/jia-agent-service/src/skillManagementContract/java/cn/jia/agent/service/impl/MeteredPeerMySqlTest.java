@@ -224,7 +224,7 @@ class MeteredPeerMySqlTest extends TaskExecutionCancellationMySqlTest {
         var beans=new DefaultListableBeanFactory();beans.registerSingleton("s",new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager));
         var schedules=beans.getBeanProvider(ScheduleService.class);
         var store=transactional(new UsageCaptureProjectionStore(sql.getMapper(EconomyUsageCaptureMapper.class)),UsageCaptureProjection.class,manager);
-        var projection=new NativeCaptureProjection(store,schedules,scope,executions);
+        var projection=new NativeCaptureProjection(store,schedules,scope,executions,null);
         var journal=transactional(new UsageCaptureJournalImpl(sql.getMapper(EconomyUsageCaptureMapper.class),event->projection.changed((UsageCaptureProjection.Key)event)),UsageCaptureJournal.class,manager);
         var cost=transactional(new UsageCostServiceImpl(sql.getMapper(EconomyUsageCostMapper.class),json),UsageCostService.class,manager);
         var settle=transactional(new UsageCaptureSettlement(cost,journal),UsageCaptureJournal.Settlement.class,manager);

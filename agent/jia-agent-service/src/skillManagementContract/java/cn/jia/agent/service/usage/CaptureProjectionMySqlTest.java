@@ -40,7 +40,7 @@ class CaptureProjectionMySqlTest extends SkillManagementMySqlFixture {
             var store=proxy(new UsageCaptureProjectionStore(db),manager,cn.jia.economy.usage.UsageCaptureProjection.class);
             var scope=new FixedTenantAdmissionPolicy("t","c");var schedules=new ScheduledWorkStore(sql.getMapper(ScheduledWorkMapper.class),scope,manager);
             var beans=new DefaultListableBeanFactory();
-            var handler=new NativeCaptureProjection(store,beans.getBeanProvider(ScheduleService.class),scope,org.mockito.Mockito.mock(cn.jia.agent.dao.PersonalWorkspaceExecutionDao.class));
+            var handler=new NativeCaptureProjection(store,beans.getBeanProvider(ScheduleService.class),scope,org.mockito.Mockito.mock(cn.jia.agent.dao.PersonalWorkspaceExecutionDao.class),null);
             var journal=proxy(new UsageCaptureJournalImpl(db,event->handler.changed((cn.jia.economy.usage.UsageCaptureProjection.Key)event)),manager,cn.jia.economy.usage.UsageCaptureJournal.class);
             // A receipt is not durable without its projection signal: abort, then retry the same submission.
             var first=sub("p","PLAN",h,"1",null,h);

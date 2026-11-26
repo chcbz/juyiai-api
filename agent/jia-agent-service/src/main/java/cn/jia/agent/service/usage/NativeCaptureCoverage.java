@@ -33,18 +33,21 @@ final class NativeCaptureCoverage {
     private final Map<Source,Group> groups=new HashMap<>();private final Tuples finals=new Tuples();
     static final String LOCAL_POLICY="NATIVE_LOCAL_ARTIFACT_TEXT_V1", BASIS="RESPONSES_TEXT_TOKENS_V1", ENGINE="codex-cli-0.167.0";
     private final String capture,approved;private final Policy trusted;
-    private JsonNode plan,close;private String planSha,last="";private boolean waiting,incomplete;
+    private Row closeRow;private JsonNode plan,close;private String planSha,last="";private boolean waiting,incomplete;
     NativeCaptureCoverage(String capture,Policy trusted){this(capture,trusted,null);}
     private NativeCaptureCoverage(String capture,Policy trusted,String approved){this.capture=capture;this.trusted=trusted;this.approved=approved;}
     static NativeCaptureCoverage forAdmission(String capture,String approved){return new NativeCaptureCoverage(capture,null,approved);}
     // Freeze independently of the run-specific config SHA, which cannot be known before the layout exists.
     static String profileSha(String config,String route,String tools,String channel){return NativeCaptureEvidence.digest(List.of(LOCAL_POLICY,ENGINE,BASIS,config,route,tools,channel));}
     private boolean matchesAdmittedGroup(Group g){
-        var d=dispatchGroup();return approved!=null&&d!=null&&LOCAL_POLICY.equals(d.capturePolicyVersion())
-            &&ENGINE.equals(plan.path("engineVersion").asText())&&plan.hasNonNull("snapshotSha256")&&groups.size()==1
-            &&g==groups.get(new Source(plan.path("rootSourceId").asText(),"0"))&&g.requests>0
-            &&BASIS.equals(g.source.path("adapterVersion").asText())
-            &&approved.equals(profileSha(d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256(),g.source.path("channelNamespace").asText()));
+        var d=dispatchGroup();if(approved==null||d==null||!ENGINE.equals(plan.path("engineVersion").asText())||!plan.hasNonNull("snapshotSha256")||groups.size()!=1
+            ||g!=groups.get(new Source(plan.path("rootSourceId").asText(),"0"))||g.requests==0||!BASIS.equals(g.source.path("adapterVersion").asText()))return false;
+        String channel=g.source.path("channelNamespace").asText();
+        if(LOCAL_POLICY.equals(d.capturePolicyVersion()))return approved.equals(profileSha(d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256(),channel));
+        var image=plan.path("imageRoute");if(!"NATIVE_PINNED_IMAGE_V1".equals(d.capturePolicyVersion())||!image.isObject()||close==null)return false;
+        String child=image.path("childRouteSha256").asText();return child.equals(close.path("imageInvocation").path("childRouteSha256").asText())
+            &&d.routeSha256().equals(NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1",channel,image.path("model").asText(),child)))
+            &&approved.equals(NativeCaptureEvidence.imageProfile(d.version(),d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256()));
     }
     // The journal keeps contradictory evidence; only its eligibility for normalized use is denied.
     private static boolean quantityReasonsOnly(JsonNode observation){
@@ -59,7 +62,7 @@ final class NativeCaptureCoverage {
         var e=JSON.readTree(r.evidenceJson());if(!capture.equals(e.get("captureId").asText())||!r.recordId().equals(e.get("recordId").asText()))throw new IllegalStateException("Wrong capture head");
         var o=e.get("observation");String kind=e.get("kind").asText();
         if(kind.equals("PLAN")){plan=o;planSha=r.evidenceSha256();return;}
-        if(kind.equals("CAPTURE_FINAL")){close=o;return;}
+        if(kind.equals("CAPTURE_FINAL")){close=o;closeRow=r;return;}
         var g=groups.computeIfAbsent(new Source(o.get("sourceId").asText(),o.get("epoch").asText()),key->new Group());
         if(kind.equals("SOURCE_FINAL")){g.closed=o;finals.add(r);return;}
         g.members.add(r);
@@ -82,7 +85,8 @@ final class NativeCaptureCoverage {
         return new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup(g.get("version").asText(),g.get("executionConfigSha256").asText(),
             g.get("routeSha256").asText(),g.get("toolConfigSha256").asText(),plan.get("coveragePolicyVersion").asText(),planSha);
     }
-    Result finish(){
+    Result finish(){return finish(row->false);}
+    Result finish(java.util.function.Predicate<Row> hasMeasuredChild){
         BigInteger observed=BigInteger.ZERO;
         if(plan==null||close==null)waiting=true;
         if(plan!=null){var root=groups.get(new Source(plan.get("rootSourceId").asText(),"0"));if(root==null||root.source==null)waiting=true;
@@ -98,6 +102,7 @@ final class NativeCaptureCoverage {
             if(!g.max.equals(BigInteger.valueOf(g.requests))||!number(g.closed,"reservedSequenceHighWatermark").equals(BigInteger.valueOf(g.requests))
                     ||g.refs.size()!=g.responses||!drained(g.closed)||!g.members.finish().equals(g.closed.get("recordsSha256").asText()))incomplete=true;
         }
+        if(!waiting&&!incomplete&&"NATIVE_PINNED_IMAGE_V1".equals(plan.path("coveragePolicyVersion").asText())&&(approved==null||!hasMeasuredChild.test(closeRow)))incomplete=true;
         return new Result(waiting?Coverage.WAITING_EVIDENCE:incomplete?Coverage.INCOMPLETE:Coverage.COMPLETE,observed);
     }
     private static boolean drained(JsonNode close){return "DRAINED".equals(close.get("closeState").asText())&&close.get("reasonCodes").isEmpty();}

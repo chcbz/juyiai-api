@@ -15,6 +15,9 @@ class NativeCaptureEvidenceTest {
         var fold=new NativeCaptureCoverage("cap",null);assertNull(fold.dispatchGroup());
         var r=new cn.jia.economy.usage.UsageCaptureProjection.Row("record",1,"1","f".repeat(64),JSON.writeValueAsString(Map.of("captureId","cap","recordId","record","kind","PLAN","observation",plan)));
         fold.accept(r);assertEquals("c".repeat(64),fold.dispatchGroup().routeSha256());assertEquals(r.evidenceSha256(),fold.dispatchGroup().planEvidenceSha256());assertNotEquals(cn.jia.economy.usage.UsageCaptureProjection.Coverage.COMPLETE,fold.finish().state());
+        plan.put("imageRoute",Map.of("model","gpt-6-luna","childRouteSha256","e".repeat(64)));assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));
+        plan.put("coveragePolicyVersion","NATIVE_PINNED_IMAGE_V1");NativeCaptureEvidence.planKeys(plan);var imagePlan=NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of());
+        plan.remove("imageRoute");assertNotEquals(imagePlan,NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of()));
         group.put("providerUrl","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));group.remove("providerUrl");
         group.put("routeSha256","private");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.planKeys(plan));
     }
@@ -141,30 +144,33 @@ class NativeCaptureEvidenceTest {
     @Test void closedTwoRequestProjectionUsesFrozenAdmissionNotReportedProfileOrCurrentRollout(){
         // Associated-head boundary: HTTP codec/journal/recovery are verified independently with MySQL.
         String cap="a".repeat(64),cfg="b".repeat(64),route="c".repeat(64),tool="d".repeat(64),channel="e".repeat(64);
-        for(String fault:List.of("none","requestReason","responseReason")){
+        for(String fault:List.of("none","requestReason","responseReason","image","missingChild","wrongRoute","wrongChild")){
+        boolean image=List.of("image","missingChild","wrongRoute","wrongChild").contains(fault);String child="9".repeat(64);
+        String measuredRoute=image&&!fault.equals("wrongRoute")?NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1",channel,"parent",child)):route;
         var heads=new TreeMap<String,cn.jia.economy.usage.UsageCaptureProjection.Row>();
         class Fixture { String add(String kind,Map<String,Object> o){String id=String.format("%064x",heads.size()+1);
             var data=Map.of("kind",kind,"captureId",cap,"recordId",id,"observation",o);String sha=NativeCaptureEvidence.digest(data);
             heads.put(id,new cn.jia.economy.usage.UsageCaptureProjection.Row(id,1,"1",sha,JSON.writeValueAsString(data)));return sha;}
             String hash(int from,int to){return NativeCaptureEvidence.digest(heads.values().stream().skip(from).limit(to-from).map(r->List.of(r.recordId(),r.sourceRevision(),r.evidenceSha256())).toList());}}
-        var f=new Fixture();var group=Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256",cfg,"routeSha256",route,"toolConfigSha256",tool);
-        String p=f.add("PLAN",Map.of("rootSourceId","root","snapshotSha256",cap,"executionConfigSha256","f".repeat(64),"engineVersion","codex-cli-0.167.0","coveragePolicyVersion","NATIVE_LOCAL_ARTIFACT_TEXT_V1","dispatchGroup",group));
+        var f=new Fixture();var group=Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256",cfg,"routeSha256",measuredRoute,"toolConfigSha256",tool);
+        var plan=new HashMap<String,Object>(Map.of("rootSourceId","root","snapshotSha256",cap,"executionConfigSha256","f".repeat(64),"engineVersion","codex-cli-0.167.0","coveragePolicyVersion",image?"NATIVE_PINNED_IMAGE_V1":"NATIVE_LOCAL_ARTIFACT_TEXT_V1","dispatchGroup",group));if(image)plan.put("imageRoute",Map.of("model","parent","childRouteSha256",child));String p=f.add("PLAN",plan);
         f.add("SOURCE",Map.of("sourceId","root","epoch","0","adapterVersion","RESPONSES_TEXT_TOKENS_V1","sourceKind","METERED_HTTP_RESPONSES_V1","channelNamespace",channel));
         for(int i=1;i<=2;i++){f.add("REQUEST",Map.of("sourceId","root","epoch","0","sequence",""+i,"resolution","RESPONSE","sourceAttemptId","r"+i,"reasonCodes",List.of(fault.equals("requestReason")?"FUTURE_TOOL":"BILLING_IDENTITY_UNKNOWN")));
             f.add("RESPONSE",Map.of("sourceId","root","epoch","0","reasonCodes",List.of(fault.equals("responseReason")?"USAGE_INCOMPLETE":"BILLING_IDENTITY_UNKNOWN"),
                 "reportedUsage",Map.of("input_tokens",4,"output_tokens",1,"total_tokens",5,"input_tokens_details",Map.of("cached_tokens",1),"output_tokens_details",Map.of("reasoning_tokens",0)),
                 "measuredQuantities",Map.of("coverage","COMPLETE","normalizationBasis","RESPONSES_TEXT_TOKENS_V1","tokens",Map.of("INPUT","3","CACHED_INPUT","1","OUTPUT","1"))));}
         f.add("SOURCE_FINAL",Map.of("sourceId","root","epoch","0","requestCount","2","responseCount","2","reservedSequenceHighWatermark","2","recordsSha256",f.hash(1,6),"closeState","DRAINED","reasonCodes",List.of()));
-        f.add("CAPTURE_FINAL",Map.of("planEvidenceSha256",p,"sourceCount","1","sourcesSha256",f.hash(6,7),"closeState","DRAINED","reasonCodes",List.of()));
-        String approved=NativeCaptureEvidence.digest(List.of("NATIVE_LOCAL_ARTIFACT_TEXT_V1","codex-cli-0.167.0","RESPONSES_TEXT_TOKENS_V1",cfg,route,tool,channel));
+        var close=new HashMap<String,Object>(Map.of("planEvidenceSha256",p,"sourceCount","1","sourcesSha256",f.hash(6,7),"closeState","DRAINED","reasonCodes",List.of()));
+        if(image)close.put("imageInvocation",Map.of("childRouteSha256",fault.equals("wrongChild")?tool:child));f.add("CAPTURE_FINAL",close);
+        String approved=image?NativeCaptureEvidence.imageProfile("NATIVE_DISPATCH_GROUP_V1",cfg,measuredRoute,tool):NativeCaptureEvidence.digest(List.of("NATIVE_LOCAL_ARTIFACT_TEXT_V1","codex-cli-0.167.0","RESPONSES_TEXT_TOKENS_V1",cfg,route,tool,channel));
         for(String pin:Arrays.asList(null,approved,NativeCaptureCoverage.profileSha(cfg,route,tool,"other"),NativeCaptureCoverage.profileSha(cfg,route,"other",channel))){
-            var fold=NativeCaptureCoverage.forAdmission(cap,pin);heads.values().forEach(fold::accept);var result=fold.finish();boolean match=approved.equals(pin);
-            assertEquals(match&&fault.equals("none")?"COMPLETE":"INCOMPLETE",result.state().name());assertEquals(match&&(fault.equals("none")||fault.equals("requestReason"))?10:0,result.observedTokens().intValueExact());}
+            var fold=NativeCaptureCoverage.forAdmission(cap,pin);heads.values().forEach(fold::accept);var result=fold.finish(row->!fault.equals("missingChild"));boolean match=approved.equals(pin)&&!fault.equals("wrongRoute")&&!fault.equals("wrongChild");
+            assertEquals(match&&(fault.equals("none")||fault.equals("image"))?"COMPLETE":"INCOMPLETE",result.state().name());assertEquals(match&&(fault.equals("none")||fault.equals("requestReason")||image)?10:0,result.observedTokens().intValueExact());}
         }
     }
     @Test void openCaptureHandlerUsesOnlyScopedFinalLookupAndRevisionCas(){
         var store=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCaptureProjection.class);
-        var worker=new NativeCaptureProjection(store,null,new cn.jia.core.security.FixedTenantAdmissionPolicy("t","c"),null);
+        var worker=new NativeCaptureProjection(store,null,new cn.jia.core.security.FixedTenantAdmissionPolicy("t","c"),null,null);
         var key=new cn.jia.economy.usage.UsageCaptureProjection.Key("t","c",7);var cap="a".repeat(64);
         org.mockito.Mockito.when(store.pending(key)).thenReturn(new cn.jia.economy.usage.UsageCaptureProjection.Snapshot(19,cap,"o","task","a","e","r"));
         var schedule=new cn.jia.task.scheduling.ScheduleKey("c",worker.getName(),"7","");

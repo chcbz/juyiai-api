@@ -64,6 +64,11 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         if(plan.containsKey("snapshotSha256")){
             field(plan,"snapshotSha256",SHA);var fields=new HashMap<>(plan);fields.remove("snapshotSha256");plan=fields;
         }
+        if(plan.containsKey("imageRoute")){
+            check(plan.containsKey("dispatchGroup")&&"NATIVE_PINNED_IMAGE_V1".equals(plan.get("coveragePolicyVersion")));
+            var image=obj(plan.get("imageRoute"));keys(image,"model","childRouteSha256");field(image,"model",ID);field(image,"childRouteSha256",SHA);
+            var fields=new HashMap<>(plan);fields.remove("imageRoute");plan=fields;
+        }
         if(!plan.containsKey("dispatchGroup")){
             keys(plan,"captureProtocol","executionConfigSha256","engineVersion","coveragePolicyVersion","rootSourceId");return;
         }

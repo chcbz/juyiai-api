@@ -18,7 +18,8 @@ public final class NativeCaptureProjection implements ScheduledJobHandler {
     private static final String NAME="native.usage-coverage";
     private final UsageCaptureProjection store;private final ObjectProvider<ScheduleService> schedules;private final FixedTenantAdmissionPolicy scope;
     private final cn.jia.agent.dao.PersonalWorkspaceExecutionDao admissions;
-    public NativeCaptureProjection(UsageCaptureProjection store,ObjectProvider<ScheduleService> schedules,FixedTenantAdmissionPolicy scope,cn.jia.agent.dao.PersonalWorkspaceExecutionDao admissions){this.admissions=admissions;this.store=store;this.schedules=schedules;this.scope=scope;}
+    private final cn.jia.economy.usage.UsageCostService costs;
+    public NativeCaptureProjection(UsageCaptureProjection store,ObjectProvider<ScheduleService> schedules,FixedTenantAdmissionPolicy scope,cn.jia.agent.dao.PersonalWorkspaceExecutionDao admissions,cn.jia.economy.usage.UsageCostService costs){this.costs=costs;this.admissions=admissions;this.store=store;this.schedules=schedules;this.scope=scope;}
     public String getName(){return NAME;}
     @EventListener public void changed(UsageCaptureProjection.Key k){
         if(!TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing evidence transaction");
@@ -41,6 +42,9 @@ public final class NativeCaptureProjection implements ScheduledJobHandler {
         var fold=NativeCaptureCoverage.forAdmission(snap.captureId(),approved);String after="";
         while(true){var page=store.page(k,after);if(page.isEmpty())break;for(var row:page)fold.accept(row);after=page.getLast().recordId();}
         // A newer input has its own transactional signal; never overwrite it or replay a provider call.
-        store.publish(k,snap.inputRevision(),fold.finish().state(),fold.dispatchGroup());
+        var coverage=fold.finish(row->NativeImageSampleOperation.read(costs,new cn.jia.economy.task.TaskBillingService.Task(
+            new cn.jia.economy.service.EconomyScope(k.tenant(),k.client()),snap.owner(),snap.task()),snap.execution(),snap.run(),snap.captureId(),
+            row.recordId(),row.sourceRevision(),row.evidenceSha256(),row.evidenceJson())!=null);
+        store.publish(k,snap.inputRevision(),coverage.state(),fold.dispatchGroup());
     }
 }
