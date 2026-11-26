@@ -562,6 +562,19 @@ class TaskBillingServiceMySqlTest {
         assertEquals(study,jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(roster_json,'$.studyApprovalSha')) FROM economy_budget_group_build_evidence",String.class));
         jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=TRUE WHERE approval_sha=?",study);assertInstanceOf(GroupBudgetQuotes.Fixed.class,reader.prepare(SCOPE,java.util.Set.of(k)).get(k));
     }
+    @Test void transientStudyReadFailureDoesNotStarveNextDueGroup(){
+        installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
+        var t=SCOPE.tenantId();var c=SCOPE.clientId();var first="1".repeat(64);var second="2".repeat(64);
+        for(var group:List.of(first,second))jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,book_epoch,attempt,policy_sha,next_at,updated_at) VALUES(?,?,?,1,'DIRTY',1,0,?,'2020-01-01',CURRENT_TIMESTAMP(3))",t,c,group,"a".repeat(64));
+        var order=maintenance.dueFor(t,c);assertEquals(List.of(first,second),order.stream().map(w->w.groupSha()).toList());
+        var fault=org.mockito.Mockito.mock(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class,org.mockito.AdditionalAnswers.delegatesTo(maintenance));
+        org.mockito.Mockito.doThrow(new org.springframework.dao.TransientDataAccessResourceException("fixture")).when(fault).study(order.getFirst());
+        var service=new SharedGroupMaintenanceService(fault,null,null,null,null,new ObjectMapper());service.runDue(t,c,null);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE group_sha=? AND status='RETRY' AND attempt=1 AND next_at IS NOT NULL AND claim_id IS NULL",Integer.class,first));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE group_sha=? AND status='WAIT_INPUT' AND attempt=1 AND next_at IS NULL AND claim_id IS NULL",Integer.class,second));
+        jdbc.update("UPDATE economy_budget_group_head SET next_at=CURRENT_TIMESTAMP(3) WHERE group_sha=?",first);service.runDue(t,c,null);
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE group_sha=? AND status='WAIT_INPUT' AND attempt=2 AND next_at IS NULL",Integer.class,first));assertEquals(0,count("economy_budget_group_revision"));
+    }
     @Test void absentOrWithdrawnStudyCannotPublishAndExpiredFifthClaimDoesNotRunAgain(){
         installPublicationSchema();var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
         var t=SCOPE.tenantId();var c=SCOPE.clientId();String k="d".repeat(64),policy="a".repeat(64),raw="{}",sha=GroupPublicationEnrollment.digest(raw);
