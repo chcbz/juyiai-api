@@ -1,6 +1,9 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.skill.quote.CostProfile;
+import cn.jia.agent.skill.quote.ScopedCostInputs;
+import cn.jia.agent.skill.quote.CapabilityQuoteSpec;
+import cn.jia.economy.pricing.GroupMeanPricing;
 import cn.jia.agent.skill.quote.MeasuredCostProfile;
 import cn.jia.economy.pricing.CostRouteBindings;
 import cn.jia.economy.pricing.CostRouteReference;
@@ -26,6 +29,43 @@ public final class ResolvedCostProfiles {
         public Map<CostRouteReference,CostRouteBindings.Binding> adopted(){return adopted;}
         @Override public String toString(){return "ResolvedCostProfiles[private]";}
     }
+    /** The complete requested candidate set is retained, including candidates without a measured
+     * plan. Absence is missing cost evidence, not an authorization or capability verdict.
+     */
+    public static final class ScopedPrepared {
+        private final ScopedCostInputs inputs;
+        private final Set<String> candidates;
+        private final Map<String,MeasuredCostProfile> selected;
+        private final Prepared routes;
+        private ScopedPrepared(ScopedCostInputs inputs,Set<String> candidates,Map<String,MeasuredCostProfile> selected,Prepared routes){
+            this.inputs=inputs;this.candidates=Set.copyOf(candidates);this.selected=Map.copyOf(selected);this.routes=routes;
+        }
+        public Set<String> candidates(){return candidates;}
+        public Optional<MeasuredCostProfile> selected(String candidate){
+            if(!candidates.contains(candidate))throw new IllegalArgumentException("Candidate was not prepared");
+            return Optional.ofNullable(selected.get(candidate));
+        }
+        public Optional<GroupMeanPricing.ScopeGroup> group(String candidate,String featureVersion,String policySha){
+            return selected(candidate).flatMap(routes::find).flatMap(profile->inputs.group(featureVersion,policySha,profile));
+        }
+        public CapabilityQuoteSpec.MatchStatus inputStatus(){return inputs.status();}
+        @Override public String toString(){return "ScopedPrepared[private]";}
+    }
+    /** Select actual plans before one shared route lookup. Unselected plans neither incur reads nor
+     * become finish dependencies; unavailable routing never selects a lower-priority alternative.
+     * Caller still owns current installation/spec authorization and separate capability proof.
+     */
+    public ScopedPrepared prepareScoped(EconomyScope domain,ScopedCostInputs inputs,
+            Map<String,List<MeasuredCostProfile>> authorizedProfiles){
+        Objects.requireNonNull(inputs);Objects.requireNonNull(authorizedProfiles);
+        var selected=new HashMap<String,MeasuredCostProfile>();
+        authorizedProfiles.forEach((candidate,profiles)->inputs.select(profiles).ifPresent(profile->selected.put(candidate,profile)));
+        var routes=prepare(domain,inputs.status()==CapabilityQuoteSpec.MatchStatus.MATCHED?selected.values():List.of());
+        return new ScopedPrepared(inputs,authorizedProfiles.keySet(),selected,routes);
+    }
+    /** Other finish checks (scope, authority and published specifications) remain the caller's duty. */
+    public void recheckScoped(EconomyScope domain,ScopedPrepared prepared){recheck(domain,prepared.routes);}
+
     public Prepared prepare(EconomyScope domain,Collection<MeasuredCostProfile> measurements){
         Objects.requireNonNull(domain);
         var unique=List.copyOf(new LinkedHashSet<>(measurements));
