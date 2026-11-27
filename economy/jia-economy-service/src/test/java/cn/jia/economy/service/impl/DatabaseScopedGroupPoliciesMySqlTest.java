@@ -2,6 +2,7 @@ package cn.jia.economy.service.impl;
 
 import cn.jia.core.util.CanonicalValueEncoding;
 import cn.jia.economy.config.EconomyMySqlTestFixture;
+import cn.jia.economy.config.ScopedGroupStudySchemaInitializer;
 import cn.jia.economy.mapper.ScopedGroupPolicyMapper;
 import cn.jia.economy.pricing.*;
 import cn.jia.economy.service.EconomyScope;
@@ -32,7 +33,7 @@ class DatabaseScopedGroupPoliciesMySqlTest {
         database=jdbc.queryForObject("SELECT DATABASE()",String.class);
         tx=new TransactionTemplate(new DataSourceTransactionManager(db.dataSource()));
         ddl("economy-group-budget-v1.sql",";");ddl("economy-group-budget-approval-v1.sql","$$");
-        ddl("economy-group-study-v1.sql","$$");ddl("economy-group-study-scope-v1.sql",";");
+        ddl("economy-group-study-v1.sql","$$");new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet();
         var configuration=new org.apache.ibatis.session.Configuration();configuration.setMapUnderscoreToCamelCase(true);
         configuration.addMapper(ScopedGroupPolicyMapper.class);var factory=new SqlSessionFactoryBean();
         factory.setDataSource(db.dataSource());factory.setConfiguration(configuration);
@@ -61,6 +62,64 @@ class DatabaseScopedGroupPoliciesMySqlTest {
     private ScopedGroupPolicies.Selected read(DatabaseScopedGroupPolicies.Receipt r){return service.read(domain,List.of(input(r)),false).get(input(r));}
     private void head(DatabaseScopedGroupPolicies.Receipt r){jdbc.update("INSERT INTO economy_budget_group_head(tenant_id,client_id,group_sha,generation,status,book_epoch,attempt,policy_sha,updated_at) VALUES(?,?,?,1,'WAIT_INPUT',1,0,?,CURRENT_TIMESTAMP(3))",domain.tenantId(),domain.clientId(),r.groupSha(),r.policySha());}
     private long generation(DatabaseScopedGroupPolicies.Receipt r){return jdbc.queryForObject("SELECT generation FROM economy_budget_group_head WHERE group_sha=?",Long.class,r.groupSha());}
+
+    private void removeScopeMigration() {
+        jdbc.execute("ALTER TABLE economy_budget_group_study DROP INDEX study_by_scope_input, DROP COLUMN scope_input_sha");
+    }
+    private int scopeColumnCount() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='economy_budget_group_study' AND column_name='scope_input_sha'",Integer.class);
+    }
+    @Test void maintenanceResumesPartialColumnWithoutRewritingLegacySelectionOrApproval() {
+        var r=receipt("legacy",3);var approval=approved(r);head(r);select(r,approval,null);
+        String before=jdbc.queryForObject("SELECT authority_json FROM economy_budget_publish_approval WHERE approval_sha=?",String.class,approval);
+        long generation=generation(r);removeScopeMigration();
+        jdbc.execute("ALTER TABLE economy_budget_group_study ADD COLUMN scope_input_sha CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL FIRST");
+        var migration=new ScopedGroupStudySchemaInitializer(jdbc);migration.afterPropertiesSet();migration.afterPropertiesSet();
+        assertEquals(1,scopeColumnCount());
+        assertEquals(approval,jdbc.queryForObject("SELECT approval_sha FROM economy_budget_group_study WHERE scope_input_sha IS NULL",String.class));
+        assertEquals(before,jdbc.queryForObject("SELECT authority_json FROM economy_budget_publish_approval WHERE approval_sha=?",String.class,approval));
+        assertEquals(generation,generation(r));
+        // Original immutability and invalidation triggers still govern the table after migration.
+        assertThrows(org.springframework.dao.DataAccessException.class,()->jdbc.update("UPDATE economy_budget_group_study SET approval_sha=approval_sha"));
+        jdbc.update("DELETE FROM economy_budget_group_study");assertEquals(generation+1,generation(r));
+        select(r,approval,null);assertEquals(r.groupSha(),read(r).group().key());
+    }
+    @Test void maintenanceRejectsWrongExistingIndexBeforeAddingAnyColumn() {
+        removeScopeMigration();
+        jdbc.execute("ALTER TABLE economy_budget_group_study ADD KEY study_by_scope_input(tenant_id,client_id,group_sha)");
+        var failure=assertThrows(IllegalStateException.class,()->new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet());
+        assertEquals("SCOPED_GROUP_STUDY_SCHEMA_MISMATCH",failure.getMessage());assertEquals(0,scopeColumnCount());
+        jdbc.execute("ALTER TABLE economy_budget_group_study DROP INDEX study_by_scope_input");
+        new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet();assertEquals(1,scopeColumnCount());
+    }
+    @Test void maintenanceRejectsWrongColumnAndFoundationWithoutDestructiveRepair() {
+        removeScopeMigration();
+        jdbc.execute("ALTER TABLE economy_budget_group_study ADD COLUMN scope_input_sha VARCHAR(64) NULL");
+        assertThrows(IllegalStateException.class,()->new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet());
+        assertEquals("varchar",jdbc.queryForObject("SELECT data_type FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='economy_budget_group_study' AND column_name='scope_input_sha'",String.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='economy_budget_group_study' AND index_name='study_by_scope_input'",Integer.class));
+        jdbc.execute("ALTER TABLE economy_budget_group_study DROP COLUMN scope_input_sha, MODIFY tenant_id VARCHAR(49) NOT NULL");
+        assertThrows(IllegalStateException.class,()->new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet());assertEquals(0,scopeColumnCount());
+    }
+    @Test void concurrentMaintenanceUsesSameConnectionLockAndConvergesWithoutDuplicateDdl() throws Exception {
+        removeScopeMigration();
+        try(var holder=jdbc.getDataSource().getConnection();var pool=Executors.newFixedThreadPool(2)){
+            try(var statement=holder.createStatement();var rs=statement.executeQuery("SELECT GET_LOCK('cyf:scoped-group-study-v1',0)")){assertTrue(rs.next());assertEquals(1,rs.getInt(1));}
+            var started=new CountDownLatch(2);
+            var first=pool.submit(()->{started.countDown();new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet();});
+            var second=pool.submit(()->{started.countDown();new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet();});
+            assertTrue(started.await(5,TimeUnit.SECONDS));
+            long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);boolean waiting=false;
+            while(System.nanoTime()<until){
+                if(jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.metadata_locks WHERE OBJECT_TYPE='USER LEVEL LOCK' AND OBJECT_NAME='cyf:scoped-group-study-v1' AND LOCK_STATUS='PENDING'",Integer.class)==2){waiting=true;break;}
+                java.util.concurrent.locks.LockSupport.parkNanos(5_000_000);
+            }
+            assertTrue(waiting,"both workers must actually wait for the held migration lock");assertEquals(0,scopeColumnCount());
+            try(var statement=holder.createStatement();var rs=statement.executeQuery("SELECT RELEASE_LOCK('cyf:scoped-group-study-v1')")){assertTrue(rs.next());assertEquals(1,rs.getInt(1));}
+            first.get(10,TimeUnit.SECONDS);second.get(10,TimeUnit.SECONDS);
+            new ScopedGroupStudySchemaInitializer(jdbc).afterPropertiesSet();assertEquals(1,scopeColumnCount());
+        }
+    }
 
     @Test void findsApprovedPolicyBeforeFinalGroupAndIsolatesDomains(){
         var r=receipt("short",3);var approval=approved(r);var selected=select(r,approval,null);
