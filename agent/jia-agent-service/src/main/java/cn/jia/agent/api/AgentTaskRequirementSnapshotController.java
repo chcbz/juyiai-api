@@ -49,7 +49,8 @@ public final class AgentTaskRequirementSnapshotController {
                 || current.requirementRevision()<1 || current.title()==null
                 || current.title().isBlank() || current.sha256()==null
                 || !current.sha256().matches("[0-9a-f]{64}")
-                || !("CREATE".equals(current.source()) || "RECONFIRM".equals(current.source()))) {
+                || !("CREATE".equals(current.source()) || "RECONFIRM".equals(current.source())
+                    || "SCOPED".equals(current.source()))) {
             throw new AgentTaskRequirementReadException(
                     AgentTaskRequirementReadException.Reason.INTEGRITY_ERROR);
         }

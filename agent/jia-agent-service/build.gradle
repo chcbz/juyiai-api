@@ -1105,6 +1105,7 @@ gradle.projectsEvaluated {
 // Database task quotes: affected real consumers and fixtures only.
 def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
     java {
+        include 'cn/jia/agent/service/impl/AgentTaskRequirementSnapshotServiceImplTest.java'
         srcDir 'src/test/java'
         srcDir 'src/taskQuoteRegression/java'
         include 'cn/jia/agent/skill/InstalledPurposeHttpFixture.java'

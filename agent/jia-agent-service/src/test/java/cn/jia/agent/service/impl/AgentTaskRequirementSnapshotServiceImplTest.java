@@ -206,6 +206,28 @@ class AgentTaskRequirementSnapshotServiceImplTest {
         verifyNoMoreInteractions(snapshots);
     }
 
+    @Test void controllerReadsConfirmedScopeSourceButRejectsUnknownSource() throws Exception {
+        var snapshots=mock(AgentTaskRequirementSnapshotService.class);
+        var mvc=MockMvcBuilders.standaloneSetup(new AgentTaskRequirementSnapshotController(snapshots)).build();
+        for (String source : List.of("CREATE", "RECONFIRM", "SCOPED")) {
+            when(snapshots.readCurrent(OWNER,"task-1")).thenReturn(
+                    new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-1",6,3,
+                            "Confirmed work",null,"a".repeat(64),source));
+            mvc.perform(get("/agent/tasks/task-1/requirements/current").principal(jwtToken("owner","client")))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string(HttpHeaders.CACHE_CONTROL,"private, no-store"))
+                    .andExpect(jsonPath("$.data.source").value(source))
+                    .andExpect(jsonPath("$.data.taskVersion").value("6"))
+                    .andExpect(jsonPath("$.data.requirementRevision").value("3"));
+        }
+        when(snapshots.readCurrent(OWNER,"task-1")).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot("task-1",6,3,
+                        "Confirmed work",null,"a".repeat(64),"UNKNOWN"));
+        mvc.perform(get("/agent/tasks/task-1/requirements/current").principal(jwtToken("owner","client")))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("REQUIREMENT_INTEGRITY_ERROR"));
+    }
+
     @Test void controllerMapsAuthParameterAndReadFailuresWithoutLeakingIdentifiers()
             throws Exception {
         AgentTaskRequirementSnapshotService snapshots=mock(AgentTaskRequirementSnapshotService.class);
