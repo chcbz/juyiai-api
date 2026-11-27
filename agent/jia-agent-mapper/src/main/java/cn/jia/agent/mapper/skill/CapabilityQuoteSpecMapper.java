@@ -27,8 +27,7 @@ public interface CapabilityQuoteSpecMapper {
     record VersionSpec(String productVersionId,String capabilityId,String version,String specSha,String specJson,String status) {
         public StoredSpec specification(){return new StoredSpec(capabilityId,version,specSha,specJson,status);}
     }
-    @Select("""
-            <script>
+    String APPROVED_VERSION_QUERY="""
             SELECT b.product_version_id,s.capability_id,s.version,s.spec_sha,s.spec_json,s.status
             FROM agent_skill_quote_spec_binding b
             JOIN agent_capability_quote_spec s ON s.tenant_id=b.tenant_id AND s.client_id=b.client_id
@@ -44,9 +43,12 @@ public interface CapabilityQuoteSpecMapper {
                 <foreach collection="versions" item="version" open="(" separator="," close=")">BINARY #{version}</foreach>
               AND v.review_status='APPROVED'
             ORDER BY b.product_version_id,s.capability_id,s.version
-            </script>
-            """)
+            """;
+    @Select("<script>"+APPROVED_VERSION_QUERY+"</script>")
     List<VersionSpec> forApprovedVersions(@Param("tenantId") String tenant,@Param("clientId") String client,
+            @Param("versions") List<String> versions);
+    @Select("<script>"+APPROVED_VERSION_QUERY+" FOR SHARE</script>")
+    List<VersionSpec> lockApprovedVersions(@Param("tenantId") String tenant,@Param("clientId") String client,
             @Param("versions") List<String> versions);
     record SpecKey(String capabilityId,String version) { }
     @Select("""

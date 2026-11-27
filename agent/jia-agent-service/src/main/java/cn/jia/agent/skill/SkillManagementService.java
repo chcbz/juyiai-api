@@ -1303,12 +1303,25 @@ public final class SkillManagementService {
     public Set<Slot> costProfileBindings(
             SkillCapabilityLookup.Scope scope, String runtimeInstallationId, String runtimeHostId,
             Collection<Slot> requested) {
+        return costProfileBindings(scope,runtimeInstallationId,runtimeHostId,requested,false);
+    }
+    /** Current-read finish: keep the installed skill roots and adopted published semantics stable.
+     * Caller still owns task, relationship and Runtime identity fences. No Runtime/package IO. */
+    public Set<Slot> lockCostProfileBindings(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,
+            String runtimeHostId,Collection<Slot> requested) {
+        require(TransactionSynchronizationManager.isActualTransactionActive(),503,"SKILL_STATE_UNAVAILABLE");
+        return costProfileBindings(scope,runtimeInstallationId,runtimeHostId,requested,true);
+    }
+    private Set<Slot> costProfileBindings(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,
+            String runtimeHostId,Collection<Slot> requested,boolean locking) {
         var slots=Set.copyOf(requested);if(slots.isEmpty())return Set.of();
         var byInstallation=new HashMap<String,List<Slot>>();
         for(var slot:slots)byInstallation.computeIfAbsent(slot.installId(),id->new ArrayList<>()).add(slot);
         var relationship=relationship(scope);
         var eligible=new HashMap<Slot,String>();
         var states=new HashMap<String,SkillManagedStateEntity>();
+        if(locking)for(var skill:slots.stream().map(Slot::skillKey).distinct().sorted().toList())
+            states.put(skill,db.lockState(scope.tenantId(),scope.clientId(),scope.agentId(),skill));
         for(var auth:db.authorizationsForAgent(scope.tenantId(),scope.clientId(),scope.agentId())) {
             if(!byInstallation.containsKey(auth.getInstallationId())
                     ||!Objects.equals(runtimeInstallationId,runtimeInstallation(auth,relationship))
@@ -1331,7 +1344,8 @@ public final class SkillManagementService {
                         &&original.contains(binding))eligible.put(slot,text(target,"productVersionId"));
             }
         }
-        var active=quoteSpecifications.bindingsForVersions(scope.tenantId(),scope.clientId(),eligible.values());
+        var active=locking?quoteSpecifications.lockBindingsForVersions(scope.tenantId(),scope.clientId(),eligible.values())
+                :quoteSpecifications.bindingsForVersions(scope.tenantId(),scope.clientId(),eligible.values());
         var accepted=new HashSet<Slot>();
         eligible.forEach((slot,version)->{
             if(active.get(version).contains(Map.of("capabilityId",slot.capabilityId(),"capabilityVersion",slot.capabilityVersion(),"specSha",slot.specSha())))accepted.add(slot);

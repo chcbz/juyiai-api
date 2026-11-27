@@ -3106,12 +3106,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private cn.jia.agent.security.RegisteredPricingProfiles registrationFixture(){
         var bindings=mock(cn.jia.agent.skill.SkillManagementService.class);
         when(bindings.costProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
+        when(bindings.lockCostProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
         return new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,bindings);
     }
     private void verifyRegisteredPricingProfile(String agent,long binding,AgentManagedSessionLookup.SessionFence fence){
         new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-runtime-pricing-profiles-v1.sql"))).execute(jdbc.getDataSource());
         var installationBindings=mock(cn.jia.agent.skill.SkillManagementService.class);
         when(installationBindings.costProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
+        when(installationBindings.lockCostProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
         var repo=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,installationBindings);var target=new AgentExternalServicePolicyService.QuoteTarget(agent,OWNER,binding,0);
         var h="a".repeat(64);
         var slot=new cn.jia.agent.skill.quote.MeasuredCostProfile.Slot(0,"fixture.capability","1",h,List.of(),"fixture-skill","1",h,"installed");

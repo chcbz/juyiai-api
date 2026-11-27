@@ -25,6 +25,14 @@ public final class PublishedCapabilityQuoteSpecs {
     /** One bounded read per 128 distinct approved versions, including explicit empty results.
      * Registration/quote callers still own identity fencing and commit-time status revalidation. */
     public Map<String,List<Map<String,String>>> bindingsForVersions(String tenant,String client,Collection<String> requested) {
+        return bindingsForVersions(tenant,client,requested,false);
+    }
+    /** Quote finish retains adopted version/specification rows in the caller's original transaction. */
+    public Map<String,List<Map<String,String>>> lockBindingsForVersions(String tenant,String client,Collection<String> requested) {
+        require(TransactionSynchronizationManager.isActualTransactionActive(),503,"CAPABILITY_QUOTE_SPEC_TRANSACTION_REQUIRED");
+        return bindingsForVersions(tenant,client,requested,true);
+    }
+    private Map<String,List<Map<String,String>>> bindingsForVersions(String tenant,String client,Collection<String> requested,boolean locking) {
         require(tenant!=null&&!tenant.isBlank()&&client!=null&&!client.isBlank(),400,"BAD_REQUEST");
         var versions=requested.stream().distinct().sorted(CanonicalValueEncoding::compareUtf8).toList();
         var result=new HashMap<String,List<Map<String,String>>>();
@@ -33,7 +41,7 @@ public final class PublishedCapabilityQuoteSpecs {
             var decoded=new HashMap<CapabilityQuoteSpecMapper.StoredSpec,CapabilityQuoteSpec>();
             var seen=new HashMap<String,Set<SpecKey>>();
             for(var version:batch){result.put(version,new ArrayList<>());seen.put(version,new HashSet<>());}
-            for(var row:mapper.forApprovedVersions(tenant,client,batch)) {
+            for(var row:locking?mapper.lockApprovedVersions(tenant,client,batch):mapper.forApprovedVersions(tenant,client,batch)) {
                 var keys=seen.get(row.productVersionId());
                 require(keys!=null&&keys.add(new SpecKey(row.capabilityId(),row.version()))
                         &&keys.size()<=CapabilityQuoteSpecJson.MAX_SPECS,503,"CAPABILITY_QUOTE_SPEC_CORRUPT");

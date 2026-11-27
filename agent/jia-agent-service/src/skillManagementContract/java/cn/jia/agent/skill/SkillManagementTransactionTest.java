@@ -517,9 +517,48 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         new ResourceDatabasePopulator(new ClassPathResource("db/agent-runtime-cost-profiles-v1.sql")).execute(jdbc.getDataSource());
         assertEquals(large,cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()));
         send.accept(report.apply(10).wire());
+        assertThrows(IllegalStateException.class,()->registry.read("0",ACTOR.clientId(),List.of(target),true));
+        assertThrows(SkillMarketplaceException.class,()->service.lockCostProfileBindings(scope(),fence.runtimeInstallationId(),fence.hostId(),List.of(slot)));
+        assertCostProfileFinishLocks(slot,()->assertEquals(read.get(),registry.read("0",ACTOR.clientId(),List.of(target),true)));
 
         verifyNoInteractions(packages,sessions,capabilities);
         return read;
+    }
+    /** Observe actual server lock waits, not a sleep-based guess that a writer was blocked. */
+    private void assertCostProfileFinishLocks(Slot slot,Runnable lockedRead) throws Exception {
+        var pool=Executors.newSingleThreadExecutor();
+        try {
+            var mutations=List.of(
+                Map.entry("UPDATE agent_skill_managed_state SET desired_enabled=0 WHERE active_installation_id=?",slot.installId()),
+                Map.entry("UPDATE agent_capability_quote_spec SET status='WITHDRAWN' WHERE capability_id=?",slot.capabilityId()),
+                Map.entry("UPDATE agent_skill_product_version SET review_status='REJECTED' WHERE product_version_id=?","spv_pdf_2"));
+            for(var mutation:mutations){
+                var connection=new java.util.concurrent.atomic.AtomicLong();var entered=new CountDownLatch(1);
+                var pending=new java.util.concurrent.atomic.AtomicReference<Future<Integer>>();
+                tx.execute(status->{
+                    lockedRead.run();
+                    pending.set(pool.submit(()->tx.execute(writer->{
+                        connection.set(jdbc.queryForObject("SELECT CONNECTION_ID()",Long.class));entered.countDown();
+                        int changed=jdbc.update(mutation.getKey(),mutation.getValue());writer.setRollbackOnly();return changed;
+                    })));
+                    try {
+                        assertTrue(entered.await(5,TimeUnit.SECONDS));boolean waiting=false;
+                        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+                        while(System.nanoTime()<deadline){
+                            int locks=jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
+                                +"JOIN performance_schema.threads t ON t.THREAD_ID=w.REQUESTING_THREAD_ID WHERE t.PROCESSLIST_ID=?",Integer.class,connection.get());
+                            if(locks>0){waiting=true;break;}
+                            if(pending.get().isDone())break;
+                            Thread.sleep(10);
+                        }
+                        assertTrue(waiting,"finish must retain skill state, capability and approved product locks");
+                    }catch(InterruptedException interrupted){Thread.currentThread().interrupt();throw new AssertionError(interrupted);}
+                    return null;
+                });
+                assertEquals(1,pending.get().get(5,TimeUnit.SECONDS));
+            }
+        }finally {pool.shutdownNow();}
+        assertEquals(Set.of(slot),costBindings(scope(),List.of(slot)),"rolled-back competing withdrawals must not alter authorization");
     }
     private Set<Slot> costBindings(SkillCapabilityLookup.Scope scope,Collection<Slot> slots) {
         return service.costProfileBindings(scope,runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId(),slots);

@@ -18,11 +18,16 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
     private final SkillManagementService skills;
     public RegisteredPricingProfiles(JdbcTemplate db,SkillManagementService skills){this.db=db;this.skills=skills;}
     private boolean installed(String tenant,String client,String provider,String agent,String installation,String host,CostProfileReport report){
+        return installed(tenant,client,provider,agent,installation,host,report,false);
+    }
+    private boolean installed(String tenant,String client,String provider,String agent,String installation,String host,CostProfileReport report,boolean locking){
         var requested=new HashSet<Slot>();
         for(var profile:report.profiles())requested.addAll(profile.scopePattern());
         // An empty report withdraws cost evidence without querying the package/runtime catalog.
-        return requested.isEmpty() || skills.costProfileBindings(new SkillCapabilityLookup.Scope(tenant,client,provider,agent),
-                installation,host,requested).containsAll(requested);
+        if(requested.isEmpty())return true;
+        var scope=new SkillCapabilityLookup.Scope(tenant,client,provider,agent);
+        return (locking?skills.lockCostProfileBindings(scope,installation,host,requested)
+                :skills.costProfileBindings(scope,installation,host,requested)).containsAll(requested);
     }
     private record Row(long id,boolean same,long sequence,String sha){}
     @Override @Transactional(propagation=Propagation.MANDATORY)
@@ -92,7 +97,7 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
                     if(row.seq()!=report.sequence() || !row.sha().equals(report.sha256()))throw new IllegalStateException("Invalid stored pricing configuration");
                     // Snapshot evidence is not a permanent installation/spec permission. Reuse its owner,
                     // not the requesting task owner, and never ask a live Runtime whether it is online.
-                    if(!installed(tenant,client,row.provider(),row.agent(),row.installation(),row.host(),report))continue;
+                    if(!installed(tenant,client,row.provider(),row.agent(),row.installation(),row.host(),report,lock))continue;
                     result.put(row.agent(),row);}
             }catch(org.springframework.dao.DataAccessException failure){for(Throwable c=failure;c!=null;c=c.getCause())if(lock&&c instanceof java.sql.SQLException e&&e.getErrorCode()==3572)throw new PreparedRuntimeEpochFence.Busy();throw failure;}
         }
