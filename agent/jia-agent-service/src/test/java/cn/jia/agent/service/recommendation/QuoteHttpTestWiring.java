@@ -18,8 +18,8 @@ public final class QuoteHttpTestWiring {
     public static String template(){return TaskRetrievalText.VERSION;}
     public static IndependentTaskQuoteController structured(AgentTaskMutationTransaction roots,TaskQuoteBatches batches,
             AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,AgentExternalServicePolicyService agents,
-            RecommendationMaterials materials,TaskBillingService billing,cn.jia.economy.mapper.GroupBaselineMapper db,cn.jia.agent.security.RegisteredPricingProfiles profiles,cn.jia.economy.task.PreparedReferenceRoutes routes){
-        var json=new tools.jackson.databind.ObjectMapper();return new IndependentTaskQuoteController(new IndependentTaskQuotes(new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials),new CandidateGroupOffers(new cn.jia.economy.service.impl.GroupBudgetQuotesService(db),billing),new RegisteredGroupQuoteInputs(new cn.jia.economy.service.impl.TaskQuoteExperimentReader(db,json),profiles,routes,json)));
+            RecommendationMaterials materials,TaskBillingService billing,cn.jia.economy.mapper.GroupBaselineMapper db,cn.jia.agent.security.RegisteredPricingProfiles profiles,cn.jia.economy.task.PreparedReferenceRoutes routes,io.micrometer.observation.ObservationRegistry observations){
+        var json=new tools.jackson.databind.ObjectMapper();return new IndependentTaskQuoteController(new IndependentTaskQuotes(new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials),new CandidateGroupOffers(new cn.jia.economy.service.impl.GroupBudgetQuotesService(db),billing),new RegisteredGroupQuoteInputs(new cn.jia.economy.service.impl.TaskQuoteExperimentReader(db,json),profiles,routes,json),Optional.of(observations)));
     }
     public static IndependentTaskQuoteController controller(AgentTaskMutationTransaction roots,TaskQuoteBatches batches,
             AgentTaskRequirementSnapshotService requirements,AgentTaskExecutionGrantService grants,AgentExternalServicePolicyService agents,

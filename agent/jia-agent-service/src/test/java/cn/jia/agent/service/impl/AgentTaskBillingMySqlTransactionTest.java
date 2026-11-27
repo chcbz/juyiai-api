@@ -3263,7 +3263,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String routeBytes=json.writeValueAsString(Map.of("schema","prepared-reference-routes-v2","entries",List.of(routeEntry)));Path routeFile=tmp.resolve("experiment-routes.json");Files.writeString(routeFile,routeBytes);var resolver=new cn.jia.economy.service.impl.PinnedReferenceRoutes(routeFile.toString(),QuoteWireWindow.digest(routeBytes));
         var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),new PersonalWorkspaceServiceImpl(workspace.files(),mock(PersonalWorkspaceStorage.class),mock(PersonalWorkspaceWriteService.class)));
         recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured(Boolean.getBoolean("cyf.measuredBatchQuoteLoad")?observedQuoteRoots():roots,batches,authority.req(),assignment,authority.policies(),materials,billing,recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),resolver);
+        var observations=io.micrometer.observation.ObservationRegistry.create();
+        observations.observationConfig().observationHandler(new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(quoteStages));
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured(Boolean.getBoolean("cyf.measuredBatchQuoteLoad")?observedQuoteRoots():roots,batches,authority.req(),assignment,authority.policies(),materials,billing,recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),resolver,observations);
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));
@@ -3282,6 +3284,15 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureSharedQuoteMatrix(agent,token,policy,cfg);
             jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertEquals(quotes,call.send("approved"));var fresh=call.send("after-withdraw");assertFixedQuote(fresh.get(0));assertFixedQuote(fresh.get(1));}
         assertEquals(money,count("economy_transaction"));
+    }
+    private final io.micrometer.core.instrument.simple.SimpleMeterRegistry quoteStages=new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+    private java.util.Map<String,Long> stageCounts(){
+        var counts=new java.util.TreeMap<String,Long>();
+        for(String name:List.of("intent_features","configuration","baseline","finish")){
+            var timer=quoteStages.find("cyf.task.quote.batch.stage").tags("stage",name,"outcome","ok").timer();
+            counts.put(name,timer==null?0L:timer.count());
+        }
+        return counts;
     }
     /** Isolated HTTP/SQL load only. The registration and aggregate fixtures are not accuracy evidence. */
     private void measureSharedQuoteMatrix(String registered,String token,cn.jia.economy.pricing.GroupMeanPricing.Policy policy,cn.jia.economy.pricing.GroupMeanPricing.Configuration config)throws Exception{
@@ -3310,9 +3321,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }
                 for(int n:(mixed||fixed?List.of(108):List.of(6,108))){var selected=ids.subList(0,n);String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","perf","data",Map.of("expectedTaskVersion","0","agentIds",selected)));
                     var times=new java.util.ArrayList<Long>();var all=new java.util.HashSet<String>();long cold=0;var before=readRecSql();var writes=readQuoteWrites(TASK);var base=groupPerf();
+                    var stageStart=stageCounts();
                     timingWindow=new java.util.concurrent.ConcurrentLinkedQueue<>();
                     for(int j=0;j<=30;j++){String key="group-perf-"+scenario+"-"+n+"-"+j;var req=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","perf").header("Authorization","Bearer "+token).header("Idempotency-Key",key).POST(HttpRequest.BodyPublishers.ofString(body)).build();long start=System.nanoTime();var reply=http.send(req,HttpResponse.BodyHandlers.ofString());long elapsed=System.nanoTime()-start;if(j==0)cold=elapsed;else times.add(elapsed);
                         assertEquals(200,reply.statusCode(),reply.body());var rows=json.readTree(reply.body()).at("/data/quotes");assertEquals(n,rows.size());for(int i=0;i<n;i++){var row=rows.get(i);assertEquals(selected.get(i),row.path("agentId").asText());if(fixed||(mixed && i%2!=0))assertFixedQuote(row);else {assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());assertEquals(String.valueOf(distinct?30+i:30),row.at("/amount/amountMinor").asText());}assertTrue(all.add(row.path("quoteId").asText()));}}
+                    stageCounts().forEach((name,count)->assertEquals(31L,count-stageStart.get(name),name));
                     reportRootTimings(scenario,n,1,31);
                     var after=readRecSql().minus(before);var end=groupPerf();var saved=readQuoteWrites(TASK);times.sort(Long::compare);long reads=end[0]-base[0],scanned=end[1]-base[1],sources=end[2]-base[2];
                     System.out.printf(java.util.Locale.ROOT,"SHARED_QUOTE_HTTP candidates=%d groups=%d firstMs=%.3f hotN=30 p95ms=%.3f meanRows=%d fixedRows=%d groupReads=%d groupExamined=%d privateReads=%d insertCalls=%d lockWaits=%d lockMs=%d%n",n,fixed?0:mixed?n/2:distinct?n:1,cold/1e6,times.get(28)/1e6,fixed?0:mixed?all.size()/2:all.size(),fixed?all.size():mixed?all.size()/2:0,reads,scanned,sources,saved.calls()-writes.calls(),after.waits(),after.waitMillis());
