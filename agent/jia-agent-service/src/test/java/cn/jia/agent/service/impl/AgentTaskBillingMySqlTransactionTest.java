@@ -3296,8 +3296,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation,pricing_installation_id,pricing_generation,pricing_binding_id,pricing_sequence,pricing_config_sha,pricing_profiles_json) VALUES(?,'fixture',?,?,?,?,'offline',?,'host','boot',1,?,1,?,1,?,?)",id,TENANT,CLIENT,OWNER,binding,install,install,binding,QuoteWireWindow.digest(canonical),canonical);
         }
         try(var http=HttpClient.newHttpClient()){
-            for(String scenario:List.of("shared","distinct","mixed","fixed")){
-                boolean distinct=!scenario.equals("shared"), mixed=scenario.equals("mixed"), fixed=scenario.equals("fixed");
+            for(String scenario:List.of("fixed_fresh","shared","distinct","mixed","fixed")){
+                boolean distinct=!scenario.equals("shared"), mixed=scenario.equals("mixed"), fixed=scenario.startsWith("fixed");
+                if(scenario.equals("shared"))for(String id:ids)jdbc.update("UPDATE agent_runtime SET pricing_config_sha=?,pricing_profiles_json=? WHERE agent_id=?",QuoteWireWindow.digest(canonical),canonical,id);
                 if(mixed || fixed)for(int i=mixed?1:0;i<ids.size();i+=mixed?2:1)
                     jdbc.update("UPDATE agent_runtime SET pricing_config_sha=NULL,pricing_profiles_json=NULL WHERE agent_id=?",ids.get(i));
                 if(scenario.equals("distinct"))for(int i=0;i<ids.size();i++){
@@ -3316,6 +3317,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     var after=readRecSql().minus(before);var end=groupPerf();var saved=readQuoteWrites(TASK);times.sort(Long::compare);long reads=end[0]-base[0],scanned=end[1]-base[1],sources=end[2]-base[2];
                     System.out.printf(java.util.Locale.ROOT,"SHARED_QUOTE_HTTP candidates=%d groups=%d firstMs=%.3f hotN=30 p95ms=%.3f meanRows=%d fixedRows=%d groupReads=%d groupExamined=%d privateReads=%d insertCalls=%d lockWaits=%d lockMs=%d%n",n,fixed?0:mixed?n/2:distinct?n:1,cold/1e6,times.get(28)/1e6,fixed?0:mixed?all.size()/2:all.size(),fixed?all.size():mixed?all.size()/2:0,reads,scanned,sources,saved.calls()-writes.calls(),after.waits(),after.waitMillis());
                     assertEquals(fixed?0:62,reads);assertEquals(0,sources);assertEquals(31L*((n+31)/32),saved.calls()-writes.calls());assertEquals(31L*n,saved.rows()-writes.rows());
+                    System.out.printf(java.util.Locale.ROOT,"SHARED_BATCH_DB scenario=%s n=%d batchN=31 quoteWriteMs=%.3f selectMs=%.3f snapshotBytes=%d statements=%d httpMaxMs=%.3f%n",scenario,n,(saved.dbPicos()-writes.dbPicos())/1e9,after.statementPicos()/1e9,saved.bytes()-writes.bytes(),after.statements(),times.getLast()/1e6);
                     if(!mixed && !fixed)for(int lanes:List.of(5,10))
                         measureConcurrentGroupQuotes(http,token,body,selected,distinct,lanes);
                     if(!mixed && !fixed){
@@ -3325,7 +3327,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                     }
                     if(scenario.equals("shared") && n==108)measurePrivateHistoryGrowth(http,token,body,selected,
                         cn.jia.economy.pricing.GroupMeanPricing.key(policy.classify("edit",Map.of(cn.jia.economy.pricing.GroupMeanPricing.Dimension.INPUT_FILE_COUNT,1L),config).orElseThrow()));
-                    if(mixed || fixed)verifyLastQuoteChunkRollback(http,token,body,selected.getLast(),scenario);
+                    if(mixed || scenario.equals("fixed"))verifyLastQuoteChunkRollback(http,token,body,selected.getLast(),scenario);
                 }
             }
         }
