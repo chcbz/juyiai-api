@@ -413,7 +413,12 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     private void requireSnapshot(EconomyTaskQuoteEntity row) {
         if (row.getSnapshotJson() == null) throw new IllegalStateException("Unresolvable frozen quote preparation");
         var root=json.readTree(row.getSnapshotJson());
-        if(ScopedTaskQuoteSnapshot.SCHEMA.equals(root.path("schema").asText(null))){
+        String schema=root.path("schema").asText(null);
+        // A stored new-format identity losing its schema is corruption, not a historical quote.
+        // Selection still follows the stored schema; this does not grant semantics to a client prefix.
+        if(row.getQuoteId().startsWith("tq_s1_")&&!ScopedTaskQuoteSnapshot.SCHEMA.equals(schema))
+            throw new IllegalStateException("Scoped quote schema is missing or changed");
+        if(ScopedTaskQuoteSnapshot.SCHEMA.equals(schema)){
             final ScopedTaskQuoteSnapshot scoped;
             try {scoped=json.readValue(row.getSnapshotJson(),ScopedTaskQuoteSnapshot.class);}
             catch(RuntimeException corrupt){throw new IllegalStateException("Invalid scoped quote snapshot",corrupt);}

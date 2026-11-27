@@ -782,7 +782,12 @@ class TaskBillingServiceMySqlTest {
         assertThrows(TaskBillingException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"wrong-payer")));
         var wrong=new Binding(2,snapshot.binding().requirementSha256(),snapshot.binding().inputSnapshotDigest(),"agent","scope-batch");
         assertThrows(TaskBillingException.class,()->inTask(TASK,()->billing.reserve(TASK,id,wrong,"payer-1")));
-        jdbc.update("UPDATE economy_task_quote SET amount_wen=1 WHERE quote_id=?",id);
+        String original=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,id);
+        jdbc.update("UPDATE economy_task_quote SET snapshot_json=JSON_REMOVE(snapshot_json,'$.schema') WHERE quote_id=?",id);
+        assertThrows(IllegalStateException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
+        jdbc.update("UPDATE economy_task_quote SET snapshot_json=JSON_SET(?, '$.schema', 'UNKNOWN_SCOPE') WHERE quote_id=?",original,id);
+        assertThrows(IllegalStateException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
+        jdbc.update("UPDATE economy_task_quote SET snapshot_json=?,amount_wen=1 WHERE quote_id=?",original,id);
         assertThrows(IllegalStateException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
         assertEquals(100,wallet());assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
     }
