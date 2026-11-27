@@ -59,12 +59,17 @@ public interface TaskBillingService {
     InitialCommitment heldInitialCommitment(Task task,String agentId);
     default String heldInitialIntent(Task task,String agentId){var held=heldInitialCommitment(task,agentId);return held==null?null:held.intentSha256();}
     StoredQuote storeFixedFallback(Task task, Binding binding, String payer, TaskQuoteBatches.Reason reason);
-    sealed interface OfferWrite permits MeanWrite,FixedWrite { Binding binding(); }
+    sealed interface OfferWrite permits MeanWrite,FixedWrite,ScopedWrite { Binding binding(); }
     record LocalQuoteFacts(String version,String operation,String bucketId) {}
     record MeanWrite(Binding binding,GroupBudgetQuotes.Mean price,LocalQuoteFacts facts,MeasuredGroup observedGroup,
                      String initialIntentSha256) implements OfferWrite {
         public MeanWrite { Objects.requireNonNull(observedGroup);
             if(initialIntentSha256!=null && !initialIntentSha256.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid initial intent commitment"); }
+    }
+    /** Complete typed snapshot only; callers cannot inject a raw JSON price or a fabricated measured execution. */
+    record ScopedWrite(ScopedTaskQuoteSnapshot snapshot) implements OfferWrite {
+        public ScopedWrite {Objects.requireNonNull(snapshot);}
+        @Override public Binding binding(){return snapshot.binding();}
     }
     record FixedWrite(Binding binding,GroupBudgetQuotes.Fixed price) implements OfferWrite {}
     java.util.List<StoredQuote> storeOffersBatch(Task task,String payer,java.util.List<OfferWrite> writes);

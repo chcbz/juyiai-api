@@ -141,10 +141,10 @@ public interface ConfirmedSampleMapper {
                   String agent,String groupVersion,String executionConfig,String localRoute,String referenceRoute,String tools,String policy) {}
     @Select("""
         SELECT s.lifecycle_state,s.evidence_revision,r.fact_id,r.outcome,r.membership_verified,r.member_count,
-          q.snapshot_json->>'$.binding.agentId',q.snapshot_json->>'$.preparation.group.dispatchGroupVersion',
-          q.snapshot_json->>'$.preparation.group.executionConfigSha256',q.snapshot_json->>'$.preparation.group.localRouteSha256',
-          q.snapshot_json->>'$.preparation.group.routeVersion',q.snapshot_json->>'$.preparation.group.toolConfigSha256',
-          q.snapshot_json->>'$.preparation.group.capturePolicyVersion'
+          q.snapshot_json->>'$.binding.agentId',CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.dispatchGroupVersion' ELSE q.snapshot_json->>'$.preparation.group.dispatchGroupVersion' END,
+          CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.executionConfigSha256' ELSE q.snapshot_json->>'$.preparation.group.executionConfigSha256' END,CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.localRouteSha256' ELSE q.snapshot_json->>'$.preparation.group.localRouteSha256' END,
+          CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.routeVersion' ELSE q.snapshot_json->>'$.preparation.group.routeVersion' END,CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.toolConfigSha256' ELSE q.snapshot_json->>'$.preparation.group.toolConfigSha256' END,
+          CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN q.snapshot_json->>'$.executionBinding.capturePolicyVersion' ELSE q.snapshot_json->>'$.preparation.group.capturePolicyVersion' END
         FROM economy_task_cost_sample s JOIN economy_task_charge ch ON ch.tenant_id=s.tenant_id AND ch.client_id=s.client_id
           AND ch.owner_jiacn=s.owner_jiacn AND ch.task_id=s.task_id AND ch.quote_id=s.quote_id
         JOIN economy_task_quote_resolved q ON q.tenant_id=ch.tenant_id AND q.client_id=ch.client_id AND q.owner_jiacn=ch.owner_jiacn

@@ -25,6 +25,7 @@ import cn.jia.economy.service.EconomyPostingService;
 import cn.jia.economy.service.EconomyPrincipal;
 import cn.jia.economy.task.TaskBillingException;
 import cn.jia.economy.task.TaskBillingService;
+import cn.jia.economy.task.ScopedTaskQuoteSnapshot;
 import tools.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -209,6 +210,10 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     @Override public List<StoredQuote> storeOffersBatch(Task task,String payer,List<OfferWrite> writes) {
         Objects.requireNonNull(payer);
         return observedWrite(() -> persistChunked(writes,write -> {
+            if(write instanceof ScopedWrite scoped){
+                var snapshot=scoped.snapshot();
+                return quoteRow("tq_s1_"+UUID.randomUUID(),task,bindingHash(snapshot.binding()),payer,snapshot.amountWen(),encode(snapshot));
+            }
             if(write instanceof FixedWrite fixed)return fixedRow(task,payer,fixed.binding(),fixed.price().reason());
             var mean=(MeanWrite)write; var pin=mean.price().pin(); var binding=mean.binding(); var facts=mean.facts();
             var digest=cn.jia.economy.pricing.GroupMeanPricing.featureDigest(facts.version(),facts.operation(),facts.bucketId(),binding.requirementSha256(),binding.inputSnapshotDigest());
@@ -280,11 +285,13 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         requireTransition(mapper.markHeld(row));
         // Namespace comes from the validated immutable DB quote, not an unchecked client ID.
         // Old snapshots do not contain initial features. Do not invent them at assignment time.
-        boolean groupMean=quote.getQuoteId().startsWith(GROUP_PREFIX);
-        if (groupMean || quote.getQuoteId().startsWith(MEASURED_PREFIX)) {
+        String schema=json.readTree(quote.getSnapshotJson()).path("schema").asText();
+        boolean groupMean=GROUP_SCHEMA.equals(schema), scoped=ScopedTaskQuoteSnapshot.SCHEMA.equals(schema);
+        if (groupMean || scoped || MEASURED_SCHEMA.equals(schema)) {
             String sampleId = HexFormat.of().formatHex(digest(encode(List.of("TASK_LIFECYCLE_V1",task.scope().tenantId(),
                     task.scope().clientId(),task.ownerJiacn(),task.taskId(),quote.getQuoteId())).getBytes(StandardCharsets.UTF_8)));
-            requireTransition(groupMean ? mapper.confirmGroupMeanSample(quote,sampleId) : mapper.confirmMeasuredSample(quote, sampleId));
+            requireTransition(scoped ? mapper.confirmScopedSample(quote,sampleId,json.readValue(quote.getSnapshotJson(),ScopedTaskQuoteSnapshot.class).featureSha())
+                    : groupMean ? mapper.confirmGroupMeanSample(quote,sampleId) : mapper.confirmMeasuredSample(quote, sampleId));
         }
         return receipt(row);
     }
@@ -403,11 +410,19 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         if (changed != 1) throw new TaskBillingException(CHARGE_CONFLICT);
     }
 
-    private static void requireSnapshot(EconomyTaskQuoteEntity row) {
+    private void requireSnapshot(EconomyTaskQuoteEntity row) {
         if (row.getSnapshotJson() == null) throw new IllegalStateException("Unresolvable frozen quote preparation");
+        var root=json.readTree(row.getSnapshotJson());
+        if(ScopedTaskQuoteSnapshot.SCHEMA.equals(root.path("schema").asText())){
+            final ScopedTaskQuoteSnapshot scoped;
+            try {scoped=json.readValue(row.getSnapshotJson(),ScopedTaskQuoteSnapshot.class);}
+            catch(RuntimeException corrupt){throw new IllegalStateException("Invalid scoped quote snapshot",corrupt);}
+            if(row.getAmountWen()!=scoped.amountWen() || !row.getBindingSha256().equals(bindingHash(scoped.binding())))
+                throw new IllegalStateException("Scoped quote storage differs from snapshot");
+        }
     }
 
-    private static Quote receipt(EconomyTaskQuoteEntity row) {
+    private Quote receipt(EconomyTaskQuoteEntity row) {
         requireSnapshot(row);
         return new Quote(row.getQuoteId(), row.getAmountWen(), row.getSnapshotJson());
     }

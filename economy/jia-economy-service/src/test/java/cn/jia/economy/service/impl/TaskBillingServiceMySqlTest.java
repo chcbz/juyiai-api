@@ -23,6 +23,7 @@ import cn.jia.economy.task.GroupBudgetQuotes;
 import cn.jia.economy.task.TaskQuoteBatches;
 import cn.jia.economy.task.TaskBillingException;
 import cn.jia.economy.task.TaskBillingService;
+import cn.jia.economy.task.ScopedTaskQuoteSnapshot;
 import cn.jia.economy.task.TaskBillingService.Binding;
 import cn.jia.economy.task.TaskBillingService.Charge;
 import cn.jia.economy.task.TaskBillingService.Quote;
@@ -709,6 +710,74 @@ class TaskBillingServiceMySqlTest {
         assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent-0")));
         assertEquals(70,wallet());assertEquals(1,count("economy_task_cost_sample"));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_task_cost_sample WHERE quote_id=? AND history_group_sha256 IS NULL AND sample_state='WAITING_EVIDENCE'",Integer.class,id));
+    }
+
+    private static ScopedTaskQuoteSnapshot scopedSnapshot(String agent,boolean mean,boolean zero) {
+        String h="a".repeat(64);var binding=new Binding(1,"1".repeat(64),"2".repeat(64),agent,"scope-batch");
+        var scope=new ScopedTaskQuoteSnapshot.ScopePin(1,binding.requirementSha256(),"3".repeat(64),binding.inputSnapshotDigest());
+        var evidence=mean?new ScopedTaskQuoteSnapshot.MeanEvidence(h,List.of("small"),h,List.of(h),h,h,1,1,1,h,2,zero?BigDecimal.ZERO:new BigDecimal("0.59")):null;
+        var basis=new ScopedTaskQuoteSnapshot.Basis(mean?"GROUP_MEAN":"FIXED_FALLBACK",evidence,mean?null:TaskQuoteBatches.Reason.COST_INPUT_MISSING);
+        var profile=mean?new ScopedTaskQuoteSnapshot.PricingProfilePin("install","runtime",1,1,h,"profile",1,h,h):null;
+        return new ScopedTaskQuoteSnapshot(ScopedTaskQuoteSnapshot.SCHEMA,binding,scope,basis,profile,null,null,basis.amountWen());
+    }
+    private void usageSchema(){new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(jdbc.getDataSource());}
+
+    @Test void scopedFixedQuotesPersistFullBatchReserveOneSampleAndSettleOriginalPrice() {
+        usageSchema();var json=new ObjectMapper();var writes=new java.util.ArrayList<TaskBillingService.OfferWrite>();
+        for(int i=0;i<108;i++)writes.add(new TaskBillingService.ScopedWrite(scopedSnapshot("agent-"+i,i%2==0,false)));
+        var stored=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",writes));
+        assertEquals(108,stored.size());assertEquals(108,count("economy_task_quote"));assertEquals(0,count("economy_task_cost_sample"));
+        for(int i=0;i<108;i++){
+            assertTrue(stored.get(i).quoteId().startsWith("tq_s1_"));assertEquals(i%2==0?30:1,stored.get(i).amountWen());
+            String raw=jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote WHERE quote_id=?",String.class,stored.get(i).quoteId());
+            assertEquals(raw,jdbc.queryForObject("SELECT snapshot_json FROM economy_task_quote_resolved WHERE quote_id=?",String.class,stored.get(i).quoteId()));
+            assertEquals(((TaskBillingService.ScopedWrite)writes.get(i)).snapshot(),json.readValue(raw,ScopedTaskQuoteSnapshot.class));
+            assertFalse(json.readTree(raw).has("preparation"));
+        }
+        var snapshot=((TaskBillingService.ScopedWrite)writes.getFirst()).snapshot();String id=stored.getFirst().quoteId();
+        var held=inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1"));
+        assertEquals(held,inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
+        assertEquals(70,wallet());assertEquals(1,count("economy_task_cost_sample"));
+        assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent-0")));
+        String sample=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        assertEquals(snapshot.featureSha(),jdbc.queryForObject("SELECT initial_feature_sha256 FROM economy_task_cost_sample",String.class));
+        assertNull(jdbc.queryForObject("SELECT history_group_sha256 FROM economy_task_cost_sample",String.class));
+        assertNull(originals.confirmed(TASK,sample).groupVersion());
+        assertEquals(State.CAPTURED,inTask(TASK,()->billing.capture(TASK)).state());
+        assertEquals(30,inTask(TASK,()->billing.reservation(TASK,id,"payer-1","scope-batch")).amountWen());
+        assertNotNull(originals.confirmed(TASK,sample));assertEquals(70,wallet());
+    }
+    @Test void scopedZeroAndOneWenUseSameSchemaAndOnlyRealExecutionCommitmentIsReturned() {
+        usageSchema();var zero=scopedSnapshot("agent",true,true);var h="a".repeat(64);
+        var execution=new TaskBillingService.MeasuredGroup("dispatch",h,h,"1",h,"capture");
+        var snapshot=new ScopedTaskQuoteSnapshot(zero.schema(),zero.binding(),zero.scopePin(),zero.basis(),zero.pricingProfilePin(),h,execution,0);
+        var id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(snapshot)))).getFirst().quoteId();
+        inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1"));assertEquals(100,wallet());
+        assertEquals(new TaskBillingService.InitialCommitment(h,execution),inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent")));
+        assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"other")));
+        String sample=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        assertEquals(execution.executionConfigSha256(),originals.confirmed(TASK,sample).executionConfig());
+        var other=new Task(SCOPE,"owner-1","task-2");var fixed=scopedSnapshot("fallback",false,false);
+        var fixedId=inTask(other,()->billing.storeOffersBatch(other,"payer-1",List.of(new TaskBillingService.ScopedWrite(fixed)))).getFirst().quoteId();
+        inTask(other,()->billing.reserve(other,fixedId,fixed.binding(),"payer-1"));assertEquals(99,wallet());assertEquals(2,count("economy_task_cost_sample"));
+        inTask(other,()->billing.release(other,true));assertEquals(100,wallet());
+    }
+    @Test void scopedSnapshotsRejectCorruptionBeforeMoneyAndLateChunkFailureRollsBackAllQuotes() {
+        usageSchema();var snapshot=scopedSnapshot("agent",true,false);
+        assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot(snapshot.schema(),snapshot.binding(),snapshot.scopePin(),snapshot.basis(),snapshot.pricingProfilePin(),null,null,1));
+        assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot(snapshot.schema(),snapshot.binding(),snapshot.scopePin(),snapshot.basis(),null,null,null,30));
+        var writes=new java.util.ArrayList<TaskBillingService.OfferWrite>();
+        for(int i=0;i<107;i++)writes.add(new TaskBillingService.ScopedWrite(scopedSnapshot("agent-"+i,false,false)));
+        writes.add(writes.getFirst());
+        assertThrows(org.springframework.dao.DataAccessException.class,()->inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",writes)));
+        assertEquals(0,count("economy_task_quote"));assertEquals(100,wallet());
+        String id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(snapshot)))).getFirst().quoteId();
+        assertThrows(TaskBillingException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"wrong-payer")));
+        var wrong=new Binding(2,snapshot.binding().requirementSha256(),snapshot.binding().inputSnapshotDigest(),"agent","scope-batch");
+        assertThrows(TaskBillingException.class,()->inTask(TASK,()->billing.reserve(TASK,id,wrong,"payer-1")));
+        jdbc.update("UPDATE economy_task_quote SET amount_wen=1 WHERE quote_id=?",id);
+        assertThrows(IllegalStateException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
+        assertEquals(100,wallet());assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
     }
 
     private Quote quote(Task task, Binding binding, String yuan) {

@@ -59,12 +59,13 @@ public interface EconomyTaskBillingMapper {
     record InitialCommitmentRow(String intent,String groupJson) {}
     // The caller cannot nominate a quote id. Read the charge winner, not the most recent quote or configuration.
     @Select("""
-        SELECT JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256')) AS intent,JSON_EXTRACT(q.snapshot_json,'$.preparation.group') AS groupJson FROM economy_task_charge c
+        SELECT JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256')) AS intent,CASE WHEN q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1' THEN JSON_EXTRACT(q.snapshot_json,'$.executionBinding') ELSE JSON_EXTRACT(q.snapshot_json,'$.preparation.group') END AS groupJson FROM economy_task_charge c
         JOIN economy_task_quote_resolved q ON q.quote_id=c.quote_id AND BINARY q.tenant_id=BINARY c.tenant_id AND BINARY q.client_id=BINARY c.client_id
           AND BINARY q.owner_jiacn=BINARY c.owner_jiacn AND BINARY q.task_id=BINARY c.task_id AND BINARY q.payer_user_id=BINARY c.payer_user_id
         WHERE c.tenant_id=#{tenant} AND c.client_id=#{client} AND c.owner_jiacn=#{owner} AND c.task_id=#{task} AND c.state='HELD'
           AND BINARY c.tenant_id=BINARY #{tenant} AND BINARY c.client_id=BINARY #{client} AND BINARY c.owner_jiacn=BINARY #{owner} AND BINARY c.task_id=BINARY #{task}
-          AND JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256'))='STRING' AND JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.schema')) IN ('MEASURED_TASK_QUOTE_V1','GROUP_MEAN_TASK_QUOTE_V1')
+          AND JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.initialIntentSha256'))='STRING' AND JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.schema')) IN ('MEASURED_TASK_QUOTE_V1','GROUP_MEAN_TASK_QUOTE_V1','SCOPED_FIXED_TASK_QUOTE_V1')
+          AND (q.snapshot_json->>'$.schema'<>'SCOPED_FIXED_TASK_QUOTE_V1' OR JSON_TYPE(JSON_EXTRACT(q.snapshot_json,'$.executionBinding'))='OBJECT')
           AND BINARY JSON_UNQUOTE(JSON_EXTRACT(q.snapshot_json,'$.binding.agentId'))=BINARY #{agent}
         """) InitialCommitmentRow heldInitialCommitment(@Param("tenant") String tenant,@Param("client") String client,@Param("owner") String owner,@Param("task") String task,@Param("agent") String agent);
 
@@ -94,6 +95,19 @@ public interface EconomyTaskBillingMapper {
           AND task_id=#{q.taskId} AND quote_id=#{q.quoteId} AND payer_user_id=#{q.payerUserId}
           AND JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='GROUP_MEAN_TASK_QUOTE_V1'
         """) int confirmGroupMeanSample(@Param("q") EconomyTaskQuoteEntity quote,@Param("sid") String sampleId);
+
+    // Scope facts remain in the immutable quote; no invented vector, shared-training grant or execution proof.
+    @Insert("""
+        INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,quote_id,sample_definition_version,
+          initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,history_group_sha256,lifecycle_state,evidence_revision,sample_state)
+        SELECT #{sid},tenant_id,client_id,owner_jiacn,task_id,quote_id,'TASK_LIFECYCLE_V1',
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.scopePin.requirementSha256')),
+          JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.scopePin.inputSnapshotDigest')),
+          #{featureSha},NULL,'ACTIVE',1,'WAITING_EVIDENCE'
+        FROM economy_task_quote_resolved WHERE tenant_id=#{q.tenantId} AND client_id=#{q.clientId} AND owner_jiacn=#{q.ownerJiacn}
+          AND task_id=#{q.taskId} AND quote_id=#{q.quoteId} AND payer_user_id=#{q.payerUserId}
+          AND JSON_UNQUOTE(JSON_EXTRACT(snapshot_json,'$.schema'))='SCOPED_FIXED_TASK_QUOTE_V1'
+        """) int confirmScopedSample(@Param("q") EconomyTaskQuoteEntity quote,@Param("sid") String sampleId,@Param("featureSha") String featureSha);
 
     @Select("SELECT * FROM economy_task_charge WHERE " + SCOPE + " FOR UPDATE")
     EconomyTaskChargeEntity lockCharge(@Param("tenantId") String tenant, @Param("clientId") String client,
