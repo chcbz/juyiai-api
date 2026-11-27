@@ -133,6 +133,15 @@ class AgentTaskExecutionGrantServiceImplTest {
         verifyNoInteractions(rentAdmission);
     }
 
+    @Test void unsupportedInitialExecutionCannotReserveOrWriteAnUnreadableBootstrap(){
+        for(String operation:List.of("GENERATE_TEXT_FILE","EXECUTE_SKILL"))for(boolean explicit:List.of(false,true)){
+            var command=request();command.setRequestedOperations(List.of(operation));if(explicit)command.setInitialOperation(operation);
+            var failure=assertThrows(AgentTaskExecutionGrantException.class,()->service.assignAndGrant(scope(),"task-1","unsupported-start",command,"payer-1"));
+            assertEquals(AgentTaskExecutionGrantException.Reason.BAD_REQUEST,failure.reason());
+        }
+        verifyNoInteractions(benchmarks,billing,legacy);assertTrue(grants.byAction.isEmpty());assertTrue(bootstraps.byAction.isEmpty());
+    }
+
     @Test void incompleteOrLegacyAssignmentCannotMutateOrReserve() {
         var missingQuote=request(); missingQuote.setQuoteId(null);
         var missingRecommendation=request(); missingRecommendation.setRecommendationId(null);

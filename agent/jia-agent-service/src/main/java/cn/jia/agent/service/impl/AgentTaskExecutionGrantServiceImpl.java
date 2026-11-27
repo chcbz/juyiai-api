@@ -1131,6 +1131,10 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
         String initialOperation=initialOperationPresent
                 ? explicitInitialOperation(request.getInitialOperation(),operations)
                 : legacyInitialOperationOrNull(operations);
+        // Follow-up grant operations are broader than the bootstrap consumer's initial intents.
+        // Reject unsupported starts before any reservation instead of persisting an unreadable outbox.
+        if(initialOperation!=null && !AgentTaskBountyBootstrapPayload.supportsInitialOperation(initialOperation))
+            throw bad("initialOperation is not supported by task bootstrap");
         List<ValidInput> inputs=canonicalInputs(request.getInputRefs());
         return new ValidAssign(taskId,key,request.getAgentId(),request.getExpectedTaskVersion(),
                 request.getRequirementRevision(),operations,inputs,initialOperation,

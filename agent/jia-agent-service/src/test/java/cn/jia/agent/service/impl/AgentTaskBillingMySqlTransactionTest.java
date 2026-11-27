@@ -4095,31 +4095,31 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     @Test void scopedBenchmarkBootstrapFailureRollsBackRealAssignmentWalletAndSample(){
         prepareScopedAssignment();failBootstrap=true;assertThrows(InjectedFailure.class,this::assign);
-        assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));failBootstrap=false;assign();assertEquals(1,count("economy_task_cost_sample"));
+        assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));failBootstrap=false;assign();assertEquals(1,count("economy_task_cost_sample"));
     }
     @Test void scopedBenchmarkChangedCurrentConfigurationRejectsBeforeMoneyOrGrant(){
         prepareScopedAssignment();when(scopedProfiles.atAssignment(any())).thenReturn(null);
-        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));
     }
     @Test void scopedBenchmarkRetiredOriginalRejectsWithoutReadingConfiguration(){
         prepareScopedAssignment();jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
         assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);
-        assertAssignmentAbsent();verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+        assertAssignmentAbsent(2);verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
     }
     @Test void scopedBenchmarkChangedRouteSemanticCannotBeApprovedByCopyingManifest(){
         prepareScopedAssignment();var ref=new CostRouteReference("MODEL_RESPONSE","INFERENCE","fixture-provider","fixture-model","TOKENS_V1");
         when(scopedRoutes.read(eq(BILLING_TASK.scope()),anyList(),anyBoolean())).thenReturn(Map.of(ref,new CostRouteBindings.Binding(ref,2,"b".repeat(64),new CostPricingRoute.TokenRoute("other-channel","fixture-model","standard","TOKENS_V1"))));
-        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));
         verify(scopedRoutes).read(eq(BILLING_TASK.scope()),anyList(),eq(true));
     }
     @Test void scopedBenchmarkDirectAssignUsesSameProspectiveEnrollment(){
         prepareScopedAssignment();var request=new cn.jia.agent.entity.AgentTaskAssignDTO();request.setAgentId(AGENT);
         request.setWorkflowVersion(2);request.setBusinessAction("assign_and_start");request.setQuoteId(quoteId);request.setRecommendationId("recommendation-1");
-        request.setExpectedTaskVersion(0L);request.setRequirementRevision(1L);request.setRequestedOperations(List.of("GENERATE_TEXT_FILE"));
-        request.setInitialOperation("GENERATE_TEXT_FILE");request.setInputRefs(List.of());
+        request.setExpectedTaskVersion(0L);request.setRequirementRevision(1L);request.setRequestedOperations(List.of("DELIBERATE","EXECUTE_SKILL"));
+        request.setInitialOperation("DELIBERATE");request.setInputRefs(List.of());
         var grant=assignment.assignAndGrant(SCOPE,TASK,"scoped-direct",request,PAYER);
         assertEquals(99,wallet(jdbc));assertEquals(1,count("economy_task_cost_sample"));assertEquals(1,count("agent_task_execution_grant"));
-        assertEquals("GENERATE_TEXT_FILE",jdbc.queryForObject("SELECT permitted_operation FROM agent_task_bounty_bootstrap_outbox",String.class));
+        assertEquals("DELIBERATE",jdbc.queryForObject("SELECT permitted_operation FROM agent_task_bounty_bootstrap_outbox",String.class));
         assertEquals(grant.getGrantId(),assignment.assignAndGrant(SCOPE,TASK,"scoped-direct",request,PAYER).getGrantId());
         assertEquals(1,count("economy_task_cost_sample"));
     }
@@ -4153,7 +4153,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         if ("changes_requested".equals(decision)) command.setReviewReason("add tests");
         return decisions.decide(TENANT, CLIENT, TASK, OWNER, command);
     }
-    private void assertAssignmentAbsent() {
+    private void assertAssignmentAbsent() { assertAssignmentAbsent(1); }
+    private void assertAssignmentAbsent(int originalQuotes) {
         assertEquals(100, wallet(jdbc)); assertEquals("open", taskState());
         assertEquals(0L, jdbc.queryForObject("SELECT task_version FROM agent_task_meta", Long.class));
         for (String table : List.of("economy_task_charge", "economy_transaction", "economy_entry",
@@ -4161,7 +4162,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 "agent_task_event", "agent_task_execution_grant", "agent_task_bounty_bootstrap_outbox")) {
             assertEquals(0, count(table), table);
         }
-        assertEquals(1, count("economy_task_quote")); // immutable quote predates the failed assignment
+        assertEquals(originalQuotes, count("economy_task_quote")); // immutable quotes predate the failed assignment
     }
     private <T> T proxy(Object target, Class<T> type) {
         var factory = new ProxyFactory(target);

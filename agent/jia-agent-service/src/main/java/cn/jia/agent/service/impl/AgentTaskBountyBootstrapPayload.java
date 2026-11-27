@@ -21,6 +21,8 @@ final class AgentTaskBountyBootstrapPayload {
 
     private AgentTaskBountyBootstrapPayload() { }
 
+    static boolean supportsInitialOperation(String operation) { return OPERATIONS.contains(operation); }
+
     static String initialOperation(List<String> allowed) {
         Objects.requireNonNull(allowed, "allowed");
         List<String> executable = allowed.stream()
