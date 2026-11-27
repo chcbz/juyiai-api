@@ -1,0 +1,92 @@
+{
+  "reservation": {
+    "invocationId": "11111111-1111-4111-8111-111111111111",
+    "executionId": "exec1",
+    "runId": "run1",
+    "snapshotDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "childRouteSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "costRouteReference": {
+      "kind": "NATIVE_PROVIDER_CALL",
+      "component": "generate",
+      "namespace": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "modelOrTool": "im",
+      "normalizationBasis": "openai-images-modalities-v1"
+    }
+  },
+  "binding": {
+    "operation": "generate",
+    "packageSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "started": {
+    "schemaVersion": 1,
+    "invocationId": "11111111-1111-4111-8111-111111111111",
+    "protocol": "openai-images-v1",
+    "operation": "generate",
+    "channel": "g",
+    "tier": "s",
+    "requestedModel": "im",
+    "priceVersion": "v1",
+    "phase": "STARTED",
+    "observedAt": 4,
+    "evidence": null
+  },
+  "terminal": {
+    "schemaVersion": 1,
+    "invocationId": "11111111-1111-4111-8111-111111111111",
+    "protocol": "openai-images-v1",
+    "operation": "generate",
+    "channel": "g",
+    "tier": "s",
+    "requestedModel": "im",
+    "priceVersion": "v1",
+    "phase": "TERMINAL",
+    "observedAt": 5,
+    "evidence": {
+      "providerRequestId": "request1",
+      "usage": {
+        "input_tokens_details": {
+          "text_tokens": 3,
+          "image_tokens": 0
+        },
+        "input_tokens": 3,
+        "output_tokens": 12,
+        "total_tokens": 15
+      }
+    }
+  },
+  "final": {
+    "schemaVersion": 2,
+    "executionId": "exec1",
+    "runId": "run1",
+    "captureId": "49d27b483b3fb776ef456068bc7bd2ee4f2f7160ee29bec20e6d99694664ddb1",
+    "recordId": "e84b2f7597777c5e3b074fcdf262bcbf33c128fa9991538a98e173c724b16d02",
+    "kind": "CAPTURE_FINAL",
+    "sourceRevision": "1",
+    "previousEvidenceSha256": null,
+    "observedAt": 6,
+    "observation": {
+      "planEvidenceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "sourceCount": "1",
+      "sourcesSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "closeState": "DRAINED",
+      "reasonCodes": [],
+      "imageInvocation": {
+        "invocationId": "11111111-1111-4111-8111-111111111111",
+        "operation": "generate",
+        "childRouteSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "startedSha256": "de16ab8b020e7a9c6d2158b9c1e94df3f4f0f18e3c07321f5d70fa5516c2740a",
+        "terminalSha256": "ace8135e4808089210f8854d1c662b124502ef7788d3d6c9e87fc4c7a9b626f5",
+        "costRouteReference": {
+          "kind": "NATIVE_PROVIDER_CALL",
+          "component": "generate",
+          "namespace": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "modelOrTool": "im",
+          "normalizationBasis": "openai-images-modalities-v1"
+        }
+      }
+    },
+    "receiptId": "child-resource-final",
+    "expectedRevision": null,
+    "evidenceSha256": "f03b6315ab8e9f86228b60a0f5f6e609d7f54e7310245de28b22935c132ed962"
+  }
+}

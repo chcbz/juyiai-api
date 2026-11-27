@@ -45,17 +45,23 @@ final class NativeCaptureCoverage {
         String channel=g.source.path("channelNamespace").asText();
         var configuration=costConfiguration();
         if(configuration!=null && approved.equals(NativeCaptureEvidence.configurationProfile(configuration))){
-            // A generic commitment is not generic resource coverage. This adapter proves only the single
-            // Responses resource; child-provider routes need their independently verified ledger identity.
-            return LOCAL_POLICY.equals(d.capturePolicyVersion()) && LOCAL_POLICY.equals(configuration.capturePolicyVersion())
-                && configuration.routeRefs().size()==1 && !plan.has("imageRoute")
-                && close!=null && !close.has("imageInvocation") && matchesObservedRootConfiguration();
+            // A generic commitment is not generic resource coverage. Each supported adapter must
+            // independently cover exactly its declared resources, in addition to the closed parent set.
+            if(!d.capturePolicyVersion().equals(configuration.capturePolicyVersion()) || !matchesObservedRootConfiguration() || close==null)return false;
+            if(LOCAL_POLICY.equals(d.capturePolicyVersion()))return configuration.routeRefs().size()==1 && !plan.has("imageRoute") && !close.has("imageInvocation");
+            if(!"NATIVE_PINNED_IMAGE_V1".equals(d.capturePolicyVersion()) || configuration.routeRefs().size()!=2 || !matchesImageRoute(d,channel))return false;
+            var invocation=close.path("imageInvocation");if(!invocation.has("costRouteReference"))return false;
+            var actual=NativeCaptureEvidence.costRouteReference(JSON.convertValue(invocation.get("costRouteReference"),Map.class));
+            return "NATIVE_PROVIDER_CALL".equals(actual.kind()) && actual.component().equals(invocation.path("operation").asText())
+                && "openai-images-modalities-v1".equals(actual.normalizationBasis()) && configuration.routeRefs().contains(actual);
         }
         if(LOCAL_POLICY.equals(d.capturePolicyVersion()))return approved.equals(profileSha(d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256(),channel));
+        return matchesImageRoute(d,channel) && approved.equals(NativeCaptureEvidence.imageProfile(d.version(),d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256()));
+    }
+    private boolean matchesImageRoute(cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup d,String channel){
         var image=plan.path("imageRoute");if(!"NATIVE_PINNED_IMAGE_V1".equals(d.capturePolicyVersion())||!image.isObject()||close==null)return false;
         String child=image.path("childRouteSha256").asText();return child.equals(close.path("imageInvocation").path("childRouteSha256").asText())
-            &&d.routeSha256().equals(NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1",channel,image.path("model").asText(),child)))
-            &&approved.equals(NativeCaptureEvidence.imageProfile(d.version(),d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256()));
+            &&d.routeSha256().equals(NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1",channel,image.path("model").asText(),child)));
     }
     // The journal keeps contradictory evidence; only its eligibility for normalized use is denied.
     private static boolean quantityReasonsOnly(JsonNode observation){

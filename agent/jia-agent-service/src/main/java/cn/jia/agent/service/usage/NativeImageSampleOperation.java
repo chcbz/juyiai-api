@@ -34,6 +34,11 @@ final class NativeImageSampleOperation {
         var model=t.path("requestedModel").asText();if(e.hasNonNull("responseModel")&&!model.equals(e.path("responseModel").asText()))return null;
         var qty=ImageUsageNormalizer.normalize(t.path("channel").asText(),model,t.path("tier").asText(),e);
         if(qty==null||!qty.equals(end.normalizedUsage()))return null;
+        if(i.has("costRouteReference")){
+            var reference=NativeCaptureEvidence.costRouteReference(JSON.convertValue(i.get("costRouteReference"),Map.class));
+            if(!binding.source().equals(reference.kind()) || !op.equals(reference.component()) || !model.equals(reference.modelOrTool())
+                || !qty.normalizationBasis().equals(reference.normalizationBasis()))return null;
+        }
         return new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation(binding.source(),binding.sourceAttemptId()),binding.source(),op,evidenceSha,new MeasuredTaskRepricing.Tokens(qty.normalizationBasis(),qty.tokens()));
     }
     private static JsonNode raw(UsageCostService.Observation saved,JsonNode ref,String hash){

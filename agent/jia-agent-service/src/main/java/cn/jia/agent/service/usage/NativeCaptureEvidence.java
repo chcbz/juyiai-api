@@ -57,7 +57,12 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
     static void captureFinalKeys(Map<?,?> o){
         if(!o.containsKey("imageInvocation")){keys(o,"planEvidenceSha256","sourceCount","sourcesSha256","closeState","reasonCodes");return;}
         keys(o,"planEvidenceSha256","sourceCount","sourcesSha256","closeState","reasonCodes","imageInvocation");
-        var i=obj(o.get("imageInvocation"));keys(i,"invocationId","operation","childRouteSha256","startedSha256","terminalSha256");
+        var i=obj(o.get("imageInvocation"));
+        if(i.containsKey("costRouteReference")){
+            costRouteReference(i.get("costRouteReference"));
+            var fields=new HashMap<>(i);fields.remove("costRouteReference");i=fields;
+        }
+        keys(i,"invocationId","operation","childRouteSha256","startedSha256","terminalSha256");
         field(i,"invocationId","[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}");field(i,"operation","generate|edit");
         for(var k:List.of("childRouteSha256","startedSha256","terminalSha256"))field(i,k,SHA);
     }
@@ -92,12 +97,13 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         var c=obj(value);keys(c,"executionStrategyVersion","contextPolicyId","contextPolicyVersion","toolPolicyVersion","capturePolicyVersion","routeRefs");
         check(c.get("routeRefs") instanceof List<?> routes && !routes.isEmpty() && routes.size()<=128);
         var routes=new ArrayList<cn.jia.economy.pricing.CostRouteReference>();
-        for(var item:(List<?>)c.get("routeRefs")){
-            var r=obj(item);keys(r,"kind","component","namespace","modelOrTool","normalizationBasis");
-            routes.add(new cn.jia.economy.pricing.CostRouteReference(text(r,"kind"),text(r,"component"),text(r,"namespace"),text(r,"modelOrTool"),text(r,"normalizationBasis")));
-        }
+        for(var item:(List<?>)c.get("routeRefs"))routes.add(costRouteReference(item));
         return new cn.jia.agent.skill.quote.CostConfigurationObservation(text(c,"executionStrategyVersion"),text(c,"contextPolicyId"),
                 text(c,"contextPolicyVersion"),text(c,"toolPolicyVersion"),text(c,"capturePolicyVersion"),routes);
+    }
+    static cn.jia.economy.pricing.CostRouteReference costRouteReference(Object value){
+        var r=obj(value);keys(r,"kind","component","namespace","modelOrTool","normalizationBasis");
+        return new cn.jia.economy.pricing.CostRouteReference(text(r,"kind"),text(r,"component"),text(r,"namespace"),text(r,"modelOrTool"),text(r,"normalizationBasis"));
     }
     // Select immutable wire facts here; Economy enforces equality without interpreting Runtime JSON.
     static String bindingDigest(String kind,Map<?,?> o,List<String> identity){

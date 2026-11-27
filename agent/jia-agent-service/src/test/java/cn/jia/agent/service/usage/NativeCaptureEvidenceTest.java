@@ -37,6 +37,35 @@ class NativeCaptureEvidenceTest {
             c.put("routeRefs",List.of());assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.costConfiguration(c));
         }
     }
+    @Test void independentChildReferenceHasPortableDigestAndRequiresOriginalLedgerQuantities() throws Exception {
+        try(var in=getClass().getResourceAsStream("/usage/native-child-cost-reference.json")){
+            var fixture=JSON.readTree(Objects.requireNonNull(in));var data=JSON.convertValue(fixture.get("final"),Map.class);
+            var parsed=NativeCaptureEvidence.parse("exec1","run1",(String)data.get("receiptId"),data);
+            var costs=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class);
+            var task=new cn.jia.economy.task.TaskBillingService.Task(new cn.jia.economy.service.EconomyScope("t","c"),"owner","task");
+            String id=fixture.path("reservation").path("invocationId").asText();
+            var binding=new cn.jia.economy.usage.UsageCostService.Binding(task.scope(),"owner","task","NATIVE_PROVIDER_CALL","exec1:"+id);
+            var usage=ImageUsageNormalizer.normalize("g","im","s",fixture.path("terminal").get("evidence"));assertNotNull(usage);
+            org.mockito.Mockito.when(costs.observation(binding,"started")).thenReturn(Optional.of(new cn.jia.economy.usage.UsageCostService.Observation(binding,"started",0,fixture.get("started").toString(),null,null,4)));
+            org.mockito.Mockito.when(costs.observation(binding,"terminal")).thenReturn(Optional.of(new cn.jia.economy.usage.UsageCostService.Observation(binding,"terminal",1,fixture.get("terminal").toString(),usage,null,5)));
+            var envelope=JSON.convertValue(fixture.get("final"),Map.class);
+            var invocation=(Map<String,Object>)((Map<?,?>)envelope.get("observation")).get("imageInvocation");
+            var actual=NativeCaptureEvidence.costRouteReference(invocation.get("costRouteReference"));
+            java.util.function.Supplier<cn.jia.economy.pricing.MeasuredTaskRepricing.Fact> read=()->NativeImageSampleOperation.read(costs,task,"exec1","run1",parsed.captureId(),parsed.recordId(),"1",parsed.evidenceSha256(),JSON.writeValueAsString(envelope));
+            assertNotNull(read.get());
+            for(String field:List.of("kind","component","modelOrTool","normalizationBasis")){
+                var wrong=new HashMap<>(actual.canonical());wrong.put(field,"wrong");invocation.put("costRouteReference",wrong);assertNull(read.get(),field);
+            }
+            invocation.put("costRouteReference",actual.canonical());
+            var originalBinding=NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",(Map)envelope.get("observation"),List.of());
+            var wrongNamespace=new HashMap<>(actual.canonical());wrongNamespace.put("namespace","foreign");invocation.put("costRouteReference",wrongNamespace);
+            assertNotEquals(originalBinding,NativeCaptureEvidence.bindingDigest("CAPTURE_FINAL",(Map)envelope.get("observation"),List.of()));
+            wrongNamespace.put("providerUrl","secret");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys((Map)envelope.get("observation")));
+            invocation.put("costRouteReference",actual.canonical());
+            org.mockito.Mockito.when(costs.observation(binding,"terminal")).thenReturn(Optional.empty());assertNull(read.get());
+            org.mockito.Mockito.verify(costs,org.mockito.Mockito.never()).record(org.mockito.ArgumentMatchers.any());
+        }
+    }
     @Test void dispatchGroupIsOptionalImmutablePrivateAndDoesNotGrantCoverage(){
         var plan=new HashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","executionConfigSha256","a".repeat(64),"engineVersion","fixture","coveragePolicyVersion","unverified","rootSourceId","root"));
         NativeCaptureEvidence.planKeys(plan);var old=NativeCaptureEvidence.bindingDigest("PLAN",plan,List.of());
@@ -174,9 +203,9 @@ class NativeCaptureEvidenceTest {
     @Test void closedTwoRequestProjectionUsesFrozenAdmissionNotReportedProfileOrCurrentRollout(){
         // Associated-head boundary: HTTP codec/journal/recovery are verified independently with MySQL.
         String cap="a".repeat(64),cfg="b".repeat(64),route="c".repeat(64),tool="d".repeat(64),channel="e".repeat(64);
-        for(String fault:List.of("none","requestReason","responseReason","image","missingChild","wrongRoute","wrongChild","configuration","foreignConfiguration","generic","genericForeign","genericExtra","genericMissing","genericImage","genericReason")){
-        boolean generic=fault.startsWith("generic");
-        boolean image=List.of("image","missingChild","wrongRoute","wrongChild","genericImage").contains(fault);String child="9".repeat(64);
+        for(String fault:List.of("none","requestReason","responseReason","image","missingChild","wrongRoute","wrongChild","configuration","foreignConfiguration","generic","genericForeign","genericExtra","genericMissing","genericImage","genericReason","resource","resourceMissingLedger","resourceMissingRef","resourceForeign","resourceExtra")){
+        boolean resource=fault.startsWith("resource"),generic=fault.startsWith("generic")||resource;
+        boolean image=List.of("image","missingChild","wrongRoute","wrongChild","genericImage").contains(fault)||resource;String child="9".repeat(64);
         String measuredRoute=image&&!fault.equals("wrongRoute")?NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1",channel,"parent",child)):route;
         var heads=new TreeMap<String,cn.jia.economy.usage.UsageCaptureProjection.Row>();
         class Fixture { String add(String kind,Map<String,Object> o){String id=String.format("%064x",heads.size()+1);
@@ -189,6 +218,12 @@ class NativeCaptureEvidenceTest {
             "executionStrategyVersion","native","contextPolicyId","context","contextPolicyVersion",cfg,"toolPolicyVersion",tool,
             "capturePolicyVersion",image?"NATIVE_PINNED_IMAGE_V1":"NATIVE_LOCAL_ARTIFACT_TEXT_V1","routeRefs",List.of(Map.of("kind","MODEL_RESPONSE","component","INFERENCE",
                 "namespace",fault.equals("foreignConfiguration")||fault.equals("genericForeign")?"foreign":channel,"modelOrTool","parent","normalizationBasis","RESPONSES_TEXT_TOKENS_V1"))));
+        var actualChild=new HashMap<String,Object>(Map.of("kind","NATIVE_PROVIDER_CALL","component","generate","namespace",channel,"modelOrTool","im","normalizationBasis","openai-images-modalities-v1"));
+        if(resource){
+            var refs=new ArrayList<Object>((List<?>)configuration.get("routeRefs"));refs.add(Map.copyOf(actualChild));
+            if(fault.equals("resourceExtra"))refs.add(Map.of("kind","TOOL","component","other","namespace",channel,"modelOrTool","extra","normalizationBasis","UNIT_V1"));
+            configuration.put("routeRefs",refs);
+        }
         if(fault.equals("genericExtra"))configuration.put("routeRefs",List.of(
             ((List<?>)configuration.get("routeRefs")).getFirst(),Map.of("kind","TOOL","component","EXTRA","namespace",channel,"modelOrTool","unobserved","normalizationBasis","UNIT_V1")));
         if(fault.endsWith("Configuration") || fault.equals("configuration") || generic&&!fault.equals("genericMissing"))plan.put("costConfiguration",configuration);
@@ -200,14 +235,22 @@ class NativeCaptureEvidenceTest {
                 "measuredQuantities",Map.of("coverage","COMPLETE","normalizationBasis","RESPONSES_TEXT_TOKENS_V1","tokens",Map.of("INPUT","3","CACHED_INPUT","1","OUTPUT","1"))));}
         f.add("SOURCE_FINAL",Map.of("sourceId","root","epoch","0","requestCount","2","responseCount","2","reservedSequenceHighWatermark","2","recordsSha256",f.hash(1,6),"closeState","DRAINED","reasonCodes",List.of()));
         var close=new HashMap<String,Object>(Map.of("planEvidenceSha256",p,"sourceCount","1","sourcesSha256",f.hash(6,7),"closeState","DRAINED","reasonCodes",List.of()));
-        if(image)close.put("imageInvocation",Map.of("childRouteSha256",fault.equals("wrongChild")?tool:child));f.add("CAPTURE_FINAL",close);
+        if(image){
+            var invocation=new HashMap<String,Object>(Map.of("childRouteSha256",fault.equals("wrongChild")?tool:child,"operation","generate"));
+            if(resource&&!fault.equals("resourceMissingRef")){
+                if(fault.equals("resourceForeign"))actualChild.put("namespace","foreign");
+                invocation.put("costRouteReference",actualChild);
+            }
+            close.put("imageInvocation",invocation);
+        }
+        f.add("CAPTURE_FINAL",close);
         String approved=image?NativeCaptureEvidence.imageProfile("NATIVE_DISPATCH_GROUP_V1",cfg,measuredRoute,tool):NativeCaptureEvidence.digest(List.of("NATIVE_LOCAL_ARTIFACT_TEXT_V1","codex-cli-0.167.0","RESPONSES_TEXT_TOKENS_V1",cfg,route,tool,channel));
         if(generic)approved=NativeCaptureEvidence.configurationProfile(NativeCaptureEvidence.costConfiguration(configuration));
         for(String pin:Arrays.asList(null,approved,NativeCaptureCoverage.profileSha(cfg,route,tool,"other"),NativeCaptureCoverage.profileSha(cfg,route,"other",channel))){
-            var fold=NativeCaptureCoverage.forAdmission(cap,pin);heads.values().forEach(fold::accept);var result=fold.finish(row->!fault.equals("missingChild"));boolean match=approved.equals(pin)&&!fault.equals("wrongRoute")&&!fault.equals("wrongChild");
+            var fold=NativeCaptureCoverage.forAdmission(cap,pin);heads.values().forEach(fold::accept);var result=fold.finish(row->!fault.equals("missingChild")&&!fault.equals("resourceMissingLedger"));boolean match=approved.equals(pin)&&!fault.equals("wrongRoute")&&!fault.equals("wrongChild");
             if(generic){
-                boolean covered=match&&(fault.equals("generic")||fault.equals("genericReason"));
-                assertEquals(covered&&!fault.equals("genericReason")?"COMPLETE":"INCOMPLETE",result.state().name(),fault);
+                boolean covered=match&&(fault.equals("generic")||fault.equals("genericReason")||fault.equals("resource")||fault.equals("resourceMissingLedger"));
+                assertEquals(covered&&!fault.equals("genericReason")&&!fault.equals("resourceMissingLedger")?"COMPLETE":"INCOMPLETE",result.state().name(),fault);
                 assertEquals(covered?10:0,result.observedTokens().intValueExact(),fault);
             }else{
                 assertEquals(match&&(fault.equals("none")||fault.equals("image")||fault.equals("configuration"))?"COMPLETE":"INCOMPLETE",result.state().name());
