@@ -81,6 +81,10 @@ public interface TaskBillingService {
      * Matching the quote payer is required even for zero-price quotes and reservation replays.
      */
     Charge reserve(Task task, String quoteId, Binding currentBinding, String payerUserId);
+    /** Original caller-owned transaction; optional pre-execution enrollment replaces, never adds to,
+     * the normal single sample. An enrollment is not payment or execution authorization. */
+    Charge reserve(Task task,String quoteId,Binding currentBinding,String payerUserId,
+                   TaskBenchmarkAdmission.ScopedEnrollment enrollment);
     /** Verify original assignment replay without re-reserving or consulting mutable requirements/inputs.
      * Checks the original quote, payer and recommendation; no mutable requirement reads.
      * A completed/released original remains readable, but never authorizes a new execution. */

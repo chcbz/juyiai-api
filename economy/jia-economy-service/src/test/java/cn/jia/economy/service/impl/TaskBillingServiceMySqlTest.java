@@ -64,6 +64,7 @@ class TaskBillingServiceMySqlTest {
     private static final Binding BINDING = new Binding(1, "requirement-sha", "input-sha", "agent-1", "recommendation-1");
     private final EconomyMySqlTestFixture fixture = new EconomyMySqlTestFixture();
     private TaskBillingService billing;
+    private TaskBenchmarkAdmission scopedAdmissions;
     private cn.jia.economy.mapper.GroupBaselineMaintenanceMapper maintenance;
     private cn.jia.economy.mapper.GroupBaselineMapper baselines;
     private cn.jia.economy.mapper.ConfirmedSampleMapper originals;
@@ -90,6 +91,7 @@ class TaskBillingServiceMySqlTest {
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
         config.addMapper(EconomyLedgerMapper.class);
         config.addMapper(EconomyTaskBillingMapper.class);
+        config.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
         config.addMapper(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.class);
         config.addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var factory = new SqlSessionFactoryBean();
@@ -101,6 +103,7 @@ class TaskBillingServiceMySqlTest {
         baselines=session.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var manager = new DataSourceTransactionManager(db.dataSource());
         tx = new TransactionTemplate(manager);
+        scopedAdmissions=transactional(new TaskBenchmarkAdmissionService(session.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()));
         var ledger = session.getMapper(EconomyLedgerMapper.class);
         var gate = new EconomyPreviewGate(new EconomyPreviewProperties(true,
                 List.of(new EconomyPreviewProperties.AllowedScope(SCOPE.tenantId(), SCOPE.clientId()))));
@@ -790,6 +793,104 @@ class TaskBillingServiceMySqlTest {
         jdbc.update("UPDATE economy_task_quote SET snapshot_json=?,amount_wen=1 WHERE quote_id=?",original,id);
         assertThrows(IllegalStateException.class,()->inTask(TASK,()->billing.reserve(TASK,id,snapshot.binding(),"payer-1")));
         assertEquals(100,wallet());assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
+    }
+
+    private record PaidCase(cn.jia.economy.task.ScopedBenchmarkManifest manifest,String sha,
+                            ScopedTaskQuoteSnapshot quote,String quoteId) {
+        TaskBenchmarkAdmission.ObservedScopeGroup observed(){return new TaskBenchmarkAdmission.ObservedScopeGroup(manifest.scopePin(),manifest.group());}
+    }
+    private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero){
+        usageSchema();new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
+        var quote=scopedSnapshot("agent",zero,zero);
+        var slots=List.of(new GroupMeanPricing.ScopeSlot(0,"text.summary","1","a".repeat(64),List.of()));
+        var config=Map.<String,Object>of("strategy","native-summary","routes",List.of("text-model"));
+        var input=new GroupMeanPricing.ScopeInput(slots,List.of("short"),cn.jia.core.util.CanonicalValueEncoding.digest(config));
+        var policy=new GroupMeanPricing.ScopedPolicy("f1",input.specShas(),input.scopeShapeSha(),"config-1",GroupMeanPricing.ScopedPolicy.definitionsSha(input.specShas()),3);
+        var group=new GroupMeanPricing.ScopeGroup("f1",policy.sha(),slots,List.of("short"),config);
+        var manifest=new cn.jia.economy.task.ScopedBenchmarkManifest("SCOPED_BENCHMARK_V1",TASK,"case-1","agent","fixture-authority","review complete output",purpose,quote.scopePin(),policy,slots,List.of("short"),config,group.key());
+        String body=new ObjectMapper().writeValueAsString(manifest),sha=GroupPublicationEnrollment.digest(body);
+        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",SCOPE.tenantId(),SCOPE.clientId(),TASK.ownerJiacn(),TASK.taskId(),manifest.caseId(),body,sha);
+        var id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+        return new PaidCase(manifest,sha,quote,id);
+    }
+    private TaskBenchmarkAdmission.ScopedEnrollment preparePaid(PaidCase c){return scopedAdmissions.prepareScopedPaid(TASK,c.manifest().caseId(),c.sha(),"agent",c.observed());}
+    private Charge reservePaid(PaidCase c){return inTask(TASK,()->billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1",preparePaid(c)));}
+
+    @Test void scopedPaidAdmissionCreatesExactlyOneQuoteLinkedSampleAndNeverReenrollsReplay(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);
+        assertEquals(0,count("economy_task_cost_sample"));var held=reservePaid(c);
+        assertEquals(State.HELD,held.state());assertEquals(99,wallet());assertEquals(1,count("economy_task_cost_sample"));
+        var row=jdbc.queryForMap("SELECT * FROM economy_task_cost_sample");
+        assertEquals(c.quoteId(),row.get("quote_id"));assertEquals("case-1",row.get("benchmark_case_id"));
+        assertNotEquals(c.sha(),row.get("sample_id"));assertNull(row.get("history_group_sha256"));
+        assertEquals(c.manifest().scopePin().scopeSha256(),row.get("scope_sha256"));
+        assertEquals(c.manifest().group().scopeShapeSha(),row.get("scope_shape_sha256"));
+        assertEquals(c.manifest().groupSha(),row.get("scoped_group_sha256"));assertEquals(c.manifest().policy().sha(),row.get("scoped_policy_sha256"));
+        assertEquals("WAITING_EVIDENCE",row.get("sample_state"));assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent")));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->preparePaid(c)));
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
+        assertEquals(held,inTask(TASK,()->billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1")));
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals(1,count("economy_transaction"));
+    }
+    @Test void scopedPaidHoldoutZeroKeepsPurposeAndDoesNotInventExecutionOrTrainingApproval(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.HOLDOUT,true);reservePaid(c);
+        assertEquals(100,wallet());assertEquals(0,count("economy_transaction"));assertEquals(1,count("economy_task_charge"));assertEquals(1,count("economy_task_cost_sample"));
+        assertEquals("HOLDOUT",jdbc.queryForObject("SELECT JSON_UNQUOTE(JSON_EXTRACT(manifest_json,'$.purpose')) FROM economy_task_benchmark_case",String.class));
+        assertNull(inTask(TASK,()->billing.heldInitialCommitment(TASK,"agent")));
+        assertEquals(State.CAPTURED,inTask(TASK,()->billing.capture(TASK)).state());
+    }
+    @Test void scopedPaidInsufficientFundsDoesNotAdmitSampleOrLeaveCharge(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);
+        jdbc.update("UPDATE economy_account SET balance_wen=0 WHERE account_id='wallet'");
+        assertThrows(EconomyPostingException.class,()->reservePaid(c));
+        assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));assertEquals(0,count("economy_transaction"));
+        jdbc.update("UPDATE economy_account SET balance_wen=100 WHERE account_id='wallet'");reservePaid(c);assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedPaidAssignmentFailureRollsBackSampleAndWalletTogether(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);
+        assertThrows(IllegalStateException.class,()->inTask(TASK,()->{
+            billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1",preparePaid(c));
+            jdbc.update("UPDATE test_task_root SET state='ASSIGNED' WHERE id='task-1'");throw new IllegalStateException("assignment failed");
+        }));
+        assertEquals("OPEN",taskState());assertEquals(100,wallet());assertEquals(0,count("economy_task_cost_sample"));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+        reservePaid(c);assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedPaidEnrollmentCannotEscapeTransactionOrUseOtherScopeOrCandidate(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);
+        assertThrows(IllegalTransactionStateException.class,()->preparePaid(c));
+        var escaped=inTask(TASK,()->preparePaid(c));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1",escaped)));
+        var otherPin=new ScopedTaskQuoteSnapshot.ScopePin(1,"1".repeat(64),"9".repeat(64),"2".repeat(64));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->scopedAdmissions.prepareScopedPaid(TASK,"case-1",c.sha(),"agent",new TaskBenchmarkAdmission.ObservedScopeGroup(otherPin,c.manifest().group()))));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->scopedAdmissions.prepareScopedPaid(TASK,"case-1",c.sha(),"other-agent",c.observed())));
+        assertEquals(100,wallet());assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_task_cost_sample"));
+    }
+    @Test void scopedPaidRefusesLateOrdinaryEnrollmentAndCorruptOrRetiredOriginal(){
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);
+        String original=jdbc.queryForObject("SELECT manifest_json FROM economy_task_benchmark_case",String.class);
+        jdbc.update("UPDATE economy_task_benchmark_case SET manifest_json='{}'");
+        assertThrows(IllegalStateException.class,()->inTask(TASK,()->preparePaid(c)));
+        jdbc.update("UPDATE economy_task_benchmark_case SET manifest_json=?,retired=TRUE",original);
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->preparePaid(c)));
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=FALSE");
+        inTask(TASK,()->billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1"));
+        assertThrows(TaskBenchmarkAdmission.NotAdmitted.class,()->inTask(TASK,()->preparePaid(c)));
+        assertEquals(1,count("economy_task_cost_sample"));assertNull(jdbc.queryForObject("SELECT benchmark_case_id FROM economy_task_cost_sample",String.class));
+        assertNull(jdbc.queryForObject("SELECT scoped_group_sha256 FROM economy_task_cost_sample",String.class));
+    }
+    @Test void scopedSampleMigrationResumesWithoutBackfillingOrdinarySamplesAndRejectsDrift(){
+        usageSchema();var quote=scopedSnapshot("agent",false,false);
+        var id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+        inTask(TASK,()->billing.reserve(TASK,id,quote.binding(),"payer-1"));
+        jdbc.execute("ALTER TABLE economy_task_cost_sample ADD COLUMN scope_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL FIRST");
+        var migration=new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc);migration.afterPropertiesSet();migration.afterPropertiesSet();
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals(99,wallet());
+        assertNull(jdbc.queryForObject("SELECT scope_sha256 FROM economy_task_cost_sample",String.class));
+        jdbc.execute("ALTER TABLE economy_task_cost_sample DROP COLUMN scope_shape_sha256, MODIFY scoped_group_sha256 CHAR(63) CHARACTER SET ascii COLLATE ascii_bin NULL");
+        assertThrows(IllegalStateException.class,migration::afterPropertiesSet);
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='economy_task_cost_sample' AND column_name='scope_shape_sha256'",Integer.class));
+        assertEquals(1,count("economy_task_cost_sample"));
     }
 
     private Quote quote(Task task, Binding binding, String yuan) {

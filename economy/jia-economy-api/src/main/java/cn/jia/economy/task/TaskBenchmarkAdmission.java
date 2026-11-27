@@ -6,6 +6,20 @@ import java.util.Objects;
 /** Internal benchmark enrollment, not permission to dispatch or spend. The caller owns the new benchmark task root
  * and must enroll before admitting any execution. No browser endpoint, inference or synthetic fixed quote. */
 public interface TaskBenchmarkAdmission {
+    /** Independent Agent observation; never obtained by copying a manifest or a pricing-profile pin. */
+    record ObservedScopeGroup(ScopedTaskQuoteSnapshot.ScopePin scopePin,
+            cn.jia.economy.pricing.GroupMeanPricing.ScopeGroup group) {
+        public ObservedScopeGroup { Objects.requireNonNull(scopePin);Objects.requireNonNull(group); }
+    }
+    /** An in-process, transaction-bound capability produced by prepareScopedPaid, not a JSON DTO.
+     * Wallet reservation invokes this only for a new scoped charge, instead of its ordinary sample insert. */
+    interface ScopedEnrollment {
+        void requireQuote(TaskBillingService.Task task,ScopedTaskQuoteSnapshot quote);
+        void recordPaidSample(TaskBillingService.Task task,String quoteId,String sampleId,ScopedTaskQuoteSnapshot quote);
+    }
+    ScopedEnrollment prepareScopedPaid(TaskBillingService.Task task,String caseId,String manifestSha,
+            String agentId,ObservedScopeGroup observed);
+
     /** Optional, operator-approved before execution; never inferred from text or output files. */
     record GroupInput(String operation,cn.jia.economy.pricing.GroupMeanPricing.Configuration configuration) {
         public GroupInput { if(configuration==null||!configuration.supportsImage(operation))throw new IllegalArgumentException("Invalid benchmark cost configuration"); }

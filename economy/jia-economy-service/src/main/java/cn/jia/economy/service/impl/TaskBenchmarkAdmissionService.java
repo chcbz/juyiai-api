@@ -5,6 +5,11 @@ import cn.jia.economy.pricing.TaskEstimateFeatures;
 import cn.jia.economy.task.TaskBenchmarkAdmission;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.economy.task.TaskHistoryCatalog;
+import cn.jia.economy.task.ScopedBenchmarkManifest;
+import cn.jia.economy.task.ScopedTaskQuoteSnapshot;
+import cn.jia.core.util.CanonicalValueEncoding;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -18,6 +23,59 @@ import tools.jackson.databind.ObjectMapper;
 public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
     private final TaskBenchmarkMapper db;private final ObjectMapper json;
     public TaskBenchmarkAdmissionService(TaskBenchmarkMapper db,ObjectMapper json){this.db=db;this.json=json;}
+    private static final ObjectMapper SCOPED_JSON=tools.jackson.databind.json.JsonMapper.builder(
+            tools.jackson.core.json.JsonFactory.builder()
+                    .streamReadConstraints(tools.jackson.core.StreamReadConstraints.builder().maxNestingDepth(24).maxStringLength(1048576).build())
+                    .enable(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
+            .enable(tools.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+            .disable(tools.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS).build();
+
+    @Override @Transactional(propagation=Propagation.MANDATORY)
+    public ScopedEnrollment prepareScopedPaid(TaskBillingService.Task task,String id,String sha,String agent,ObservedScopeGroup observed){
+        requireTransaction();java.util.Objects.requireNonNull(observed);
+        if(sha==null || !sha.matches("[0-9a-f]{64}"))throw new NotAdmitted();
+        var raw=db.approved(task,id,sha);if(raw==null)throw new NotAdmitted();
+        if(CanonicalValueEncoding.utf8(raw).length>1048576 || !CanonicalValueEncoding.sha256(CanonicalValueEncoding.utf8(raw)).equals(sha))
+            throw new IllegalStateException("SCOPED_BENCHMARK_AUTHORITY_CORRUPT");
+        final ScopedBenchmarkManifest manifest;
+        try{manifest=SCOPED_JSON.readValue(raw,ScopedBenchmarkManifest.class);}
+        catch(RuntimeException invalid){throw new IllegalStateException("SCOPED_BENCHMARK_AUTHORITY_CORRUPT",invalid);}
+        if(!task.equals(manifest.task()) || !id.equals(manifest.caseId()) || !agent.equals(manifest.agentId())
+                || !observed.scopePin().equals(manifest.scopePin()) || !observed.group().key().equals(manifest.groupSha()))throw new NotAdmitted();
+        // This is prospective enrollment only. Replay belongs to the original assignment/charge path,
+        // not to a new approval lookup which could retroactively label ordinary user history.
+        if(db.charges(task)!=0 || db.samples(task)!=0 || db.hasEvidence(task))throw new NotAdmitted();
+        var marker=new TransactionSynchronization(){};
+        TransactionSynchronizationManager.registerSynchronization(marker);
+        return new ScopedPaid(manifest,sha,marker);
+    }
+    private static void requireTransaction(){
+        if(!TransactionSynchronizationManager.isActualTransactionActive() || !TransactionSynchronizationManager.isSynchronizationActive())
+            throw new IllegalStateException("Scoped benchmark requires caller transaction");
+    }
+    private final class ScopedPaid implements ScopedEnrollment {
+        private final ScopedBenchmarkManifest manifest;private final String sha;
+        private final TransactionSynchronization marker;private boolean recorded;
+        ScopedPaid(ScopedBenchmarkManifest manifest,String sha,TransactionSynchronization marker){this.manifest=manifest;this.sha=sha;this.marker=marker;}
+        @Override public void requireQuote(TaskBillingService.Task task,ScopedTaskQuoteSnapshot quote){
+            requireTransaction();
+            if(!TransactionSynchronizationManager.getSynchronizations().contains(marker))throw new NotAdmitted();
+            if(!manifest.task().equals(task) || !manifest.agentId().equals(quote.binding().agentId())
+                    || !manifest.scopePin().equals(quote.scopePin()))throw new NotAdmitted();
+        }
+        @Override public void recordPaidSample(TaskBillingService.Task task,String quoteId,String sampleId,ScopedTaskQuoteSnapshot quote){
+            requireQuote(task,quote);if(recorded)throw new NotAdmitted();
+            var group=manifest.group();
+            if(db.seedScopedPaid(manifest,sha,quoteId,sampleId,quote.featureSha(),group.scopeShapeSha(),group.policySha())!=1)
+                throw new NotAdmitted();
+            recorded=true;
+        }
+        @Override public String toString(){return "ScopedEnrollment[private]";}
+    }
+
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public String enroll(TaskBillingService.Task task,String id,String sha,String agent,TaskBillingService.MeasuredGroup actual,TaskEstimateFeatures features){
         return enrollLocked(task,id,sha,agent,actual,features,EnrollmentMode.NORMAL,null);

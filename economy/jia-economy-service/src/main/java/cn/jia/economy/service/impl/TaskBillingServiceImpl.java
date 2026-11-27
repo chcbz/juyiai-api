@@ -247,6 +247,12 @@ public class TaskBillingServiceImpl implements TaskBillingService {
 
     @Override
     public Charge reserve(Task task, String quoteId, Binding currentBinding, String payerUserId) {
+        return reserve(task,quoteId,currentBinding,payerUserId,null);
+    }
+
+    @Override
+    public Charge reserve(Task task,String quoteId,Binding currentBinding,String payerUserId,
+            cn.jia.economy.task.TaskBenchmarkAdmission.ScopedEnrollment enrollment) {
         EconomyTaskQuoteEntity quote = mapper.findQuote(task.scope().tenantId(), task.scope().clientId(),
                 task.ownerJiacn(), task.taskId(), quoteId);
         if (quote == null) throw new TaskBillingException(QUOTE_NOT_FOUND);
@@ -258,6 +264,13 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         }
         if (!quote.getBindingSha256().equals(bindingHash(currentBinding))) {
             throw new TaskBillingException(QUOTE_BINDING_CHANGED);
+        }
+        ScopedTaskQuoteSnapshot enrollmentQuote=null;
+        if(enrollment!=null){
+            if(!ScopedTaskQuoteSnapshot.SCHEMA.equals(json.readTree(quote.getSnapshotJson()).path("schema").asText(null)))
+                throw new cn.jia.economy.task.TaskBenchmarkAdmission.NotAdmitted();
+            enrollmentQuote=json.readValue(quote.getSnapshotJson(),ScopedTaskQuoteSnapshot.class);
+            enrollment.requireQuote(task,enrollmentQuote);
         }
         long now = System.currentTimeMillis();
         EconomyTaskChargeEntity row = new EconomyTaskChargeEntity()
@@ -290,7 +303,8 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         if (groupMean || scoped || MEASURED_SCHEMA.equals(schema)) {
             String sampleId = HexFormat.of().formatHex(digest(encode(List.of("TASK_LIFECYCLE_V1",task.scope().tenantId(),
                     task.scope().clientId(),task.ownerJiacn(),task.taskId(),quote.getQuoteId())).getBytes(StandardCharsets.UTF_8)));
-            requireTransition(scoped ? mapper.confirmScopedSample(quote,sampleId,json.readValue(quote.getSnapshotJson(),ScopedTaskQuoteSnapshot.class).featureSha())
+            if(enrollment!=null)enrollment.recordPaidSample(task,quoteId,sampleId,enrollmentQuote);
+            else requireTransition(scoped ? mapper.confirmScopedSample(quote,sampleId,json.readValue(quote.getSnapshotJson(),ScopedTaskQuoteSnapshot.class).featureSha())
                     : groupMean ? mapper.confirmGroupMeanSample(quote,sampleId) : mapper.confirmMeasuredSample(quote, sampleId));
         }
         return receipt(row);

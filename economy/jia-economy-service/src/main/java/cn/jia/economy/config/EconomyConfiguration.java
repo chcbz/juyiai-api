@@ -47,4 +47,12 @@ public class EconomyConfiguration {
         return new ScopedGroupStudySchemaInitializer(jdbcTemplate);
     }
 
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @org.springframework.context.annotation.DependsOn("economyUsageCostSchemaInitializer")
+    @Bean
+    @ConditionalOnProperty(prefix = "economy.usage-cost", name = "schema-enabled", havingValue = "true")
+    public ScopedCostSampleSchemaInitializer scopedCostSampleSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new ScopedCostSampleSchemaInitializer(jdbcTemplate);
+    }
+
 }
