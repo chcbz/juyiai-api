@@ -3215,6 +3215,18 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
     // Isolated load probe only. Callback starts AFTER SELECT FOR UPDATE and validation. Its duration
     // is a lower bound on lock ownership; the post segment also includes commit and connection cleanup.
+    // Test-only: join one actual HTTP reply to the lock spans of its own signing transaction.
+    // Receipt IDs never leave memory. Sibling call durations do not overlap; residual is explicitly unassigned.
+    private boolean correlated(){return "contention".equals(System.getProperty("cyf.measuredBatchQuoteLoad"));}
+    private final ThreadLocal<Map<String,Long>> withinRoot=new ThreadLocal<>();
+    private record Cost(RootTiming root,Map<String,Long> parts){}
+    private final Map<String,Cost> costs=new java.util.concurrent.ConcurrentHashMap<>();
+    private <T>T component(Class<T> type,T actual,String name){
+        if(!correlated())return actual;
+        var f=new ProxyFactory();if(type.isInterface())f.setInterfaces(type);else f.setProxyTargetClass(true);f.setTarget(actual);
+        f.addAdvice((org.aopalliance.intercept.MethodInterceptor)i->{var m=withinRoot.get();if(m==null||!i.getMethod().getName().equals(name))return i.proceed();
+            long t=System.nanoTime();try{return i.proceed();}finally{m.merge(name,System.nanoTime()-t,Long::sum);}});return type.cast(f.getProxy());
+    }
     private record RootTiming(boolean finish,long acquirePath,long callback,long returnPath){}
     private volatile java.util.Queue<RootTiming> timingWindow;
     private cn.jia.agent.service.AgentTaskMutationTransaction observedQuoteRoots(){
@@ -3223,10 +3235,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             var window=timingWindow;if(window==null||!invocation.getMethod().getName().equals("executeWithLockedTaskRootInOwnerScope"))return invocation.proceed();
             assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive());
             var args=invocation.getArguments();var callback=(cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<?>)args[4];
-            var stamps=new long[2];args[4]=(cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<Object>)root->{
-                stamps[0]=System.nanoTime();try{return callback.apply(root);}finally{stamps[1]=System.nanoTime();}};
+            var parts=new java.util.HashMap<String,Long>();var stamps=new long[2];args[4]=(cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<Object>)root->{
+                stamps[0]=System.nanoTime();if(correlated())withinRoot.set(parts);try{return callback.apply(root);}finally{withinRoot.remove();stamps[1]=System.nanoTime();}};
             long start=System.nanoTime();Object result=invocation.proceed();long end=System.nanoTime();assertTrue(stamps[0]>=start&&stamps[1]>=stamps[0]);
-            window.add(new RootTiming(result instanceof TaskQuoteBatches.Result,stamps[0]-start,stamps[1]-stamps[0],end-stamps[1]));return result;
+            var timing=new RootTiming(result instanceof TaskQuoteBatches.Result,stamps[0]-start,stamps[1]-stamps[0],end-stamps[1]);window.add(timing);if(correlated()&&result instanceof TaskQuoteBatches.Result batch)assertNull(costs.put(batch.quotes().getFirst().quoteId(),new Cost(timing,Map.copyOf(parts))));return result;
         });return (cn.jia.agent.service.AgentTaskMutationTransaction)factory.getProxy();
     }
     private void reportRootTimings(String scenario,int n,int lanes,int expected){
@@ -3265,7 +3277,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var observations=io.micrometer.observation.ObservationRegistry.create();
         observations.observationConfig().observationHandler(new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(quoteStages));
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured(Boolean.getBoolean("cyf.measuredBatchQuoteLoad")?observedQuoteRoots():roots,batches,authority.req(),assignment,authority.policies(),materials,billing,recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),resolver,observations);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured((correlated()||Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))?observedQuoteRoots():roots,batches,component(AgentTaskRequirementSnapshotService.class,authority.req(),"readCurrentWithinLockedTask"),component(AgentTaskExecutionGrantService.class,assignment,"snapshotTaskInputsWithinLockedTask"),component(AgentExternalServicePolicyService.class,authority.policies(),"quoteTargets"),materials,component(TaskBillingService.class,billing,"storeOffersBatch"),recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),component(cn.jia.agent.security.RegisteredPricingProfiles.class,new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),"read"),resolver,observations);
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));
@@ -3281,7 +3293,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 }finally{bg.rollback();}
             }
             var retried=call.send("busy-group");assertEquals("30",retried.get(0).at("/amount/amountMinor").asText());assertFixedQuote(retried.get(1));
-            if(Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureSharedQuoteMatrix(agent,token,policy,cfg);
+            if(correlated()||Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))measureSharedQuoteMatrix(agent,token,policy,cfg);
             jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=true WHERE approval_sha=?",sha);assertEquals(quotes,call.send("approved"));var fresh=call.send("after-withdraw");assertFixedQuote(fresh.get(0));assertFixedQuote(fresh.get(1));}
         assertEquals(money,count("economy_transaction"));
     }
@@ -3307,6 +3319,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             jdbc.update("INSERT INTO agent_runtime(agent_id,name,tenant_id,client_id,owner_jiacn,binding_id,status,runtime_installation_id,runtime_host_id,runtime_instance_id,runtime_session_generation,pricing_installation_id,pricing_generation,pricing_binding_id,pricing_sequence,pricing_config_sha,pricing_profiles_json) VALUES(?,'fixture',?,?,?,?,'offline',?,'host','boot',1,?,1,?,1,?,?)",id,TENANT,CLIENT,OWNER,binding,install,install,binding,QuoteWireWindow.digest(canonical),canonical);
         }
         try(var http=HttpClient.newHttpClient()){
+            if(correlated()){
+                var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","perf","data",Map.of("expectedTaskVersion","0","agentIds",ids)));
+                measureConcurrentGroupQuotes(http,token,body,ids,false,10);assertTrue(costs.isEmpty());return;
+            }
             for(String scenario:List.of("fixed_fresh","shared","distinct","mixed","fixed")){
                 boolean distinct=!scenario.equals("shared"), mixed=scenario.equals("mixed"), fixed=scenario.startsWith("fixed");
                 if(scenario.equals("shared"))for(String id:ids)jdbc.update("UPDATE agent_runtime SET pricing_config_sha=?,pricing_profiles_json=? WHERE agent_id=?",QuoteWireWindow.digest(canonical),canonical,id);
@@ -3424,6 +3440,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             wave.get(50,java.util.concurrent.TimeUnit.SECONDS);
             for(var job:pending){var sample=job.join();var response=sample.response();assertEquals(200,response.statusCode());times.add(sample.nanos());
                 var rows=mapper.readTree(response.body()).at("/data/quotes");assertEquals(agents.size(),rows.size());
+                if(correlated()){
+                    var c=costs.remove(rows.get(0).path("quoteId").asText());assertNotNull(c);var r=c.root();var p=c.parts();
+                    assertEquals(Set.of("readCurrentWithinLockedTask","snapshotTaskInputsWithinLockedTask","quoteTargets","read","storeOffersBatch"),p.keySet());
+                    long residual=r.callback()-p.values().stream().mapToLong(Long::longValue).sum();assertTrue(residual>=0);
+                    System.out.printf(java.util.Locale.ROOT,"SHARED_LINKED httpMs=%.3f acquireMs=%.3f holdCallbackMs=%.3f requirementMs=%.3f inputsMs=%.3f authMs=%.3f configMs=%.3f writeMs=%.3f remainingCallbackMs=%.3f returnMs=%.3f%n",sample.nanos()/1e6,r.acquirePath()/1e6,r.callback()/1e6,p.get("readCurrentWithinLockedTask")/1e6,p.get("snapshotTaskInputsWithinLockedTask")/1e6,p.get("quoteTargets")/1e6,p.get("read")/1e6,p.get("storeOffersBatch")/1e6,residual/1e6,r.returnPath()/1e6);
+                }
                 for(int i=0;i<agents.size();i++){var row=rows.get(i);assertEquals(agents.get(i),row.path("agentId").asText());assertEquals("GROUP_MEAN",row.at("/estimateSummary/method").asText());
                     assertEquals(String.valueOf(distinct?30+i:30),row.at("/amount/amountMinor").asText());String id=row.path("quoteId").asText();assertFalse(id.isBlank());assertTrue(ids.add(id));}
             }
