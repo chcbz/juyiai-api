@@ -34,8 +34,14 @@ public final class GroupHoldoutForecast {
             var cost=MeasuredTaskRepricing.reprice(book,row.facts()).yuan();members.put(row.sampleId(),new Member(row.revision(),row.features(),cost));total=total.add(cost);
             allFeatures &= row.features()!=null;
         }
-        mean=members.size()<minimumMean?null:GroupMeanPricing.amountWen(total,members.size());
+        mean=members.size()<minimumMean?null:representableWen(total,BigDecimal.valueOf(members.size()));
         parameters=frozenTrial==null||members.isEmpty()||!allFeatures?null:frozenTrial.fit(TaskNeighborSearch.trainingScales(members.values().stream().map(Member::features).toList()));
+    }
+    // An otherwise valid whole-task cost may exceed the WEN field. Abstain only for
+    // that predictor: never saturate, substitute a fixed price or drop this held task.
+    private static Long representableWen(BigDecimal numerator,BigDecimal denominator){
+        try{return CnyAmounts.quoteWen(numerator,denominator);}
+        catch(ArithmeticException overflow){return null;}
     }
     public Pair predict(Domain held,String task,String family,long featuresAt,TaskEstimateFeatures query){
         if(!domain.equals(held)||task.isBlank()||family.isBlank()||tasks.contains(task)||families.contains(family)||(!members.isEmpty()&&featuresAt<=lastTruth))
@@ -48,7 +54,7 @@ public final class GroupHoldoutForecast {
         }
         try{BigDecimal numerator=BigDecimal.ZERO,denominator=BigDecimal.ZERO;
             for(var hit:search.selected()){numerator=numerator.add(members.get(hit.id()).cost().multiply(hit.weight()));denominator=denominator.add(hit.weight());}
-            return new Pair(mean,CnyAmounts.quoteWen(numerator,denominator));
+            return new Pair(mean,representableWen(numerator,denominator));
         }catch(MeasuredTaskRepricing.Unavailable noNeighbors){return new Pair(mean,null);}
     }
 }

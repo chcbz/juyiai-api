@@ -79,6 +79,21 @@ class MeasuredTaskRepricingTest {
         assertThrows(IllegalArgumentException.class,()->fit.predict(group,"new","third",3,q));
         assertThrows(IllegalArgumentException.class,()->new GroupHoldoutForecast(group,book,List.of(a,a),2,trial));
     }
+    @Test void pairedGroupForecastOverflowAbstainsOnlyOnAffectedAlgorithm(){
+        var d=new GroupHoldoutForecast.Domain("tenant","client","a".repeat(64));
+        var book=new Reference("frozen",Map.of("render",Map.of("frames",new UnitRate(image,new TaskQuoteCalculator.ToolPrice("p","fixture",BigDecimal.ONE)))));
+        var trial=new TaskEstimateCalibration.Trial("frozen",1,1,1,1,1,.1,.5,1,1,0,1);
+        var small=features(1,0,2);var large=features(-1,0,2);var train=TaskEstimateEvaluation.Split.TRAIN;
+        var zero=new GroupHoldoutForecast.Training(d,"a",new TaskEstimateEvaluation.Case("a","a",1,2,train),1,small,List.of(fact("a","render","frames",new Units(image,BigDecimal.ZERO))));
+        for(long factor:List.of(1L,2L)){
+            var units=BigDecimal.valueOf(Long.MAX_VALUE).add(BigDecimal.ONE).multiply(BigDecimal.valueOf(factor)).movePointLeft(2);
+            var high=new GroupHoldoutForecast.Training(d,"b",new TaskEstimateEvaluation.Case("b","b",1,2,train),1,large,List.of(fact("b","render","frames",new Units(image,units))));
+            var fit=new GroupHoldoutForecast(d,book,List.of(zero,high),2,trial);
+            Long mean=factor==1?Long.valueOf(1L<<62):null;
+            assertEquals(new GroupHoldoutForecast.Pair(mean,null),fit.predict(d,"held","new",3,large));
+            assertEquals(new GroupHoldoutForecast.Pair(mean,0L),fit.predict(d,"held","new",3,small));
+        }
+    }
     @Test void structuralRadiusRejectionStillCountsEvidenceAndKeepsExactBoundary(){
         var q=features(1,0,2);var params=new TaskNeighborSearch.Parameters(new TaskNeighborSearch.Scales(0,0,1),1,1,1,1,1,.1,.5,2,2,1,1);
         var search=new TaskNeighborSearch(q,params);search.accept("a",1,features(1,1,2));
