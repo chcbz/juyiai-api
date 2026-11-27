@@ -40,11 +40,11 @@ final class CandidateGroupOffers {
         var agents=fresh.intent().agentIds();
         if(!agents.equals(fresh.candidates().stream().map(t->t.agent()).toList()) || !bases.keySet().equals(Set.copyOf(agents)))
             throw new IllegalArgumentException("Cost inputs do not match authorized candidates");
-        var keys=new LinkedHashMap<String,GroupBudgetQuotes.Key>();
+        var keys=new LinkedHashMap<String,GroupBudgetQuotes.Key>();var byGroup=new HashMap<GroupMeanPricing.Group,GroupBudgetQuotes.Key>();
         for(var agent:agents)if(bases.get(agent) instanceof ComparableGroup c){
             var group=c.group();
             if(!group.operation().equals(fresh.facts().operation()))throw new IllegalArgumentException("Operation does not match quote facts");
-            keys.put(agent,new GroupBudgetQuotes.Key(GroupMeanPricing.key(group)));
+            keys.put(agent,byGroup.computeIfAbsent(group,g->new GroupBudgetQuotes.Key(GroupMeanPricing.key(g))));
         }
         var distinct=Set.copyOf(keys.values());var prices=distinct.isEmpty()?Map.<GroupBudgetQuotes.Key,GroupBudgetQuotes.Decision>of():estimates.prepare(fresh.key().task().scope(),distinct);
         if(!prices.keySet().equals(distinct))throw new IllegalStateException("Incomplete cost decisions");
