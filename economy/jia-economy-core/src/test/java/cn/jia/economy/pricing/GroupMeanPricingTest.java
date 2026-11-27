@@ -55,4 +55,19 @@ class GroupMeanPricingTest {
         assertThrows(IllegalArgumentException.class, () -> GroupMeanPricing.amountWen(BigDecimal.ONE.negate(),1));
         assertThrows(ArithmeticException.class, () -> GroupMeanPricing.amountWen(BigDecimal.TEN.pow(30),1));
     }
+
+    @Test void scopeGroupUsesCanonicalWholeShapeAndDefensivelyFreezesIdentity(){
+        var slot=new GroupMeanPricing.ScopeSlot(0,"text.summary","1","b".repeat(64),List.of());
+        var routes=new java.util.ArrayList<String>(List.of("model","tool"));
+        var config=new java.util.HashMap<String,Object>();config.put("routes",routes);config.put("strategy","native-1");
+        var group=new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),List.of(slot),List.of("short"),config);
+        assertEquals("63a1c75d8e34fb65085f8463bf5d085ad2ae38a8a4d481d21301e892d5e0e5ac",group.key());
+        routes.add("mutated");config.put("strategy","changed");
+        assertEquals("63a1c75d8e34fb65085f8463bf5d085ad2ae38a8a4d481d21301e892d5e0e5ac",group.key());
+        assertThrows(UnsupportedOperationException.class,()->group.bucketIds().add("other"));
+        assertNotEquals(group.key(),new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),List.of(slot),List.of("short"),config).key());
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),List.of(slot),List.of(),config));
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopeSlot(0,"a","1","b".repeat(64),List.of(0)));
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),List.of(slot),List.of("short"),java.util.Map.of()));
+    }
 }

@@ -86,6 +86,60 @@ public final class GroupMeanPricing {
         }
     }
 
+    /** Complete ordered task shape. Private item/installation identities never enter this value. */
+    public record ScopeSlot(int slot, String capabilityId, String capabilityVersion, String specSha,
+                            List<Integer> dependsOn) {
+        public ScopeSlot {
+            if(slot<0 || slot>=128)throw new IllegalArgumentException("Invalid scope slot");
+            bytes(capabilityId);bytes(capabilityVersion);requireSha(specSha);
+            dependsOn=List.copyOf(dependsOn);
+            if(new java.util.HashSet<>(dependsOn).size()!=dependsOn.size()
+                    || dependsOn.stream().anyMatch(i->i<0 || i>=slot))
+                throw new IllegalArgumentException("Invalid scope dependency");
+            dependsOn=dependsOn.stream().sorted().toList();
+        }
+        public java.util.Map<String,Object> canonical(){return java.util.Map.of("slot",Integer.toString(slot),
+                "capabilityId",capabilityId,"capabilityVersion",capabilityVersion,"specSha",specSha,
+                "dependsOn",dependsOn.stream().map(Object::toString).toList());}
+    }
+
+    /** Generic EXACT_WHOLE_SCOPE identity. Constructed from validated published declarations and
+     * resolved configuration semantics, never from names, owner histories or individual-task sums.
+     * Canonical bytes are consumed immediately so mutable caller maps cannot change an issued identity.
+     */
+    public static final class ScopeGroup {
+        private final String key,scopeShapeSha,configSemanticSha,featureVersion,policySha;
+        private final List<ScopeSlot> scopeShape;
+        private final List<String> bucketIds;
+        public ScopeGroup(String featureVersion,String policySha,List<ScopeSlot> scopeShape,List<String> bucketIds,
+                          java.util.Map<String,Object> compatibleConfig){
+            bytes(featureVersion);requireSha(policySha);
+            this.featureVersion=featureVersion;this.policySha=policySha;
+            this.scopeShape=List.copyOf(scopeShape);this.bucketIds=List.copyOf(bucketIds);
+            if(this.scopeShape.isEmpty() || this.scopeShape.size()>128 || this.scopeShape.size()!=this.bucketIds.size())
+                throw new IllegalArgumentException("Incomplete whole-task group");
+            for(int i=0;i<this.scopeShape.size();i++){
+                if(this.scopeShape.get(i).slot()!=i)throw new IllegalArgumentException("Unordered scope slots");
+                bytes(this.bucketIds.get(i));
+            }
+            if(compatibleConfig.isEmpty())throw new IllegalArgumentException("Missing cost configuration");
+            var shape=this.scopeShape.stream().map(ScopeSlot::canonical).toList();
+            scopeShapeSha=cn.jia.core.util.CanonicalValueEncoding.digest(shape);
+            configSemanticSha=cn.jia.core.util.CanonicalValueEncoding.digest(compatibleConfig);
+            key=cn.jia.core.util.CanonicalValueEncoding.digest(java.util.Map.of("schema","scope-group-1",
+                    "featureVersion",featureVersion,"policySha",policySha,"scopeShape",shape,
+                    "bucketIds",this.bucketIds,"compatibleConfig",compatibleConfig));
+        }
+        public String key(){return key;} public String scopeShapeSha(){return scopeShapeSha;}
+        public String configSemanticSha(){return configSemanticSha;} public String featureVersion(){return featureVersion;}
+        public String policySha(){return policySha;} public List<ScopeSlot> scopeShape(){return scopeShape;}
+        public List<String> bucketIds(){return bucketIds;}
+        @Override public String toString(){return "ScopeGroup["+key+"]";}
+    }
+    private static void requireSha(String value){
+        if(value==null || !value.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid group digest");
+    }
+
     public static long amountWen(BigDecimal totalYuan, int completeTasks) {
         return CnyAmounts.quoteWen(totalYuan, BigDecimal.valueOf(completeTasks));
     }
