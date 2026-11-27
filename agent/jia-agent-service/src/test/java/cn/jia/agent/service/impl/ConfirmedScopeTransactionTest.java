@@ -65,7 +65,7 @@ class ConfirmedScopeTransactionTest {
                 String.class,String.class,String.class,String.class,long.class,long.class).getAnnotation(Update.class).value())
                 .replaceAll("#\\{([A-Za-z]+)\\}",":$1");
         when(roots.advanceRequirementVersionInOwnerScope(anyString(),anyString(),anyString(),anyString(),anyLong())).thenAnswer(i->
-                new NamedParameterJdbcTemplate(jdbc).update(sql,Map.of("tenantId",i.getArgument(0),"clientId",i.getArgument(1),
+                new NamedParameterJdbcTemplate(jdbc).update(sql,Map.<String,Object>of("tenantId",i.getArgument(0),"clientId",i.getArgument(1),
                         "ownerJiacn",i.getArgument(2),"taskId",i.getArgument(3),"expectedVersion",i.getArgument(4),"updateTime",1L)));
         mutations=new AgentTaskMutationTransactionImpl(roots,manager);
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,mutations);
