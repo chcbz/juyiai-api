@@ -1,6 +1,10 @@
 package cn.jia.agent.service.impl;
 
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
+import cn.jia.agent.dao.AgentTaskMetaDao;
+import cn.jia.agent.dao.impl.AgentTaskScopedRequirementStore;
+import cn.jia.agent.requirement.ConfirmedScope;
+import org.springframework.beans.factory.ObjectProvider;
 import cn.jia.core.context.EsContextHolder;
 import cn.jia.agent.exception.AgentTaskCollaborationException;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
@@ -32,12 +36,22 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
     private final JdbcTemplate jdbc;
     private final AgentTaskMutationTransaction transactions;
     private final AgentTaskCurrentRequirementStore currentRequirements;
+    private final AgentTaskScopedRequirementStore scopedRequirements;
+    private ObjectProvider<AgentTaskExecutionGrantService> inputCatalogues;
+    private AgentTaskMetaDao taskRoots;
+
+    /** Lazy catalogue dependency avoids the existing grant -> requirements constructor cycle. */
+    @Inject void scopeDependencies(ObjectProvider<AgentTaskExecutionGrantService> catalogues,AgentTaskMetaDao tasks) {
+        this.inputCatalogues=catalogues;
+        this.taskRoots=tasks;
+    }
 
     @Inject
     public AgentTaskRequirementSnapshotServiceImpl(JdbcTemplate jdbc, AgentTaskMutationTransaction transactions) {
         this.jdbc=Objects.requireNonNull(jdbc);
         this.transactions=Objects.requireNonNull(transactions);
         this.currentRequirements=new AgentTaskCurrentRequirementStore(jdbc);
+        this.scopedRequirements=new AgentTaskScopedRequirementStore(jdbc);
     }
 
     @Override public Snapshot captureOnCreate(AgentTaskExecutionGrantService.Scope scope, String taskId,
@@ -50,9 +64,7 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
         return created;
     }
 
-    @Override public Snapshot reconfirm(AgentTaskExecutionGrantService.Scope scope, String taskId,
-            long expectedTaskVersion, String confirmationId, String title, String description) {
-        validScope(scope,taskId);
+    private static void requireAuthenticatedOwner(AgentTaskExecutionGrantService.Scope scope) {
         var principal=SecurityContextHolder.getContext().getAuthentication();
         var context=EsContextHolder.getContext();
         if (context==null || !scope.ownerJiacn().equals(context.getJiacn())
@@ -61,6 +73,84 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                 || !scope.ownerJiacn().equals(jwt.getToken().getClaims().get("jiacn"))
                 || !scope.clientId().equals(jwt.getToken().getClaims().get("client_id")))
             throw new IllegalArgumentException("Authenticated task owner required for re-confirmation");
+    }
+
+    @Override public Snapshot confirmScope(AgentTaskExecutionGrantService.Scope scope,String taskId,
+            long expectedTaskVersion,String confirmationId,ConfirmScopeCommand command) {
+        validScope(scope,taskId);
+        requireAuthenticatedOwner(scope);
+        if (command==null || command.payload()==null || expectedTaskVersion<0
+                || confirmationId==null || !confirmationId.matches("[A-Za-z0-9_-]{1,100}")
+                || "CREATE".equals(confirmationId)) throw new IllegalArgumentException("Invalid scope confirmation");
+        validateOriginalInput(command.title(),command.description());
+        return transactions.executeWithLockedTaskRootInOwnerScope(scope.tenantId(),scope.clientId(),
+                scope.ownerJiacn(),taskId,root -> {
+                    writeTransaction();
+                    Snapshot previous=currentRequirements.read(scope,taskId);
+                    var repeated=jdbc.query("SELECT revision FROM agent_task_requirement_snapshot "
+                            +"WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND confirmation_id=? "
+                            +"AND CAST(confirmation_id AS BINARY)=CAST(? AS BINARY)",
+                            (r,n)->r.getLong(1),scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,
+                            confirmationId,confirmationId);
+                    if (!repeated.isEmpty()) {
+                        if (repeated.size()!=1) throw new IllegalStateException("Ambiguous scope confirmation");
+                        var prior=read(scope,taskId,repeated.getFirst());
+                        var confirmed=prior.confirmedScope();
+                        if (confirmed==null || previous==null || previous.revision()!=prior.revision()
+                                || scopedRequirements.confirmationVersion(scope,taskId,confirmationId)!=expectedTaskVersion
+                                || !Objects.equals(prior.title(),command.title())
+                                || !Objects.equals(prior.description(),command.description())
+                                || !confirmed.scopeSha256().equals(command.payload().digest(confirmed.inputSnapshotDigest())))
+                            throw new IllegalStateException("Scope confirmation idempotency conflict");
+                        return prior;
+                    }
+                    if (root.getTaskVersion()==null || root.getTaskVersion()!=expectedTaskVersion
+                            || expectedTaskVersion==Long.MAX_VALUE || previous==null)
+                        throw new IllegalStateException("Scope confirmation version conflict");
+                    requireUnfunded(scope,taskId);
+                    if (!"open".equals(root.getRewardStatus()) || root.getAssignedAt()!=null
+                            || root.getStartedAt()!=null || root.getAssignedAgentId()!=null && !root.getAssignedAgentId().isBlank())
+                        throw new IllegalStateException("Task scope no longer editable");
+                    if (inputCatalogues==null || taskRoots==null) throw new IllegalStateException("Scope dependencies unavailable");
+                    var catalogue=inputCatalogues.getObject().snapshotTaskInputsWithinLockedTask(scope,taskId);
+                    var refs=new java.util.HashSet<String>();
+                    for (var input:catalogue.inputs()) refs.add(input.fileId()+"@"+input.version());
+                    for (var item:command.payload().workItems())
+                        if (!refs.containsAll(item.inputRefs())) throw new IllegalArgumentException("Scope input is not authorized");
+                    long revision=Math.addExact(previous.revision(),1);
+                    var payload=command.payload();
+                    String requirementSha=payload.requirementDigest(command.title(),command.description(),catalogue.digest());
+                    var confirmed=new ConfirmedScope(revision,requirementSha,payload.digest(catalogue.digest()),
+                            catalogue.digest(),payload.schemaVersion(),System.currentTimeMillis(),payload.workItems(),payload.acceptanceText());
+                    var row=new Snapshot(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,revision,
+                            command.title(),command.description(),requirementSha,"SCOPED",confirmed);
+                    String json=ConfirmedScopeJson.write(confirmed);
+                    scopedRequirements.insert(row,confirmationId,expectedTaskVersion,json);
+                    scopedRequirements.replaceCurrent(row,previous.revision(),json);
+                    if (taskRoots.advanceRequirementVersionInOwnerScope(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),
+                            taskId,expectedTaskVersion)!=1) throw new IllegalStateException("Scope task version changed");
+                    return row;
+                });
+    }
+
+    @Override public ConfirmedScope readConfirmedWithinLockedTask(AgentTaskExecutionGrantService.Scope scope,
+            String taskId,cn.jia.agent.entity.AgentTaskMetaEntity root) {
+        var current=readCurrentWithinLockedTask(scope,taskId,root);
+        if (current.confirmedScope()==null) throw new IllegalStateException("REQUIREMENT_SCOPE_REQUIRED");
+        return current.confirmedScope();
+    }
+
+    private void requireUnfunded(AgentTaskExecutionGrantService.Scope scope,String taskId) {
+        Integer count=jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_funding "
+                +"WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",Integer.class,
+                scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId);
+        if (count==null || count!=0) throw new IllegalStateException("Funded task scope is immutable");
+    }
+
+    @Override public Snapshot reconfirm(AgentTaskExecutionGrantService.Scope scope, String taskId,
+            long expectedTaskVersion, String confirmationId, String title, String description) {
+        validScope(scope,taskId);
+        requireAuthenticatedOwner(scope);
         if (expectedTaskVersion<0 || confirmationId==null || !confirmationId.matches("[A-Za-z0-9_-]{1,100}")
                 || "CREATE".equals(confirmationId))
             throw new IllegalArgumentException("Confirmation identity/version invalid");
@@ -70,7 +160,7 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                     writeTransaction();
                     Snapshot previous=currentRequirements.read(scope,taskId);
                     List<Snapshot> repeated=jdbc.query("SELECT tenant_id,client_id,owner_jiacn,task_id,revision,title,description,"
-                                    + "content_sha256,source FROM agent_task_requirement_snapshot WHERE tenant_id=? "
+                                    + "content_sha256,source,"+ConfirmedScopeJson.COLUMNS+" FROM agent_task_requirement_snapshot WHERE tenant_id=? "
                                     + "AND client_id=? AND owner_jiacn=? AND task_id=? AND confirmation_id=? "
                                     + "AND CAST(tenant_id AS BINARY)=CAST(? AS BINARY) "
                                     + "AND CAST(client_id AS BINARY)=CAST(? AS BINARY) "
@@ -78,7 +168,8 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                                     + "AND CAST(task_id AS BINARY)=CAST(? AS BINARY) "
                                     + "AND CAST(confirmation_id AS BINARY)=CAST(? AS BINARY) LIMIT 2",
                             (rs,n)->new Snapshot(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),
-                                    rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)),
+                                    rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9),
+                                ConfirmedScopeJson.read(rs,rs.getLong(5),rs.getString(8))),
                             scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,confirmationId,
                             scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,confirmationId);
                     if (!repeated.isEmpty()) {
@@ -113,6 +204,12 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                             expectedTaskVersion,confirmationId,title,description,"RECONFIRM");
                     if (previous==null) currentRequirements.insert(confirmed);
                     else currentRequirements.replace(scope,taskId,previous.revision(),title,description);
+                    if (previous!=null && previous.confirmedScope()!=null) {
+                        if (taskRoots==null || expectedTaskVersion==Long.MAX_VALUE
+                                || taskRoots.advanceRequirementVersionInOwnerScope(scope.tenantId(),scope.clientId(),
+                                    scope.ownerJiacn(),taskId,expectedTaskVersion)!=1)
+                            throw new IllegalStateException("Scope withdrawal version changed");
+                    }
                     return confirmed;
                 });
     }
@@ -121,14 +218,15 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
         validReadScope(scope,taskId);
         if (revision<1) throw new IllegalArgumentException("requirement revision invalid");
         List<Snapshot> rows=jdbc.query("SELECT tenant_id,client_id,owner_jiacn,task_id,revision,title,description,"
-                        + "content_sha256,source FROM agent_task_requirement_snapshot "
+                        + "content_sha256,source,"+ConfirmedScopeJson.COLUMNS+" FROM agent_task_requirement_snapshot "
                         + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND revision=? "
                         + "AND CAST(tenant_id AS BINARY)=CAST(? AS BINARY) "
                         + "AND CAST(client_id AS BINARY)=CAST(? AS BINARY) "
                         + "AND CAST(owner_jiacn AS BINARY)=CAST(? AS BINARY) "
                         + "AND CAST(task_id AS BINARY)=CAST(? AS BINARY) LIMIT 2",
                 (rs,n)->new Snapshot(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),
-                        rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)),
+                        rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9),
+                                ConfirmedScopeJson.read(rs,rs.getLong(5),rs.getString(8))),
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,revision,
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId);
         if (rows.size()!=1) throw new IllegalStateException("Exact requirement snapshot unavailable");
@@ -165,7 +263,7 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                     AgentTaskRequirementReadException.Reason.RECONFIRM_REQUIRED);
         }
         return new CurrentSnapshot(taskId,root.getTaskVersion(),current.revision(),
-                current.title(),current.description(),current.sha256(),current.source());
+                current.title(),current.description(),current.sha256(),current.source(),current.confirmedScope());
     }
 
     private static CurrentSnapshot readSafely(java.util.function.Supplier<CurrentSnapshot> read) {
@@ -205,6 +303,8 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
             long expectedRevision,String title,String description) {
         validReadScope(scope,taskId);
         writeTransaction();
+        var current=currentRequirements.read(scope,taskId);
+        if (current!=null && current.confirmedScope()!=null) requireUnfunded(scope,taskId);
         return currentRequirements.replace(scope,taskId,expectedRevision,title,description);
     }
 
@@ -226,7 +326,7 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
     private Snapshot latest(AgentTaskExecutionGrantService.Scope scope,String taskId,boolean lock) {
         validReadScope(scope,taskId);
         List<Snapshot> rows=jdbc.query("SELECT tenant_id,client_id,owner_jiacn,task_id,revision,title,description,"
-                        + "content_sha256,source FROM agent_task_requirement_snapshot "
+                        + "content_sha256,source,"+ConfirmedScopeJson.COLUMNS+" FROM agent_task_requirement_snapshot "
                         + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? "
                         + "AND CAST(tenant_id AS BINARY)=CAST(? AS BINARY) "
                         + "AND CAST(client_id AS BINARY)=CAST(? AS BINARY) "
@@ -238,7 +338,8 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                         + "AND OCTET_LENGTH(task_id)=OCTET_LENGTH(?) "
                         + "ORDER BY revision DESC LIMIT 1"+(lock?" FOR UPDATE":""),
                 (rs,n)->new Snapshot(rs.getString(1),rs.getString(2),rs.getString(3),rs.getString(4),
-                        rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9)),
+                        rs.getLong(5),rs.getString(6),rs.getString(7),rs.getString(8),rs.getString(9),
+                                ConfirmedScopeJson.read(rs,rs.getLong(5),rs.getString(8))),
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId);
@@ -275,9 +376,15 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                 || !Objects.equals(row.ownerJiacn(),scope.ownerJiacn()) || !Objects.equals(row.taskId(),taskId)
                 || row.revision()<1 || row.title()==null || row.title().isBlank()
                 || row.sha256()==null || !row.sha256().matches("[0-9a-f]{64}")
-                || !("CREATE".equals(row.source()) || "RECONFIRM".equals(row.source()))
+                || !("CREATE".equals(row.source()) || "RECONFIRM".equals(row.source()) || "SCOPED".equals(row.source()))
+                || "SCOPED".equals(row.source()) != (row.confirmedScope()!=null)
+                || row.confirmedScope()!=null && (row.confirmedScope().requirementRevision()!=row.revision()
+                    || !row.confirmedScope().requirementSha256().equals(row.sha256()))
                 || !MessageDigest.isEqual(row.sha256().getBytes(StandardCharsets.US_ASCII),
-                digest(scope,taskId,row.revision(),row.source(),row.title(),row.description()).getBytes(StandardCharsets.US_ASCII)))
+                (row.confirmedScope()==null ? digest(scope,taskId,row.revision(),row.source(),row.title(),row.description())
+                    : new ConfirmedScope.Payload(row.confirmedScope().schemaVersion(),row.confirmedScope().workItems(),
+                        row.confirmedScope().acceptanceText()).requirementDigest(row.title(),row.description(),
+                        row.confirmedScope().inputSnapshotDigest())).getBytes(StandardCharsets.US_ASCII)))
             throw new IllegalStateException("Requirement snapshot integrity/scope drift");
         return row;
     }

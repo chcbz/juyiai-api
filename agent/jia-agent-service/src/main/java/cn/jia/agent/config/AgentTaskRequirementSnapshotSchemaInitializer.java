@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
-/** Only creates an absent table; rejects drift rather than rewriting existing identity/history. */
+/** Explicit schema-maintenance: create tables and add nullable scope columns, never backfill history. */
 @org.springframework.context.annotation.Profile("schema-maintenance")
 public final class AgentTaskRequirementSnapshotSchemaInitializer implements InitializingBean {
     private static final String TABLE = "agent_task_requirement_snapshot";
@@ -30,11 +30,38 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables "
                 + "WHERE table_schema=DATABASE() AND table_name=?", Integer.class, TABLE);
         if (count == null || count == 0) jdbc.execute(ddl());
+        evolveScopeColumns(TABLE);
         validate();
         // Explicit schema-maintenance only. Production backfill is a separate controlled migration.
         for (String resource:List.of("db/agent-task-current-requirement-v1.sql","db/agent-task-requirement-edit-operation-v1.sql")) {
             try { jdbc.execute(new ClassPathResource(resource).getContentAsString(StandardCharsets.UTF_8)); }
             catch (java.io.IOException failure) {throw new IllegalStateException("Current requirement DDL unavailable",failure);}
+        }
+        evolveScopeColumns("agent_task_current_requirement");
+    }
+
+    private void evolveScopeColumns(String table) {
+        if (!List.of(TABLE,"agent_task_current_requirement").contains(table)) throw new IllegalArgumentException("Unknown scope table");
+        var definitions=new java.util.LinkedHashMap<String,String>();
+        definitions.put("scope_schema","VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NULL");
+        definitions.put("scope_json","JSON NULL");
+        definitions.put("scope_sha256","CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
+        definitions.put("scope_input_sha256","CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
+        definitions.put("scope_confirmed_at","BIGINT NULL");
+        var types=Map.of("scope_schema","varchar(48)","scope_json","json","scope_sha256","char(64)",
+                "scope_input_sha256","char(64)","scope_confirmed_at","bigint");
+        for (var entry:definitions.entrySet()) {
+            var rows=jdbc.queryForList("SELECT column_type,is_nullable,collation_name FROM information_schema.columns "
+                    +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",table,entry.getKey());
+            if (rows.isEmpty()) {
+                jdbc.execute("ALTER TABLE "+table+" ADD COLUMN "+entry.getKey()+" "+entry.getValue());
+                rows=jdbc.queryForList("SELECT column_type,is_nullable,collation_name FROM information_schema.columns "
+                        +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",table,entry.getKey());
+            }
+            if (rows.size()!=1 || !types.get(entry.getKey()).equalsIgnoreCase(Objects.toString(rows.getFirst().get("column_type"),""))
+                    || !"YES".equalsIgnoreCase(Objects.toString(rows.getFirst().get("is_nullable"),""))
+                    || entry.getValue().contains("ascii_bin") && !"ascii_bin".equalsIgnoreCase(Objects.toString(rows.getFirst().get("collation_name"),"")))
+                throw new IllegalStateException("Confirmed scope column drift: "+entry.getKey());
         }
     }
 
@@ -62,7 +89,7 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
                 + "ORDER BY ordinal_position", TABLE);
         if (!columns.stream().map(r -> Objects.toString(r.get("column_name"), "")).toList()
                 .equals(List.of("id","tenant_id","client_id","owner_jiacn","task_id",
-                        "revision","confirmation_id","task_version_at_confirmation","title","description","content_sha256","source","created_at")))
+                        "revision","confirmation_id","task_version_at_confirmation","title","description","content_sha256","source","created_at","scope_schema","scope_json","scope_sha256","scope_input_sha256","scope_confirmed_at")))
             throw new IllegalStateException("Snapshot columns drift");
         for (var r : columns) {
             String name = Objects.toString(r.get("column_name"), "");
@@ -72,7 +99,7 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
             if ((name.equals("title") || name.equals("description"))
                     && !"mediumtext".equalsIgnoreCase(Objects.toString(r.get("column_type"), "")))
                 throw new IllegalStateException("Snapshot text width drift: " + name);
-            if ((!name.equals("description")) && !"NO".equalsIgnoreCase(Objects.toString(r.get("is_nullable"), "")))
+            if ((!name.equals("description") && !name.startsWith("scope_")) && !"NO".equalsIgnoreCase(Objects.toString(r.get("is_nullable"), "")))
                 throw new IllegalStateException("Snapshot nullability drift: " + name);
         }
         List<Map<String,Object>> indexes = jdbc.queryForList("SELECT index_name,non_unique,seq_in_index,column_name,sub_part "

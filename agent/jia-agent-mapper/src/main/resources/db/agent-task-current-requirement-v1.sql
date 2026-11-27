@@ -9,5 +9,10 @@ CREATE TABLE IF NOT EXISTS agent_task_current_requirement (
  description MEDIUMTEXT COLLATE utf8mb4_0900_bin NULL,
  content_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
  source VARCHAR(20) COLLATE utf8mb4_0900_bin NOT NULL,
+ scope_schema VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NULL,
+ scope_json JSON NULL,
+ scope_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+ scope_input_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+ scope_confirmed_at BIGINT NULL,
  PRIMARY KEY (tenant_id,client_id,owner_jiacn,task_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin;

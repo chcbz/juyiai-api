@@ -334,4 +334,13 @@ public class AgentTaskMetaDaoImpl extends BaseDaoImpl<AgentTaskMetaMapper, Agent
         }
         return new ArrayList<>(exact);
     }
+    @Override public int advanceRequirementVersionInOwnerScope(String tenantId,String clientId,
+            String ownerJiacn,String taskId,long expectedVersion) {
+        requireStrictOwnerScope(tenantId,clientId,ownerJiacn);
+        TaskCollaborationDaoSupport.requireId(taskId,"taskId");
+        TaskCollaborationDaoSupport.requireExpectedVersion(expectedVersion);
+        if (expectedVersion==Long.MAX_VALUE) throw new IllegalArgumentException("Task version exhausted");
+        return baseMapper.advanceRequirementVersionInOwnerScope(tenantId,clientId,ownerJiacn,
+                taskId,expectedVersion,DateUtil.nowTime());
+    }
 }

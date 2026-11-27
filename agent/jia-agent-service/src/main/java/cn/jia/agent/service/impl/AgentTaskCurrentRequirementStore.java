@@ -10,10 +10,11 @@ final class AgentTaskCurrentRequirementStore {
     AgentTaskCurrentRequirementStore(JdbcTemplate jdbc) { this.jdbc=jdbc; }
 
     Snapshot read(Scope scope,String taskId) {
-        var rows=jdbc.query("SELECT revision,title,description,content_sha256,source FROM agent_task_current_requirement "
+        var rows=jdbc.query("SELECT revision,title,description,content_sha256,source,"+ConfirmedScopeJson.COLUMNS+" FROM agent_task_current_requirement "
                         + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=?",
                 (r,n)->new Snapshot(scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,
-                        r.getLong(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5)),
+                        r.getLong(1),r.getString(2),r.getString(3),r.getString(4),r.getString(5),
+                        ConfirmedScopeJson.read(r,r.getLong(1),r.getString(4))),
                 scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId);
         try { return rows.isEmpty()?null:AgentTaskRequirementSnapshotServiceImpl.verified(rows.getFirst(),scope,taskId); }
         catch (IllegalStateException corrupt) {throw new AgentTaskRequirementSnapshotServiceImpl.SnapshotIntegrityException(corrupt); }
@@ -28,7 +29,8 @@ final class AgentTaskCurrentRequirementStore {
         AgentTaskRequirementSnapshotServiceImpl.validateOriginalInput(title,description);
         long revision=Math.addExact(expectedRevision,1);
         String hash=AgentTaskRequirementSnapshotServiceImpl.digest(scope,taskId,revision,"RECONFIRM",title,description);
-        if (jdbc.update("UPDATE agent_task_current_requirement SET revision=?,title=?,description=?,content_sha256=?,source=? "
+        if (jdbc.update("UPDATE agent_task_current_requirement SET revision=?,title=?,description=?,content_sha256=?,source=?, "
+                + "scope_schema=NULL,scope_json=NULL,scope_sha256=NULL,scope_input_sha256=NULL,scope_confirmed_at=NULL "
                 + "WHERE tenant_id=? AND client_id=? AND owner_jiacn=? AND task_id=? AND revision=?",
                 revision,title,description,hash,"RECONFIRM",scope.tenantId(),scope.clientId(),scope.ownerJiacn(),taskId,expectedRevision)!=1)
             throw new IllegalStateException("Current requirement changed");

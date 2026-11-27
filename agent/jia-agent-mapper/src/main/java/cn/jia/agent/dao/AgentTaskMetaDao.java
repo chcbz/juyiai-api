@@ -99,4 +99,7 @@ public interface AgentTaskMetaDao extends IBaseDao<AgentTaskMetaEntity> {
 
     List<AgentTaskStatusCountRow> countSearchByStatus(
             String tenantId, String clientId, String ownerJiacn, String ability, String keyword, String assignedAgentId);
+    /** Exactly one requirement version advance under the owner's existing task-root lock. */
+    int advanceRequirementVersionInOwnerScope(String tenantId,String clientId,String ownerJiacn,
+            String taskId,long expectedVersion);
 }

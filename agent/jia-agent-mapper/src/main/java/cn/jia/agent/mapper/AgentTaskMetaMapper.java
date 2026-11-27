@@ -829,4 +829,21 @@ public interface AgentTaskMetaMapper extends BaseMapper<AgentTaskMetaEntity> {
             @Param("completedAt") Long completedAt,
             @Param("failureReason") String failureReason,
             @Param("updateTime") long updateTime);
+    @Update("""
+            UPDATE agent_task_meta SET task_version=task_version+1,update_time=#{updateTime}
+            WHERE tenant_id=#{tenantId} AND client_id=#{clientId} AND owner_jiacn=#{ownerJiacn}
+              AND task_id=#{taskId} AND task_version=#{expectedVersion}
+              AND CAST(tenant_id AS BINARY)=CAST(#{tenantId} AS BINARY)
+              AND OCTET_LENGTH(tenant_id)=OCTET_LENGTH(#{tenantId})
+              AND CAST(client_id AS BINARY)=CAST(#{clientId} AS BINARY)
+              AND OCTET_LENGTH(client_id)=OCTET_LENGTH(#{clientId})
+              AND CAST(owner_jiacn AS BINARY)=CAST(#{ownerJiacn} AS BINARY)
+              AND OCTET_LENGTH(owner_jiacn)=OCTET_LENGTH(#{ownerJiacn})
+              AND CAST(task_id AS BINARY)=CAST(#{taskId} AS BINARY)
+              AND OCTET_LENGTH(task_id)=OCTET_LENGTH(#{taskId})
+            """)
+    int advanceRequirementVersionInOwnerScope(@Param("tenantId") String tenantId,
+            @Param("clientId") String clientId,@Param("ownerJiacn") String ownerJiacn,
+            @Param("taskId") String taskId,@Param("expectedVersion") long expectedVersion,
+            @Param("updateTime") long updateTime);
 }
