@@ -4,14 +4,14 @@ import cn.jia.core.util.CanonicalValueEncoding;
 import java.util.*;
 
 /** One bounded declaration revision in an existing authenticated runtime session. Not a session fence. */
-public record CostProfileReport(long sequence,List<CostProfile> profiles) {
+public record CostProfileReport(long sequence,List<MeasuredCostProfile> profiles) {
     public CostProfileReport {
         if(sequence<=0)throw new IllegalArgumentException("Invalid cost profile sequence");
-        profiles=CostProfile.validateProfiles(profiles);
+        profiles=MeasuredCostProfile.validateProfiles(profiles);
     }
     public Map<String,Object> configuration() {
-        return Map.of("schema",CostProfile.SCHEMA,"profiles",profiles.stream().map(profile->{
-            var value=new HashMap<>(profile.canonical());value.put("configSha",profile.configSha());return Map.copyOf(value);
+        return Map.of("schema",MeasuredCostProfile.SCHEMA,"profiles",profiles.stream().map(profile->{
+            var value=new HashMap<>(profile.canonical());value.put("measurementSha",profile.measurementSha());return Map.copyOf(value);
         }).toList());
     }
     /** Sequence is an ordering fence, not cost semantics. An empty profile list explicitly withdraws cost evidence. */

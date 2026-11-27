@@ -1,104 +1,35 @@
 package cn.jia.agent.skill.quote;
 
-import cn.jia.agent.requirement.ConfirmedScope.WorkItem;
 import cn.jia.core.util.CanonicalValueEncoding;
+import cn.jia.economy.pricing.CostPricingRoute;
+import cn.jia.economy.pricing.CostRouteReference;
 import java.util.*;
 
-/** A measured configuration, not execution authority or a price. Installation/spec checks belong to Agent service. */
-public record CostProfile(String profileId, long revision, int selectionPriority,
-        List<Slot> scopePattern, String executionStrategyVersion, String contextPolicyId,
-        String contextPolicyVersion, String toolPolicyVersion, String capturePolicyVersion, List<Route> routes) {
-    public static final String SCHEMA="COST_PROFILES_V1";
-    public static final int MAX_PROFILES=32, MAX_SLOTS=128, MAX_ROUTES=128;
-
+/** Backend-resolved pricing configuration. Never accepted as a Runtime measurement or execution permission. */
+public record CostProfile(MeasuredCostProfile measurement,List<Route> routes) {
     public CostProfile {
-        id(profileId,128);require(revision>0 && selectionPriority>=0,"Invalid profile revision/priority");
-        id(executionStrategyVersion,64);id(contextPolicyId,128);sha(contextPolicyVersion);sha(toolPolicyVersion);id(capturePolicyVersion,64);
-        scopePattern=List.copyOf(Objects.requireNonNull(scopePattern));
-        require(!scopePattern.isEmpty() && scopePattern.size()<=MAX_SLOTS,"Invalid profile scope size");
-        for(int i=0;i<scopePattern.size();i++)require(scopePattern.get(i).slot()==i,"Scope slots must be ordered and contiguous");
-        routes=List.copyOf(Objects.requireNonNull(routes));
-        require(!routes.isEmpty() && routes.size()<=MAX_ROUTES,"Invalid profile routes");
-        require(new HashSet<>(routes).size()==routes.size(),"Duplicate pricing route");
-        routes=routes.stream().sorted(CostProfile::compareRoutes).toList();
+        Objects.requireNonNull(measurement);routes=List.copyOf(Objects.requireNonNull(routes));
+        var byReference=new HashMap<CostRouteReference,Route>();
+        for(var route:routes)if(byReference.put(route.reference(),route)!=null)throw new IllegalArgumentException("Duplicate resolved cost route");
+        if(!byReference.keySet().equals(Set.copyOf(measurement.routeRefs())))throw new IllegalArgumentException("Incomplete resolved cost configuration");
+        // Retain the measured reference order, not map iteration or the order returned by SQL.
+        routes=measurement.routeRefs().stream().map(byReference::get).toList();
     }
-
-    public record Slot(int slot,String capabilityId,String capabilityVersion,String specSha,List<Integer> dependsOn,
-            String skillKey,String skillVersion,String packageSha,String installId) {
-        public Slot {
-            require(slot>=0 && slot<MAX_SLOTS,"Invalid scope slot");id(capabilityId,128);id(capabilityVersion,64);sha(specSha);
-            id(skillKey,128);id(skillVersion,64);sha(packageSha);id(installId,128);
-            dependsOn=List.copyOf(Objects.requireNonNull(dependsOn));
-            require(new HashSet<>(dependsOn).size()==dependsOn.size(),"Duplicate slot dependency");
-            for(int dependency:dependsOn)require(dependency>=0 && dependency<slot,"Dependency must precede its slot");
-            dependsOn=dependsOn.stream().sorted().toList();
+    public record Route(CostRouteReference reference,CostPricingRoute pricing) {
+        public Route {
+            Objects.requireNonNull(reference);Objects.requireNonNull(pricing);
+            if(pricing instanceof CostPricingRoute.TokenRoute t && !reference.normalizationBasis().equals(t.normalizationBasis()))
+                throw new IllegalArgumentException("Cost route basis mismatch");
         }
-        public Map<String,Object> shape() {
-            return Map.of("slot",Integer.toString(slot),"capabilityId",capabilityId,"capabilityVersion",capabilityVersion,
-                    "specSha",specSha,"dependsOn",dependsOn.stream().map(Object::toString).toList());
-        }
-        public Map<String,Object> canonical() {
-            var result=new HashMap<>(shape());result.put("skillKey",skillKey);result.put("skillVersion",skillVersion);
-            result.put("packageSha",packageSha);result.put("installId",installId);return Map.copyOf(result);
-        }
+        public Map<String,Object> canonical(){return Map.of("reference",reference.canonical(),"pricing",pricing.canonical());}
     }
-
-    /** Names are normalized billing identities, never URLs, credentials or task text. Known mechanisms are checked by the pricing adapter. */
-    public record Route(String kind,String component,String channel,String modelOrTool,String tier,String normalizationBasis) {
-        public Route {for(String value:List.of(kind,component,channel,modelOrTool,tier,normalizationBasis))id(value,128);}
-        public Map<String,Object> canonical() {return Map.of("kind",kind,"component",component,"channel",channel,
-                "modelOrTool",modelOrTool,"tier",tier,"normalizationBasis",normalizationBasis);}
-        private List<String> ordering() {return List.of(kind,component,channel,modelOrTool,tier,normalizationBasis);}
-    }
-
-    /** Inputs have already passed confirmation validation; item IDs are mapped to ordinal slots, never put in a cost identity. */
-    public boolean matches(List<WorkItem> items) {
-        if(items==null || items.size()!=scopePattern.size())return false;
-        var ordinals=new HashMap<String,Integer>();
-        for(int i=0;i<items.size();i++) {
-            var item=items.get(i);var slot=scopePattern.get(i);
-            if(ordinals.containsKey(item.itemId()) || !slot.capabilityId().equals(item.capabilityId())
-                    || !slot.capabilityVersion().equals(item.capabilityVersion()))return false;
-            var dependencies=new ArrayList<Integer>();
-            for(String id:item.dependsOn()) {var ordinal=ordinals.get(id);if(ordinal==null)return false;dependencies.add(ordinal);}
-            dependencies.sort(Integer::compareTo);if(!slot.dependsOn().equals(dependencies))return false;
-            ordinals.put(item.itemId(),i);
-        }
-        return true;
-    }
-
-    /** Caller supplies only profiles whose actual installations/spec bindings are valid. Never selects a cheaper non-executed plan. */
-    public static Optional<CostProfile> select(List<CostProfile> eligible,List<WorkItem> items) {
-        var profiles=validateProfiles(eligible);
-        return profiles.stream().filter(p->p.matches(items)).min(Comparator.comparingInt(CostProfile::selectionPriority));
-    }
-    public static List<CostProfile> validateProfiles(List<CostProfile> profiles) {
-        require(profiles!=null && profiles.size()<=MAX_PROFILES,"Too many cost profiles");
-        var ids=new HashSet<String>();var priorities=new HashSet<Integer>();
-        for(var profile:profiles)require(profile!=null && ids.add(profile.profileId()) && priorities.add(profile.selectionPriority()),"Duplicate profile ID/priority");
-        return profiles.stream().sorted((a,b)->CanonicalValueEncoding.compareUtf8(a.profileId(),b.profileId())).toList();
-    }
-
-    public List<Map<String,Object>> scopeShape() {return scopePattern.stream().map(Slot::shape).toList();}
-    public String scopeShapeSha() {return CanonicalValueEncoding.digest(scopeShape());}
+    /** Excludes installation/profile identity and mutable mapping revision, but includes resolved mapping semantics. */
     public Map<String,Object> compatibleConfiguration() {
-        // Include package content independently of install IDs. A producer cannot accidentally collapse changed bytes using a stale policy label.
-        var packages=scopePattern.stream().map(s->Map.of("skillKey",s.skillKey(),"skillVersion",s.skillVersion(),"packageSha",s.packageSha()))
-                .distinct().sorted((a,b)->{for(String k:List.of("skillKey","skillVersion","packageSha")){int c=CanonicalValueEncoding.compareUtf8(a.get(k),b.get(k));if(c!=0)return c;}return 0;}).toList();
-        return Map.of("executionStrategyVersion",executionStrategyVersion,"contextPolicyId",contextPolicyId,
-                "contextPolicyVersion",contextPolicyVersion,"toolPolicyVersion",toolPolicyVersion,
-                "capturePolicyVersion",capturePolicyVersion,"skillPackages",packages,"routes",routes.stream().map(Route::canonical).toList());
+        return Map.of("measurement",measurement.compatibleMeasurement(),"routes",routes.stream().map(Route::canonical).toList());
     }
-    public String configSemanticSha() {return CanonicalValueEncoding.digest(compatibleConfiguration());}
-    public Map<String,Object> canonical() {
-        var result=new HashMap<>(compatibleConfiguration());result.remove("skillPackages");
-        result.put("profileId",profileId);result.put("revision",Long.toString(revision));result.put("selectionPriority",Integer.toString(selectionPriority));
-        result.put("scopePattern",scopePattern.stream().map(Slot::canonical).toList());return Map.copyOf(result);
-    }
-    public String configSha() {return CanonicalValueEncoding.digest(canonical());}
+    public String configSemanticSha(){return CanonicalValueEncoding.digest(compatibleConfiguration());}
+    /** Private identity binds the full measured configuration; mapping revision pins are separately held for finish. */
+    public Map<String,Object> canonical(){return Map.of("measurement",measurement.canonical(),"routes",routes.stream().map(Route::canonical).toList());}
+    public String configSha(){return CanonicalValueEncoding.digest(canonical());}
     @Override public String toString(){return "CostProfile[private]";}
-    private static int compareRoutes(Route a,Route b) {for(int i=0;i<a.ordering().size();i++){int c=CanonicalValueEncoding.compareUtf8(a.ordering().get(i),b.ordering().get(i));if(c!=0)return c;}return 0;}
-    private static void id(String value,int max) {require(value!=null && !value.isBlank() && value.equals(value.strip()) && value.codePointCount(0,value.length())<=max,"Invalid cost identity");CanonicalValueEncoding.utf8(value);}
-    private static void sha(String value) {require(value!=null && value.matches("[0-9a-f]{64}"),"Invalid configuration digest");}
-    private static void require(boolean valid,String message) {if(!valid)throw new IllegalArgumentException(message);}
 }

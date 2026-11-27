@@ -580,6 +580,7 @@ def mmdU1BootstrapOutboxSourceSet = sourceSets.create('mmdU1BootstrapOutbox') {
         include 'cn/jia/agent/skill/CapabilityQuotePublicationMySqlTest.java'
         include 'cn/jia/agent/skill/PublishedCapabilityQuoteSpecsTest.java'
         include 'cn/jia/agent/security/CostProfileReportJsonTest.java'
+        include 'cn/jia/agent/service/recommendation/ResolvedCostProfilesTest.java'
         include 'cn/jia/agent/skill/SkillPackagePublicationServiceTest.java'
         include 'cn/jia/agent/api/SkillPackagePublicationControllerTest.java'
         include 'cn/jia/agent/api/ExecutionQuoteSpecPublicationTest.java'

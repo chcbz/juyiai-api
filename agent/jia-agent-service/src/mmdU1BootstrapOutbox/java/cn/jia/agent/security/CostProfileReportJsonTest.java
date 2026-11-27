@@ -8,9 +8,17 @@ import static org.junit.jupiter.api.Assertions.*;
 class CostProfileReportJsonTest {
     private static final String H="a".repeat(64);
     private static CostProfileReport report() {
-        var slots=List.of(new CostProfile.Slot(0,"text.summary","1",H,List.of(),"summary","1",H,"install"));
-        var routes=List.of(new CostProfile.Route("MODEL","OUTPUT","channel","model","default","TOKENS_V1"));
-        return new CostProfileReport(1,List.of(new CostProfile("summary",1,0,slots,"native-1","context-1",H,H,"capture-1",routes)));
+        var slots=List.of(new MeasuredCostProfile.Slot(0,"text.summary","1",H,List.of(),"summary","1",H,"install"));
+        var routes=List.of(new cn.jia.economy.pricing.CostRouteReference("MODEL","OUTPUT","namespace","model","TOKENS_V1"));
+        return new CostProfileReport(1,List.of(new MeasuredCostProfile("summary",1,0,slots,"native-1","context-1",H,H,"capture-1",routes)));
+    }
+    @Test void consumesSameMeasuredWireFixtureAsRuntimeWithoutAnyTariffAuthority() throws Exception {
+        try(var source=getClass().getResourceAsStream("/cost-profile-report.json")){
+            assertNotNull(source);String raw=new String(source.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);
+            assertEquals(report(),CostProfileReportJson.read(raw));
+            assertFalse(raw.contains("channel"));assertFalse(raw.contains("tier"));assertFalse(raw.contains("configSha"));
+            assertThrows(IllegalArgumentException.class,()->CostProfileReportJson.read(raw.replace("\"namespace\":\"namespace\"","\"namespace\":\"namespace\",\"channel\":\"forged\"")));
+        }
     }
     @Test void strictWireRoundtripAndSequenceIndependentConfigurationIdentity() {
         var report=report();assertEquals(report,CostProfileReportJson.read(CostProfileReportJson.write(report)));
@@ -19,9 +27,9 @@ class CostProfileReportJsonTest {
         assertEquals("CostProfileReport[private]",report.toString());
     }
     @Test void declarationMatchesIndependentCanonicalEncodingVector() {
-        var report=report();assertEquals("8065776bbe21d93d2c0b4f7547921b7dc34238bcda64c12078273ee0e427a432",report.profiles().getFirst().configSha());
-        assertEquals("4d5508e8c8cf0e02cfabbad11422e7a747f9a15e0e12dba90db17bc66721fed1",report.sha256());
-        assertEquals(1051,cn.jia.core.util.CanonicalValueEncoding.encode(report.configuration()).length);
+        var report=report();assertEquals("bb6aff8ed243ccf9e146640c6a10f37138af8c82f1014c1c7cdb24b255c2f220",report.profiles().getFirst().measurementSha());
+        assertEquals("729eff1e98d5f9fdbf2a0249d8b81a676da8a4936fefe47b1d718750b8fb6068",report.sha256());
+        assertEquals(1042,cn.jia.core.util.CanonicalValueEncoding.encode(report.configuration()).length);
     }
     @Test void emptyProfilesAreAnExplicitWithdrawalNotAnImaginaryExecutableProfile() {
         var empty=new CostProfileReport(2,List.of());assertEquals(empty,CostProfileReportJson.read(CostProfileReportJson.write(empty)));

@@ -1,6 +1,7 @@
 package cn.jia.agent.security;
 
-import cn.jia.agent.skill.quote.CostProfile;
+import cn.jia.agent.skill.quote.MeasuredCostProfile;
+import cn.jia.economy.pricing.CostRouteReference;
 import cn.jia.agent.skill.quote.CostProfileReport;
 import cn.jia.core.util.CanonicalValueEncoding;
 import com.fasterxml.jackson.core.JsonFactory;
@@ -23,9 +24,9 @@ public final class CostProfileReportJson {
         try {
             if(raw==null || raw.length()>MAX_BYTES || CanonicalValueEncoding.utf8(raw).length>MAX_BYTES)throw invalid();
             var root=JSON.readTree(raw);keys(root,"schema","sequence","sha256","profiles");
-            if(!CostProfile.SCHEMA.equals(text(root,"schema")))throw invalid();
-            var profiles=new ArrayList<CostProfile>();
-            for(var node:array(root.get("profiles"),CostProfile.MAX_PROFILES))profiles.add(profile(node));
+            if(!MeasuredCostProfile.SCHEMA.equals(text(root,"schema")))throw invalid();
+            var profiles=new ArrayList<MeasuredCostProfile>();
+            for(var node:array(root.get("profiles"),MeasuredCostProfile.MAX_PROFILES))profiles.add(profile(node));
             var report=new CostProfileReport(number(root,"sequence"),profiles);
             if(!report.sha256().equals(text(root,"sha256")))throw invalid();
             return report;
@@ -41,25 +42,25 @@ public final class CostProfileReportJson {
     public static CostProfileReport readWire(Object wire) {
         try{return read(JSON.writeValueAsString(wire));}catch(Exception failure){throw invalid();}
     }
-    private static CostProfile profile(JsonNode node) {
+    private static MeasuredCostProfile profile(JsonNode node) {
         keys(node,"profileId","revision","selectionPriority","scopePattern","executionStrategyVersion","contextPolicyId",
-                "contextPolicyVersion","toolPolicyVersion","capturePolicyVersion","routes","configSha");
-        var slots=new ArrayList<CostProfile.Slot>();
-        for(var slot:array(node.get("scopePattern"),CostProfile.MAX_SLOTS)) {
+                "contextPolicyVersion","toolPolicyVersion","capturePolicyVersion","routeRefs","measurementSha");
+        var slots=new ArrayList<MeasuredCostProfile.Slot>();
+        for(var slot:array(node.get("scopePattern"),MeasuredCostProfile.MAX_SLOTS)) {
             keys(slot,"slot","capabilityId","capabilityVersion","specSha","dependsOn","skillKey","skillVersion","packageSha","installId");
             var dependencies=new ArrayList<Integer>();
-            for(var dependency:array(slot.get("dependsOn"),CostProfile.MAX_SLOTS))dependencies.add(integer(dependency));
-            slots.add(new CostProfile.Slot(integer(slot.get("slot")),text(slot,"capabilityId"),text(slot,"capabilityVersion"),text(slot,"specSha"),dependencies,
+            for(var dependency:array(slot.get("dependsOn"),MeasuredCostProfile.MAX_SLOTS))dependencies.add(integer(dependency));
+            slots.add(new MeasuredCostProfile.Slot(integer(slot.get("slot")),text(slot,"capabilityId"),text(slot,"capabilityVersion"),text(slot,"specSha"),dependencies,
                     text(slot,"skillKey"),text(slot,"skillVersion"),text(slot,"packageSha"),text(slot,"installId")));
         }
-        var routes=new ArrayList<CostProfile.Route>();
-        for(var route:array(node.get("routes"),CostProfile.MAX_ROUTES)) {
-            keys(route,"kind","component","channel","modelOrTool","tier","normalizationBasis");
-            routes.add(new CostProfile.Route(text(route,"kind"),text(route,"component"),text(route,"channel"),text(route,"modelOrTool"),text(route,"tier"),text(route,"normalizationBasis")));
+        var routes=new ArrayList<CostRouteReference>();
+        for(var route:array(node.get("routeRefs"),MeasuredCostProfile.MAX_ROUTES)) {
+            keys(route,"kind","component","namespace","modelOrTool","normalizationBasis");
+            routes.add(new CostRouteReference(text(route,"kind"),text(route,"component"),text(route,"namespace"),text(route,"modelOrTool"),text(route,"normalizationBasis")));
         }
-        var result=new CostProfile(text(node,"profileId"),number(node,"revision"),integer(node.get("selectionPriority")),slots,
+        var result=new MeasuredCostProfile(text(node,"profileId"),number(node,"revision"),integer(node.get("selectionPriority")),slots,
                 text(node,"executionStrategyVersion"),text(node,"contextPolicyId"),text(node,"contextPolicyVersion"),text(node,"toolPolicyVersion"),text(node,"capturePolicyVersion"),routes);
-        if(!result.configSha().equals(text(node,"configSha")))throw invalid();return result;
+        if(!result.measurementSha().equals(text(node,"measurementSha")))throw invalid();return result;
     }
     private static long number(JsonNode node,String key) {return decimal(text(node,key));}
     private static long decimal(String value) {if(!value.matches("0|[1-9][0-9]{0,18}"))throw invalid();return Long.parseLong(value);}
