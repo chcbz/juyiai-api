@@ -36,7 +36,7 @@ public class GroupPublicationEnrollment {
         var m=read(approvalSha);
         if(!m.tenant().equals(scope.tenantId())||!m.client().equals(scope.clientId()))throw new NotApproved();
         var original=db.lockCaseOriginal(m);if(original==null||!m.reviewSha().equals(db.lockReview(m)))throw new NotApproved();
-        if(cn.jia.economy.task.ScopedBenchmarkManifest.SCHEMA.equals(json.readTree(original).path("schema").asText())) {
+        if(cn.jia.economy.task.ScopedBenchmarkManifest.SCHEMA.equals(json.readTree(original).path("schema").asText(null))) {
             requireScopedSource(m,original);
         } else if(!m.sampleId().equals(m.manifestSha())||!Objects.equals(m.evidenceRevision(),db.lockSample(m)))throw new NotApproved();
         db.ensureDomain(m);var h=db.lockMemberHead(m);

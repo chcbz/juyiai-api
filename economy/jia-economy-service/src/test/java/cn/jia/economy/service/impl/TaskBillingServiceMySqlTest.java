@@ -882,7 +882,7 @@ class TaskBillingServiceMySqlTest {
                 "UPDATE economy_task_cost_sample SET scoped_policy_sha256=REPEAT('0',64)",
                 "UPDATE economy_task_benchmark_review SET withdrawn=TRUE",
                 "UPDATE economy_budget_publish_approval SET withdrawn=TRUE")){
-            tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_budget_group_head SET status='ACTIVE',active_revision=1");
+            tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_budget_group_head SET status='ACTIVE',active_revision=1,tariff_sha=REPEAT('a',64)");
                 jdbc.update(change);assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL AND generation=2",Integer.class));
                 st.setRollbackOnly();});
             assertEquals(1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Integer.class));
