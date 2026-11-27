@@ -41,6 +41,7 @@ class AgentTaskExecutionGrantServiceImplTest {
     private final AgentTaskMetaEntity root = new AgentTaskMetaEntity();
     private AgentTaskExecutionGrantServiceImpl service;
     private final cn.jia.agent.service.AgentHostingWorkAdmission rentAdmission = mock(cn.jia.agent.service.AgentHostingWorkAdmission.class);
+    private final cn.jia.agent.service.recommendation.ScopedBenchmarkEnrollment benchmarks=mock(cn.jia.agent.service.recommendation.ScopedBenchmarkEnrollment.class);
     private final cn.jia.economy.task.TaskBillingService billing = mock(cn.jia.economy.task.TaskBillingService.class);
     private final cn.jia.agent.service.TaskAssigneeAuthorityService authority=mock(cn.jia.agent.service.TaskAssigneeAuthorityService.class);
 
@@ -82,7 +83,7 @@ class AgentTaskExecutionGrantServiceImplTest {
                     .filter(java.util.Objects::nonNull).toList();
         });
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
-                new DirectTransaction(root),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
+                new DirectTransaction(root),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission,benchmarks);
         service.setAssigneeAuthority(authority);
         service.setDeliberationRuntime(executor -> true);
     }
@@ -238,7 +239,7 @@ class AgentTaskExecutionGrantServiceImplTest {
     @Test void grayScopeReachesTenantBoundRootLockWithoutProductionFallback() {
         var transactions = mock(AgentTaskMutationTransaction.class);
         var scoped = new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,
-                legacy,identities,transactions,new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
+                legacy,identities,transactions,new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission,benchmarks);
         var gray = new AgentTaskExecutionGrantService.Scope("1","client","owner");
         scoped.admit(gray,"task-1","grant-1",1,0,"agent-1","READ_TASK",false);
         verify(transactions).executeWithLockedTaskRootInOwnerScope(eq("1"),eq("client"),
@@ -278,7 +279,7 @@ class AgentTaskExecutionGrantServiceImplTest {
         when(taskRoots.findByTaskIdInOwnerScope("0","client","owner","task-1")).thenReturn(root);
         var transactions=mock(AgentTaskMutationTransaction.class);
         var observed=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,
-                identities,transactions,new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
+                identities,transactions,new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission,benchmarks);
         observed.setAssigneeAuthority(authority);
         observed.setDeliberationRuntime(executor -> true);
         clearInvocations(identities,authority);
@@ -466,7 +467,7 @@ class AgentTaskExecutionGrantServiceImplTest {
     void pointBootstrapFailureRollsBackAssignmentGrantAndIntentInTransactionHarness() {
         when(links.list("0","client","owner","task-1",null,null,33)).thenReturn(List.of());
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
-                new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
+                new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission,benchmarks);
         service.setAssigneeAuthority(authority);
         service.setDeliberationRuntime(executor -> true);
         bootstraps.failInsert=true;
@@ -675,7 +676,7 @@ class AgentTaskExecutionGrantServiceImplTest {
     void bootstrapFailureRollsBackAssignmentAndGrantBoundary() {
         bootstraps.failInsert=true;
         service=new AgentTaskExecutionGrantServiceImpl(grants,bootstraps,links,workspace,legacy,identities,
-                new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission);
+                new RollbackTransaction(root,grants,bootstraps),new ObjectMapper(),requirementSnapshots,billing,taskRoots,rentAdmission,benchmarks);
         service.setAssigneeAuthority(authority);
         service.setDeliberationRuntime(executor -> true);
         assertThrows(IllegalStateException.class,

@@ -67,6 +67,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
     private final AgentTaskMutationTransaction transactions;
     private final ObjectMapper json;
     private final cn.jia.economy.task.TaskBillingService billing;
+    private final cn.jia.agent.service.recommendation.ScopedBenchmarkEnrollment benchmarks;
     private final cn.jia.agent.service.AgentHostingWorkAdmission hostingWorkAdmission;
     private ControlledImageGrantAuthority controlledAuthority;
     private cn.jia.agent.service.TaskAssigneeAuthorityService assigneeAuthority;
@@ -102,7 +103,9 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
             AgentLegacyTaskCompatibilityService legacyAssignments, AgentIdentityService identities,
             AgentTaskMutationTransaction transactions, ObjectMapper json,
             AgentTaskRequirementSnapshotService requirementSnapshots, cn.jia.economy.task.TaskBillingService billing,
-            cn.jia.agent.dao.AgentTaskMetaDao taskRoots, cn.jia.agent.service.AgentHostingWorkAdmission hostingWorkAdmission) {
+            cn.jia.agent.dao.AgentTaskMetaDao taskRoots, cn.jia.agent.service.AgentHostingWorkAdmission hostingWorkAdmission,
+            cn.jia.agent.service.recommendation.ScopedBenchmarkEnrollment benchmarks) {
+        this.benchmarks=Objects.requireNonNull(benchmarks);
         this.hostingWorkAdmission = Objects.requireNonNull(hostingWorkAdmission);
         this.taskRoots = Objects.requireNonNull(taskRoots,"taskRoots");
         this.billing = Objects.requireNonNull(billing,"billing");
@@ -309,10 +312,14 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                                 var catalogue = inputCatalogue(allInputs.equals(valid.inputs()) ? snapshot.get()
                                         : validateAndSnapshotInputs(scope, valid.taskId(), allInputs));
                                 var taskBilling = billingTask(scope, valid.taskId());
-                                try { billing.reserve(taskBilling, valid.quoteId(),
-                                        new cn.jia.economy.task.TaskBillingService.Binding(requirement.revision(),
-                                                requirement.sha256(), catalogue.digest(), canonicalAgent,
-                                                valid.recommendationId()), payerUserId);
+                                try {
+                                    var enrollment=benchmarks.prepare(taskBilling,target.get(),requirement,catalogue);
+                                    var binding=new cn.jia.economy.task.TaskBillingService.Binding(requirement.revision(),
+                                            requirement.sha256(),catalogue.digest(),canonicalAgent,valid.recommendationId());
+                                    if(enrollment==null)billing.reserve(taskBilling,valid.quoteId(),binding,payerUserId);
+                                    else billing.reserve(taskBilling,valid.quoteId(),binding,payerUserId,enrollment);
+                                } catch (cn.jia.economy.task.TaskBenchmarkAdmission.NotAdmitted failure) {
+                                    throw invalidState("Approved benchmark no longer matches this assignment");
                                 } catch (cn.jia.economy.task.TaskBillingException failure) {
                                     throw billingFailure(failure);
                                 } catch (cn.jia.economy.exception.EconomyPostingException failure) {
@@ -321,6 +328,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                                                 "Available balance is insufficient for the selected task quotation");
                                     throw failure;
                                 }
+
                             }
                         },root);
         long assignmentRevision = assignment.changed()

@@ -11,6 +11,9 @@ public interface TaskBenchmarkMapper {
     // No approval writer in application code. Caller serializes enrollment on its task root; fence retirement of the exact authority row.
     @Select("SELECT manifest_json FROM economy_task_benchmark_case WHERE "+SCOPE+" AND benchmark_case_id=#{id} AND retired=FALSE AND manifest_sha=#{sha} FOR SHARE")
     String approved(@Param("t") Task task,@Param("id") String id,@Param("sha") String sha);
+    record ScopedCase(String manifestJson,String manifestSha,String benchmarkCaseId,boolean retired) {}
+    @Select("SELECT manifest_json,manifest_sha,benchmark_case_id,retired FROM economy_task_benchmark_case WHERE "+SCOPE+" FOR SHARE")
+    ScopedCase scopedCase(@Param("t") Task task);
     @Select("SELECT sample_id FROM economy_task_cost_sample WHERE "+SCOPE+" AND benchmark_case_id=#{id} AND quote_id IS NULL AND sample_definition_version='TASK_LIFECYCLE_V1' FOR UPDATE")
     String existing(@Param("t") Task task,@Param("id") String id);
     // Refuse retrospective enrollment of an already measured/closed/charged business task. Agent also fences admission at source.

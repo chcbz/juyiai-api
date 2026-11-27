@@ -38,15 +38,29 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
         requireTransaction();java.util.Objects.requireNonNull(observed);
         if(sha==null || !sha.matches("[0-9a-f]{64}"))throw new NotAdmitted();
         var raw=db.approved(task,id,sha);if(raw==null)throw new NotAdmitted();
-        if(CanonicalValueEncoding.utf8(raw).length>1048576 || !CanonicalValueEncoding.sha256(CanonicalValueEncoding.utf8(raw)).equals(sha))
+        var manifest=decodeScoped(raw,sha);
+        if(!id.equals(manifest.caseId()))throw new NotAdmitted();
+        return prepareScoped(task,agent,manifest,sha,observed);
+    }
+    @Override @Transactional(propagation=Propagation.MANDATORY)
+    public ScopedEnrollment prepareScopedPaidIfPresent(TaskBillingService.Task task,String agent,
+            java.util.function.Function<cn.jia.economy.pricing.GroupMeanPricing.ScopedPolicy,ObservedScopeGroup> observer){
+        requireTransaction();java.util.Objects.requireNonNull(observer);
+        var row=db.scopedCase(task);if(row==null)return null;
+        if(row.retired())throw new NotAdmitted();
+        var manifest=decodeScoped(row.manifestJson(),row.manifestSha());
+        if(!row.benchmarkCaseId().equals(manifest.caseId()) || !task.equals(manifest.task()) || !agent.equals(manifest.agentId()))throw new NotAdmitted();
+        return prepareScoped(task,agent,manifest,row.manifestSha(),observer.apply(manifest.policy()));
+    }
+    private static ScopedBenchmarkManifest decodeScoped(String raw,String sha){
+        if(raw==null || sha==null || CanonicalValueEncoding.utf8(raw).length>1048576 || !CanonicalValueEncoding.sha256(CanonicalValueEncoding.utf8(raw)).equals(sha))
             throw new IllegalStateException("SCOPED_BENCHMARK_AUTHORITY_CORRUPT");
-        final ScopedBenchmarkManifest manifest;
-        try{manifest=SCOPED_JSON.readValue(raw,ScopedBenchmarkManifest.class);}
+        try{return SCOPED_JSON.readValue(raw,ScopedBenchmarkManifest.class);}
         catch(RuntimeException invalid){throw new IllegalStateException("SCOPED_BENCHMARK_AUTHORITY_CORRUPT",invalid);}
-        if(!task.equals(manifest.task()) || !id.equals(manifest.caseId()) || !agent.equals(manifest.agentId())
+    }
+    private ScopedEnrollment prepareScoped(TaskBillingService.Task task,String agent,ScopedBenchmarkManifest manifest,String sha,ObservedScopeGroup observed){
+        if(observed==null || !task.equals(manifest.task()) || !agent.equals(manifest.agentId())
                 || !observed.scopePin().equals(manifest.scopePin()) || !observed.group().key().equals(manifest.groupSha()))throw new NotAdmitted();
-        // This is prospective enrollment only. Replay belongs to the original assignment/charge path,
-        // not to a new approval lookup which could retroactively label ordinary user history.
         if(db.charges(task)!=0 || db.samples(task)!=0 || db.hasEvidence(task))throw new NotAdmitted();
         var marker=new TransactionSynchronization(){};
         TransactionSynchronizationManager.registerSynchronization(marker);

@@ -69,6 +69,10 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
         return readSubjects(tenant,client,authorized.stream().map(t->new Subject(t.agent(),t.provider(),t.binding())).toList(),lock);
     }
     private record Subject(String agent,String provider,long binding){}
+    /** The caller already locked this exact assignment target through the original authority path. */
+    public Observed atAssignment(cn.jia.agent.service.TaskAssigneeAuthorityService.Target target){
+        return readSubjects(target.tenantId(),target.clientId(),List.of(new Subject(target.agentId(),target.ownerJiacn(),target.bindingId())),true).get(target.agentId());
+    }
     public Observed atDispatch(cn.jia.agent.service.TaskAssigneeAuthorityService.Target target,SessionFence fence){
         var row=readSubjects(target.tenantId(),target.clientId(),List.of(new Subject(target.agentId(),target.ownerJiacn(),target.bindingId())),true).get(target.agentId());
         return row!=null && row.installation().equals(fence.runtimeInstallationId()) && row.host().equals(fence.hostId()) && row.instance().equals(fence.runtimeInstanceId()) && row.generation()==fence.sessionGeneration()?row:null;

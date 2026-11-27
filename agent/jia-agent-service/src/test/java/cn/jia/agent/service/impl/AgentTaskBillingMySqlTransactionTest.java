@@ -1,5 +1,17 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.agent.service.recommendation.ScopedBenchmarkEnrollment;
+import cn.jia.agent.service.recommendation.ResolvedCostProfiles;
+import cn.jia.agent.security.RegisteredPricingProfiles;
+import cn.jia.agent.security.CostProfileReportJson;
+import cn.jia.agent.requirement.ConfirmedScope;
+import cn.jia.agent.skill.PublishedCapabilityQuoteSpecs;
+import cn.jia.agent.skill.quote.*;
+import cn.jia.economy.task.ScopedBenchmarkManifest;
+import cn.jia.economy.task.ScopedTaskQuoteSnapshot;
+import cn.jia.economy.pricing.CostRouteBindings;
+import cn.jia.economy.pricing.CostRouteReference;
+import cn.jia.economy.pricing.GroupMeanPricing;
 import cn.jia.economy.pricing.CostPricingRoute;
 
 import cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource;
@@ -106,6 +118,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private DataSourceTransactionManager manager;
     private AgentTaskMutationTransactionImpl roots;
     private TaskBillingService billing,inlineBilling;
+    private ScopedBenchmarkEnrollment scopedEnrollment;
+    private RegisteredPricingProfiles scopedProfiles;
+    private PublishedCapabilityQuoteSpecs scopedSpecs;
+    private CostRouteBindings scopedRoutes;
     private cn.jia.economy.task.TaskQuoteBatches batches;
     private java.util.function.Supplier<AgentTaskExecutionGrantServiceImpl> newAssignment;
     private AgentTaskExecutionGrantServiceImpl assignment;
@@ -199,6 +215,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-v0-hosting-rent.sql")).execute(source);
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/task-scheduled-work-v1.sql"),new org.springframework.core.io.ClassPathResource("db/economy-usage-capture.sql")).execute(source);
         new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-quote-batch-v1.sql")).execute(source);
+        new ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(source);
+        new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
         manager = new DataSourceTransactionManager(source);
         var config = new MybatisConfiguration(); config.setMapUnderscoreToCamelCase(true);
         for (Class<?> mapper : List.of(AgentTaskMetaMapper.class, AgentTaskMemberMapper.class,
@@ -214,6 +232,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         for(var m:List.of(AgentRuntimeMapper.class,AgentIdentityRegistryMapper.class,AgentIdentityAliasMapper.class,AgentExternalServicePolicyMapper.class,AgentRuntimeV1InstallationMapper.class))config.addMapper(m);
         config.addMapper(cn.jia.economy.mapper.EconomyUsageCaptureMapper.class);
         config.addMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);
+        config.addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatDeliberationMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class);
         config.addMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class);
@@ -280,11 +299,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(authority.lockForAssignment(TENANT, CLIENT, OWNER, AGENT)).thenReturn(target);
         when(authority.requireGrantTarget(eq(TENANT), eq(CLIENT), eq(OWNER), anyString(), anyString(), anyLong()))
                 .thenReturn(target);
+        scopedProfiles=mock(RegisteredPricingProfiles.class);scopedSpecs=mock(PublishedCapabilityQuoteSpecs.class);scopedRoutes=mock(CostRouteBindings.class);
+        var scopedAdmissions=proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(sql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()),cn.jia.economy.task.TaskBenchmarkAdmission.class);
+        scopedEnrollment=new ScopedBenchmarkEnrollment(scopedAdmissions,scopedProfiles,scopedSpecs,new ResolvedCostProfiles(scopedRoutes));
         newAssignment = () -> {
             var service = new AgentTaskExecutionGrantServiceImpl(
                     new AgentTaskExecutionGrantDaoImpl(sql.getMapper(AgentTaskExecutionGrantMapper.class)),
                     outbox, links, mock(PersonalWorkspaceDao.class), legacy, identities, roots,
-                    new ObjectMapper(), requirements, billing, meta, mock(cn.jia.agent.service.AgentHostingWorkAdmission.class));
+                    new ObjectMapper(), requirements, billing, meta, mock(cn.jia.agent.service.AgentHostingWorkAdmission.class),scopedEnrollment);
             service.setAssigneeAuthority(authority);
             // Live Agent transport is an external observation; SQL/money remains real here.
             service.setDeliberationRuntime(executor -> {
@@ -314,7 +336,6 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
                 new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql"),
                 new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-sponsorship-v1.sql"))
                 .execute(jdbc.getDataSource());
-        recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class);
         benchmarks = proxy(new cn.jia.economy.service.impl.TaskBenchmarkAdmissionService(
                 recommendationSql.getMapper(cn.jia.economy.mapper.TaskBenchmarkMapper.class),new ObjectMapper()),
                 TaskBenchmarkAdmission.class);
@@ -4026,6 +4047,84 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String content = header + "." + payload; var mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(signingKey, "HmacSHA256"));
         return content + "." + encoder.encodeToString(mac.doFinal(content.getBytes(StandardCharsets.US_ASCII)));
+    }
+
+    /** Synthetic approved case and authoritative-port observations, with real assignment/wallet SQL. */
+    private void prepareScopedAssignment(){
+        String h="a".repeat(64),digest=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
+        var spec=new CapabilityQuoteSpec(CapabilityQuoteSpec.SCHEMA,"text.summary","1",
+                Map.of("deliverables.count",new CapabilityQuoteSpec.Field(ConfirmedScope.ValueType.INTEGER,"unit/items",true,"1","100",java.util.Set.of(),null)),
+                List.of(new CapabilityQuoteSpec.CostDimension("size",CapabilityQuoteSpec.Source.DELIVERABLE,"count",ConfirmedScope.ValueType.INTEGER,"unit/items",null,java.util.Set.of())),
+                List.of(new CapabilityQuoteSpec.Bucket("small",Map.of("size",new CapabilityQuoteSpec.Range("1","10",java.util.Set.of())))));
+        var item=new ConfirmedScope.WorkItem("w0","text.summary","1",Map.of(),Map.of("count",new ConfirmedScope.Scalar(ConfirmedScope.ValueType.INTEGER,"unit/items","2")),List.of(),List.of());
+        var payload=new ConfirmedScope.Payload(ConfirmedScope.VERSION,List.of(item),"fixture acceptance");
+        var scope=new ConfirmedScope(1,payload.requirementDigest("Fixture title","Fixture description",digest),payload.digest(digest),digest,ConfirmedScope.VERSION,1,List.of(item),payload.acceptanceText());
+        var requirements=(AgentTaskRequirementSnapshotService)ReflectionTestUtils.getField(assignment,"requirementSnapshots");
+        var requirement=new AgentTaskRequirementSnapshotService.Snapshot(TENANT,CLIENT,OWNER,TASK,1,"Fixture title","Fixture description",scope.requirementSha256(),"SCOPED",scope);
+        when(requirements.freezeCurrent(any(),eq(TASK),eq(1L))).thenReturn(requirement);when(requirements.read(SCOPE,TASK,1)).thenReturn(requirement);
+        var ref=new CostRouteReference("MODEL_RESPONSE","INFERENCE","fixture-provider","fixture-model","TOKENS_V1");
+        var route=new CostPricingRoute.TokenRoute("fixture","fixture-model","standard","TOKENS_V1");
+        var measured=new MeasuredCostProfile("profile",1,0,List.of(new MeasuredCostProfile.Slot(0,"text.summary","1",spec.specSha(),List.of(),"summary","1",h,"install-skill")),"native-1","context-1",h,h,"capture-1",List.of(ref));
+        var report=new CostProfileReport(1,List.of(measured));
+        when(scopedProfiles.atAssignment(any())).thenReturn(new RegisteredPricingProfiles.Observed(AGENT,OWNER,1,"install","host","runtime",1,1,report.sha256(),CostProfileReportJson.write(report)));
+        var key=new cn.jia.agent.mapper.skill.CapabilityQuoteSpecMapper.SpecKey("text.summary","1");
+        when(scopedSpecs.lockActive(eq(TENANT),eq(CLIENT),anyList())).thenReturn(Map.of(key,spec));
+        when(scopedRoutes.read(eq(BILLING_TASK.scope()),anyList(),anyBoolean())).thenReturn(Map.of(ref,new CostRouteBindings.Binding(ref,1,h,route)));
+        var inputs=ScopedCostInputs.prepare(scope,Map.of(new ScopedCostInputs.Capability("text.summary","1"),spec),Map.of());
+        var config=new CostProfile(measured,List.of(new CostProfile.Route(ref,route)));var input=inputs.input(config).orElseThrow();
+        var policy=new GroupMeanPricing.ScopedPolicy("scope-1",input.specShas(),input.scopeShapeSha(),"config-1",GroupMeanPricing.ScopedPolicy.definitionsSha(input.specShas()),3);
+        var group=inputs.group(policy.featureVersion(),policy.sha(),config).orElseThrow();
+        var pin=new ScopedTaskQuoteSnapshot.ScopePin(1,scope.requirementSha256(),scope.scopeSha256(),digest);
+        var manifest=new ScopedBenchmarkManifest(ScopedBenchmarkManifest.SCHEMA,BILLING_TASK,"case-scoped",AGENT,"fixture-approved","review output",ScopedBenchmarkManifest.Purpose.TRAIN,pin,policy,
+                List.of(new GroupMeanPricing.ScopeSlot(0,"text.summary","1",spec.specSha(),List.of())),List.of("small"),config.compatibleConfiguration(),group.key());
+        String body=new ObjectMapper().writeValueAsString(manifest),sha=cn.jia.core.util.CanonicalValueEncoding.sha256(cn.jia.core.util.CanonicalValueEncoding.utf8(body));
+        jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",TENANT,CLIENT,OWNER,TASK,manifest.caseId(),body,sha);
+        var binding=new TaskBillingService.Binding(1,scope.requirementSha256(),digest,AGENT,"recommendation-1");
+        var basis=new ScopedTaskQuoteSnapshot.Basis("FIXED_FALLBACK",null,cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE);
+        var quote=new ScopedTaskQuoteSnapshot(ScopedTaskQuoteSnapshot.SCHEMA,binding,pin,basis,null,null,null,1);
+        quoteId=locked(()->billing.storeOffersBatch(BILLING_TASK,PAYER,List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+    }
+    @Test void scopedBenchmarkAssignmentReservesOneSampleAndReplayDoesNotReadCurrentConfiguration(){
+        prepareScopedAssignment();var grant=assign();assertEquals(99,wallet(jdbc));assertEquals("HELD",charge());
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals("case-scoped",jdbc.queryForObject("SELECT benchmark_case_id FROM economy_task_cost_sample",String.class));
+        assertEquals(quoteId,jdbc.queryForObject("SELECT quote_id FROM economy_task_cost_sample",String.class));
+        assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        clearInvocations(scopedProfiles,scopedSpecs,scopedRoutes);jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
+        assertEquals(grant.getGrantId(),assign().getGrantId());verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+        assertEquals(99,wallet(jdbc));assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedBenchmarkBootstrapFailureRollsBackRealAssignmentWalletAndSample(){
+        prepareScopedAssignment();failBootstrap=true;assertThrows(InjectedFailure.class,this::assign);
+        assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));failBootstrap=false;assign();assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedBenchmarkChangedCurrentConfigurationRejectsBeforeMoneyOrGrant(){
+        prepareScopedAssignment();when(scopedProfiles.atAssignment(any())).thenReturn(null);
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));
+    }
+    @Test void scopedBenchmarkRetiredOriginalRejectsWithoutReadingConfiguration(){
+        prepareScopedAssignment();jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);
+        assertAssignmentAbsent();verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+    }
+    @Test void scopedBenchmarkChangedRouteSemanticCannotBeApprovedByCopyingManifest(){
+        prepareScopedAssignment();var ref=new CostRouteReference("MODEL_RESPONSE","INFERENCE","fixture-provider","fixture-model","TOKENS_V1");
+        when(scopedRoutes.read(eq(BILLING_TASK.scope()),anyList(),anyBoolean())).thenReturn(Map.of(ref,new CostRouteBindings.Binding(ref,2,"b".repeat(64),new CostPricingRoute.TokenRoute("other-channel","fixture-model","standard","TOKENS_V1"))));
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);assertAssignmentAbsent();assertEquals(0,count("economy_task_cost_sample"));
+        verify(scopedRoutes).read(eq(BILLING_TASK.scope()),anyList(),eq(true));
+    }
+    @Test void scopedBenchmarkDirectAssignUsesSameProspectiveEnrollment(){
+        prepareScopedAssignment();var request=new cn.jia.agent.entity.AgentTaskAssignDTO();request.setAgentId(AGENT);
+        request.setWorkflowVersion(2);request.setBusinessAction("assign_and_start");request.setQuoteId(quoteId);request.setRecommendationId("recommendation-1");
+        request.setExpectedTaskVersion(0L);request.setRequirementRevision(1L);request.setRequestedOperations(List.of("GENERATE_TEXT_FILE"));
+        request.setInitialOperation("GENERATE_TEXT_FILE");request.setInputRefs(List.of());
+        var grant=assignment.assignAndGrant(SCOPE,TASK,"scoped-direct",request,PAYER);
+        assertEquals(99,wallet(jdbc));assertEquals(1,count("economy_task_cost_sample"));assertEquals(1,count("agent_task_execution_grant"));
+        assertEquals("GENERATE_TEXT_FILE",jdbc.queryForObject("SELECT permitted_operation FROM agent_task_bounty_bootstrap_outbox",String.class));
+        assertEquals(grant.getGrantId(),assignment.assignAndGrant(SCOPE,TASK,"scoped-direct",request,PAYER).getGrantId());
+        assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedBenchmarkNoCaseDoesNotReadScopeConfigurationOrRoutes(){
+        assign();verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);assertEquals(50,wallet(jdbc));
     }
 
     private AgentTaskExecutionGrantDTO assign() {
