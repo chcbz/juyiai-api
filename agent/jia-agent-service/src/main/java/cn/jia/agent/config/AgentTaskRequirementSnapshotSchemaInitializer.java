@@ -17,6 +17,11 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
     private static final List<String> SCOPE_COLUMNS = List.of("scope_schema", "scope_json", "scope_sha256",
             "scope_input_sha256", "scope_confirmed_at");
 
+    private static final String CURRENT = "agent_task_current_requirement";
+    private static final Map<String,String> SCOPE_TYPES = Map.of(
+            "scope_schema","varchar(48)","scope_json","json","scope_sha256","char(64)",
+            "scope_input_sha256","char(64)","scope_confirmed_at","bigint");
+
     private final JdbcTemplate jdbc;
 
     public AgentTaskRequirementSnapshotSchemaInitializer(JdbcTemplate jdbc) {
@@ -29,43 +34,88 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
                     || c.getMetaData().getDatabaseMajorVersion()<8)
                 throw new IllegalStateException("Requirement snapshot requires MySQL 8");
         } catch (Exception e) { throw new IllegalStateException("Requirement snapshot database unavailable", e); }
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables "
-                + "WHERE table_schema=DATABASE() AND table_name=?", Integer.class, TABLE);
-        if (count == null || count == 0) jdbc.execute(ddl());
-        validate(false); // Reject base-schema drift before issuing any additive ALTER.
+        // MySQL DDL commits independently: inspect both existing tables before the first ALTER.
+        boolean snapshotExists=exists(TABLE), currentExists=exists(CURRENT);
+        if (snapshotExists) { validate(false); validateScopeColumns(TABLE, false); }
+        if (currentExists) { validateCurrent(); validateScopeColumns(CURRENT, false); }
+        if (!snapshotExists) jdbc.execute(ddl());
+        if (!currentExists) executeResource("db/agent-task-current-requirement-v1.sql");
         evolveScopeColumns(TABLE);
+        evolveScopeColumns(CURRENT);
         validate();
-        // Explicit schema-maintenance only. Production backfill is a separate controlled migration.
-        for (String resource:List.of("db/agent-task-current-requirement-v1.sql","db/agent-task-requirement-edit-operation-v1.sql")) {
-            try { jdbc.execute(new ClassPathResource(resource).getContentAsString(StandardCharsets.UTF_8)); }
-            catch (java.io.IOException failure) {throw new IllegalStateException("Current requirement DDL unavailable",failure);}
+        validateCurrent();
+        executeResource("db/agent-task-requirement-edit-operation-v1.sql");
+    }
+
+    private boolean exists(String table) {
+        Integer count=jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables "
+                +"WHERE table_schema=DATABASE() AND table_name=?",Integer.class,table);
+        if (count==null || count<0 || count>1) throw new IllegalStateException("Ambiguous requirement table");
+        return count==1;
+    }
+
+    private void executeResource(String resource) {
+        try { jdbc.execute(new ClassPathResource(resource).getContentAsString(StandardCharsets.UTF_8)); }
+        catch (java.io.IOException failure) {throw new IllegalStateException("Current requirement DDL unavailable",failure);}
+    }
+
+    private void validateScopeColumns(String table, boolean requireAll) {
+        for (String name:SCOPE_COLUMNS) {
+            var rows=jdbc.queryForList("SELECT column_type,is_nullable,collation_name FROM information_schema.columns "
+                    +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",table,name);
+            if (rows.isEmpty() && !requireAll) continue;
+            if (rows.size()!=1 || !SCOPE_TYPES.get(name).equalsIgnoreCase(Objects.toString(rows.getFirst().get("column_type"),""))
+                    || !"YES".equalsIgnoreCase(Objects.toString(rows.getFirst().get("is_nullable"),""))
+                    || List.of("scope_schema","scope_sha256","scope_input_sha256").contains(name)
+                       && !"ascii_bin".equalsIgnoreCase(Objects.toString(rows.getFirst().get("collation_name"),"")))
+                throw new IllegalStateException("Confirmed scope column drift: "+table+"."+name);
         }
-        evolveScopeColumns("agent_task_current_requirement");
     }
 
     private void evolveScopeColumns(String table) {
-        if (!List.of(TABLE,"agent_task_current_requirement").contains(table)) throw new IllegalArgumentException("Unknown scope table");
-        var definitions=new java.util.LinkedHashMap<String,String>();
-        definitions.put("scope_schema","VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NULL");
-        definitions.put("scope_json","JSON NULL");
-        definitions.put("scope_sha256","CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
-        definitions.put("scope_input_sha256","CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL");
-        definitions.put("scope_confirmed_at","BIGINT NULL");
-        var types=Map.of("scope_schema","varchar(48)","scope_json","json","scope_sha256","char(64)",
-                "scope_input_sha256","char(64)","scope_confirmed_at","bigint");
-        for (var entry:definitions.entrySet()) {
-            var rows=jdbc.queryForList("SELECT column_type,is_nullable,collation_name FROM information_schema.columns "
-                    +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",table,entry.getKey());
-            if (rows.isEmpty()) {
-                jdbc.execute("ALTER TABLE "+table+" ADD COLUMN "+entry.getKey()+" "+entry.getValue());
-                rows=jdbc.queryForList("SELECT column_type,is_nullable,collation_name FROM information_schema.columns "
-                        +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",table,entry.getKey());
-            }
-            if (rows.size()!=1 || !types.get(entry.getKey()).equalsIgnoreCase(Objects.toString(rows.getFirst().get("column_type"),""))
-                    || !"YES".equalsIgnoreCase(Objects.toString(rows.getFirst().get("is_nullable"),""))
-                    || entry.getValue().contains("ascii_bin") && !"ascii_bin".equalsIgnoreCase(Objects.toString(rows.getFirst().get("collation_name"),"")))
-                throw new IllegalStateException("Confirmed scope column drift: "+entry.getKey());
+        if (!List.of(TABLE,CURRENT).contains(table)) throw new IllegalArgumentException("Unknown scope table");
+        var missing=new java.util.ArrayList<String>();
+        for (String name:SCOPE_COLUMNS) {
+            Integer count=jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.columns "
+                    +"WHERE table_schema=DATABASE() AND table_name=? AND column_name=?",Integer.class,table,name);
+            if (count==null || count<0 || count>1) throw new IllegalStateException("Ambiguous scope column");
+            if (count==0) missing.add("ADD COLUMN "+name+" "+SCOPE_TYPES.get(name)
+                    +(List.of("scope_schema","scope_sha256","scope_input_sha256").contains(name)
+                    ? " CHARACTER SET ascii COLLATE ascii_bin" : "")+" NULL");
         }
+        if (!missing.isEmpty()) jdbc.execute("ALTER TABLE "+table+" "+String.join(", ",missing));
+        validateScopeColumns(table, true);
+    }
+
+    private void validateCurrent() {
+        var table=jdbc.queryForMap("SELECT engine,table_collation FROM information_schema.tables "
+                +"WHERE table_schema=DATABASE() AND table_name=?",CURRENT);
+        if (!"InnoDB".equalsIgnoreCase(Objects.toString(table.get("engine"),""))
+                || !"utf8mb4_0900_bin".equalsIgnoreCase(Objects.toString(table.get("table_collation"),"")))
+            throw new IllegalStateException("Current requirement table engine/collation drift");
+        var types=Map.of("tenant_id","varchar(50)","client_id","varchar(50)","owner_jiacn","varchar(50)",
+                "task_id","varchar(100)","revision","bigint","title","mediumtext","description","mediumtext",
+                "content_sha256","char(64)","source","varchar(20)");
+        var columns=jdbc.queryForList("SELECT column_name,column_type,is_nullable,collation_name FROM information_schema.columns "
+                +"WHERE table_schema=DATABASE() AND table_name=?",CURRENT);
+        var seen=new java.util.HashSet<String>();
+        for (var column:columns) {
+            String name=Objects.toString(column.get("column_name"),"");
+            if (SCOPE_COLUMNS.contains(name)) continue;
+            String expected=types.get(name);
+            if (expected==null || !seen.add(name)
+                    || !expected.equalsIgnoreCase(Objects.toString(column.get("column_type"),""))
+                    || !(name.equals("description")?"YES":"NO").equalsIgnoreCase(Objects.toString(column.get("is_nullable"),"")))
+                throw new IllegalStateException("Current requirement column drift: "+name);
+            if (!name.equals("revision") && !(name.equals("content_sha256")?"ascii_bin":"utf8mb4_0900_bin")
+                    .equalsIgnoreCase(Objects.toString(column.get("collation_name"),"")))
+                throw new IllegalStateException("Current requirement collation drift: "+name);
+        }
+        if (!seen.equals(types.keySet())) throw new IllegalStateException("Current requirement columns missing");
+        var indexes=jdbc.queryForList("SELECT index_name,non_unique,seq_in_index,column_name,sub_part "
+                +"FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? "
+                +"ORDER BY index_name,seq_in_index",CURRENT);
+        index(indexes,"PRIMARY",0,List.of("tenant_id","client_id","owner_jiacn","task_id"));
     }
 
     static String ddl() {
@@ -94,10 +144,10 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
                 + "ORDER BY ordinal_position", TABLE);
         var expected = new java.util.ArrayList<>(List.of("id","tenant_id","client_id","owner_jiacn","task_id",
                 "revision","confirmation_id","task_version_at_confirmation","title","description","content_sha256","source","created_at"));
-        if (requireScopeColumns) expected.addAll(SCOPE_COLUMNS);
         if (!columns.stream().map(r -> Objects.toString(r.get("column_name"), ""))
-                .filter(name -> requireScopeColumns || !SCOPE_COLUMNS.contains(name)).toList().equals(expected))
+                .filter(name -> !SCOPE_COLUMNS.contains(name)).toList().equals(expected))
             throw new IllegalStateException("Snapshot columns drift");
+        if (requireScopeColumns) validateScopeColumns(TABLE, true);
         for (var r : columns) {
             String name = Objects.toString(r.get("column_name"), "");
             if (List.of("tenant_id","client_id","owner_jiacn","task_id","confirmation_id","title","description","source").contains(name)
