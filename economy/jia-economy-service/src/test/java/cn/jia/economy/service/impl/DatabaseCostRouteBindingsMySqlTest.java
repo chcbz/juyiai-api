@@ -4,7 +4,8 @@ import cn.jia.economy.config.EconomyMySqlTestFixture;
 import cn.jia.economy.config.CostRouteBindingSchemaInitializer;
 import cn.jia.economy.mapper.CostRouteBindingMapper;
 import cn.jia.economy.pricing.*;
-import cn.jia.economy.pricing.TaskReferencePricing.*;
+import cn.jia.economy.pricing.CostPricingRoute;
+import cn.jia.economy.pricing.CostPricingRoute.*;
 import cn.jia.economy.service.EconomyScope;
 import java.util.*;
 import java.util.concurrent.*;
@@ -62,7 +63,7 @@ class DatabaseCostRouteBindingsMySqlTest {
     }
     @Test void tokenUnitAndExplicitZeroAreTypedWithoutBusinessCategorySwitches(){
         var refs=List.of(ref("model"),new CostRouteReference("TOOL","PROCESS","tool","processor","SECONDS_V1"),new CostRouteReference("LOCAL","RENDER","local","renderer","FREE_CONTRACT_V1"));
-        List<Route> routes=List.of(route("channel"),new UnitRoute(new TaskQuoteCalculator.ToolKey("tools","processor","seconds")),new ZeroRoute("local-free-1"));
+        List<CostPricingRoute> routes=List.of(route("channel"),new UnitRoute(new TaskQuoteCalculator.ToolKey("tools","processor","seconds")),new ZeroRoute("local-free-1"));
         for(int i=0;i<refs.size();i++){int n=i;tx.execute(s->service.publish(scope,refs.get(n),0,routes.get(n)));}
         var values=service.read(scope,refs,false);for(int i=0;i<refs.size();i++)assertEquals(routes.get(i),values.get(refs.get(i)).route());
         assertTrue(service.read(scope,List.of(ref("missing")),false).isEmpty());

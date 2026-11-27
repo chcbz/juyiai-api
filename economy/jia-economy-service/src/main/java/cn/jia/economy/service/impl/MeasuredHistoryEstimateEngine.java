@@ -1,5 +1,7 @@
 package cn.jia.economy.service.impl;
 
+import cn.jia.economy.pricing.CostPricingRoute;
+
 import cn.jia.economy.pricing.MeasuredNeighborEstimate;
 import cn.jia.economy.pricing.TaskEstimateFeatures;
 import cn.jia.economy.pricing.TaskNeighborSearch;
@@ -28,7 +30,7 @@ public class MeasuredHistoryEstimateEngine {
     // Reject real transactions without opening an empty Spring synchronization scope: history reads
     // must release their connection before pricing opens its own repeatable-read transaction.
     public MeasuredNeighborEstimate.Estimate estimate(TaskBillingService.Task task,TaskBillingService.MeasuredGroup execution,
-            TaskEstimateFeatures query,Active active,Map<String,Map<String,TaskReferencePricing.Route>> routes){
+            TaskEstimateFeatures query,Active active,Map<String,Map<String,CostPricingRoute>> routes){
         if (org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())
             throw new org.springframework.transaction.IllegalTransactionStateException("Budget estimation must be outside a transaction");
         var span=Observation.start("cyf.task.quote.estimate",observations);String outcome="error";
@@ -38,7 +40,7 @@ public class MeasuredHistoryEstimateEngine {
         finally{span.lowCardinalityKeyValue("outcome",outcome).stop();}
     }
     private MeasuredNeighborEstimate.Estimate calculate(TaskBillingService.Task task,TaskBillingService.MeasuredGroup execution,
-            TaskEstimateFeatures query,Active active,Map<String,Map<String,TaskReferencePricing.Route>> routes){
+            TaskEstimateFeatures query,Active active,Map<String,Map<String,CostPricingRoute>> routes){
         var group=TaskHistoryCatalog.Group.of(execution,query);var search=new TaskNeighborSearch(query,active.parameters());String after="";
         while(true){var page=history.candidatePage(task,group,active.pin(),after);
             for(var row:page){var source=row.source();search.accept(source.sampleId(),source.revision(),row.features());after=source.sampleId();}

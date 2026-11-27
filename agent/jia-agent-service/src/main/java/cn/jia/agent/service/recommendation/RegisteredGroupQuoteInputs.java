@@ -1,5 +1,7 @@
 package cn.jia.agent.service.recommendation;
 
+import cn.jia.economy.pricing.CostPricingRoute;
+
 import cn.jia.agent.security.RegisteredPricingProfiles;
 import cn.jia.economy.pricing.*;
 import cn.jia.economy.task.*;
@@ -32,14 +34,14 @@ final class RegisteredGroupQuoteInputs {
             int i=a.outputContract();var c=new PreparedReferenceRoutes.Configuration("NATIVE_DISPATCH_GROUP_V1",p.path("execution"+i).asText(),p.path("referenceRouteSha256").asText(),p.path("tools"+i).asText(),p.path("capturePolicyVersion").asText());
             var terms=routes.resolve(task,c);if(terms==null)break;
             var src=terms.routes();if(!src.keySet().equals(Set.of("MODEL_RESPONSE","NATIVE_PROVIDER_CALL"))||!src.get("MODEL_RESPONSE").keySet().equals(Set.of("INFERENCE"))||!src.get("NATIVE_PROVIDER_CALL").keySet().equals(Set.of(a.operation())))break;
-            if(!(src.get("MODEL_RESPONSE").get("INFERENCE") instanceof TaskReferencePricing.TokenRoute parent)||!(src.get("NATIVE_PROVIDER_CALL").get(a.operation()) instanceof TaskReferencePricing.TokenRoute child))break;
+            if(!(src.get("MODEL_RESPONSE").get("INFERENCE") instanceof CostPricingRoute.TokenRoute parent)||!(src.get("NATIVE_PROVIDER_CALL").get(a.operation()) instanceof CostPricingRoute.TokenRoute child))break;
             if(!parent.model().equals(p.path("parentModel").asText())||!parent.normalizationBasis().equals(p.path("parentBasis").asText())||!child.model().equals(p.path("childModel").asText())||!child.channel().equals(p.path("childChannel").asText())||!child.tier().equals(p.path("childTier").asText())||!child.normalizationBasis().equals(p.path("childBasis").asText()))break;
             var config=new GroupMeanPricing.Configuration(p.path("contextPolicyId").asText(),p.path("contextPolicyVersion").asText(),p.path("toolPolicyVersion").asText(),c.capturePolicy(),List.of(route("MODEL_RESPONSE","INFERENCE",parent),route("NATIVE_PROVIDER_CALL",a.operation(),child)));
             return CandidateGroupOffers.classify(facts,a.policy(),config,terms.execution(),null);
         }
         return new CandidateGroupOffers.Missing(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING);
     }
-    private static GroupMeanPricing.Route route(String k,String component,TaskReferencePricing.TokenRoute r){return new GroupMeanPricing.Route(k,component,r.channel(),r.model(),r.tier(),r.normalizationBasis());}
+    private static GroupMeanPricing.Route route(String k,String component,CostPricingRoute.TokenRoute r){return new GroupMeanPricing.Route(k,component,r.channel(),r.model(),r.tier(),r.normalizationBasis());}
     void recheck(TaskQuoteIntentService.Fresh f,Read r){if(!r.approved())return;var d=f.key().task().scope();
         if(!experiments.current(subject(f),f.experimentSha())||!r.configs().equals(profiles.read(d.tenantId(),d.clientId(),f.candidates(),true)))throw new TaskQuoteIntentService.Stale();
     }

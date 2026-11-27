@@ -1,5 +1,7 @@
 package cn.jia.economy.service.impl;
 
+import cn.jia.economy.pricing.CostPricingRoute;
+
 import cn.jia.economy.entity.EconomyModelPriceRow;
 import cn.jia.economy.entity.EconomyTaskModelTariffRow;
 import cn.jia.economy.entity.EconomyToolPriceRow;
@@ -36,6 +38,17 @@ class DatabaseTaskPricingServiceTest {
     private static String tools(String units) {
         return "[{\"channel\":\"tool-channel\",\"tool\":\"render\",\"unit\":\"image\",\"unitsPerDeliverable\":\"" + units + "\"}]";
     }
+    @Test void explicitZeroRouteNeedsContractAndMeasuredZeroNotMissingUsage(){
+        var routes=Map.of("local",Map.<String,CostPricingRoute>of("compute",new CostPricingRoute.ZeroRoute("local-free-v1")));
+        var book=service.freeze(scope,"book",routes,routes.keySet());
+        assertEquals(new MeasuredTaskRepricing.ExplicitZero("local-free-v1"),book.byKind().get("local").get("compute"));
+        var operation=new MeasuredTaskRepricing.Operation("local","call");
+        var fact=new MeasuredTaskRepricing.Fact(operation,"local","compute","a".repeat(64),MeasuredTaskRepricing.Zero.EXPLICIT_ZERO);
+        assertEquals(0,MeasuredTaskRepricing.reprice(book,java.util.List.of(fact)).yuan().signum());
+        var missing=new MeasuredTaskRepricing.Fact(operation,"local","compute","a".repeat(64),MeasuredTaskRepricing.Missing.MISSING);
+        assertThrows(MeasuredTaskRepricing.Unavailable.class,()->MeasuredTaskRepricing.reprice(book,java.util.List.of(missing)));
+        verifyNoInteractions(mapper);
+    }
     @Test void preparedReferenceRoutesArePrivateExactImmutableAndContentVersioned(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir)throws Exception{
         var c=new cn.jia.economy.task.PreparedReferenceRoutes.Configuration("NATIVE_DISPATCH_GROUP_V1","1".repeat(64),"2".repeat(64),"3".repeat(64),"NATIVE_LOCAL_ARTIFACT_TEXT_V1");
         var key=Map.of("tenant","tenant","client","client","owner","owner","configuration",c);
@@ -44,7 +57,7 @@ class DatabaseTaskPricingServiceTest {
         class Load {PinnedReferenceRoutes from(Object... rows)throws Exception{var bytes=new ObjectMapper().writeValueAsBytes(Map.of("schema","prepared-reference-routes-v1","entries",java.util.List.of(rows)));
             java.nio.file.Files.write(file,bytes);return new PinnedReferenceRoutes(file.toString(),java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes)));}}
         var load=new Load();var first=load.from(entry);var terms=first.resolve(task,c);assertNotNull(terms);
-        assertEquals(new TaskReferencePricing.TokenRoute("channel","modelA","standard","RESPONSES_TEXT_TOKENS_V1"),terms.routes().get("MODEL_RESPONSE").get("INFERENCE"));
+        assertEquals(new CostPricingRoute.TokenRoute("channel","modelA","standard","RESPONSES_TEXT_TOKENS_V1"),terms.routes().get("MODEL_RESPONSE").get("INFERENCE"));
         assertNull(first.resolve(new cn.jia.economy.task.TaskBillingService.Task(scope,"other","task"),c));
         assertNull(first.resolve(task,new cn.jia.economy.task.PreparedReferenceRoutes.Configuration(c.version(),c.executionSha(),c.localRouteSha(),"4".repeat(64),c.capturePolicy())));
         var edited=new java.util.HashMap<String,Object>(entry);edited.put("model","modelB");assertNotEquals(terms.execution().routeVersion(),load.from(edited).resolve(task,c).execution().routeVersion());
@@ -64,7 +77,7 @@ class DatabaseTaskPricingServiceTest {
         var load=new Load();String v2="prepared-reference-routes-v2";assertNull(load.get(v2));
         var child=new java.util.HashMap<>(Map.of("operation","generate","channel","image-channel","model","image-model","tier","standard"));row.put("image",child);
         assertNull(load.get("prepared-reference-routes-v1"));var terms=load.get(v2);assertNotNull(terms);
-        assertEquals(new TaskReferencePricing.TokenRoute("image-channel","image-model","standard","openai-images-modalities-v1"),terms.routes().get("NATIVE_PROVIDER_CALL").get("generate"));
+        assertEquals(new CostPricingRoute.TokenRoute("image-channel","image-model","standard","openai-images-modalities-v1"),terms.routes().get("NATIVE_PROVIDER_CALL").get("generate"));
         child.put("operation","edit");assertNotEquals(terms.execution().routeVersion(),load.get(v2).execution().routeVersion());
         child.put("operation","unknown");assertNull(load.get(v2));
         price(DATA);var kinds=terms.routes().keySet();assertEquals(MODEL_PRICE_MISSING,assertThrows(TaskPricingService.Unavailable.class,()->service.freeze(scope,"book",terms.routes(),kinds)).reason());
@@ -103,7 +116,7 @@ class DatabaseTaskPricingServiceTest {
         var roster=keep.apply(study.freeze(new FrozenCalibrationStudy.Roster(owner,assignments)));
         var gate=new TaskEstimateCalibration.Gate(1,BigDecimal.ONE);var trial=new TaskEstimateCalibration.Trial("fixture",1,1,1,1,1,0.1,0.2,1,1,1,1);
         var policy=keep.apply(study.freeze(new FrozenCalibrationStudy.Policy(FrozenCalibrationStudy.VERSION,java.util.List.of(trial),gate,123L)));
-        var routes=Map.of("text",Map.<String,TaskReferencePricing.Route>of("model",new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint")));
+        var routes=Map.of("text",Map.<String,CostPricingRoute>of("model",new CostPricingRoute.TokenRoute("channel","model","standard","disjoint")));
         String equalRates="{\"basis\":\"synthetic\",\"yuanPerMillionTokens\":{\"INPUT\":\"1\",\"OUTPUT\":\"1\"},\"longContextYuanPerMillionTokens\":{}}";
         price(equalRates);var ref=service.freeze(scope,"book",routes,routes.keySet());
         var reference=keep.apply(study.freezeReference(ref));var members=new java.util.ArrayList<FrozenCalibrationStudy.Member>();
@@ -126,7 +139,7 @@ class DatabaseTaskPricingServiceTest {
         assertEquals(result,study.evaluate(owner,group,pins,objects::get)); // old evidence retains precisely its original meaning
         // New quotes must use the complete current contract, even when selected neighbors only consume text.
         var tool=new TaskQuoteCalculator.ToolKey("tools","draw","frame");
-        var contract=new java.util.HashMap<>(routes);contract.put("render",Map.of("frame",new TaskReferencePricing.UnitRoute(tool)));
+        var contract=new java.util.HashMap<>(routes);contract.put("render",Map.of("frame",new CostPricingRoute.UnitRoute(tool)));
         java.util.function.Function<String,MeasuredTaskRepricing.Reference> complete=price->new MeasuredTaskRepricing.Reference("book",Map.of("text",ref.byKind().get("text"),"render",Map.of("frame",new MeasuredTaskRepricing.UnitRate(tool,new TaskQuoteCalculator.ToolPrice("v","fixture",new BigDecimal(price))))));
         var current=new java.util.concurrent.atomic.AtomicReference<>(complete.apply("0.2500"));var calls=new java.util.concurrent.atomic.AtomicInteger();
         var history=mock(cn.jia.economy.task.TaskHistoryCatalog.class);var catalog=mock(cn.jia.economy.task.TaskCalibrationCatalog.class);
@@ -249,8 +262,8 @@ class DatabaseTaskPricingServiceTest {
         price(DATA);var key=new TaskQuoteCalculator.ToolKey("tool-channel","render","image");
         var row=new EconomyToolPriceRow();row.setPriceVersion("units-v1");row.setPriceDataJson("{\"basis\":\"reference\",\"yuanPerUnit\":\"0.15\"}");
         when(mapper.findCurrentTool("tenant","client","tool-channel","render","image")).thenReturn(row);
-        var route=new TaskReferencePricing.TokenRoute("channel","model","standard","disjoint");
-        Map<String,Map<String,TaskReferencePricing.Route>> rules=Map.of("text",Map.of("model",route),"combined",Map.of("model",route,"image",new TaskReferencePricing.UnitRoute(key)));
+        var route=new CostPricingRoute.TokenRoute("channel","model","standard","disjoint");
+        Map<String,Map<String,CostPricingRoute>> rules=Map.of("text",Map.of("model",route),"combined",Map.of("model",route,"image",new CostPricingRoute.UnitRoute(key)));
         var book=service.freeze(scope,"contract-v1",rules,rules.keySet());verify(mapper,times(1)).findCurrentModel("tenant","client","channel","model","standard");
         verify(mapper,never()).findTaskTariff(any(),any(),any());var op=new MeasuredTaskRepricing.Operation("gw","op");
         var priced=MeasuredTaskRepricing.reprice(book,java.util.List.of(new MeasuredTaskRepricing.Fact(op,"combined","model","a",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,101L))),new MeasuredTaskRepricing.Fact(op,"combined","image","b",new MeasuredTaskRepricing.Units(key,new BigDecimal("2")))));

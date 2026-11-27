@@ -1,7 +1,7 @@
 package cn.jia.economy.service.impl;
 
-import cn.jia.economy.pricing.TaskReferencePricing.Route;
-import cn.jia.economy.pricing.TaskReferencePricing.TokenRoute;
+import cn.jia.economy.pricing.CostPricingRoute;
+import cn.jia.economy.pricing.CostPricingRoute.TokenRoute;
 import cn.jia.economy.task.*;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -38,7 +38,7 @@ public final class PinnedReferenceRoutes implements PreparedReferenceRoutes {
                 if(!"NATIVE_DISPATCH_GROUP_V1".equals(c.version()) || (image ? !composite || entry.image()==null : !"NATIVE_LOCAL_ARTIFACT_TEXT_V1".equals(c.capturePolicy()) || entry.image()!=null))throw new IllegalArgumentException();
                 requireIds(key.tenant(),key.client(),key.owner(),entry.channel(),entry.model(),entry.tier());
                 var parent=new TokenRoute(entry.channel(),entry.model(),entry.tier(),"RESPONSES_TEXT_TOKENS_V1");
-                Map<String,Map<String,Route>> routes=new HashMap<>();routes.put("MODEL_RESPONSE",Map.of("INFERENCE",parent));
+                Map<String,Map<String,CostPricingRoute>> routes=new HashMap<>();routes.put("MODEL_RESPONSE",Map.of("INFERENCE",parent));
                 var parentIdentity=List.of("native-reference-route-v1","MODEL_RESPONSE","INFERENCE",parent.channel(),parent.model(),parent.tier(),parent.normalizationBasis());
                 // Preserve text group identity. A different child operation or tariff key requires a new group,
                 // but changing numerical prices alone does not. Presence of a route never proves usage.

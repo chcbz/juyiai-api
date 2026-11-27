@@ -5,6 +5,8 @@ import cn.jia.economy.mapper.EconomyPriceCatalogMapper;
 import cn.jia.economy.pricing.ModelPriceCatalog;
 import cn.jia.economy.pricing.MeasuredTaskRepricing;
 import cn.jia.economy.pricing.TaskReferencePricing;
+import cn.jia.economy.pricing.CostPricingRoute;
+import cn.jia.economy.pricing.CostPricingRoute.*;
 import cn.jia.economy.pricing.ModelTokenPrice;
 import cn.jia.economy.pricing.TaskPricingService;
 import cn.jia.economy.pricing.TaskQuoteCalculator;
@@ -90,8 +92,8 @@ public class DatabaseTaskPricingService implements TaskPricingService, ModelPric
     }
     @Override
     @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
-    public MeasuredTaskRepricing.Reference freeze(EconomyScope scope,String version,Map<String,Map<String,Route>> contract,java.util.Set<String> kinds){
-        var cache=new java.util.HashMap<Route,MeasuredTaskRepricing.Rate>();var selected=new LinkedHashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
+    public MeasuredTaskRepricing.Reference freeze(EconomyScope scope,String version,Map<String,Map<String,CostPricingRoute>> contract,java.util.Set<String> kinds){
+        var cache=new java.util.HashMap<CostPricingRoute,MeasuredTaskRepricing.Rate>();var selected=new LinkedHashMap<String,Map<String,MeasuredTaskRepricing.Rate>>();
         for(String kind:kinds){
             var rules=contract.get(kind);if(rules==null||rules.isEmpty())throw new Unavailable(BILLING_ROUTE_MISSING);
             var prices=new LinkedHashMap<String,MeasuredTaskRepricing.Rate>();

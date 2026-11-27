@@ -3,7 +3,8 @@ package cn.jia.economy.service.impl;
 import cn.jia.core.util.CanonicalValueEncoding;
 import cn.jia.economy.mapper.CostRouteBindingMapper;
 import cn.jia.economy.pricing.*;
-import cn.jia.economy.pricing.TaskReferencePricing.*;
+import cn.jia.economy.pricing.CostPricingRoute;
+import cn.jia.economy.pricing.CostPricingRoute.*;
 import cn.jia.economy.service.EconomyScope;
 import java.util.*;
 import org.springframework.dao.DuplicateKeyException;
@@ -22,26 +23,11 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
     private static void transaction(){if(!TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Cost route transaction required");}
     private static void scope(EconomyScope scope){Objects.requireNonNull(scope);for(var s:List.of(scope.tenantId(),scope.clientId()))id(s,50);}
     private static void id(String s,int max){if(s==null || s.isBlank() || !s.equals(s.strip()) || s.codePointCount(0,s.length())>max)throw new IllegalArgumentException("Invalid cost route field");CanonicalValueEncoding.utf8(s);}
-    private static Map<String,Object> route(Route route){
-        return switch(route){
-            case TokenRoute r -> {id(r.channel(),100);id(r.model(),200);id(r.tier(),100);id(r.normalizationBasis(),128);
-                yield Map.of("type","TOKEN","channel",r.channel(),"model",r.model(),"tier",r.tier(),"basis",r.normalizationBasis());}
-            case UnitRoute r -> {id(r.tool().channel(),100);id(r.tool().tool(),100);id(r.tool().unit(),100);
-                yield Map.of("type","UNIT","channel",r.tool().channel(),"tool",r.tool().tool(),"unit",r.tool().unit());}
-            case ZeroRoute r -> {id(r.contractVersion(),128);yield Map.of("type","ZERO","contractVersion",r.contractVersion());}
-        };
-    }
+    private static Map<String,Object> route(CostPricingRoute route){return route.canonical();}
     private static void keys(Map<String,Object> m,String... keys){if(!m.keySet().equals(Set.of(keys)))throw new IllegalArgumentException("Invalid cost route fields");}
     private static String text(Map<String,Object> m,String key){if(!(m.get(key) instanceof String s))throw new IllegalArgumentException("Invalid cost route field");return s;}
-    private static Route decodeRoute(Map<String,Object> m){
-        return switch(text(m,"type")){
-            case "TOKEN" -> {keys(m,"type","channel","model","tier","basis");yield new TokenRoute(text(m,"channel"),text(m,"model"),text(m,"tier"),text(m,"basis"));}
-            case "UNIT" -> {keys(m,"type","channel","tool","unit");yield new UnitRoute(new TaskQuoteCalculator.ToolKey(text(m,"channel"),text(m,"tool"),text(m,"unit")));}
-            case "ZERO" -> {keys(m,"type","contractVersion");yield new ZeroRoute(text(m,"contractVersion"));}
-            default -> throw new IllegalArgumentException("Unknown cost route type");
-        };
-    }
-    private static String sha(CostRouteReference ref,long revision,Route route){
+    private static CostPricingRoute decodeRoute(Map<String,Object> m){return CostPricingRoute.fromCanonical(m);}
+    private static String sha(CostRouteReference ref,long revision,CostPricingRoute route){
         var m=new HashMap<String,Object>();m.put("reference",ref.canonical());m.put("revision",Long.toString(revision));m.put("route",route==null?null:route(route));
         return CanonicalValueEncoding.digest(m);
     }
@@ -57,7 +43,7 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
             return new Binding(ref,row.revision(),row.bindingSha(),route);
         }catch(RuntimeException corrupt){throw new Corrupt();}
     }
-    private static void basis(CostRouteReference ref,Route route){if(route instanceof TokenRoute r && !ref.normalizationBasis().equals(r.normalizationBasis()))throw new IllegalArgumentException("Cost route basis mismatch");}
+    private static void basis(CostRouteReference ref,CostPricingRoute route){if(route instanceof TokenRoute r && !ref.normalizationBasis().equals(r.normalizationBasis()))throw new IllegalArgumentException("Cost route basis mismatch");}
     @Override public Map<CostRouteReference,Binding> read(EconomyScope scope,List<CostRouteReference> references,boolean lock){
         scope(scope);if(lock)transaction();
         var wanted=new TreeMap<String,CostRouteReference>();for(var ref:references){var old=wanted.put(ref.sha(),ref);if(old!=null&&!old.equals(ref))throw new IllegalArgumentException("Cost route identity conflict");}
@@ -77,10 +63,10 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
         return Optional.of(binding);
     }
     @Override @Transactional(propagation=Propagation.MANDATORY)
-    public Binding publish(EconomyScope scope,CostRouteReference reference,long expectedRevision,Route route){Objects.requireNonNull(route);route(route);basis(reference,route);return change(scope,reference,expectedRevision,route);}
+    public Binding publish(EconomyScope scope,CostRouteReference reference,long expectedRevision,CostPricingRoute route){Objects.requireNonNull(route);route(route);basis(reference,route);return change(scope,reference,expectedRevision,route);}
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public long withdraw(EconomyScope scope,CostRouteReference reference,long expectedRevision){return change(scope,reference,expectedRevision,null).revision();}
-    private Binding change(EconomyScope scope,CostRouteReference reference,long expected,Route target){
+    private Binding change(EconomyScope scope,CostRouteReference reference,long expected,CostPricingRoute target){
         scope(scope);transaction();if(expected<0 || expected==Long.MAX_VALUE)throw new IllegalArgumentException("Invalid route revision");
         Long current=mapper.lockHead(scope.tenantId(),scope.clientId(),reference.sha());
         if(current!=null){

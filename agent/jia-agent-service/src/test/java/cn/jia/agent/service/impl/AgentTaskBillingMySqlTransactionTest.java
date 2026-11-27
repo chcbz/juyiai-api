@@ -1,5 +1,7 @@
 package cn.jia.agent.service.impl;
 
+import cn.jia.economy.pricing.CostPricingRoute;
+
 import cn.jia.chat.service.usage.ChatUsageDispatchAuthority.TaskSource;
 import cn.jia.economy.pricing.TaskEstimateFeatures;
 import cn.jia.economy.pricing.TaskQuoteCalculator;
@@ -557,7 +559,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         return new MeasuredTaskRepricing.Reference("r1",Map.of("MODEL_RESPONSE",fixtureReference().byKind().get("MODEL_RESPONSE")));
     }
     private String fixtureBookPin(MeasuredTaskRepricing.Reference reference){return new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),null).freezeReference(reference).sha256();}
-    private Map<String,Map<String,cn.jia.economy.pricing.TaskReferencePricing.Route>> fixtureDrawRoutes(){return Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame"))));}
+    private Map<String,Map<String,cn.jia.economy.pricing.CostPricingRoute>> fixtureDrawRoutes(){return Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.CostPricingRoute.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame"))));}
     private TaskBenchmarkAdmission benchmarks;
     private record SponsoredFixture(TaskBenchmarkAdmission service, TaskBillingService.Task task,
             TaskBenchmarkAdmission.Manifest manifest, String manifestSha,
@@ -773,7 +775,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
             return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
-        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
         String receipt=json.writeValueAsString(structured); // synthetic passing calibration, not evidence of production accuracy
         var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,candidates,engine);
         var unavailable=new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE);
@@ -869,7 +871,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var group=cn.jia.economy.task.TaskHistoryCatalog.Group.of(measured,features);
         var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(group.digest(),1,"a".repeat(64));
         var params=new TaskNeighborSearch.Parameters(TaskNeighborSearch.trainingScales(List.of(features)),1,1,1,1,1,0.1,0.2,1,1,10,1);
-        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(measured,Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(measured,Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.CostPricingRoute.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
         var cal=mock(cn.jia.economy.task.TaskCalibrationCatalog.class);var hist=mock(cn.jia.economy.task.TaskHistoryCatalog.class);
         when(cal.resolve(BILLING_TASK,group)).thenAnswer(call->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,fixtureBookPin(fixtureReference()));});
         var rev=new cn.jia.economy.task.TaskHistoryCatalog.Revision("sample",1);
@@ -1123,7 +1125,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         }
         var fit=new TaskEstimateCalibration.Fit("dense-fixture",attachedProbe?richParams:params,scores);
         var report=new TaskEstimateCalibration.Report(group.privateCalibrationGroup(requester),group.execution().routeVersion(),fit,scores,true);
-        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.CostPricingRoute.UnitRoute(new TaskQuoteCalculator.ToolKey("test","draw","frame")))));
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(json,new cn.jia.economy.service.impl.TaskHistoryCatalogService(original,json));
         var book=study.freezeContractReference(requester,terms,reference);
         var receipt=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),book.sha256(),"4".repeat(64),"5".repeat(64),gate,report);
@@ -1412,8 +1414,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var study=new cn.jia.economy.service.impl.FrozenCalibrationStudy(new ObjectMapper(),observations);
         var offer=measuredOffer();var offeredGroup=cn.jia.economy.task.TaskHistoryCatalog.Group.of(offer.preparation().group(),offer.features());
         var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
-        var allTerms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(offeredGroup.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.TaskReferencePricing.UnitRoute(unit)),
-                "MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        var allTerms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(offeredGroup.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.CostPricingRoute.UnitRoute(unit)),
+                "MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
         var book=study.freezeContractReference(BILLING_TASK,allTerms,(scope,version,routes,kinds)->{assertEquals(BILLING_TASK.scope(),scope);assertEquals("r1",version);
             assertEquals(allTerms.routes(),routes);assertEquals(java.util.Set.of("draw","MODEL_RESPONSE"),kinds);return fixtureReference();});
         // Same contract version and same rounded forecast, even identical model rates for all actual operations.
@@ -1484,9 +1486,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
             return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
-        var prediction=engine.estimate(query,group.execution(),needle,calibrationCatalog.resolve(query,group),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
+        var prediction=engine.estimate(query,group.execution(),needle,calibrationCatalog.resolve(query,group),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
         var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine);
-        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.TaskReferencePricing.TokenRoute("fixture","model","tier","fixture"))));
+        var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.BILLING_ROUTE_MISSING),estimator.prepare(query,needle,null));
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(new TaskBillingService.Task(query.scope(),"other","offer"),needle,terms));
         var available=assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,needle,terms));assertEquals(65,available.preparation().estimate().wen());
