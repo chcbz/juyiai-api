@@ -33,4 +33,11 @@ public class EconomyConfiguration {
     public EconomyUsageCostSchemaInitializer economyUsageCostSchemaInitializer(javax.sql.DataSource dataSource) {
         return new EconomyUsageCostSchemaInitializer(dataSource);
     }
+    @org.springframework.context.annotation.Profile("schema-maintenance")
+    @Bean
+    @ConditionalOnProperty(prefix = "economy.usage-cost", name = "schema-enabled", havingValue = "true")
+    public CostRouteBindingSchemaInitializer costRouteBindingSchemaInitializer(JdbcTemplate jdbcTemplate) {
+        return new CostRouteBindingSchemaInitializer(jdbcTemplate);
+    }
+
 }

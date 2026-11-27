@@ -1,6 +1,7 @@
 package cn.jia.economy.service.impl;
 
 import cn.jia.economy.config.EconomyMySqlTestFixture;
+import cn.jia.economy.config.CostRouteBindingSchemaInitializer;
 import cn.jia.economy.mapper.CostRouteBindingMapper;
 import cn.jia.economy.pricing.*;
 import cn.jia.economy.pricing.TaskReferencePricing.*;
@@ -28,7 +29,7 @@ class DatabaseCostRouteBindingsMySqlTest {
     private static TokenRoute route(String channel){return new TokenRoute(channel,"same-model","standard","TOKENS_V1");}
     @BeforeEach void setup()throws Exception{
         fixture.start();var db=fixture.newDatabase("costroutes");jdbc=db.jdbc();database=jdbc.queryForObject("SELECT DATABASE()",String.class);tx=new TransactionTemplate(new DataSourceTransactionManager(db.dataSource()));
-        new ResourceDatabasePopulator(new ClassPathResource("db/economy-cost-route-binding.sql")).execute(db.dataSource());
+        new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet();
         var config=new org.apache.ibatis.session.Configuration();config.setMapUnderscoreToCamelCase(true);config.addMapper(CostRouteBindingMapper.class);
         var factory=new SqlSessionFactoryBean();factory.setDataSource(db.dataSource());factory.setConfiguration(config);
         var mapper=new SqlSessionTemplate(factory.getObject()).getMapper(CostRouteBindingMapper.class);
@@ -52,7 +53,7 @@ class DatabaseCostRouteBindingsMySqlTest {
         assertEquals(one,tx.execute(s->service.publish(scope,r,0,route("a"))));
         var two=tx.execute(s->service.publish(scope,r,1,route("b")));assertEquals(2,two.revision());
         assertThrows(CostRouteBindings.Conflict.class,()->tx.execute(s->service.publish(scope,r,0,route("a"))));
-        assertEquals(3L,tx.execute(s->service.withdraw(scope,r,2)));assertEquals(3L,tx.execute(s->service.withdraw(scope,r,2)));
+        assertEquals(Long.valueOf(3),tx.execute(s->service.withdraw(scope,r,2)));assertEquals(Long.valueOf(3),tx.execute(s->service.withdraw(scope,r,2)));
         assertTrue(service.read(scope,List.of(r),false).isEmpty());
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision",Integer.class));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision WHERE route_json IS NULL",Integer.class));
@@ -127,12 +128,29 @@ class DatabaseCostRouteBindingsMySqlTest {
     @Test void migrationReplayPreservesBindingsAndHeadCannotPointToMissingRevision(){
         var r=ref("provider");var original=tx.execute(s->service.publish(scope,r,0,route("channel")));
         new ResourceDatabasePopulator(new ClassPathResource("db/economy-cost-route-binding.sql")).execute(jdbc.getDataSource());
+        new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet();
         assertEquals(original,service.read(scope,List.of(r),false).get(r));
         assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
                 "UPDATE economy_cost_route_head SET revision=99"));
         assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->jdbc.update(
                 "DELETE FROM economy_cost_route_revision"));
         assertEquals(original,service.read(scope,List.of(r),false).get(r));
+    }
+    @Test void maintenanceResumesPartialCreationWithoutInventingMappings(){
+        jdbc.execute("DROP TABLE economy_cost_route_head");
+        new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet();
+        assertTrue(service.read(scope,List.of(ref("missing")),false).isEmpty());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision",Integer.class));
+    }
+    @Test void maintenanceRejectsDriftBeforeCreatingMissingTable(){
+        jdbc.execute("DROP TABLE economy_cost_route_head");
+        jdbc.execute("ALTER TABLE economy_cost_route_revision MODIFY binding_sha VARCHAR(64) NOT NULL");
+        assertThrows(IllegalStateException.class,()->new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet());
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='economy_cost_route_head'",Integer.class));
+    }
+    @Test void maintenanceRejectsMissingReferenceConstraint(){
+        jdbc.execute("ALTER TABLE economy_cost_route_head DROP FOREIGN KEY fk_cost_route_head_revision");
+        assertThrows(IllegalStateException.class,()->new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet());
     }
     private void awaitMappingLockWait(Future<?> writer)throws Exception{
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
