@@ -40,6 +40,7 @@ class ResolvedCostProfilesTest {
         assertEquals(Set.of(a),p.adopted().keySet());assertEquals(2,partial.routeRefs().size());
         when(bindings.read(DOMAIN,ordered(a),true)).thenReturn(p.adopted());
         service.recheck(DOMAIN,p);verify(bindings).read(DOMAIN,ordered(a),true);
+        verify(bindings).read(DOMAIN,ordered(a,b,c),false);
         // Newly available c or withdrawal of unused b cannot change this prepared fallback.
         verifyNoMoreInteractions(bindings);
     }
@@ -55,7 +56,7 @@ class ResolvedCostProfilesTest {
         var a=ref("provider");var measurement=profile("i",List.of(a));
         when(bindings.read(DOMAIN,ordered(a),false)).thenThrow(new CostRouteBindings.Corrupt());
         assertThrows(CostRouteBindings.Corrupt.class,()->service.prepare(DOMAIN,List.of(measurement)));
-        when(bindings.read(DOMAIN,ordered(a),false)).thenReturn(Map.of(a,binding(a,1,"channel")));var p=service.prepare(DOMAIN,List.of(measurement));
+        doReturn(Map.of(a,binding(a,1,"channel"))).when(bindings).read(DOMAIN,ordered(a),false);var p=service.prepare(DOMAIN,List.of(measurement));
         when(bindings.read(DOMAIN,ordered(a),true)).thenThrow(new CostRouteBindings.Corrupt());
         assertThrows(CostRouteBindings.Corrupt.class,()->service.recheck(DOMAIN,p));
     }
