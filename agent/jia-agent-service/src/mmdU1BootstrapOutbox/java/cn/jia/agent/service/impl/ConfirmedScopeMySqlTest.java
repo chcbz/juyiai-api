@@ -50,6 +50,7 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
     @org.junit.jupiter.api.io.TempDir java.nio.file.Path packageScratch;
     private SkillPackagePublicationService publisher;
     private PublishedCapabilityQuoteSpecs specifications;
+    private CapabilityQuoteSpecMapper specificationMapper;
     private final PositionAuthority.Scope publisherScope=new PositionAuthority.Scope("0","client","owner");
     private final PositionAuthority.Grant publisherGrant=new PositionAuthority.Grant("appointment",1,1,"agent",1,null,true);
 
@@ -84,7 +85,8 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
         field.set(roots,session.getMapper(AgentTaskMetaMapper.class));
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,new AgentTaskMutationTransactionImpl(roots,manager));
         service.confirmationActor(new AuthenticatedRequirementConfirmationActor());
-        specifications=new PublishedCapabilityQuoteSpecs(session.getMapper(CapabilityQuoteSpecMapper.class));
+        specificationMapper=spy(session.getMapper(CapabilityQuoteSpecMapper.class));
+        specifications=new PublishedCapabilityQuoteSpecs(specificationMapper);
         service.capabilitySpecifications(specifications);
         publishSpecifications(session);
         catalogues=mock(AgentTaskExecutionGrantService.class);
@@ -230,6 +232,42 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
         verify(catalogues,times(1)).snapshotTaskInputsWithinLockedTask(OWNER,"task");
     }
 
+    @Test void installedBindingsBatchUsesRealApprovedVersionJoinsAndExactDomainKeys() {
+        var requested=new ArrayList<String>();requested.add("fixture-v1");
+        tx.execute(status->{
+            for(int i=0;i<128;i++) {
+                String version="batch-"+i;requested.add(version);
+                jdbc.update("""
+                    INSERT INTO agent_skill_product_version(product_version_id,product_id,version_sequence,skill_key,skill_version,
+                      price_wen,package_sha256,package_size,approved_permissions_manifest,approved_permissions_sha256,
+                      deployment_restriction,review_status,tenant_id,client_id,create_time)
+                    SELECT ?,product_id,?,skill_key,?,price_wen,package_sha256,package_size,approved_permissions_manifest,
+                      approved_permissions_sha256,deployment_restriction,review_status,tenant_id,client_id,create_time
+                    FROM agent_skill_product_version WHERE product_version_id='fixture-v1'
+                    """,version,1000+i,version);
+                jdbc.update("""
+                    INSERT INTO agent_skill_quote_spec_binding(tenant_id,client_id,product_version_id,capability_id,capability_version,semantic_sha)
+                    SELECT tenant_id,client_id,?,capability_id,capability_version,semantic_sha
+                    FROM agent_skill_quote_spec_binding WHERE product_version_id='fixture-v1'
+                    """,version);
+            }
+            return null;
+        });
+        requested.add("fixture-v1");clearInvocations(specificationMapper);
+        var result=specifications.bindingsForVersions("0","client",requested);
+        assertEquals(129,result.size());assertTrue(result.values().stream().allMatch(bindings->bindings.size()==3));
+        verify(specificationMapper,times(2)).forApprovedVersions(org.mockito.ArgumentMatchers.eq("0"),org.mockito.ArgumentMatchers.eq("client"),org.mockito.ArgumentMatchers.anyList());
+        assertTrue(specifications.bindingsForVersion("0","Client","fixture-v1").isEmpty());
+        assertTrue(specifications.bindingsForVersion("other","client","fixture-v1").isEmpty());
+        assertTrue(specifications.bindingsForVersion("0","client","fixture-v1 ").isEmpty());
+        assertTrue(specifications.bindingsForVersion("0","client","Fixture-v1").isEmpty());
+        jdbc.update("UPDATE agent_skill_product_version SET review_status='PENDING' WHERE product_version_id='batch-0'");
+        assertTrue(specifications.bindingsForVersion("0","client","batch-0").isEmpty());
+        publisher.withdrawQuoteSpec(publisherScope,publisherGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1"));
+        assertEquals(2,specifications.bindingsForVersion("0","client","fixture-v1").size());
+        jdbc.update("UPDATE agent_capability_quote_spec SET spec_json=JSON_SET(spec_json,'$.version','2') WHERE capability_id='text.summary'");
+        assertEquals(503,assertThrows(SkillMarketplaceException.class,()->specifications.bindingsForVersion("0","client","fixture-v1")).status(),"withdrawn corruption is not missing cost data");
+    }
     @Test void scopeConfirmationRequiresPublishedBindingAndValidDeclaredFields() {
         var invalid=command("text.summary","words","unit/words","10001",List.of("f-text@1"));
         assertEquals(400,assertThrows(SkillMarketplaceException.class,()->service.confirmScope(OWNER,"task",0,"bad",invalid)).status());

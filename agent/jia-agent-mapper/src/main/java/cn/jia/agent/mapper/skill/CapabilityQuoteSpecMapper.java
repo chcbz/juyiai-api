@@ -24,16 +24,30 @@ public interface CapabilityQuoteSpecMapper {
             +"VALUES(#{tenantId},#{clientId},#{productVersionId},#{capabilityId},#{version},#{sha})")
     int insertBinding(@Param("tenantId") String tenant,@Param("clientId") String client,@Param("productVersionId") String productVersion,
             @Param("capabilityId") String capability,@Param("version") String version,@Param("sha") String sha);
-    @Select("SELECT s.capability_id,s.version,s.spec_sha,s.spec_json,s.status FROM agent_skill_quote_spec_binding b "
-            +"JOIN agent_capability_quote_spec s ON s.tenant_id=b.tenant_id AND s.client_id=b.client_id "
-            +"AND s.capability_id=b.capability_id AND s.version=b.capability_version AND s.spec_sha=b.semantic_sha "
-            +"JOIN agent_skill_product_version v ON v.tenant_id=b.tenant_id AND v.client_id=b.client_id AND v.product_version_id=b.product_version_id "
-            +"WHERE b.tenant_id=#{tenantId} AND b.client_id=#{clientId} AND b.product_version_id=#{productVersionId} "
-            +"AND OCTET_LENGTH(b.tenant_id)=OCTET_LENGTH(#{tenantId}) AND OCTET_LENGTH(b.client_id)=OCTET_LENGTH(#{clientId}) "
-            +"AND OCTET_LENGTH(b.product_version_id)=OCTET_LENGTH(#{productVersionId}) AND v.review_status='APPROVED' "
-            +"ORDER BY s.capability_id,s.version")
-    List<StoredSpec> forApprovedVersion(@Param("tenantId") String tenant,@Param("clientId") String client,
-            @Param("productVersionId") String productVersion);
+    record VersionSpec(String productVersionId,String capabilityId,String version,String specSha,String specJson,String status) {
+        public StoredSpec specification(){return new StoredSpec(capabilityId,version,specSha,specJson,status);}
+    }
+    @Select("""
+            <script>
+            SELECT b.product_version_id,s.capability_id,s.version,s.spec_sha,s.spec_json,s.status
+            FROM agent_skill_quote_spec_binding b
+            JOIN agent_capability_quote_spec s ON s.tenant_id=b.tenant_id AND s.client_id=b.client_id
+              AND s.capability_id=b.capability_id AND s.version=b.capability_version AND s.spec_sha=b.semantic_sha
+            JOIN agent_skill_product_version v ON v.tenant_id=b.tenant_id AND v.client_id=b.client_id
+              AND v.product_version_id=b.product_version_id
+            WHERE b.tenant_id=#{tenantId} AND b.client_id=#{clientId}
+              AND OCTET_LENGTH(b.tenant_id)=OCTET_LENGTH(#{tenantId})
+              AND OCTET_LENGTH(b.client_id)=OCTET_LENGTH(#{clientId})
+              AND b.product_version_id IN
+                <foreach collection="versions" item="version" open="(" separator="," close=")">#{version}</foreach>
+              AND BINARY b.product_version_id IN
+                <foreach collection="versions" item="version" open="(" separator="," close=")">BINARY #{version}</foreach>
+              AND v.review_status='APPROVED'
+            ORDER BY b.product_version_id,s.capability_id,s.version
+            </script>
+            """)
+    List<VersionSpec> forApprovedVersions(@Param("tenantId") String tenant,@Param("clientId") String client,
+            @Param("versions") List<String> versions);
     record SpecKey(String capabilityId,String version) { }
     @Select("""
             <script>

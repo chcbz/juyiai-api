@@ -19,19 +19,41 @@ public final class PublishedCapabilityQuoteSpecs {
 
     /** Immutable package metadata, not an execution grant. A skill without cost declarations remains installable. */
     public List<Map<String,String>> bindingsForVersion(String tenant,String client,String productVersion) {
-        var rows=mapper.forApprovedVersion(tenant,client,productVersion);
-        require(rows.size()<=CapabilityQuoteSpecJson.MAX_SPECS,503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
-        var keys=new HashSet<SpecKey>();var result=new ArrayList<Map<String,String>>();
-        for(var row:rows) {
-            require(keys.add(new SpecKey(row.capabilityId(),row.version())),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
-            CapabilityQuoteSpec spec;
-            try {spec=CapabilityQuoteSpecJson.readStored(row.specJson(),row.specSha());}
-            catch(IllegalStateException corrupt){throw new SkillMarketplaceException(503,"CAPABILITY_QUOTE_SPEC_CORRUPT");}
-            require(spec.capabilityId().equals(row.capabilityId()) && spec.version().equals(row.version())
-                    && Set.of("ACTIVE","WITHDRAWN").contains(row.status()),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
-            if("ACTIVE".equals(row.status()))result.add(Map.of("capabilityId",row.capabilityId(),"capabilityVersion",row.version(),"specSha",row.specSha()));
+        return bindingsForVersions(tenant,client,List.of(productVersion)).get(productVersion);
+    }
+
+    /** One bounded read per 128 distinct approved versions, including explicit empty results.
+     * Registration/quote callers still own identity fencing and commit-time status revalidation. */
+    public Map<String,List<Map<String,String>>> bindingsForVersions(String tenant,String client,Collection<String> requested) {
+        require(tenant!=null&&!tenant.isBlank()&&client!=null&&!client.isBlank(),400,"BAD_REQUEST");
+        var versions=requested.stream().distinct().sorted(CanonicalValueEncoding::compareUtf8).toList();
+        var result=new HashMap<String,List<Map<String,String>>>();
+        for(int start=0;start<versions.size();start+=READ_BATCH_SIZE) {
+            var batch=versions.subList(start,Math.min(start+READ_BATCH_SIZE,versions.size()));
+            var decoded=new HashMap<CapabilityQuoteSpecMapper.StoredSpec,CapabilityQuoteSpec>();
+            var seen=new HashMap<String,Set<SpecKey>>();
+            for(var version:batch){result.put(version,new ArrayList<>());seen.put(version,new HashSet<>());}
+            for(var row:mapper.forApprovedVersions(tenant,client,batch)) {
+                var keys=seen.get(row.productVersionId());
+                require(keys!=null&&keys.add(new SpecKey(row.capabilityId(),row.version()))
+                        &&keys.size()<=CapabilityQuoteSpecJson.MAX_SPECS,503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+                var stored=row.specification();var spec=decoded.get(stored);
+                if(spec==null) {
+                    try {spec=CapabilityQuoteSpecJson.readStored(row.specJson(),row.specSha());}
+                    catch(IllegalStateException corrupt){throw new SkillMarketplaceException(503,"CAPABILITY_QUOTE_SPEC_CORRUPT");}
+                    require(spec.capabilityId().equals(row.capabilityId())&&spec.version().equals(row.version())
+                            &&Set.of("ACTIVE","WITHDRAWN").contains(row.status()),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+                    decoded.put(stored,spec);
+                }
+                if("ACTIVE".equals(row.status()))result.get(row.productVersionId()).add(Map.of(
+                        "capabilityId",row.capabilityId(),"capabilityVersion",row.version(),"specSha",row.specSha()));
+            }
         }
-        return List.copyOf(result);
+        result.replaceAll((version,bindings)->bindings.stream().sorted((a,b)->{
+            int c=CanonicalValueEncoding.compareUtf8(a.get("capabilityId"),b.get("capabilityId"));
+            return c==0?CanonicalValueEncoding.compareUtf8(a.get("capabilityVersion"),b.get("capabilityVersion")):c;
+        }).toList());
+        return Map.copyOf(result);
     }
 
     /** New confirmations lock the adopted rows through the original task transaction. Historical replay skips this. */

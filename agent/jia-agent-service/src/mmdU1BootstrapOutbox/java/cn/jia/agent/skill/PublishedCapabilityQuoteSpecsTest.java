@@ -49,15 +49,48 @@ class PublishedCapabilityQuoteSpecsTest {
         when(mapper.published("0","client",List.of(key),false)).thenReturn(List.of(row,row));
         assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.readActive("0","client",List.of(key))).status());
     }
+    private static VersionSpec versionRow(String version,StoredSpec row) {
+        return new VersionSpec(version,row.capabilityId(),row.version(),row.specSha(),row.specJson(),row.status());
+    }
     @Test void installationMetadataComesOnlyFromVerifiedActiveSemanticBindings() {
-        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of());
+        when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(List.of());
         assertTrue(service.bindingsForVersion("0","client","version").isEmpty());
         var row=stored("cap");
-        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(row));
+        when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(List.of(versionRow("version",row)));
         assertEquals(List.of(Map.of("capabilityId","cap","capabilityVersion","1","specSha",row.specSha())),service.bindingsForVersion("0","client","version"));
-        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(new StoredSpec("cap","1",row.specSha(),row.specJson(),"WITHDRAWN")));
+        when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(List.of(versionRow("version",new StoredSpec("cap","1",row.specSha(),row.specJson(),"WITHDRAWN"))));
         assertTrue(service.bindingsForVersion("0","client","version").isEmpty());
-        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(new StoredSpec("cap","1","0".repeat(64),row.specJson(),"WITHDRAWN")));
+        when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(List.of(versionRow("version",new StoredSpec("cap","1","0".repeat(64),row.specJson(),"WITHDRAWN"))));
+        assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.bindingsForVersion("0","client","version")).status());
+    }
+    @Test void installedVersionBindingsAreDeduplicatedPagedAndImmutableIncludingMissingVersions() {
+        var batches=new ArrayList<List<String>>();
+        when(mapper.forApprovedVersions(eq("0"),eq("client"),anyList())).thenAnswer(i->{
+            List<String> batch=i.getArgument(2);batches.add(List.copyOf(batch));
+            return batch.stream().filter(v->!v.equals("missing")).flatMap(v->List.of(versionRow(v,stored("b")),versionRow(v,stored("a"))).stream()).toList();
+        });
+        assertEquals(Map.of(),service.bindingsForVersions("0","client",List.of()));verifyNoInteractions(mapper);
+        var requested=new ArrayList<String>();requested.add("missing");for(int i=127;i>=0;i--)requested.add("v-"+i);
+        requested.addAll(List.copyOf(requested));
+        var result=service.bindingsForVersions("0","client",requested);
+        assertEquals(129,result.size());assertEquals(List.of(128,1),batches.stream().map(List::size).toList());
+        var all=batches.stream().flatMap(List::stream).toList();assertEquals(all.stream().sorted().toList(),all);
+        assertTrue(result.get("missing").isEmpty());assertEquals(List.of("a","b"),result.get("v-0").stream().map(b->b.get("capabilityId")).toList());
+        assertThrows(UnsupportedOperationException.class,()->result.clear());
+        assertThrows(UnsupportedOperationException.class,()->result.get("v-0").clear());
+        assertThrows(UnsupportedOperationException.class,()->result.get("v-0").getFirst().clear());
+        verify(mapper,times(2)).forApprovedVersions(eq("0"),eq("client"),anyList());
+    }
+    @Test void batchBindingsRejectDuplicateOutOfPageMisboundAndOverLimitRows() {
+        var valid=versionRow("version",stored("cap"));
+        for(var rows:List.of(List.of(valid,valid),List.of(versionRow("unrequested",stored("cap"))),
+                List.of(new VersionSpec("version","wrong","1",valid.specSha(),valid.specJson(),"ACTIVE")))) {
+            when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(rows);
+            assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.bindingsForVersion("0","client","version")).status());
+        }
+        var many=new ArrayList<VersionSpec>();
+        for(int i=0;i<33;i++){var row=stored("cap-"+i);many.add(versionRow("version",new StoredSpec(row.capabilityId(),"1",row.specSha(),row.specJson(),"WITHDRAWN")));}
+        when(mapper.forApprovedVersions("0","client",List.of("version"))).thenReturn(many);
         assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.bindingsForVersion("0","client","version")).status());
     }
     @Test void confirmationUsesSharedLocksAndRejectsUndeclaredUserConstraints() {
