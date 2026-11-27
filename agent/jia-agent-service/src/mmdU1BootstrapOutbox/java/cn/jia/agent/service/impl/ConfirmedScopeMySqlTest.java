@@ -125,8 +125,9 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
 
     @Test void explicitSqlMigrationPreservesOldSnapshotAndInitializerCanResume() throws Exception {
         var original=service.read(OWNER,"task",1);removeScopeColumns();
-        String sql=new ClassPathResource("db/agent-task-confirmed-scope-v1.sql").getContentAsString(StandardCharsets.UTF_8);
-        for(String statement:sql.split(";")) if(!statement.isBlank()) jdbc.execute(statement);
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(
+                new ClassPathResource("db/agent-task-confirmed-scope-v1.sql"))
+                .execute(Objects.requireNonNull(jdbc.getDataSource()));
         new AgentTaskRequirementSnapshotSchemaInitializer(jdbc).afterPropertiesSet();
         assertEquals(original,service.read(OWNER,"task",1));
         assertNull(service.readCurrent(OWNER,"task").confirmedScope());

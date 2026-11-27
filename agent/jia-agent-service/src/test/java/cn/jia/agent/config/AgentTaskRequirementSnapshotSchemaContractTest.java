@@ -38,6 +38,8 @@ class AgentTaskRequirementSnapshotSchemaContractTest {
         when(metadata.getDatabaseMajorVersion()).thenReturn(8);
         when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.eq(Integer.class),
                 org.mockito.ArgumentMatchers.eq("agent_task_requirement_snapshot"))).thenReturn(1);
+        when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.eq(Integer.class),
+                org.mockito.ArgumentMatchers.eq("agent_task_current_requirement"))).thenReturn(0);
         when(jdbc.queryForMap(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.eq("agent_task_requirement_snapshot")))
                 .thenReturn(Map.of("engine","MyISAM","table_collation","utf8mb4_0900_bin"));
