@@ -89,7 +89,15 @@ class TaskQueryVectorsTest {
     }
     @Test void ordinaryBudgetBatchesAllCandidatesAndReplayNeverWrites(){
         var intents=mock(TaskQuoteIntentService.class);var billing=mock(TaskBillingService.class);
-        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing),org.mockito.Mockito.mock(RegisteredGroupQuoteInputs.class));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
+        var registry=io.micrometer.observation.ObservationRegistry.create();var stages=new java.util.ArrayList<String>();
+        registry.observationConfig().observationHandler(new io.micrometer.observation.ObservationHandler<io.micrometer.observation.Observation.Context>(){
+            public boolean supportsContext(io.micrometer.observation.Observation.Context c){return true;}
+            public void onStop(io.micrometer.observation.Observation.Context c){
+                assertEquals("cyf.task.quote.batch.stage",c.getName());assertFalse(c.getHighCardinalityKeyValues().iterator().hasNext());
+                var tags=new java.util.TreeMap<String,String>();c.getLowCardinalityKeyValues().forEach(k->tags.put(k.getKey(),k.getValue()));assertEquals(java.util.Set.of("stage","outcome"),tags.keySet());stages.add(tags.get("stage")+":"+tags.get("outcome"));
+            }
+        });
+        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing),org.mockito.Mockito.mock(RegisteredGroupQuoteInputs.class),java.util.Optional.of(registry));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
         var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
         var facts=new QuoteFeaturePreparation.LocalFacts(1,"a".repeat(64),"b".repeat(64),List.of(),null,null);
         var targets=intent.agentIds().stream().map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();
@@ -102,6 +110,9 @@ class TaskQueryVectorsTest {
         assertTrue(result.quotes().stream().allMatch(q->q.amount().equals(cn.jia.economy.common.Money.wen(1))));
         verify(billing).storeOffersBatch(task,OWNER.actorId(),writes);verifyNoMoreInteractions(billing);clearInvocations(billing);
         when(intents.begin(OWNER,"task","key",intent)).thenReturn(new TaskQuoteIntentService.Replay(result));assertSame(result,app.quote(OWNER,"task","key",intent));verifyNoInteractions(billing);
+        when(intents.begin(OWNER,"task","key",intent)).thenThrow(new TaskQuoteIntentService.CandidateNotAuthorized());
+        assertThrows(IndependentTaskQuotes.NotFound.class,()->app.quote(OWNER,"task","key",intent));
+        assertEquals(List.of("intent_features:ok","configuration:ok","baseline:ok","finish:ok","intent_features:ok","intent_features:error"),stages);
     }
     @Test void structuredBatchSharesGroupReadButNeverSharesQuoteOrExecutionCommitments(){
         var groups=mock(cn.jia.economy.task.GroupBudgetQuotes.class);var billing=mock(TaskBillingService.class);var offers=new CandidateGroupOffers(groups,billing);
