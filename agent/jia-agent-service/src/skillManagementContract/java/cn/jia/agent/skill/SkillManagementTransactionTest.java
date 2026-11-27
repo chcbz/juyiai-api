@@ -466,6 +466,19 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
     /** Real published version -> installed binding -> authenticated report -> SQL read, no Runtime probe. */
     private java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> assertRegisteredCostProfile(Slot slot) throws Exception {
         usePersistentAuthentication();
+        var capabilityRegistry=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,service);
+        var capabilityTarget=new AgentExternalServicePolicyService.QuoteTarget(AGENT,ACTOR.ownerJiacn(),7,0);
+        java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.CapabilityObserved>> capabilityRead=
+                ()->capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(capabilityTarget),false);
+        var capabilityFacts=capabilityRead.get();
+        assertEquals(1,capabilityFacts.get(AGENT).capabilities().size(),"capability SQL must work before cost-report migration");
+        assertEquals(runtime.getRuntimeInstallationId(),capabilityFacts.get(AGENT).installation());
+        assertThrows(UnsupportedOperationException.class,()->capabilityFacts.get(AGENT).capabilities().clear());
+        assertTrue(capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(new AgentExternalServicePolicyService.QuoteTarget(AGENT,"other",7,0)),false).isEmpty());
+        assertTrue(capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(new AgentExternalServicePolicyService.QuoteTarget(AGENT,ACTOR.ownerJiacn(),8,0)),false).isEmpty());
+        assertTrue(capabilityRegistry.readCapabilities("0","other-client",List.of(capabilityTarget),false).isEmpty());
+        assertTrue(capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(),false).isEmpty());
+        assertThrows(IllegalStateException.class,()->capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(capabilityTarget),true));
         for(String resource:List.of("db/agent-runtime-pricing-profiles-v1.sql","db/agent-runtime-cost-profiles-v1.sql"))
             new ResourceDatabasePopulator(new ClassPathResource(resource)).execute(jdbc.getDataSource());
         var registry=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,service);
@@ -502,6 +515,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertEquals(before,read.get());
         send.accept(Map.of("version","NATIVE_PRICING_PROFILES_V1","sequence","99","profiles",List.of(),"sha256","d".repeat(64)));
         assertTrue(read.get().isEmpty(),"old wire is not a second registration lane");
+        assertEquals(capabilityFacts,capabilityRead.get(),"cost report withdrawal cannot change capability identity");
         assertEquals(1,service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).size(),
                 "withdrawn cost evidence does not erase an installed capability");
         assertEquals(3,jdbc.queryForObject("SELECT pricing_sequence FROM agent_runtime WHERE agent_id=?",Long.class,AGENT));
@@ -512,15 +526,17 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         send.accept(report.apply(5).wire());
         jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=1 WHERE active_installation_id=?",slot.installId());
         assertTrue(read.get().isEmpty());
-        assertTrue(service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).isEmpty(),"disabled skill cannot prove capability");
+        assertEquals(capabilityFacts,capabilityRead.get(),"re-enabled skill restores capability without reviving a withdrawn cost report");
         send.accept(report.apply(5).wire());assertTrue(read.get().isEmpty());
         send.accept(report.apply(6).wire());assertEquals(6,read.get().get(AGENT).seq());
         String original=read.get().get(AGENT).canonical();
         jdbc.update("UPDATE agent_runtime SET pricing_profiles_json='{}' WHERE agent_id=?",AGENT);
         assertThrows(IllegalStateException.class,read::get);
+        assertEquals(capabilityFacts,capabilityRead.get(),"capability projection never decodes cost JSON; pricing still reports corruption");
         jdbc.update("UPDATE agent_runtime SET pricing_profiles_json=? WHERE agent_id=?",original,AGENT);
         send.accept(new cn.jia.agent.skill.quote.CostProfileReport(7,List.of()).wire());
         assertTrue(cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()).profiles().isEmpty());
+        assertEquals(capabilityFacts,capabilityRead.get());
         assertEquals(1,service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).size(),
                 "empty cost report is not capability revocation");
         send.accept(report.apply(8).wire());assertEquals(8,read.get().get(AGENT).seq());
@@ -540,6 +556,8 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         var installedCapabilities=service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId());
         assertCostProfileFinishLocks(slot,()->assertEquals(installedCapabilities,
                 service.lockQuoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId())));
+        assertCostProfileFinishLocks(slot,()->assertEquals(capabilityFacts,
+                capabilityRegistry.readCapabilities("0",ACTOR.clientId(),List.of(capabilityTarget),true)));
 
         verifyNoInteractions(packages,sessions,capabilities);
         return read;

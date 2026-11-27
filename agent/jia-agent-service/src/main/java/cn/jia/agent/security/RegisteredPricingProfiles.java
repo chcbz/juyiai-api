@@ -73,34 +73,66 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
         var row=readSubjects(target.tenantId(),target.clientId(),List.of(new Subject(target.agentId(),target.ownerJiacn(),target.bindingId())),true).get(target.agentId());
         return row!=null && row.installation().equals(fence.runtimeInstallationId()) && row.host().equals(fence.hostId()) && row.instance().equals(fence.runtimeInstanceId()) && row.generation()==fence.sessionGeneration()?row:null;
     }
-    private Map<String,Observed> readSubjects(String tenant,String client,List<Subject> authorized,boolean lock){
-        if(lock&&!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
-        var targets=new TreeMap<String,Subject>();
-        for(var t:authorized)if(targets.put(t.agent(),t)!=null)throw new IllegalArgumentException("Duplicate candidate");
-        var ids=List.copyOf(targets.keySet());var result=new HashMap<String,Observed>();
-        for(int i=0;i<ids.size();i+=128){var page=ids.subList(i,Math.min(ids.size(),i+128));var params=new ArrayList<Object>(List.of(tenant,client));params.addAll(page);
-            try{
-                var rows=db.query("""
-                    SELECT r.agent_id,r.owner_jiacn,r.binding_id,r.runtime_installation_id,r.runtime_host_id,r.runtime_instance_id,r.runtime_session_generation,r.pricing_sequence,r.pricing_config_sha,r.pricing_profiles_json
-                    FROM agent_runtime r JOIN agent_runtime_v1_installation n ON n.installation_id=r.runtime_installation_id
-                      AND BINARY n.installation_id=BINARY r.runtime_installation_id AND BINARY n.canonical_agent_id=BINARY r.agent_id
-                      AND BINARY n.tenant_id=BINARY r.tenant_id AND BINARY n.client_id=BINARY r.client_id AND BINARY n.status='ACTIVE'
-                    WHERE BINARY r.tenant_id=BINARY ? AND BINARY r.client_id=BINARY ? AND r.pricing_config_sha IS NOT NULL
-                      AND BINARY r.pricing_installation_id=BINARY r.runtime_installation_id AND r.pricing_generation=r.runtime_session_generation
-                      AND r.pricing_binding_id=r.binding_id AND r.agent_id IN (
-                    """+String.join(",",Collections.nCopies(page.size(),"?"))+") ORDER BY r.agent_id"+(lock?" FOR SHARE NOWAIT":""),
-                    (rs,k)->new Observed(rs.getString(1),rs.getString(2),rs.getLong(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getLong(7),rs.getLong(8),rs.getString(9),rs.getString(10)),params.toArray());
-                for(var row:rows){var t=targets.get(row.agent());if(t==null||!row.provider().equals(t.provider())||row.binding()!=t.binding())continue;
-                    CostProfileReport report;
-                    try{report=CostProfileReportJson.read(row.canonical());}
-                    catch(IllegalArgumentException corrupt){throw new IllegalStateException("Invalid stored pricing configuration",corrupt);}
-                    if(row.seq()!=report.sequence() || !row.sha().equals(report.sha256()))throw new IllegalStateException("Invalid stored pricing configuration");
-                    // Snapshot evidence is not a permanent installation/spec permission. Reuse its owner,
-                    // not the requesting task owner, and never ask a live Runtime whether it is online.
-                    if(!installed(tenant,client,row.provider(),row.agent(),row.installation(),row.host(),report,lock))continue;
-                    result.put(row.agent(),row);}
-            }catch(org.springframework.dao.DataAccessException failure){for(Throwable c=failure;c!=null;c=c.getCause())if(lock&&c instanceof java.sql.SQLException e&&e.getErrorCode()==3572)throw new PreparedRuntimeEpochFence.Busy();throw failure;}
+    /** Current native identity and installed capability facts, deliberately independent of whether
+     * a pricing report was sent. The authorized quote targets still come from the task authority. */
+    public record CapabilityObserved(String agent,String provider,long binding,String installation,String host,
+            String instance,long generation,Set<SkillManagementService.QuoteCapability> capabilities) {
+        public CapabilityObserved {capabilities=Set.copyOf(capabilities);}
+        @Override public String toString(){return "RegisteredCapabilityFacts[private]";}
+    }
+    public Map<String,CapabilityObserved> readCapabilities(String tenant,String client,
+            List<cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget> authorized,boolean lock) {
+        var subjects=authorized.stream().map(t->new Subject(t.agent(),t.provider(),t.binding())).toList();
+        var result=new HashMap<String,CapabilityObserved>();
+        for(var row:readSubjectRows(tenant,client,subjects,lock,false).values()) {
+            var scope=new SkillCapabilityLookup.Scope(tenant,client,row.provider(),row.agent());
+            var capabilities=lock?skills.lockQuoteCapabilities(scope,row.installation(),row.host())
+                    :skills.quoteCapabilities(scope,row.installation(),row.host());
+            result.put(row.agent(),new CapabilityObserved(row.agent(),row.provider(),row.binding(),row.installation(),
+                    row.host(),row.instance(),row.generation(),capabilities));
         }
         return Map.copyOf(result);
     }
+    private Map<String,Observed> readSubjects(String tenant,String client,List<Subject> authorized,boolean lock){
+        var result=new HashMap<String,Observed>();
+        for(var row:readSubjectRows(tenant,client,authorized,lock,true).values()) {
+            CostProfileReport report;
+            try{report=CostProfileReportJson.read(row.canonical());}
+            catch(IllegalArgumentException corrupt){throw new IllegalStateException("Invalid stored pricing configuration",corrupt);}
+            if(row.seq()!=report.sequence() || !row.sha().equals(report.sha256()))throw new IllegalStateException("Invalid stored pricing configuration");
+            if(!installed(tenant,client,row.provider(),row.agent(),row.installation(),row.host(),report,lock))continue;
+            result.put(row.agent(),row);
+        }
+        return Map.copyOf(result);
+    }
+    /** Shared bounded identity read. Capability projection does not even reference pricing columns;
+     * missing, withdrawn or malformed pricing evidence cannot erase native installation identity. */
+    private Map<String,Observed> readSubjectRows(String tenant,String client,List<Subject> authorized,boolean lock,boolean pricing){
+        if(lock&&!org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive())throw new IllegalStateException("Missing quote transaction");
+        var targets=new TreeMap<String,Subject>();
+        for(var t:authorized)if(targets.put(t.agent(),t)!=null)throw new IllegalArgumentException("Duplicate candidate");
+        var ids=List.copyOf(targets.keySet());var result=new LinkedHashMap<String,Observed>();
+        for(int i=0;i<ids.size();i+=128){var page=ids.subList(i,Math.min(ids.size(),i+128));var params=new ArrayList<Object>(List.of(tenant,client));params.addAll(page);
+            try{
+                var rows=db.query("""
+                    SELECT r.agent_id,r.owner_jiacn,r.binding_id,r.runtime_installation_id,r.runtime_host_id,r.runtime_instance_id,r.runtime_session_generation,
+                    """+(pricing?"r.pricing_sequence,r.pricing_config_sha,r.pricing_profiles_json":"0,NULL,NULL")+" "+"""
+                    FROM agent_runtime r JOIN agent_runtime_v1_installation n ON n.installation_id=r.runtime_installation_id
+                      AND BINARY n.installation_id=BINARY r.runtime_installation_id AND BINARY n.canonical_agent_id=BINARY r.agent_id
+                      AND BINARY n.tenant_id=BINARY r.tenant_id AND BINARY n.client_id=BINARY r.client_id AND BINARY n.status='ACTIVE'
+                    WHERE BINARY r.tenant_id=BINARY ? AND BINARY r.client_id=BINARY ?
+                    """+(pricing?"""
+                      AND r.pricing_config_sha IS NOT NULL
+                      AND BINARY r.pricing_installation_id=BINARY r.runtime_installation_id AND r.pricing_generation=r.runtime_session_generation
+                      AND r.pricing_binding_id=r.binding_id
+                    """:"")+" AND r.agent_id IN ("+String.join(",",Collections.nCopies(page.size(),"?"))+") ORDER BY r.agent_id"+(lock?" FOR SHARE NOWAIT":""),
+                    (rs,k)->new Observed(rs.getString(1),rs.getString(2),rs.getLong(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getLong(7),rs.getLong(8),rs.getString(9),rs.getString(10)),params.toArray());
+                for(var row:rows){var t=targets.get(row.agent());
+                    if(t!=null&&row.provider().equals(t.provider())&&row.binding()==t.binding())result.put(row.agent(),row);}
+            }catch(org.springframework.dao.DataAccessException failure){for(Throwable c=failure;c!=null;c=c.getCause())if(lock&&c instanceof java.sql.SQLException e&&e.getErrorCode()==3572)throw new PreparedRuntimeEpochFence.Busy();throw failure;}
+        }
+        // Preserve the ordered identity scan for subsequent per-candidate skill locks.
+        return Collections.unmodifiableMap(result);
+    }
+
 }
