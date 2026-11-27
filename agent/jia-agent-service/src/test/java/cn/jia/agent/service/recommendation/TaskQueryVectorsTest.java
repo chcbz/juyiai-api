@@ -87,6 +87,49 @@ class TaskQueryVectorsTest {
         var different=new cn.jia.economy.task.TaskQuoteBatches.Intent("4",List.of("agent"));when(batches.replay(any(),eq(different))).thenThrow(new cn.jia.economy.task.TaskQuoteBatches.IntentConflict());
         assertThrows(cn.jia.economy.task.TaskQuoteBatches.IntentConflict.class,()->service.begin(OWNER,"task","key",different));verifyNoInteractions(requirements,grants,agents,materials);
     }
+    @Test void confirmedScopeTravelsThroughOrdinaryIntentAndFinishRejectsWithdrawalBeforeWriter(){
+        var root=new cn.jia.agent.entity.AgentTaskMetaEntity();root.setRewardStatus("open");root.setTaskVersion(3L);
+        var roots=mock(cn.jia.agent.service.AgentTaskMutationTransaction.class);
+        doAnswer(call -> ((cn.jia.agent.service.AgentTaskMutationTransaction.LockedTaskMutation<?>)call.getArgument(4)).apply(root))
+            .when(roots).executeWithLockedTaskRootInOwnerScope(eq(OWNER.tenantId()),eq(OWNER.clientId()),eq(OWNER.ownerJiacn()),eq("task"),any());
+        var batches=mock(TaskQuoteBatches.class);
+        var requirements=mock(cn.jia.agent.service.AgentTaskRequirementSnapshotService.class);
+        var grants=mock(cn.jia.agent.service.AgentTaskExecutionGrantService.class);
+        var agents=mock(cn.jia.agent.service.AgentExternalServicePolicyService.class);
+        var materials=mock(RecommendationMaterials.class);
+        var payload=new cn.jia.agent.requirement.ConfirmedScope.Payload(cn.jia.agent.requirement.ConfirmedScope.VERSION,
+            List.of(new cn.jia.agent.requirement.ConfirmedScope.WorkItem("w1","text.summary","1",Map.of(),Map.of(),List.of(),List.of())),"private acceptance");
+        var digest="a".repeat(64);
+        var scope=new cn.jia.agent.requirement.ConfirmedScope(2,payload.requirementDigest("title",null,digest),
+            payload.digest(digest),digest,cn.jia.agent.requirement.ConfirmedScope.VERSION,100,payload.workItems(),payload.acceptanceText());
+        var current=new cn.jia.agent.service.AgentTaskRequirementSnapshotService.CurrentSnapshot("task",3,2,"title",null,scope.requirementSha256(),"CONFIRM",scope);
+        var catalogue=new cn.jia.agent.service.AgentTaskExecutionGrantService.InputCatalogue(digest,List.of());
+        when(requirements.readCurrentWithinLockedTask(any(),eq("task"),same(root))).thenReturn(current);
+        when(grants.snapshotTaskInputsWithinLockedTask(any(),eq("task"))).thenReturn(catalogue);
+        when(materials.observe(OWNER,"task")).thenReturn(List.of());
+        var targets=List.of(new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget("agent","owner",7,0));
+        when(agents.quoteTargets(any(),eq("task"),eq(List.of("agent")),anyBoolean())).thenReturn(targets);
+        var service=new TaskQuoteIntentService(roots,batches,requirements,grants,agents,materials);
+        var intent=new TaskQuoteBatches.Intent("3",List.of("agent"));
+        var fresh=(TaskQuoteIntentService.Fresh)service.begin(OWNER,"task","key",intent);
+        assertSame(scope,fresh.confirmedScope());assertSame(scope,fresh.withFacts(fresh.facts()).confirmedScope());
+        when(batches.commit(eq(fresh.key()),eq(intent),any())).thenAnswer(call->{
+            java.util.function.Function<String,List<TaskQuoteBatches.Item>> writer=call.getArgument(2);
+            return new TaskQuoteBatches.Result("task","3",100,writer.apply("batch"));
+        });
+        var writes=new AtomicInteger();
+        service.finish(OWNER,fresh,batch->{writes.incrementAndGet();return List.of();});
+        assertEquals(1,writes.get());
+        // Even a malformed same-version projection cannot silently drop confirmed scope.
+        when(requirements.readCurrentWithinLockedTask(any(),eq("task"),same(root))).thenReturn(
+            new cn.jia.agent.service.AgentTaskRequirementSnapshotService.CurrentSnapshot("task",3,2,"title",null,scope.requirementSha256(),"CONFIRM"));
+        assertThrows(TaskQuoteIntentService.Stale.class,()->service.finish(OWNER,fresh,batch->{writes.incrementAndGet();return List.of();}));
+        assertEquals(1,writes.get());
+        assertThrows(TaskQuoteIntentService.Stale.class,()->QuoteFeaturePreparation.localFacts(current,
+            new cn.jia.agent.service.AgentTaskExecutionGrantService.InputCatalogue("b".repeat(64),List.of()),List.of()));
+        var corrupt=new cn.jia.agent.service.AgentTaskRequirementSnapshotService.CurrentSnapshot("task",3,9,"title",null,scope.requirementSha256(),"CONFIRM",scope);
+        assertThrows(IllegalStateException.class,()->QuoteFeaturePreparation.localFacts(corrupt,catalogue,List.of()));
+    }
     @Test void ordinaryBudgetBatchesAllCandidatesAndReplayNeverWrites(){
         var intents=mock(TaskQuoteIntentService.class);var billing=mock(TaskBillingService.class);
         var registry=io.micrometer.observation.ObservationRegistry.create();var stages=new java.util.ArrayList<String>();

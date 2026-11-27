@@ -6,6 +6,7 @@ import cn.jia.agent.service.AgentExternalServicePolicyService;
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
 import cn.jia.agent.service.AgentTaskRequirementSnapshotService;
+import cn.jia.agent.requirement.ConfirmedScope;
 import cn.jia.economy.task.TaskBillingService;
 import cn.jia.economy.task.TaskQuoteBatches;
 import org.springframework.stereotype.Service;
@@ -19,9 +20,9 @@ final class TaskQuoteIntentService {
     static final class CandidateNotAuthorized extends RuntimeException {}
     sealed interface Start permits Replay,Fresh {}
     record Replay(TaskQuoteBatches.Result stored) implements Start {}
-    record Fresh(TaskQuoteBatches.Key key,TaskQuoteBatches.Intent intent,QuoteFeaturePreparation.LocalFacts facts,List<QuoteTarget> candidates,List<RecommendationMaterials.Observation> metadata,String experimentSha) implements Start {
-        Fresh(TaskQuoteBatches.Key key,TaskQuoteBatches.Intent intent,QuoteFeaturePreparation.LocalFacts facts,List<QuoteTarget> candidates,List<RecommendationMaterials.Observation> metadata){this(key,intent,facts,candidates,metadata,null);}
-        Fresh withFacts(QuoteFeaturePreparation.LocalFacts classified){return new Fresh(key,intent,classified,candidates,metadata,experimentSha);}
+    record Fresh(TaskQuoteBatches.Key key,TaskQuoteBatches.Intent intent,QuoteFeaturePreparation.LocalFacts facts,List<QuoteTarget> candidates,List<RecommendationMaterials.Observation> metadata,String experimentSha,ConfirmedScope confirmedScope) implements Start {
+        Fresh(TaskQuoteBatches.Key key,TaskQuoteBatches.Intent intent,QuoteFeaturePreparation.LocalFacts facts,List<QuoteTarget> candidates,List<RecommendationMaterials.Observation> metadata){this(key,intent,facts,candidates,metadata,null,null);}
+        Fresh withFacts(QuoteFeaturePreparation.LocalFacts classified){return new Fresh(key,intent,classified,candidates,metadata,experimentSha,confirmedScope);}
     }
     private record Read(TaskQuoteBatches.Result replay,AgentTaskRequirementSnapshotService.CurrentSnapshot requirement,
                         AgentTaskExecutionGrantService.InputCatalogue catalogue,String experimentSha){}
@@ -43,7 +44,7 @@ final class TaskQuoteIntentService {
         });
         if(read.replay()!=null)return new Replay(read.replay());
         var selected=authorized(scope,task,intent.agentIds(),false);var meta=materials.observe(actor,task);var facts=QuoteFeaturePreparation.localFacts(read.requirement(),read.catalogue(),meta);
-        return new Fresh(key,intent,facts,List.copyOf(selected),List.copyOf(meta),read.experimentSha());
+        return new Fresh(key,intent,facts,List.copyOf(selected),List.copyOf(meta),read.experimentSha(),read.requirement().confirmedScope());
     }
     private List<QuoteTarget> authorized(AgentTaskExecutionGrantService.Scope scope,String task,List<String> ids,boolean locking){
         var targets=agents.quoteTargets(scope,task,ids,locking);if(!ids.equals(targets.stream().map(QuoteTarget::agent).toList()))throw new CandidateNotAuthorized();return targets;
@@ -54,7 +55,7 @@ final class TaskQuoteIntentService {
             if(!"open".equals(root.getRewardStatus())||!start.intent().expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
             var current=requirements.readCurrentWithinLockedTask(scope,id,root);var catalogue=grants.snapshotTaskInputsWithinLockedTask(scope,id);
             var meta=materials.observe(actor,id);
-            if(!Objects.equals(root.getPricingExperimentSha(),start.experimentSha())||!start.metadata().equals(meta)||!start.facts().equals(QuoteFeaturePreparation.localFacts(current,catalogue,meta))
+            if(!Objects.equals(current.confirmedScope(),start.confirmedScope())||!Objects.equals(root.getPricingExperimentSha(),start.experimentSha())||!start.metadata().equals(meta)||!start.facts().equals(QuoteFeaturePreparation.localFacts(current,catalogue,meta))
                 ||!start.candidates().equals(authorized(scope,id,start.intent().agentIds(),true)))throw new Stale();
             return write.apply(batch);
         }));

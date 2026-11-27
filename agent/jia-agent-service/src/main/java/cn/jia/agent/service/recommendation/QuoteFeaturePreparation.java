@@ -28,6 +28,13 @@ final class QuoteFeaturePreparation {
         @Override public String toString(){return "LocalQuoteFacts[private]";}
     }
     static LocalFacts localFacts(CurrentSnapshot requirement,InputCatalogue catalogue,List<RecommendationMaterials.Observation> metadata){
+        var scope=requirement.confirmedScope();
+        if(scope!=null){
+            if(scope.requirementRevision()!=requirement.requirementRevision()
+                ||!scope.requirementSha256().equals(requirement.sha256()))
+                throw new IllegalStateException("Confirmed scope does not match requirement snapshot");
+            if(!scope.inputSnapshotDigest().equals(catalogue.digest()))throw new TaskQuoteIntentService.Stale();
+        }
         record Version(String file,int version){}
         var observed=new HashMap<Version,RecommendationMaterials.Observation>();
         for(var m:metadata){if(!"ACTIVE".equals(m.material().fileState()))throw new TaskQuoteIntentService.Stale();
