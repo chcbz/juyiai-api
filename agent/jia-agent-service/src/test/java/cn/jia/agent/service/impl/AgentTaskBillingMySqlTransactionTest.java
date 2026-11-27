@@ -3145,7 +3145,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         java.util.function.Consumer<Map<String,Object>> send=wire->locked(()->{repo.observe(TENANT,CLIENT,OWNER,agent,fence,wire);return null;});
         java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> read=()->repo.read(TENANT,CLIENT,List.of(target),false);
         send.accept(report.apply("2",false));assertEquals(sha,read.get().get(agent).sha());send.accept(report.apply("1",true));assertEquals(sha,read.get().get(agent).sha());
-        var dispatch=new DispatchCaptureBinding(repo,new ObjectMapper());
+        var dispatch=new DispatchCaptureBinding(repo);
         var granted=new TaskAssigneeAuthorityService.Target(TENANT,CLIENT,OWNER,agent,binding,null);
         var skill=new SkillExecutionService.Skill("image-edit","1",h,null);
         var authorized=List.of(new SkillExecutionService.AuthorizedSkill(skill,Map.of("skillInstallationId","installed","executionId","run","agentId",agent,"skillKey","image-edit","skillVersion","1","packageSha256",h)));
@@ -3153,6 +3153,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var profile=cn.jia.agent.service.usage.NativeCaptureEvidence.imageProfile("NATIVE_DISPATCH_GROUP_V1",h,h,h);
         assertNull(locked(()->dispatch.forAuthorizedExecution(granted,fence,"run",authorized,snapshot)),
                 "A measured cost profile cannot manufacture the old output-dependent image execution proof");
+        var exact=List.of(new SkillExecutionService.AuthorizedSkill(new SkillExecutionService.Skill("fixture-skill","1",h,null),
+            Map.of("skillInstallationId","installed","executionId","run","agentId",agent,"skillKey","fixture-skill","skillVersion","1","packageSha256",h)));
+        assertEquals(cn.jia.agent.service.usage.NativeCaptureEvidence.configurationProfile(measured.configuration()),
+            locked(()->dispatch.forAuthorizedExecution(granted,fence,"run",exact,Map.of("toolPolicyRef",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY))),
+            "Real registered configuration is committed without image/output requirements, not asserted as complete usage");
         assertNull(locked(()->dispatch.forAuthorizedExecution(granted,fence,"another",authorized,snapshot)));
         assertNull(locked(()->dispatch.forAuthorizedExecution(granted,new AgentManagedSessionLookup.SessionFence(fence.runtimeInstallationId(),"another",fence.runtimeInstanceId(),fence.sessionGeneration()),"run",authorized,snapshot)));
         assertTrue(repo.read(TENANT,CLIENT,List.of(new AgentExternalServicePolicyService.QuoteTarget(agent,"other",binding,0)),false).isEmpty());

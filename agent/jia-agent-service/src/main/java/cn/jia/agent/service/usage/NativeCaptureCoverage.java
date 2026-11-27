@@ -43,6 +43,14 @@ final class NativeCaptureCoverage {
         var d=dispatchGroup();if(approved==null||d==null||!ENGINE.equals(plan.path("engineVersion").asText())||!plan.hasNonNull("snapshotSha256")||groups.size()!=1
             ||g!=groups.get(new Source(plan.path("rootSourceId").asText(),"0"))||g.requests==0||!BASIS.equals(g.source.path("adapterVersion").asText()))return false;
         String channel=g.source.path("channelNamespace").asText();
+        var configuration=costConfiguration();
+        if(configuration!=null && approved.equals(NativeCaptureEvidence.configurationProfile(configuration))){
+            // A generic commitment is not generic resource coverage. This adapter proves only the single
+            // Responses resource; child-provider routes need their independently verified ledger identity.
+            return LOCAL_POLICY.equals(d.capturePolicyVersion()) && LOCAL_POLICY.equals(configuration.capturePolicyVersion())
+                && configuration.routeRefs().size()==1 && !plan.has("imageRoute")
+                && close!=null && !close.has("imageInvocation") && matchesObservedRootConfiguration();
+        }
         if(LOCAL_POLICY.equals(d.capturePolicyVersion()))return approved.equals(profileSha(d.executionConfigSha256(),d.routeSha256(),d.toolConfigSha256(),channel));
         var image=plan.path("imageRoute");if(!"NATIVE_PINNED_IMAGE_V1".equals(d.capturePolicyVersion())||!image.isObject()||close==null)return false;
         String child=image.path("childRouteSha256").asText();return child.equals(close.path("imageInvocation").path("childRouteSha256").asText())

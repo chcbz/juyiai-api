@@ -3,32 +3,45 @@ package cn.jia.agent.service.impl;
 import cn.jia.agent.service.*;
 import cn.jia.agent.security.RegisteredPricingProfiles;
 import cn.jia.agent.security.PreparedRuntimeEpochFence;
+import cn.jia.agent.security.CostProfileReportJson;
+import cn.jia.agent.skill.quote.CostConfigurationObservation;
 import cn.jia.agent.service.usage.NativeCaptureEvidence;
-import tools.jackson.databind.ObjectMapper;
 import java.util.*;
 import org.springframework.stereotype.Service;
 
-/** No authority to execute. Called only after verifying the grant, selected package and exact live installation. */
+/** No authority to execute. Called only after verifying the grant, selected packages and exact live installation.
+ * Commits expected configuration; the independently produced PLAN and complete usage must still prove coverage. */
 @Service
 public class DispatchCaptureBinding {
-    private final RegisteredPricingProfiles profiles;private final ObjectMapper json;
-    public DispatchCaptureBinding(RegisteredPricingProfiles profiles,ObjectMapper json){this.profiles=profiles;this.json=json;}
+    private final RegisteredPricingProfiles profiles;
+    public DispatchCaptureBinding(RegisteredPricingProfiles profiles){this.profiles=profiles;}
+    private record Package(String key,String version,String sha,String installation) {}
     public String forAuthorizedExecution(TaskAssigneeAuthorityService.Target target,AgentManagedSessionLookup.SessionFence fence,String execution,
             List<SkillExecutionService.AuthorizedSkill> authorized,Map<String,Object> snapshot){
-        if(fence==null || authorized.size()!=1 || !SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")) || snapshot.get("privateTools")!=null ||
-            !(snapshot.get("outputs") instanceof Map<?,?> outputs) || outputs.get("dataSchema")!=null || !(outputs.get("mimeTypes") instanceof List<?> types) || !types.contains("image/png") ||
-            !(outputs.get("artifactsRequired") instanceof Boolean required) || !(outputs.get("multiple") instanceof Boolean multiple))return null;
-        var a=authorized.getFirst();var binding=a.executionBinding();var skill=a.skill();
-        if(skill.manifestSha256()!=null || !execution.equals(binding.get("executionId")) || !target.agentId().equals(binding.get("agentId")) || !skill.key().equals(binding.get("skillKey")) || !skill.version().equals(binding.get("skillVersion")) || !skill.packageSha256().equals(binding.get("packageSha256")) || binding.get("manifestSha256")!=null)return null;
+        if(fence==null || authorized.isEmpty() || !SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY.equals(snapshot.get("toolPolicyRef")))return null;
+        var selected=new HashSet<Package>();
+        for(var a:authorized){
+            var binding=a.executionBinding();var skill=a.skill();
+            if(skill.manifestSha256()!=null || !execution.equals(binding.get("executionId")) || !target.agentId().equals(binding.get("agentId"))
+                || !skill.key().equals(binding.get("skillKey")) || !skill.version().equals(binding.get("skillVersion"))
+                || !skill.packageSha256().equals(binding.get("packageSha256")) || binding.get("manifestSha256")!=null
+                || !(binding.get("skillInstallationId") instanceof String installation) || installation.isBlank())return null;
+            if(!selected.add(new Package(skill.key(),skill.version(),skill.packageSha256(),installation)))return null;
+        }
         RegisteredPricingProfiles.Observed observed;
         try{observed=profiles.atDispatch(target,fence);}catch(PreparedRuntimeEpochFence.Busy busy){return null;}
         if(observed==null)return null;
-        for(var p:json.readTree(observed.canonical())){
-            if(!skill.key().equals(p.path("skillKey").asText()) || !skill.packageSha256().equals(p.path("packageSha256").asText()) ||
-                !p.path("skillInstallationId").asText().equals(binding.get("skillInstallationId")))continue;
-            int i=(required?2:0)+(multiple?1:0);
-            return NativeCaptureEvidence.imageProfile("NATIVE_DISPATCH_GROUP_V1",p.path("execution"+i).asText(),p.path("referenceRouteSha256").asText(),p.path("tools"+i).asText());
+        CostConfigurationObservation expected=null;
+        for(var profile:CostProfileReportJson.read(observed.canonical()).profiles()){
+            var packages=new HashSet<Package>();
+            for(var slot:profile.scopePattern())packages.add(new Package(slot.skillKey(),slot.skillVersion(),slot.packageSha(),slot.installId()));
+            // Never manufacture a combined execution configuration from unrelated single-package profiles.
+            if(!selected.equals(packages))continue;
+            var candidate=profile.configuration();
+            // Dispatch has an actual package set, not the quote planner's scope/priority. Ambiguity is not permission to guess.
+            if(expected!=null && !expected.equals(candidate))return null;
+            expected=candidate;
         }
-        return null;
+        return expected==null?null:NativeCaptureEvidence.configurationProfile(expected);
     }
 }

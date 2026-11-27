@@ -28,6 +28,10 @@ public record NativeCaptureEvidence(String captureId,String recordId,String rece
         if(!"NATIVE_DISPATCH_GROUP_V1".equals(version)||!List.of(config,route,tools).stream().allMatch(s->s.matches(SHA)))throw new IllegalArgumentException("Invalid admitted image configuration");
         return digest(List.of("ADMITTED_INITIAL_IMAGE_V1",version,"NATIVE_PINNED_IMAGE_V1",config,route,tools));
     }
+    /** Expected semantics from the authorized dispatch, distinct from historical image admission hashes. */
+    public static String configurationProfile(cn.jia.agent.skill.quote.CostConfigurationObservation configuration){
+        return cn.jia.core.util.CanonicalValueEncoding.digest(List.of("ADMITTED_NATIVE_COST_CONFIG_V1",configuration.canonical()));
+    }
     public static String captureIdentity(String execution,String run){return digest(List.of("CAPTURE_V2",execution,run));}
     public static NativeCaptureEvidence parse(String execution,String run,String idempotencyKey,Map<String,Object> d){
         check(d!=null&&d.keySet().equals(COMMON));if(safeCount(d.get("schemaVersion"))!=2)throw new IllegalArgumentException("USAGE_CAPTURE_VERSION_UNSUPPORTED");

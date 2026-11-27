@@ -572,6 +572,7 @@ def mmdU1BootstrapOutboxSourceSet = sourceSets.create('mmdU1BootstrapOutbox') {
         include 'cn/jia/agent/service/impl/AgentTaskBountyBootstrapOutboxServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskBountyBootstrapWakeupPublisherTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskRequirementSnapshotServiceImplTest.java'
+        include 'cn/jia/agent/service/impl/DispatchCaptureBindingTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskRequirementEditServiceImplTest.java'
         include 'cn/jia/agent/service/impl/AgentTaskCurrentRequirementTransactionTest.java'
         include 'cn/jia/agent/service/impl/ConfirmedScopeTransactionTest.java'
