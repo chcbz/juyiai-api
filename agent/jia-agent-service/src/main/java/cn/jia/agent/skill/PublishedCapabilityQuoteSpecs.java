@@ -78,6 +78,11 @@ public final class PublishedCapabilityQuoteSpecs {
     public Map<SpecKey,CapabilityQuoteSpec> readActive(String tenant,String client,List<SpecKey> keys) {
         return read(tenant,client,keys,false);
     }
+    /** Current quote semantics stay locked until the caller's original signing transaction ends. */
+    public Map<SpecKey,CapabilityQuoteSpec> lockActive(String tenant,String client,List<SpecKey> keys) {
+        require(TransactionSynchronizationManager.isActualTransactionActive(),503,"CAPABILITY_QUOTE_SPEC_TRANSACTION_REQUIRED");
+        return read(tenant,client,keys,true);
+    }
     private Map<SpecKey,CapabilityQuoteSpec> read(String tenant,String client,List<SpecKey> requested,boolean locking) {
         require(tenant!=null && !tenant.isBlank() && client!=null && !client.isBlank(),400,"BAD_REQUEST");
         var keys=requested.stream().distinct().sorted((a,b)->{int c=CanonicalValueEncoding.compareUtf8(a.capabilityId(),b.capabilityId());

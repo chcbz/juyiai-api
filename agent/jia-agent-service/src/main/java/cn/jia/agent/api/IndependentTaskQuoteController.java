@@ -52,5 +52,7 @@ public final class IndependentTaskQuoteController {
     @ExceptionHandler(PersonalWorkspaceException.class) public ResponseEntity<JsonResult<Void>> workspace(PersonalWorkspaceException e){return switch(e.getReason()){
         case NOT_FOUND -> missing();case VERSION_CONFLICT,METADATA_CHANGED -> changed();default -> error(503,"QUOTE_UNAVAILABLE");};}
     @ExceptionHandler(cn.jia.agent.entity.AssigneeRecommendation.Failure.class) public ResponseEntity<JsonResult<Void>> material(cn.jia.agent.entity.AssigneeRecommendation.Failure e){return e.status()==409?changed():error(503,"QUOTE_UNAVAILABLE");}
+    @ExceptionHandler(cn.jia.agent.skill.SkillMarketplaceException.class)
+    public ResponseEntity<JsonResult<Void>> quoteSpecification(cn.jia.agent.skill.SkillMarketplaceException e){return e.status()==409?changed():error(503,"QUOTE_UNAVAILABLE");}
     @ExceptionHandler(RuntimeException.class) public ResponseEntity<JsonResult<Void>> unexpected(RuntimeException e){org.slf4j.LoggerFactory.getLogger(getClass()).warn("QUOTE_UNAVAILABLE requestId={} category={}",org.slf4j.MDC.get("request_id"),e.getClass().getSimpleName());return error(503,"QUOTE_UNAVAILABLE");}
 }

@@ -55,7 +55,7 @@ final class TaskQuoteIntentService {
             if(!"open".equals(root.getRewardStatus())||!start.intent().expectedTaskVersion().equals(String.valueOf(root.getTaskVersion())))throw new Stale();
             var current=requirements.readCurrentWithinLockedTask(scope,id,root);var catalogue=grants.snapshotTaskInputsWithinLockedTask(scope,id);
             var meta=materials.observe(actor,id);
-            if(!Objects.equals(current.confirmedScope(),start.confirmedScope())||!Objects.equals(root.getPricingExperimentSha(),start.experimentSha())||!start.metadata().equals(meta)||!start.facts().equals(QuoteFeaturePreparation.localFacts(current,catalogue,meta))
+            if(!Objects.equals(current.confirmedScope(),start.confirmedScope())||(start.confirmedScope()==null&&!Objects.equals(root.getPricingExperimentSha(),start.experimentSha()))||!start.metadata().equals(meta)||!start.facts().equals(QuoteFeaturePreparation.localFacts(current,catalogue,meta))
                 ||!start.candidates().equals(authorized(scope,id,start.intent().agentIds(),true)))throw new Stale();
             return write.apply(batch);
         }));

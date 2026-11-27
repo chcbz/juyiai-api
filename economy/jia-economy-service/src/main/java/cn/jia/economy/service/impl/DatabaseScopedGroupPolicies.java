@@ -70,6 +70,14 @@ public class DatabaseScopedGroupPolicies implements ScopedGroupPolicies {
             return new Selected(row.approvalSha(),policy,group);
         }catch(RuntimeException invalid){throw new Corrupt();}
     }
+    private List<ScopedGroupPolicyMapper.Row> rows(EconomyScope scope,List<String> keys,boolean lock){
+        try{return mapper.read(scope.tenantId(),scope.clientId(),keys,lock);}
+        catch(org.springframework.dao.DataAccessException failure){
+            for(Throwable c=failure;c!=null;c=c.getCause())
+                if(lock && c instanceof java.sql.SQLException sql && sql.getErrorCode()==3572)throw new Busy();
+            throw failure;
+        }
+    }
     @Override public Map<GroupMeanPricing.ScopeInput,Selected> read(EconomyScope scope,List<GroupMeanPricing.ScopeInput> inputs,boolean lock){
         domain(scope);if(lock)transaction();
         var wanted=new TreeMap<String,GroupMeanPricing.ScopeInput>();
@@ -77,7 +85,7 @@ public class DatabaseScopedGroupPolicies implements ScopedGroupPolicies {
         var keys=List.copyOf(wanted.keySet());var result=new LinkedHashMap<GroupMeanPricing.ScopeInput,Selected>();var seen=new HashSet<String>();
         for(int start=0;start<keys.size();start+=128){
             var page=keys.subList(start,Math.min(start+128,keys.size()));
-            for(var row:mapper.read(scope.tenantId(),scope.clientId(),page,lock)){
+            for(var row:rows(scope,page,lock)){
                 if(!scope.tenantId().equals(row.tenantId()) || !scope.clientId().equals(row.clientId())
                         || !page.contains(row.inputSha()) || !seen.add(row.inputSha()) || row.withdrawn()==null)throw new Corrupt();
                 if(row.withdrawn())continue;

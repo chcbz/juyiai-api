@@ -1114,6 +1114,7 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/agent/service/recommendation/CandidateRankFusionTest.java'
         include 'cn/jia/agent/service/recommendation/CapabilitySearchTest.java'
         include 'cn/jia/agent/service/recommendation/TaskQueryVectorsTest.java'
+        include 'cn/jia/agent/service/recommendation/ScopedGroupQuoteInputsTest.java'
         include 'cn/jia/agent/skill/SkillManagementRecommendationTest.java'
         include 'cn/jia/agent/skill/SkillManagementRetainedAuthorizationTest.java'
         include 'cn/jia/agent/service/recommendation/AssigneeRecommendationServiceTest.java'

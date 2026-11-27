@@ -172,6 +172,22 @@ class DatabaseScopedGroupPoliciesMySqlTest {
             holder.get(10,TimeUnit.SECONDS);assertNotNull(writer);assertEquals(b,writer.get(10,TimeUnit.SECONDS).approvalSha());
         }
     }
+    @Test void busyApprovalReadProducesBoundedConflictInsteadOfPriceFallback()throws Exception {
+        var r=receipt("short",3);var a=approved(r);select(r,a,null);
+        var entered=new CountDownLatch(1);var release=new CountDownLatch(1);
+        try(var pool=Executors.newSingleThreadExecutor()){
+            var holder=pool.submit(()->tx.execute(s->{
+                jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=FALSE WHERE approval_sha=?",a);entered.countDown();
+                try{assertTrue(release.await(15,TimeUnit.SECONDS));}catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}return null;
+            }));
+            try{
+                assertTrue(entered.await(10,TimeUnit.SECONDS));
+                assertThrows(ScopedGroupPolicies.Busy.class,()->tx.execute(s->service.read(domain,List.of(input(r)),true)));
+            }finally{release.countDown();}
+            holder.get(10,TimeUnit.SECONDS);
+        }
+        assertEquals(a,read(r).approvalSha());
+    }
     private void awaitLock(Future<?> writer,String table)throws Exception {
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);
         while(System.nanoTime()<deadline){

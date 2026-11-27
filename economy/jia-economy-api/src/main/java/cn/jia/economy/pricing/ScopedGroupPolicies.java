@@ -15,5 +15,6 @@ public interface ScopedGroupPolicies {
      * never issues approval. null expectedApprovalSha means no existing selector. */
     Selected select(EconomyScope scope,GroupMeanPricing.ScopeInput input,String approvalSha,String expectedApprovalSha);
     final class Corrupt extends IllegalStateException {public Corrupt(){super("SCOPED_GROUP_POLICY_CORRUPT");}}
+    final class Busy extends RuntimeException {public Busy(){super("SCOPED_GROUP_POLICY_BUSY");}}
     final class Conflict extends RuntimeException {public Conflict(){super("SCOPED_GROUP_POLICY_CONFLICT");}}
 }

@@ -140,7 +140,7 @@ class TaskQueryVectorsTest {
                 var tags=new java.util.TreeMap<String,String>();c.getLowCardinalityKeyValues().forEach(k->tags.put(k.getKey(),k.getValue()));assertEquals(java.util.Set.of("stage","outcome"),tags.keySet());stages.add(tags.get("stage")+":"+tags.get("outcome"));
             }
         });
-        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing),org.mockito.Mockito.mock(RegisteredGroupQuoteInputs.class),java.util.Optional.of(registry));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
+        var app=new IndependentTaskQuotes(intents,new CandidateGroupOffers(org.mockito.Mockito.mock(cn.jia.economy.task.GroupBudgetQuotes.class),billing),org.mockito.Mockito.mock(RegisteredGroupQuoteInputs.class),org.mockito.Mockito.mock(ScopedGroupQuoteInputs.class),java.util.Optional.of(registry));var intent=new TaskQuoteBatches.Intent("3",List.of("b","a"));
         var task=new TaskBillingService.Task(OWNER.scope(),OWNER.ownerJiacn(),"task");var key=new TaskQuoteBatches.Key(task,OWNER.actorId(),"key");
         var facts=new QuoteFeaturePreparation.LocalFacts(1,"a".repeat(64),"b".repeat(64),List.of(),null,null);
         var targets=intent.agentIds().stream().map(id->new cn.jia.agent.service.AgentExternalServicePolicyService.QuoteTarget(id,"owner",7,0)).toList();
@@ -206,7 +206,7 @@ class TaskQueryVectorsTest {
         var pin=new cn.jia.economy.task.GroupBudgetQuotes.Pin(key,3,4,5,"b".repeat(64),group.policySha(),2,new java.math.BigDecimal("0.14"));
         var mean=new cn.jia.economy.task.GroupBudgetQuotes.Mean(pin,7);
         when(groups.prepare(OWNER.scope(),java.util.Set.of(key))).thenReturn(Map.of(key,mean));
-        var price=new CandidateGroupOffers.ScopedGroup(group,f.profile());
+        var price=new CandidateGroupOffers.ScopedGroup(group,f.profile(),2);
         var prepared=service.prepare(f.fresh(),Map.of("a",price,"b",new CandidateGroupOffers.Unavailable(),
             "c",price,"d",new CandidateGroupOffers.Missing(TaskQuoteBatches.Reason.COST_INPUT_MISSING)));
         when(billing.storeOffersBatch(eq(f.fresh().key().task()),eq(OWNER.actorId()),any())).thenAnswer(call->{
@@ -238,9 +238,9 @@ class TaskQueryVectorsTest {
         var rows=service.issue(service.prepare(f.fresh(),bases),"batch");assertEquals(4,rows.size());
         assertTrue(rows.stream().allMatch(r->r.state()==TaskQuoteBatches.State.UNAVAILABLE));verifyNoInteractions(groups,billing);
         var partial=new GroupMeanPricing.ScopeGroup("scope-v1",f.group().policySha(),List.of(f.group().scopeShape().getFirst()),List.of("small"),Map.of("context","actual-context"));
-        bases.put("a",new CandidateGroupOffers.ScopedGroup(partial,f.profile()));
+        bases.put("a",new CandidateGroupOffers.ScopedGroup(partial,f.profile(),2));
         assertThrows(IllegalArgumentException.class,()->service.prepare(f.fresh(),bases));verifyNoInteractions(groups,billing);
-        bases.put("a",new CandidateGroupOffers.ScopedGroup(f.group(),f.profile()));
+        bases.put("a",new CandidateGroupOffers.ScopedGroup(f.group(),f.profile(),2));
         var missingScope=new TaskQuoteIntentService.Fresh(f.fresh().key(),f.fresh().intent(),f.fresh().facts(),f.fresh().candidates(),List.of());
         assertThrows(NullPointerException.class,()->service.prepare(missingScope,bases));verifyNoInteractions(groups,billing);
     }

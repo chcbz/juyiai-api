@@ -16,8 +16,8 @@ final class CandidateGroupOffers {
     }
     /** Capability denial is not missing cost data and never produces a price row. */
     record Unavailable() implements Basis {}
-    record ScopedGroup(GroupMeanPricing.ScopeGroup group,ScopedTaskQuoteSnapshot.PricingProfilePin profile) implements Basis {
-        ScopedGroup { Objects.requireNonNull(group);Objects.requireNonNull(profile); }
+    record ScopedGroup(GroupMeanPricing.ScopeGroup group,ScopedTaskQuoteSnapshot.PricingProfilePin profile,int minSupport) implements Basis {
+        ScopedGroup { Objects.requireNonNull(group);Objects.requireNonNull(profile);if(minSupport<1)throw new IllegalArgumentException("Approved support required"); }
     }
     private static GroupBudgetQuotes.Key key(Basis basis){
         if(basis instanceof ComparableGroup c)return new GroupBudgetQuotes.Key(GroupMeanPricing.key(c.group()));
@@ -85,6 +85,8 @@ final class CandidateGroupOffers {
             if(basis instanceof Missing m){offers.add(new Offer(agent,basis,new GroupBudgetQuotes.Fixed(m.reason())));continue;}
             var key=keys.get(agent);var price=Objects.requireNonNull(prices.get(key));
             if(price instanceof GroupBudgetQuotes.Mean m && (!key.equals(m.pin().key())||!policy(basis).equals(m.pin().policySha())))throw new IllegalStateException("Published group does not match cost policy");
+            if(basis instanceof ScopedGroup scoped && price instanceof GroupBudgetQuotes.Mean mean && mean.pin().n()<scoped.minSupport())
+                price=new GroupBudgetQuotes.Fixed(TaskQuoteBatches.Reason.NO_BASELINE);
             offers.add(new Offer(agent,basis,price));
         }
         return new Prepared(fresh,offers);
