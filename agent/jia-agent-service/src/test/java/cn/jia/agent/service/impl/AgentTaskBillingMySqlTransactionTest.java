@@ -3217,7 +3217,12 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     // is a lower bound on lock ownership; the post segment also includes commit and connection cleanup.
     // Test-only: join one actual HTTP reply to the lock spans of its own signing transaction.
     // Receipt IDs never leave memory. Sibling call durations do not overlap; residual is explicitly unassigned.
-    private boolean correlated(){return "contention".equals(System.getProperty("cyf.measuredBatchQuoteLoad"));}
+    private boolean linkedSample;
+    private boolean correlated(){return linkedSample;}
+    @Test @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named="cyf.measuredBatchQuoteLoad",matches="true")
+    void sameTaskSigningContentionBreakdown(@org.junit.jupiter.api.io.TempDir Path tmp) throws Exception {
+        linkedSample=true;try{signedExperimentPricesRegisteredAgentBeforeSelectionAndWithdrawalPreservesReplay(tmp);}finally{linkedSample=false;}
+    }
     private final ThreadLocal<Map<String,Long>> withinRoot=new ThreadLocal<>();
     private record Cost(RootTiming root,Map<String,Long> parts){}
     private final Map<String,Cost> costs=new java.util.concurrent.ConcurrentHashMap<>();
