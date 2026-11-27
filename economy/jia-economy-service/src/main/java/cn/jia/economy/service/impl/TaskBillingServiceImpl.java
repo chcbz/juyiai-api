@@ -285,7 +285,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
         requireTransition(mapper.markHeld(row));
         // Namespace comes from the validated immutable DB quote, not an unchecked client ID.
         // Old snapshots do not contain initial features. Do not invent them at assignment time.
-        String schema=json.readTree(quote.getSnapshotJson()).path("schema").asText();
+        String schema=json.readTree(quote.getSnapshotJson()).path("schema").asText(null);
         boolean groupMean=GROUP_SCHEMA.equals(schema), scoped=ScopedTaskQuoteSnapshot.SCHEMA.equals(schema);
         if (groupMean || scoped || MEASURED_SCHEMA.equals(schema)) {
             String sampleId = HexFormat.of().formatHex(digest(encode(List.of("TASK_LIFECYCLE_V1",task.scope().tenantId(),
@@ -413,7 +413,7 @@ public class TaskBillingServiceImpl implements TaskBillingService {
     private void requireSnapshot(EconomyTaskQuoteEntity row) {
         if (row.getSnapshotJson() == null) throw new IllegalStateException("Unresolvable frozen quote preparation");
         var root=json.readTree(row.getSnapshotJson());
-        if(ScopedTaskQuoteSnapshot.SCHEMA.equals(root.path("schema").asText())){
+        if(ScopedTaskQuoteSnapshot.SCHEMA.equals(root.path("schema").asText(null))){
             final ScopedTaskQuoteSnapshot scoped;
             try {scoped=json.readValue(row.getSnapshotJson(),ScopedTaskQuoteSnapshot.class);}
             catch(RuntimeException corrupt){throw new IllegalStateException("Invalid scoped quote snapshot",corrupt);}
