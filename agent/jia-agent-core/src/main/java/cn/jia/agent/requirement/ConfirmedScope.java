@@ -1,18 +1,10 @@
 package cn.jia.agent.requirement;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import cn.jia.core.util.CanonicalValueEncoding;
+import static cn.jia.core.util.CanonicalValueEncoding.*;
 
 /** Immutable business scope; construction is not confirmation or spending authority.
  * The Agent confirmation transaction supplies the revision, fixed catalogue and timestamp.
@@ -148,7 +140,7 @@ public record ConfirmedScope(long requirementRevision, String requirementSha256,
 
     private static List<String> canonicalSet(List<String> input, boolean identifiers) {
         if (input == null) throw invalid();
-        TreeSet<String> values = new TreeSet<>(ConfirmedScope::compareUtf8);
+        TreeSet<String> values = new TreeSet<>(CanonicalValueEncoding::compareUtf8);
         for (String value : input) {
             if (identifiers) identifier(value, 128);
             else {
@@ -167,59 +159,6 @@ public record ConfirmedScope(long requirementRevision, String requirementSha256,
 
     private static void requireSha(String value) {
         if (value == null || !value.matches("[0-9a-f]{64}")) throw invalid();
-    }
-
-    private static byte[] utf8(String text) {
-        try {
-            ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder()
-                    .onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT)
-                    .encode(CharBuffer.wrap(text));
-            byte[] bytes = new byte[encoded.remaining()];
-            encoded.get(bytes);
-            return bytes;
-        } catch (CharacterCodingException failure) { throw invalid(); }
-    }
-
-    private static int compareUtf8(String left, String right) {
-        return Arrays.compareUnsigned(utf8(left), utf8(right));
-    }
-
-    /** E is scoped binary encoding, intentionally NOT SkillCanonicalJson's UTF16/IEEE754 contract. */
-    private static byte[] encode(Object value) {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (DataOutputStream output = new DataOutputStream(bytes)) {
-            write(output, value);
-        } catch (IOException impossible) { throw new IllegalStateException(impossible); }
-        return bytes.toByteArray();
-    }
-
-    private static void write(DataOutputStream output, Object value) throws IOException {
-        if (value == null) {
-            output.writeByte(0x6e); // Only the original optional requirement description may be null.
-        } else if (value instanceof String text) {
-            byte[] bytes = utf8(text);
-            output.writeByte(0x73);
-            output.writeInt(bytes.length);
-            output.write(bytes);
-        } else if (value instanceof List<?> list) {
-            output.writeByte(0x61);
-            output.writeInt(list.size());
-            for (Object child : list) write(output, child);
-        } else if (value instanceof Map<?, ?> map) {
-            List<String> keys = map.keySet().stream().map(key -> (String) key)
-                    .sorted(ConfirmedScope::compareUtf8).toList();
-            output.writeByte(0x6f);
-            output.writeInt(keys.size());
-            for (String key : keys) {
-                write(output, key);
-                write(output, map.get(key));
-            }
-        } else throw invalid(); // Business scope forbids null and untyped numeric/boolean values.
-    }
-
-    private static String sha256(byte[] bytes) {
-        try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
-        catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
 
     private static IllegalArgumentException invalid() {
