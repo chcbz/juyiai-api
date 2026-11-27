@@ -1,6 +1,10 @@
 package cn.jia.agent.security;
 
 import cn.jia.agent.service.NativePricingProfiles;
+import cn.jia.agent.service.SkillCapabilityLookup;
+import cn.jia.agent.skill.SkillManagementService;
+import cn.jia.agent.skill.quote.CostProfileReport;
+import cn.jia.agent.skill.quote.MeasuredCostProfile.Slot;
 import cn.jia.agent.service.AgentManagedSessionLookup.SessionFence;
 import java.util.*;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -11,7 +15,15 @@ import org.springframework.transaction.annotation.*;
 @Service
 public class RegisteredPricingProfiles implements NativePricingProfiles {
     private final JdbcTemplate db;
-    public RegisteredPricingProfiles(JdbcTemplate db){this.db=db;}
+    private final SkillManagementService skills;
+    public RegisteredPricingProfiles(JdbcTemplate db,SkillManagementService skills){this.db=db;this.skills=skills;}
+    private boolean installed(String tenant,String client,String provider,String agent,String installation,String host,CostProfileReport report){
+        var requested=new HashSet<Slot>();
+        for(var profile:report.profiles())requested.addAll(profile.scopePattern());
+        // An empty report withdraws cost evidence without querying the package/runtime catalog.
+        return requested.isEmpty() || skills.costProfileBindings(new SkillCapabilityLookup.Scope(tenant,client,provider,agent),
+                installation,host,requested).containsAll(requested);
+    }
     private record Row(long id,boolean same,long sequence,String sha){}
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public void observe(String tenant,String client,String provider,String agent,SessionFence fence,Object wire){
@@ -23,13 +35,22 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
               AND BINARY runtime_instance_id=BINARY ? AND runtime_session_generation=? FOR UPDATE
             """,(rs,i)->new Row(rs.getLong(1),rs.getBoolean(2),rs.getLong(3),rs.getString(4)),agent,agent,tenant,client,provider,fence.runtimeInstallationId(),fence.hostId(),fence.runtimeInstanceId(),fence.sessionGeneration());
         if(rows.size()!=1)throw new IllegalStateException("Registration fence changed");var row=rows.getFirst();
-        Report report=null;if(wire!=null)try{report=NativePricingProfiles.parse(wire);}catch(IllegalArgumentException ignored){ /* withdraw: never persist unknown fields */ }
-        // Unsequenced/malformed input may withdraw, never advance an epoch or revive an old revision.
-        long seq=report!=null?report.sequence():row.same()?row.sequence():0;String sha=report==null?null:report.sha();String json=report==null?null:report.canonical();
-        if(row.same()){
-            if(seq<row.sequence() || seq==row.sequence() && Objects.equals(row.sha(),sha))return;
-            if(seq==row.sequence()){if(row.sha()==null)return;sha=null;json=null;} // conflict sticky until next authoritative revision
+        CostProfileReport report=null;
+        if(wire!=null)try{report=CostProfileReportJson.readWire(wire);}catch(IllegalArgumentException ignored){ /* withdraw malformed/unknown semantics */ }
+        long seq=report!=null?report.sequence():row.same()?row.sequence():0;
+        String sha=report==null?null:report.sha256();
+        // A stale report cannot withdraw a newer revision or trigger authority reads.
+        if(row.same() && seq<row.sequence())return;
+        if(row.same() && seq==row.sequence() && !Objects.equals(row.sha(),sha)) {
+            // Contradiction (including malformed input) is sticky until a higher sequence.
+            if(row.sha()==null)return;
+            report=null;sha=null;
         }
+        if(report!=null && !installed(tenant,client,provider,agent,fence.runtimeInstallationId(),fence.hostId(),report)) {
+            report=null;sha=null;
+        }
+        if(row.same() && seq==row.sequence() && Objects.equals(row.sha(),sha))return;
+        String json=report==null?null:CostProfileReportJson.write(report);
         db.update("""
             UPDATE agent_runtime SET pricing_installation_id=runtime_installation_id,pricing_binding_id=binding_id,
               pricing_generation=runtime_session_generation,pricing_sequence=?,pricing_config_sha=?,pricing_profiles_json=?,pricing_observed_at=UTC_TIMESTAMP(3) WHERE id=?
@@ -65,7 +86,13 @@ public class RegisteredPricingProfiles implements NativePricingProfiles {
                     """+String.join(",",Collections.nCopies(page.size(),"?"))+") ORDER BY r.agent_id"+(lock?" FOR SHARE NOWAIT":""),
                     (rs,k)->new Observed(rs.getString(1),rs.getString(2),rs.getLong(3),rs.getString(4),rs.getString(5),rs.getString(6),rs.getLong(7),rs.getLong(8),rs.getString(9),rs.getString(10)),params.toArray());
                 for(var row:rows){var t=targets.get(row.agent());if(t==null||!row.provider().equals(t.provider())||row.binding()!=t.binding())continue;
-                    if(row.canonical()==null || !row.sha().equals(NativePricingProfiles.digest(row.canonical())))throw new IllegalStateException("Invalid stored pricing configuration");
+                    CostProfileReport report;
+                    try{report=CostProfileReportJson.read(row.canonical());}
+                    catch(IllegalArgumentException corrupt){throw new IllegalStateException("Invalid stored pricing configuration",corrupt);}
+                    if(row.seq()!=report.sequence() || !row.sha().equals(report.sha256()))throw new IllegalStateException("Invalid stored pricing configuration");
+                    // Snapshot evidence is not a permanent installation/spec permission. Reuse its owner,
+                    // not the requesting task owner, and never ask a live Runtime whether it is online.
+                    if(!installed(tenant,client,row.provider(),row.agent(),row.installation(),row.host(),report))continue;
                     result.put(row.agent(),row);}
             }catch(org.springframework.dao.DataAccessException failure){for(Throwable c=failure;c!=null;c=c.getCause())if(lock&&c instanceof java.sql.SQLException e&&e.getErrorCode()==3572)throw new PreparedRuntimeEpochFence.Busy();throw failure;}
         }

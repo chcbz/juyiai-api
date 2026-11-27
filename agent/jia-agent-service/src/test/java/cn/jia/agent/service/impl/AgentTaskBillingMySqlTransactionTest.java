@@ -3100,15 +3100,24 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             java.util.concurrent.locks.LockSupport.parkNanos(5_000_000);
         }while(!writer.isDone()&&System.nanoTime()<until);fail("expected a real preparation row lock wait");
     }
+    // This historical quote fixture isolates the registry/epoch. Real installed bindings are
+    // exercised by SkillManagementTransactionTest through the authenticated registration path.
+    private cn.jia.agent.security.RegisteredPricingProfiles registrationFixture(){
+        var bindings=mock(cn.jia.agent.skill.SkillManagementService.class);
+        when(bindings.costProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
+        return new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,bindings);
+    }
     private void verifyRegisteredPricingProfile(String agent,long binding,AgentManagedSessionLookup.SessionFence fence){
         new ResourceDatabasePopulator(new FileSystemResource(DDL.resolve("agent-runtime-pricing-profiles-v1.sql"))).execute(jdbc.getDataSource());
-        var repo=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc);var target=new AgentExternalServicePolicyService.QuoteTarget(agent,OWNER,binding,0);
+        var installationBindings=mock(cn.jia.agent.skill.SkillManagementService.class);
+        when(installationBindings.costProfileBindings(any(),anyString(),anyString(),any())).thenAnswer(i->Set.copyOf((Collection<cn.jia.agent.skill.quote.MeasuredCostProfile.Slot>)i.getArgument(3)));
+        var repo=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,installationBindings);var target=new AgentExternalServicePolicyService.QuoteTarget(agent,OWNER,binding,0);
         var h="a".repeat(64);
-        var row=new java.util.LinkedHashMap<String,String>();var keys=cn.jia.agent.service.NativePricingProfiles.FIELDS;
-        var values=List.of("edit","native-image-context-1",h,h,"NATIVE_PINNED_IMAGE_V1","parent",h,"c","image","base","openai-images-modalities-v1","RESPONSES_TEXT_TOKENS_V1",h,"image-edit","installed",h,h,h,h,h,h,h,h,h);
-        for(int i=0;i<keys.size();i++)row.put(keys.get(i),values.get(i));
-        var arr=List.of(row);String bytes=new ObjectMapper().writeValueAsString(arr);String sha=cn.jia.agent.service.NativePricingProfiles.digest(bytes);
-        java.util.function.BiFunction<String,Boolean,Map<String,Object>> report=(seq,empty)->Map.of("version","NATIVE_PRICING_PROFILES_V1","sequence",seq,"profiles",empty?List.of():arr,"sha256",empty?cn.jia.agent.service.NativePricingProfiles.digest("[]"):sha);
+        var slot=new cn.jia.agent.skill.quote.MeasuredCostProfile.Slot(0,"fixture.capability","1",h,List.of(),"fixture-skill","1",h,"installed");
+        var measured=new cn.jia.agent.skill.quote.MeasuredCostProfile("fixture-profile",1,0,List.of(slot),"fixture-execution","fixture-context",h,h,
+                "fixture-capture",List.of(new cn.jia.economy.pricing.CostRouteReference("MODEL_RESPONSE","INFERENCE",h,"parent","RESPONSES_TEXT_TOKENS_V1")));
+        String sha=new cn.jia.agent.skill.quote.CostProfileReport(1,List.of(measured)).sha256();
+        java.util.function.BiFunction<String,Boolean,Map<String,Object>> report=(seq,empty)->new cn.jia.agent.skill.quote.CostProfileReport(Long.parseLong(seq),empty?List.of():List.of(measured)).wire();
         java.util.function.Consumer<Map<String,Object>> send=wire->locked(()->{repo.observe(TENANT,CLIENT,OWNER,agent,fence,wire);return null;});
         java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> read=()->repo.read(TENANT,CLIENT,List.of(target),false);
         send.accept(report.apply("2",false));assertEquals(sha,read.get().get(agent).sha());send.accept(report.apply("1",true));assertEquals(sha,read.get().get(agent).sha());
@@ -3118,7 +3127,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var authorized=List.of(new SkillExecutionService.AuthorizedSkill(skill,Map.of("skillInstallationId","installed","executionId","run","agentId",agent,"skillKey","image-edit","skillVersion","1","packageSha256",h)));
         Map<String,Object> snapshot=Map.of("toolPolicyRef",SkillExecutionService.NATIVE_SKILL_SCRIPT_POLICY,"outputs",Map.of("multiple",true,"artifactsRequired",true,"mimeTypes",List.of("image/png")));
         var profile=cn.jia.agent.service.usage.NativeCaptureEvidence.imageProfile("NATIVE_DISPATCH_GROUP_V1",h,h,h);
-        assertEquals(profile,locked(()->dispatch.forAuthorizedExecution(granted,fence,"run",authorized,snapshot)));
+        assertNull(locked(()->dispatch.forAuthorizedExecution(granted,fence,"run",authorized,snapshot)),
+                "A measured cost profile cannot manufacture the old output-dependent image execution proof");
         assertNull(locked(()->dispatch.forAuthorizedExecution(granted,fence,"another",authorized,snapshot)));
         assertNull(locked(()->dispatch.forAuthorizedExecution(granted,new AgentManagedSessionLookup.SessionFence(fence.runtimeInstallationId(),"another",fence.runtimeInstanceId(),fence.sessionGeneration()),"run",authorized,snapshot)));
         assertTrue(repo.read(TENANT,CLIENT,List.of(new AgentExternalServicePolicyService.QuoteTarget(agent,"other",binding,0)),false).isEmpty());
@@ -3285,7 +3295,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         recommendationSql.getConfiguration().addMapper(cn.jia.economy.mapper.GroupBaselineMapper.class);
         var observations=io.micrometer.observation.ObservationRegistry.create();
         observations.observationConfig().observationHandler(new io.micrometer.core.instrument.observation.DefaultMeterObservationHandler(quoteStages));
-        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured((correlated()||Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))?observedQuoteRoots():roots,batches,component(AgentTaskRequirementSnapshotService.class,authority.req(),"readCurrentWithinLockedTask"),component(AgentTaskExecutionGrantService.class,assignment,"snapshotTaskInputsWithinLockedTask"),component(AgentExternalServicePolicyService.class,authority.policies(),"quoteTargets"),materials,component(TaskBillingService.class,billing,"storeOffersBatch"),recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),component(cn.jia.agent.security.RegisteredPricingProfiles.class,new cn.jia.agent.security.RegisteredPricingProfiles(jdbc),"read"),(task,config)->{resolvedQuoteRoutes.incrementAndGet();return resolver.resolve(task,config);},observations);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.structured((correlated()||Boolean.getBoolean("cyf.measuredBatchQuoteLoad"))?observedQuoteRoots():roots,batches,component(AgentTaskRequirementSnapshotService.class,authority.req(),"readCurrentWithinLockedTask"),component(AgentTaskExecutionGrantService.class,assignment,"snapshotTaskInputsWithinLockedTask"),component(AgentExternalServicePolicyService.class,authority.policies(),"quoteTargets"),materials,component(TaskBillingService.class,billing,"storeOffersBatch"),recommendationSql.getMapper(cn.jia.economy.mapper.GroupBaselineMapper.class),component(cn.jia.agent.security.RegisteredPricingProfiles.class,registrationFixture(),"read"),(task,config)->{resolvedQuoteRoutes.incrementAndGet();return resolver.resolve(task,config);},observations);
         startHttp();int money=count("economy_transaction");var token=httpToken();var body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","experiment","data",Map.of("expectedTaskVersion","0","agentIds",List.of(second,agent))));
         try(var http=HttpClient.newHttpClient()){class Call{tools.jackson.databind.JsonNode send(String id)throws Exception{var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes")).header("Content-Type","application/json").header("X-Request-Id","experiment").header("Authorization","Bearer "+token).header("Idempotency-Key",id).POST(HttpRequest.BodyPublishers.ofString(body)).build();var res=http.send(request,HttpResponse.BodyHandlers.ofString());assertEquals(200,res.statusCode(),res.body());return json.readTree(res.body()).at("/data/quotes");}}
             var call=new Call();var quotes=call.send("approved");assertEquals(agent,quotes.get(0).path("agentId").asText());assertEquals("30",quotes.get(0).at("/amount/amountMinor").asText());assertFixedQuote(quotes.get(1));

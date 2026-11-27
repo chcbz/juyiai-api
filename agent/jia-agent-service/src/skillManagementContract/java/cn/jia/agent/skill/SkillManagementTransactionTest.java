@@ -445,12 +445,81 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         var slot=new Slot(0,"document.export","1",spec.specSha(),List.of(),"pdf-export","2.0.0",
                 text(object(upgrade.get("target")),"packageSha256"),auth.getInstallationId());
         assertCostProfileInstallationFacts(slot);
+        var registeredCosts=assertRegisteredCostProfile(slot);
         publisher.withdrawQuoteSpec(publicationScope,publicationGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("document.export","1"));
         assertTrue(new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)).bindingsForVersion("0",ACTOR.clientId(),"spv_pdf_2").isEmpty());
         assertTrue(costBindings(scope(),List.of(slot)).isEmpty(),"withdrawn semantics cannot authorize new cost metadata");
+        assertTrue(registeredCosts.get().isEmpty(),"registered measurements cannot revive a withdrawn capability specification");
         assertTrue(service.descriptors(scope()).stream().anyMatch(d->auth.getInstallationId().equals(d.installationId())),
                 "cost withdrawal is not execution revocation");
         assertEquals(expectedBindings,read(db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),auth.getInstallationId()).getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
+    }
+    /** Real published version -> installed binding -> authenticated report -> SQL read, no Runtime probe. */
+    private java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> assertRegisteredCostProfile(Slot slot) throws Exception {
+        usePersistentAuthentication();
+        for(String resource:List.of("db/agent-runtime-pricing-profiles-v1.sql","db/agent-runtime-cost-profiles-v1.sql"))
+            new ResourceDatabasePopulator(new ClassPathResource(resource)).execute(jdbc.getDataSource());
+        var registry=new cn.jia.agent.security.RegisteredPricingProfiles(jdbc,service);
+        var fence=new AgentManagedSessionLookup.SessionFence(runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId(),runtime.getRuntimeInstanceId(),1);
+        var profile=new cn.jia.agent.skill.quote.MeasuredCostProfile("document-profile",1,0,List.of(slot),"fixture-execution-1","fixture-context",
+                "a".repeat(64),"b".repeat(64),"fixture-capture-1",List.of(new cn.jia.economy.pricing.CostRouteReference(
+                "MODEL_RESPONSE","INFERENCE","c".repeat(64),"fixture-model","RESPONSES_TEXT_TOKENS_V1")));
+        java.util.function.LongFunction<cn.jia.agent.skill.quote.CostProfileReport> report=seq->new cn.jia.agent.skill.quote.CostProfileReport(seq,List.of(profile));
+        java.util.function.Consumer<Object> send=wire->authentication.withFence(proof(),true,()->{
+            registry.observe("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT,fence,wire);return null;});
+        var target=new AgentExternalServicePolicyService.QuoteTarget(AGENT,ACTOR.ownerJiacn(),7,0);
+        java.util.function.Supplier<Map<String,cn.jia.agent.security.RegisteredPricingProfiles.Observed>> read=
+                ()->registry.read("0",ACTOR.clientId(),List.of(target),false);
+        clearInvocations(packages,sessions,capabilities);
+        send.accept(report.apply(2).wire());assertEquals(report.apply(2).sha256(),read.get().get(AGENT).sha());
+        assertEquals(report.apply(2),cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()));
+        send.accept(new cn.jia.agent.skill.quote.CostProfileReport(1,List.of()).wire());assertEquals(2,read.get().get(AGENT).seq());
+        send.accept(report.apply(2).wire());assertEquals(2,read.get().get(AGENT).seq());
+        send.accept(new cn.jia.agent.skill.quote.CostProfileReport(2,List.of()).wire());assertTrue(read.get().isEmpty());
+        send.accept(report.apply(2).wire());assertTrue(read.get().isEmpty(),"same sequence cannot revive contradiction");
+        send.accept(report.apply(3).wire());assertEquals(3,read.get().get(AGENT).seq());
+        jdbc.update("UPDATE agent_runtime SET status='offline' WHERE agent_id=?",AGENT);
+        assertEquals(3,read.get().get(AGENT).seq());
+        jdbc.update("UPDATE agent_runtime SET status='online' WHERE agent_id=?",AGENT);
+        assertTrue(registry.read("0",ACTOR.clientId(),List.of(new AgentExternalServicePolicyService.QuoteTarget(AGENT,"other",7,0)),false).isEmpty());
+        assertThrows(IllegalStateException.class,()->tx.execute(status->{
+            registry.observe("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT,new AgentManagedSessionLookup.SessionFence(
+                    fence.runtimeInstallationId(),"other",fence.runtimeInstanceId(),1),report.apply(90).wire());return null;}));
+        assertEquals(3,read.get().get(AGENT).seq());
+        var before=read.get();
+        assertThrows(IllegalStateException.class,()->tx.execute(status->{
+            registry.observe("0",ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT,fence,report.apply(4).wire());
+            throw new IllegalStateException("fixture rollback");}));
+        assertEquals(before,read.get());
+        send.accept(Map.of("version","NATIVE_PRICING_PROFILES_V1","sequence","99","profiles",List.of(),"sha256","d".repeat(64)));
+        assertTrue(read.get().isEmpty(),"old wire is not a second registration lane");
+        assertEquals(3,jdbc.queryForObject("SELECT pricing_sequence FROM agent_runtime WHERE agent_id=?",Long.class,AGENT));
+        send.accept(report.apply(4).wire());
+        jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=0 WHERE active_installation_id=?",slot.installId());
+        assertTrue(read.get().isEmpty());send.accept(report.apply(5).wire());
+        jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=1 WHERE active_installation_id=?",slot.installId());
+        assertTrue(read.get().isEmpty());send.accept(report.apply(5).wire());assertTrue(read.get().isEmpty());
+        send.accept(report.apply(6).wire());assertEquals(6,read.get().get(AGENT).seq());
+        String original=read.get().get(AGENT).canonical();
+        jdbc.update("UPDATE agent_runtime SET pricing_profiles_json='{}' WHERE agent_id=?",AGENT);
+        assertThrows(IllegalStateException.class,read::get);
+        jdbc.update("UPDATE agent_runtime SET pricing_profiles_json=? WHERE agent_id=?",original,AGENT);
+        send.accept(new cn.jia.agent.skill.quote.CostProfileReport(7,List.of()).wire());
+        assertTrue(cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()).profiles().isEmpty());
+        send.accept(report.apply(8).wire());assertEquals(8,read.get().get(AGENT).seq());
+        var routes=java.util.stream.IntStream.range(0,32).mapToObj(i->new cn.jia.economy.pricing.CostRouteReference(
+                "MODEL_RESPONSE","INFERENCE","c".repeat(64),"fixture-model-"+i,"RESPONSES_TEXT_TOKENS_V1")).toList();
+        var large=new cn.jia.agent.skill.quote.CostProfileReport(9,java.util.stream.IntStream.range(0,32).mapToObj(i->
+                new cn.jia.agent.skill.quote.MeasuredCostProfile("fixture-profile-"+i,1,i,List.of(slot),"fixture-execution-1","fixture-context",
+                        "a".repeat(64),"b".repeat(64),"fixture-capture-1",routes)).toList());
+        assertTrue(cn.jia.agent.security.CostProfileReportJson.write(large).getBytes(java.nio.charset.StandardCharsets.UTF_8).length>65535);
+        send.accept(large.wire());assertEquals(large,cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()));
+        new ResourceDatabasePopulator(new ClassPathResource("db/agent-runtime-cost-profiles-v1.sql")).execute(jdbc.getDataSource());
+        assertEquals(large,cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()));
+        send.accept(report.apply(10).wire());
+
+        verifyNoInteractions(packages,sessions,capabilities);
+        return read;
     }
     private Set<Slot> costBindings(SkillCapabilityLookup.Scope scope,Collection<Slot> slots) {
         return service.costProfileBindings(scope,runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId(),slots);
