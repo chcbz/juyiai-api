@@ -764,6 +764,13 @@ class TaskBillingServiceMySqlTest {
     }
     @Test void scopedSnapshotsRejectCorruptionBeforeMoneyAndLateChunkFailureRollsBackAllQuotes() {
         usageSchema();var snapshot=scopedSnapshot("agent",true,false);
+        var h="a".repeat(64);
+        var group=new GroupMeanPricing.ScopeGroup("f",h,List.of(new GroupMeanPricing.ScopeSlot(0,"text.summary","1",h,List.of())),List.of("small"),Map.of("strategy","native"));
+        var pin=new GroupBudgetQuotes.Pin(new GroupBudgetQuotes.Key(group.key()),1,1,1,h,h,2,new BigDecimal("0.59"));
+        assertEquals(group.scopeShapeSha(),ScopedTaskQuoteSnapshot.MeanEvidence.from(group,new GroupBudgetQuotes.Mean(pin,30)).scopeShapeSha());
+        assertThrows(IllegalArgumentException.class,()->ScopedTaskQuoteSnapshot.MeanEvidence.from(group,new GroupBudgetQuotes.Mean(pin,31)));
+        assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot.Basis("FIXED_FALLBACK",null,TaskQuoteBatches.Reason.USAGE_INCOMPLETE));
+        assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot.MeanEvidence(h,List.of("small"),h,List.of(h),h,h,1,1,1,h,2,new BigDecimal("0.0000000000000000000000000000001")));
         assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot(snapshot.schema(),snapshot.binding(),snapshot.scopePin(),snapshot.basis(),snapshot.pricingProfilePin(),null,null,1));
         assertThrows(IllegalArgumentException.class,()->new ScopedTaskQuoteSnapshot(snapshot.schema(),snapshot.binding(),snapshot.scopePin(),snapshot.basis(),null,null,null,30));
         var writes=new java.util.ArrayList<TaskBillingService.OfferWrite>();
