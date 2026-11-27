@@ -70,4 +70,24 @@ class GroupMeanPricingTest {
         assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopeSlot(0,"a","1","b".repeat(64),List.of(0)));
         assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),List.of(slot),List.of("short"),java.util.Map.of()));
     }
+    @Test void policyIndependentInputRemainsStableAcrossPolicyRevisionsButNotShapeOrConfiguration(){
+        var slots=List.of(new GroupMeanPricing.ScopeSlot(0,"text.summary","1","b".repeat(64),List.of()));
+        var config=java.util.Map.<String,Object>of("strategy","native-1","routes",List.of("model","tool"));
+        var first=new GroupMeanPricing.ScopeGroup("f1","a".repeat(64),slots,List.of("short"),config);
+        var second=new GroupMeanPricing.ScopeGroup("f2","c".repeat(64),slots,List.of("short"),config);
+        assertEquals("630f84f7665f428d88d1ea249f9c473c5910f03b6a55e8174ff05bb0dd849c99",first.input().key());
+        assertEquals(first.input(),second.input());assertEquals(first.input().key(),second.input().key());
+        assertNotEquals(first.key(),second.key());
+        assertNotEquals(first.input().key(),new GroupMeanPricing.ScopeInput(slots,List.of("long"),first.configSemanticSha()).key());
+        assertNotEquals(first.input().key(),new GroupMeanPricing.ScopeInput(slots,List.of("short"),"d".repeat(64)).key());
+        var specs=first.input().specShas();var definitions=GroupMeanPricing.ScopedPolicy.definitionsSha(specs);
+        var policy=new GroupMeanPricing.ScopedPolicy("f1",specs,first.scopeShapeSha(),"config-1",definitions,3);
+        assertDoesNotThrow(()->policy.requireInput(first.input()));
+        assertNotEquals(policy.sha(),new GroupMeanPricing.ScopedPolicy("f1",specs,first.scopeShapeSha(),"config-1",definitions,4).sha());
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopedPolicy("f1",specs,first.scopeShapeSha(),"config-1","0".repeat(64),3));
+        assertThrows(IllegalArgumentException.class,()->new GroupMeanPricing.ScopedPolicy("f1",specs,first.scopeShapeSha(),"config-1",definitions,0));
+        var changed=List.of(new GroupMeanPricing.ScopeSlot(0,"audio.transcribe","1","b".repeat(64),List.of()));
+        assertThrows(IllegalArgumentException.class,()->policy.requireInput(new GroupMeanPricing.ScopeInput(changed,List.of("short"),first.configSemanticSha())));
+    }
+
 }

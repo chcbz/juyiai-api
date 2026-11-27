@@ -103,6 +103,52 @@ public final class GroupMeanPricing {
                 "dependsOn",dependsOn.stream().map(Object::toString).toList());}
     }
 
+    /** Policy-independent selector: only confirmed public shape, classified buckets and resolved
+     * semantic configuration. This is a lookup identity, not approval or execution authority. */
+    public record ScopeInput(List<ScopeSlot> scopeShape, List<String> bucketIds, String configSemanticSha) {
+        public ScopeInput {
+            scopeShape=List.copyOf(scopeShape);bucketIds=List.copyOf(bucketIds);requireSha(configSemanticSha);
+            if(scopeShape.isEmpty() || scopeShape.size()>128 || scopeShape.size()!=bucketIds.size())
+                throw new IllegalArgumentException("Incomplete whole-task input");
+            for(int i=0;i<scopeShape.size();i++) {
+                if(scopeShape.get(i).slot()!=i)throw new IllegalArgumentException("Unordered scope slots");
+                bytes(bucketIds.get(i));
+            }
+        }
+        public String scopeShapeSha(){return cn.jia.core.util.CanonicalValueEncoding.digest(scopeShape.stream().map(ScopeSlot::canonical).toList());}
+        public List<String> specShas(){return scopeShape.stream().map(ScopeSlot::specSha).distinct().sorted().toList();}
+        public String key(){return cn.jia.core.util.CanonicalValueEncoding.digest(java.util.Map.of(
+                "schema","scope-input-1","scopeShape",scopeShape.stream().map(ScopeSlot::canonical).toList(),
+                "bucketIds",bucketIds,"configSemanticSha",configSemanticSha));}
+    }
+
+    /** Frozen study parameters. The complete immutable spec hashes commit to their bucket declarations;
+     * the definitions digest is a domain-separated commitment to that exact sorted set, not free text. */
+    public record ScopedPolicy(String featureVersion, List<String> specShas, String scopeShapeSha,
+                               String configurationRuleVersion, String bucketDefinitionsSha, int minSupport) {
+        public ScopedPolicy {
+            bytes(featureVersion);bytes(configurationRuleVersion);requireSha(scopeShapeSha);requireSha(bucketDefinitionsSha);
+            specShas=List.copyOf(specShas);
+            if(specShas.isEmpty() || specShas.size()>128 || minSupport<1
+                    || new java.util.HashSet<>(specShas).size()!=specShas.size())
+                throw new IllegalArgumentException("Invalid scoped policy");
+            specShas.forEach(GroupMeanPricing::requireSha);specShas=specShas.stream().sorted().toList();
+            if(!bucketDefinitionsSha.equals(definitionsSha(specShas)))throw new IllegalArgumentException("Policy declarations differ");
+        }
+        public static String definitionsSha(List<String> specShas){
+            return cn.jia.core.util.CanonicalValueEncoding.digest(java.util.Map.of(
+                    "schema","scope-bucket-definitions-1","specShas",specShas.stream().distinct().sorted().toList()));
+        }
+        public String sha(){return cn.jia.core.util.CanonicalValueEncoding.digest(java.util.Map.of(
+                "schema","SCOPED_GROUP_POLICY_V1","featureVersion",featureVersion,"specShas",specShas,
+                "scopeShapeSha",scopeShapeSha,"configurationRuleVersion",configurationRuleVersion,
+                "bucketDefinitionsSha",bucketDefinitionsSha,"minSupport",Integer.toString(minSupport)));}
+        public void requireInput(ScopeInput input){
+            if(!scopeShapeSha.equals(input.scopeShapeSha()) || !specShas.equals(input.specShas()))
+                throw new IllegalArgumentException("Policy scope differs");
+        }
+    }
+
     /** Generic EXACT_WHOLE_SCOPE identity. Constructed from validated published declarations and
      * resolved configuration semantics, never from names, owner histories or individual-task sums.
      * Canonical bytes are consumed immediately so mutable caller maps cannot change an issued identity.
@@ -111,25 +157,22 @@ public final class GroupMeanPricing {
         private final String key,scopeShapeSha,configSemanticSha,featureVersion,policySha;
         private final List<ScopeSlot> scopeShape;
         private final List<String> bucketIds;
+        private final ScopeInput input;
         public ScopeGroup(String featureVersion,String policySha,List<ScopeSlot> scopeShape,List<String> bucketIds,
                           java.util.Map<String,Object> compatibleConfig){
             bytes(featureVersion);requireSha(policySha);
             this.featureVersion=featureVersion;this.policySha=policySha;
             this.scopeShape=List.copyOf(scopeShape);this.bucketIds=List.copyOf(bucketIds);
-            if(this.scopeShape.isEmpty() || this.scopeShape.size()>128 || this.scopeShape.size()!=this.bucketIds.size())
-                throw new IllegalArgumentException("Incomplete whole-task group");
-            for(int i=0;i<this.scopeShape.size();i++){
-                if(this.scopeShape.get(i).slot()!=i)throw new IllegalArgumentException("Unordered scope slots");
-                bytes(this.bucketIds.get(i));
-            }
             if(compatibleConfig.isEmpty())throw new IllegalArgumentException("Missing cost configuration");
-            var shape=this.scopeShape.stream().map(ScopeSlot::canonical).toList();
-            scopeShapeSha=cn.jia.core.util.CanonicalValueEncoding.digest(shape);
             configSemanticSha=cn.jia.core.util.CanonicalValueEncoding.digest(compatibleConfig);
+            input=new ScopeInput(this.scopeShape,this.bucketIds,configSemanticSha);
+            var shape=this.scopeShape.stream().map(ScopeSlot::canonical).toList();
+            scopeShapeSha=input.scopeShapeSha();
             key=cn.jia.core.util.CanonicalValueEncoding.digest(java.util.Map.of("schema","scope-group-1",
                     "featureVersion",featureVersion,"policySha",policySha,"scopeShape",shape,
                     "bucketIds",this.bucketIds,"compatibleConfig",compatibleConfig));
         }
+        public ScopeInput input(){return input;}
         public String key(){return key;} public String scopeShapeSha(){return scopeShapeSha;}
         public String configSemanticSha(){return configSemanticSha;} public String featureVersion(){return featureVersion;}
         public String policySha(){return policySha;} public List<ScopeSlot> scopeShape(){return scopeShape;}

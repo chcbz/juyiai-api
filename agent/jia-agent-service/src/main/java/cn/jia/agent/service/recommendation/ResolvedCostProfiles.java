@@ -48,6 +48,10 @@ public final class ResolvedCostProfiles {
         /** The exact resolved plan adopted in this preparation, for the private pricing-profile pin.
          * Never re-resolve from a newer map or substitute measurementSha for configSha. */
         public Optional<CostProfile> configuration(String candidate){return selected(candidate).flatMap(routes::find);}
+        /** Discovery identity before an approved policy (and hence the final group key) exists. */
+        public Optional<GroupMeanPricing.ScopeInput> input(String candidate){
+            return configuration(candidate).flatMap(inputs::input);
+        }
         public Optional<GroupMeanPricing.ScopeGroup> group(String candidate,String featureVersion,String policySha){
             return configuration(candidate).flatMap(profile->inputs.group(featureVersion,policySha,profile));
         }

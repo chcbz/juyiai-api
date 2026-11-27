@@ -55,6 +55,12 @@ public final class ScopedCostInputs {
         if(!measurement.matches(scope.workItems()) || !measurement.scopeShape().equals(shape.stream().map(GroupMeanPricing.ScopeSlot::canonical).toList()))
             throw new IllegalArgumentException("Cost profile differs from confirmed capability semantics");
     }
+    public Optional<GroupMeanPricing.ScopeInput> input(CostProfile profile){
+        checkShape(profile.measurement());
+        if(status()!=CapabilityQuoteSpec.MatchStatus.MATCHED)return Optional.empty();
+        return Optional.of(new GroupMeanPricing.ScopeInput(shape,matches.stream().map(CapabilityQuoteSpec.Match::bucketId).toList(),
+                profile.configSemanticSha()));
+    }
     public Optional<GroupMeanPricing.ScopeGroup> group(String featureVersion,String policySha,CostProfile profile){
         checkShape(profile.measurement());
         if(status()!=CapabilityQuoteSpec.MatchStatus.MATCHED)return Optional.empty();

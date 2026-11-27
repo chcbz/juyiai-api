@@ -45,6 +45,7 @@ class ScopedCostInputsTest {
             var input=ScopedCostInputs.prepare(scope,specs,Map.of());var m=measured(scope,specs,"install",H,0);
             assertEquals(CapabilityQuoteSpec.MatchStatus.MATCHED,input.status());assertEquals(m,input.select(List.of(m)).orElseThrow());
             var group=input.group("scope-features-1",H,resolved(m)).orElseThrow();
+            assertEquals(group.input(),input.input(resolved(m)).orElseThrow());
             assertEquals(List.of("small"),group.bucketIds());assertEquals(m.scopeShapeSha(),group.scopeShapeSha());
             assertEquals(resolved(m).configSemanticSha(),group.configSemanticSha());
             assertEquals("ScopedCostInputs[private]",input.toString());
@@ -63,10 +64,10 @@ class ScopedCostInputsTest {
     @Test void metadataMissingAndOutsideBucketRemainDistinctAndDoNotInventZeros(){
         var specs=specs(spec("document.extract",true));var scope=scope(List.of(item("a","document.extract","1",List.of("file@1"),List.of())),"deliver");
         var m=resolved(measured(scope,specs,"i",H,0));var missing=ScopedCostInputs.prepare(scope,specs,Map.of());
-        assertEquals(CapabilityQuoteSpec.MatchStatus.COST_INPUT_MISSING,missing.status());assertTrue(missing.group("f",H,m).isEmpty());
+        assertEquals(CapabilityQuoteSpec.MatchStatus.COST_INPUT_MISSING,missing.status());assertTrue(missing.group("f",H,m).isEmpty());assertTrue(missing.input(m).isEmpty());
         var metadata=new CapabilityQuoteSpec.InputMetadata("file@1",1,"application/pdf",H,"meta-1","parser-1",Map.of("bytes",new Scalar(ValueType.INTEGER,"unit/bytes","4096")));
         var outside=ScopedCostInputs.prepare(scope,specs,Map.of("file@1",metadata));
-        assertEquals(CapabilityQuoteSpec.MatchStatus.OUT_OF_DISTRIBUTION,outside.status());assertTrue(outside.group("f",H,m).isEmpty());
+        assertEquals(CapabilityQuoteSpec.MatchStatus.OUT_OF_DISTRIBUTION,outside.status());assertTrue(outside.group("f",H,m).isEmpty());assertTrue(outside.input(m).isEmpty());
     }
     @Test void missingCostMetadataCannotHideInvalidBusinessFieldsLaterInTheScope(){
         var specs=specs(spec("document.extract",true),spec("text.summary",false));
