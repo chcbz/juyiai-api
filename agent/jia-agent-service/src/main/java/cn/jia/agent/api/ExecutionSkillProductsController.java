@@ -49,6 +49,12 @@ public final class ExecutionSkillProductsController extends ExecutionDomainContr
         require(!binary || !c.input().payload().containsKey("files"),400,"AMBIGUOUS_PACKAGE");
         require(receipt || binary==(archive!=null),400,"PACKAGE_REQUIRED");
         var p=intent(c.input(),"productId","productVersionId","name","description","skillKey","skillVersion","priceWen","approvedPermissionsManifest","expectedProductVersion",binary?"packageSha256":"files");
+        // Bind the original declared semantics into the same durable intent/receipt as the package.
+        if(c.input().payload().containsKey("quoteSpecs"))p.put("quoteSpecs",c.input().payload().get("quoteSpecs"));
+        final java.util.List<cn.jia.agent.skill.quote.CapabilityQuoteSpec> quoteSpecs;
+        try {quoteSpecs=p.containsKey("quoteSpecs")?CapabilityQuoteSpecJson.readList(
+                cn.jia.agent.service.SkillCanonicalJson.write(p.get("quoteSpecs"))):List.of();}
+        catch(IllegalArgumentException invalid){throw new cn.jia.agent.position.PositionSkillException(400,"CAPABILITY_QUOTE_SPEC_INVALID");}
         if(binary)require(text(p,"packageSha256").matches("[a-f0-9]{64}"),400,"BAD_PACKAGE_DIGEST");
         return change(c,"skill-product-versions",true,p,receipt,()->{
             var a=authorized(c,true,true,s->subject(c,s));
@@ -63,7 +69,7 @@ public final class ExecutionSkillProductsController extends ExecutionDomainContr
                 for(var row:(List<?>)p.get("files")){require(row instanceof Map<?,?>,400,"BAD_REQUEST");var f=(Map<?,?>)row;files.add(new SkillPublicationToolArchive.File(text(f,"path"),text(f,"content"),text(f,"encoding")));}
                 bytes=SkillPublicationToolArchive.encode(files);try{digest=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));}catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
             }
-            var command=new SkillPackagePublicationService.Publish(text(p,"productId"),text(p,"productVersionId"),text(p,"name"),text(p,"description"),text(p,"skillKey"),text(p,"skillVersion"),number(p,"priceWen"),"NONE",text(p,"approvedPermissionsManifest"),digest,null,number(p,"expectedProductVersion"),null);
+            var command=new SkillPackagePublicationService.Publish(text(p,"productId"),text(p,"productVersionId"),text(p,"name"),text(p,"description"),text(p,"skillKey"),text(p,"skillVersion"),number(p,"priceWen"),"NONE",text(p,"approvedPermissionsManifest"),digest,null,number(p,"expectedProductVersion"),null,false,quoteSpecs);
             var prepared=products.prepare(a.scope(),a.grant(),command,bytes);return s->{require(prepared.matches(s,subject(c,s).grant()),403,"POSITION_AUTHORITY_CHANGED");var v=products.commitPrepared(prepared);
             return Map.of("productId",v.productId(),"productVersionId",v.productVersionId(),"productVersion",Long.toString(v.productVersion()),"packageSha256",v.packageSha256(),"disposition",v.disposition());};});
     }

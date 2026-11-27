@@ -28,7 +28,7 @@ class SkillPackagePublicationServiceTest {
     @BeforeEach void setup() {
         packages=new SkillPackages(root);original=new PlatformSkillPackageCatalog().requirePackage("spv_repo_inspector_1_0_0");
         @SuppressWarnings("unchecked") ObjectProvider<SkillPackages> provider=mock(ObjectProvider.class);when(provider.getIfUnique()).thenReturn(packages);
-        service=new SkillPackagePublicationService(mapper,provider,positions);
+        service=new SkillPackagePublicationService(mapper,provider,positions,mock(CapabilityQuotePublication.class));
         when(positions.withSkillManagementAuthority(eq(actor),eq(grant),any())).thenAnswer(i->((Supplier<?>)i.getArgument(2)).get());
         when(mapper.selectProductForUpdate(anyString(),anyString(),anyString())).thenAnswer(i->products.get(i.getArgument(2)));
         when(mapper.selectApprovedProductVersionForUpdate(anyString(),anyString(),anyString())).thenAnswer(i->versions.get(i.getArgument(2)));

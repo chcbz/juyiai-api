@@ -51,6 +51,21 @@ class SkillPackagePublicationControllerTest {
         assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(",\"waiveUpgradeOperationFee\":\"true\""),file));
         verifyNoMoreInteractions(service);
     }
+    @Test void quoteSpecsAreDecodedAndForwardedWithoutGrantingPublicationOrIgnoringInvalidFields() throws Exception {
+        var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
+        var request=new MockHttpServletRequest("POST","/agent/skill-maintenance/product-versions");
+        var file=new MockMultipartFile("package",new byte[]{1});
+        String spec="""
+            {"schema":"CAPABILITY_QUOTE_SPEC_V1","capabilityId":"input.count","version":"1","fields":{},
+             "costDimensions":[{"key":"count","source":"INPUT_COUNT","type":"INTEGER","unit":"unit/items"}],
+             "buckets":[{"id":"all","ranges":{"count":{"lo":"0","hi":null}}}]}
+            """;
+        controller.publish(actor(false),request,metadata(",\"quoteSpecs\":["+spec+"]"),file);
+        verify(service).publish(any(),any(),argThat(c->c.quoteSpecs().size()==1 && c.quoteSpecs().getFirst().capabilityId().equals("input.count")),any());
+        assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(",\"quoteSpecs\":null"),file));
+        assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(",\"quoteSpecs\":["+spec.replace("\"lo\":\"0\"","\"lo\":0")+"]"),file));
+        verifyNoMoreInteractions(service);
+    }
     @Test void adminRoleDoesNotReplaceRequiredAppointment() {
         var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
         var request=new MockHttpServletRequest("POST","/agent/skill-maintenance/product-versions");

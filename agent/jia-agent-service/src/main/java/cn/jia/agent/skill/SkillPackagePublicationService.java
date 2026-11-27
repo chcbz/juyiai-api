@@ -1,6 +1,7 @@
 package cn.jia.agent.skill;
 
 import cn.jia.agent.service.PositionAuthority;
+import cn.jia.agent.skill.quote.CapabilityQuoteSpec;
 import cn.jia.agent.service.PositionAuthority.Scope;
 import cn.jia.agent.service.PositionAuthority.Grant;
 import cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog;
@@ -21,7 +22,16 @@ public final class SkillPackagePublicationService {
     public record Publish(String productId,String productVersionId,String name,String description,String skillKey,
             String skillVersion,long priceWen,String deploymentRestriction,String approvedPermissionsManifest,
             String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId,
-            boolean waiveUpgradeOperationFee) {
+            boolean waiveUpgradeOperationFee,List<CapabilityQuoteSpec> quoteSpecs) {
+        public Publish {quoteSpecs=List.copyOf(Objects.requireNonNull(quoteSpecs));}
+        public Publish(String productId,String productVersionId,String name,String description,String skillKey,
+                String skillVersion,long priceWen,String deploymentRestriction,String approvedPermissionsManifest,
+                String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId,
+                boolean waiveUpgradeOperationFee) {
+            this(productId,productVersionId,name,description,skillKey,skillVersion,priceWen,deploymentRestriction,
+                    approvedPermissionsManifest,packageSha256,manifestSha256,expectedProductVersion,
+                    coveredUpgradeFromProductVersionId,waiveUpgradeOperationFee,List.of());
+        }
         public Publish(String productId,String productVersionId,String name,String description,String skillKey,
                 String skillVersion,long priceWen,String deploymentRestriction,String approvedPermissionsManifest,
                 String packageSha256,String manifestSha256,long expectedProductVersion,String coveredUpgradeFromProductVersionId) {
@@ -34,7 +44,9 @@ public final class SkillPackagePublicationService {
     private final SkillCatalogMapper market;
     private final ObjectProvider<SkillPackages> packages;
     private final PositionAuthority positions;
-    public SkillPackagePublicationService(SkillCatalogMapper market,ObjectProvider<SkillPackages> packages,PositionAuthority positions) {
+    private final CapabilityQuotePublication quoteSpecifications;
+    public SkillPackagePublicationService(SkillCatalogMapper market,ObjectProvider<SkillPackages> packages,PositionAuthority positions,CapabilityQuotePublication quoteSpecifications) {
+        this.quoteSpecifications=Objects.requireNonNull(quoteSpecifications);
         this.positions=Objects.requireNonNull(positions);this.market=Objects.requireNonNull(market);this.packages=Objects.requireNonNull(packages);
     }
     public Receipt publish(Scope actor,Grant grant,Publish command,byte[] archive) {
@@ -44,8 +56,9 @@ public final class SkillPackagePublicationService {
     public static final class Prepared {
         private final Scope actor; private final Grant grant; private final Publish command;
         private final byte[] digest,permissions; private final long length;
-        private Prepared(Scope actor,Grant grant,Publish command,byte[] digest,byte[] permissions,long length) {
-            this.actor=actor;this.grant=grant;this.command=command;this.digest=digest;this.permissions=permissions;this.length=length;
+        private final CapabilityQuotePublication.Prepared quoteSpecs;
+        private Prepared(Scope actor,Grant grant,Publish command,byte[] digest,byte[] permissions,long length,CapabilityQuotePublication.Prepared quoteSpecs) {
+            this.actor=actor;this.grant=grant;this.command=command;this.digest=digest;this.permissions=permissions;this.length=length;this.quoteSpecs=quoteSpecs;
         }
         public boolean matches(Scope actor,Grant grant) {return this.actor.equals(actor)&&this.grant.equals(grant);}
     }
@@ -54,6 +67,7 @@ public final class SkillPackagePublicationService {
         require(!TransactionSynchronizationManager.isActualTransactionActive(),503,"SKILL_PACKAGE_PREPARE_IN_TRANSACTION");
         positions.withSkillManagementAuthority(actor,grant,()->null);
         validate(command,archive);
+        var quoteSpecs=CapabilityQuotePublication.prepare(command.quoteSpecs());
         byte[] digest=SkillPackageStore.sha256(archive);
         require(command.packageSha256().equals(HexFormat.of().formatHex(digest)),409,"SKILL_PACKAGE_CHANGED");
         byte[] permissions=SkillPackageStore.sha256(command.approvedPermissionsManifest().getBytes(StandardCharsets.UTF_8));
@@ -62,12 +76,12 @@ public final class SkillPackagePublicationService {
         var manifest=store.manifest(prepared);
         require(Objects.equals(command.manifestSha256(),manifest==null?null:manifest.manifestSha256()),409,"SKILL_MANIFEST_CHANGED");
         store.publish(prepared); // immutable bytes first; failed DB transaction can leave only an unauthorized object.
-        return new Prepared(actor,grant,command,digest,permissions,archive.length);
+        return new Prepared(actor,grant,command,digest,permissions,archive.length,quoteSpecs);
     }
     public Receipt commitPrepared(Prepared prepared) {
         Objects.requireNonNull(prepared);
         try{return positions.withSkillManagementAuthority(prepared.actor,prepared.grant,()->persist(
-                prepared.actor,prepared.command,prepared.digest,prepared.permissions,prepared.length));}
+                prepared.actor,prepared.command,prepared.digest,prepared.permissions,prepared.length,prepared.quoteSpecs));}
         catch(org.springframework.dao.DuplicateKeyException race){throw new SkillMarketplaceException(409,"SKILL_PRODUCT_CHANGED");}
     }
     public record ProductView(String productId,String name,String description,String status,
@@ -168,17 +182,17 @@ public final class SkillPackagePublicationService {
             return new RetirementReceipt(p.getProductId(),"RETIRED",next,"RETIRED");
         });
     }
-    private Receipt persist(Scope a,Publish c,byte[] digest,byte[] permissions,long byteLength) {
+    private Receipt persist(Scope a,Publish c,byte[] digest,byte[] permissions,long byteLength,CapabilityQuotePublication.Prepared quoteSpecs) {
         var product=market.selectProductForUpdate(a.tenantId(),a.clientId(),c.productId());long now=System.currentTimeMillis();
         if(product==null){require(c.expectedProductVersion()==0,409,"SKILL_PRODUCT_CHANGED");product=new SkillProductEntity().setProductId(c.productId()).setSellerType(PlatformSkillPackageCatalog.SELLER_TYPE).setSellerId(PlatformSkillPackageCatalog.SELLER_ID).setCreatorAgentId(null).setName(c.name()).setDescription(c.description()).setStatus("DRAFT").setCurrentProductVersionId(null).setVersion(1L).setTenantId(a.tenantId()).setClientId(a.clientId()).setCreateTime(now).setUpdateTime(now);one(market.insertProduct(product));}
         require(a.tenantId().equals(product.getTenantId())&&a.clientId().equals(product.getClientId())&&c.productId().equals(product.getProductId())&&PlatformSkillPackageCatalog.SELLER_TYPE.equals(product.getSellerType())&&PlatformSkillPackageCatalog.SELLER_ID.equals(product.getSellerId())&&product.getCreatorAgentId()==null&&c.name().equals(product.getName())&&c.description().equals(product.getDescription())&&Set.of("DRAFT","PUBLISHED").contains(product.getStatus()),409,"SKILL_PRODUCT_CHANGED");
         var existing=market.selectApprovedProductVersionForUpdate(a.tenantId(),a.clientId(),c.productVersionId());
-        if(existing!=null){require(matches(a,c,existing,digest,permissions,byteLength)&&c.productVersionId().equals(product.getCurrentProductVersionId())&&"PUBLISHED".equals(product.getStatus()),409,"SKILL_VERSION_IMMUTABLE");coverUpgrade(a,c,existing);return receipt(c,product.getVersion(),"RECORDED");}
+        if(existing!=null){require(matches(a,c,existing,digest,permissions,byteLength)&&c.productVersionId().equals(product.getCurrentProductVersionId())&&"PUBLISHED".equals(product.getStatus()),409,"SKILL_VERSION_IMMUTABLE");quoteSpecifications.bindWithinPublication(a,c.productVersionId(),quoteSpecs,true);coverUpgrade(a,c,existing);return receipt(c,product.getVersion(),"RECORDED");}
         require(product.getVersion()!=null&&(c.expectedProductVersion()==0&&product.getVersion()==1||c.expectedProductVersion()==product.getVersion()),409,"SKILL_PRODUCT_CHANGED");
         long sequence=1;if(product.getCurrentProductVersionId()!=null){var previous=market.selectApprovedProductVersionForUpdate(a.tenantId(),a.clientId(),product.getCurrentProductVersionId());require(previous!=null&&a.tenantId().equals(previous.getTenantId())&&a.clientId().equals(previous.getClientId())&&c.productId().equals(previous.getProductId())&&c.skillKey().equals(previous.getSkillKey())&&previous.getVersionSequence()!=null,409,"SKILL_PRODUCT_CHANGED");sequence=Math.addExact(previous.getVersionSequence(),1L);}
         var version=new SkillProductVersionEntity().setProductVersionId(c.productVersionId()).setProductId(c.productId()).setVersionSequence(sequence).setSkillKey(c.skillKey()).setSkillVersion(c.skillVersion()).setPriceWen(c.priceWen()).setPackageSha256(digest).setPackageSize(byteLength);
         version.setApprovedPermissionsManifest(c.approvedPermissionsManifest()).setApprovedPermissionsSha256(permissions).setDeploymentRestriction(c.deploymentRestriction()).setReviewStatus("APPROVED").setTenantId(a.tenantId()).setClientId(a.clientId()).setCreateTime(now);
-        one(market.insertProductVersion(version));long baseVersion=product.getVersion();one(market.publishProductVersion(a.tenantId(),a.clientId(),c.productId(),c.productVersionId(),baseVersion,now));coverUpgrade(a,c,version);return receipt(c,baseVersion+1,"PUBLISHED");
+        one(market.insertProductVersion(version));quoteSpecifications.bindWithinPublication(a,c.productVersionId(),quoteSpecs,false);long baseVersion=product.getVersion();one(market.publishProductVersion(a.tenantId(),a.clientId(),c.productId(),c.productVersionId(),baseVersion,now));coverUpgrade(a,c,version);return receipt(c,baseVersion+1,"PUBLISHED");
     }
     private void coverUpgrade(Scope actor,Publish command,SkillProductVersionEntity target) {
         String sourceId=command.coveredUpgradeFromProductVersionId();

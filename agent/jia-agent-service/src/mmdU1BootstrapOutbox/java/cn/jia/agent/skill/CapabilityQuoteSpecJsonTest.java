@@ -75,6 +75,16 @@ class CapabilityQuoteSpecJsonTest {
         ((ObjectNode)fields.get("parameters.note")).put("maxLength","200");invalid(root.toString());
         ((ObjectNode)fields.get("parameters.note")).put("maxLength",2147483648L);invalid(root.toString());
     }
+    @Test void declarationListsHaveOneIdentityPerVersionAndAnIndependentTotalBound() {
+        assertEquals(java.util.List.of(CapabilityQuoteSpecJson.read(SPEC)),CapabilityQuoteSpecJson.readList("["+SPEC+"]"));
+        assertEquals(java.util.List.of(),CapabilityQuoteSpecJson.readList("[]"));
+        for(String raw:java.util.List.of("null","{}","[null]","["+SPEC+","+SPEC+"]",
+                "["+String.join(",",java.util.Collections.nCopies(CapabilityQuoteSpecJson.MAX_SPECS+1,SPEC))+"]",
+                " ".repeat(CapabilityQuoteSpecJson.MAX_LIST_BYTES)+"[]"))
+            assertThrows(IllegalArgumentException.class,()->CapabilityQuoteSpecJson.readList(raw));
+        assertThrows(SkillMarketplaceException.class,()->CapabilityQuotePublication.prepare(
+                java.util.List.of(CapabilityQuoteSpecJson.read(SPEC),CapabilityQuoteSpecJson.read(SPEC))));
+    }
     @Test void escapedInvalidUnicodeIsRejectedWithoutEchoingTheDeclaration() {
         invalid(SPEC.replace("text.summary","private-"+"\\uD800"));
         invalid(SPEC.replace("text.summary","private-"+'\uD800'));

@@ -54,12 +54,12 @@ public final class SkillPackagePublicationController {
         return ResponseEntity.ok().header(HttpHeaders.CACHE_CONTROL,"private, no-store").body(JsonResult.success(receipt));
     }
     private static JsonNode parse(String raw) {
-        var node=JSON.readTree(raw);if(node==null||!node.isObject())throw new IllegalArgumentException();var keys=new HashSet<String>();node.propertyNames().forEach(keys::add);keys.remove("coveredUpgradeFromProductVersionId");keys.remove("waiveUpgradeOperationFee");if(!keys.equals(FIELDS))throw new IllegalArgumentException();
+        var node=JSON.readTree(raw);if(node==null||!node.isObject())throw new IllegalArgumentException();var keys=new HashSet<String>();node.propertyNames().forEach(keys::add);keys.remove("coveredUpgradeFromProductVersionId");keys.remove("waiveUpgradeOperationFee");keys.remove("quoteSpecs");if(!keys.equals(FIELDS))throw new IllegalArgumentException();
         return node;
     }
     private static SkillPackagePublicationService.Publish command(JsonNode node) {
         var manifest=node.get("manifestSha256");if(manifest==null||!manifest.isNull()&&!manifest.isTextual())throw new IllegalArgumentException();
-        return new SkillPackagePublicationService.Publish(text(node,"productId"),text(node,"productVersionId"),text(node,"name"),text(node,"description"),text(node,"skillKey"),text(node,"skillVersion"),decimal(node,"priceWen"),text(node,"deploymentRestriction"),text(node,"approvedPermissionsManifest"),text(node,"packageSha256"),manifest.isNull()?null:manifest.textValue(),decimal(node,"expectedProductVersion"),optionalText(node,"coveredUpgradeFromProductVersionId"),optionalBoolean(node,"waiveUpgradeOperationFee"));
+        return new SkillPackagePublicationService.Publish(text(node,"productId"),text(node,"productVersionId"),text(node,"name"),text(node,"description"),text(node,"skillKey"),text(node,"skillVersion"),decimal(node,"priceWen"),text(node,"deploymentRestriction"),text(node,"approvedPermissionsManifest"),text(node,"packageSha256"),manifest.isNull()?null:manifest.textValue(),decimal(node,"expectedProductVersion"),optionalText(node,"coveredUpgradeFromProductVersionId"),optionalBoolean(node,"waiveUpgradeOperationFee"),node.has("quoteSpecs")?CapabilityQuoteSpecJson.readList(node.get("quoteSpecs").toString()):List.of());
     }
     private static boolean optionalBoolean(JsonNode node,String key) {
         var value=node.get(key);if(value==null)return false;

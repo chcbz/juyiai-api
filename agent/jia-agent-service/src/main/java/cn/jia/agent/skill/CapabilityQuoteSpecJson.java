@@ -17,6 +17,8 @@ import java.util.*;
  */
 public final class CapabilityQuoteSpecJson {
     public static final int MAX_BYTES=262144;
+    public static final int MAX_SPECS=32;
+    public static final int MAX_LIST_BYTES=1048576;
     public static final int MAX_FIELDS=128;
     public static final int MAX_DIMENSIONS=32;
     public static final int MAX_BUCKETS=128;
@@ -55,6 +57,20 @@ public final class CapabilityQuoteSpecJson {
             // Do not echo submitted declaration content in public errors or logs.
             throw invalid();
         }
+    }
+
+    public static List<CapabilityQuoteSpec> readList(String raw) {
+        try {
+            if(raw==null || raw.length()>MAX_LIST_BYTES || CanonicalValueEncoding.utf8(raw).length>MAX_LIST_BYTES)throw invalid();
+            var nodes=array(JSON.readTree(raw),MAX_SPECS);var result=new ArrayList<CapabilityQuoteSpec>();
+            var keys=new HashSet<List<String>>();
+            for(var node:nodes) {
+                var spec=read(node.toString());
+                if(!keys.add(List.of(spec.capabilityId(),spec.version())))throw invalid();
+                result.add(spec);
+            }
+            return List.copyOf(result);
+        } catch(Exception failure) {throw invalid();}
     }
 
     /** Used for private immutable storage; validate the exact same wire accepted on read. */

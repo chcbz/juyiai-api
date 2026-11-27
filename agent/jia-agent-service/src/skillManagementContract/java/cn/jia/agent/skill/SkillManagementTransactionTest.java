@@ -416,7 +416,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         when(authority.withSkillManagementAuthority(eq(publicationScope),eq(publicationGrant),any())).thenAnswer(invocation->
                 new org.springframework.transaction.support.TransactionTemplate(manager).execute(status->
                         ((java.util.function.Supplier<?>)invocation.getArgument(2)).get()));
-        var publisher=new SkillPackagePublicationService(market,packageProvider,authority);
+        var publisher=new SkillPackagePublicationService(market,packageProvider,authority,mock(CapabilityQuotePublication.class));
         var invalid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",HexFormat.of().formatHex(SkillPackageStore.sha256(archive)),null,2,"missing-source");
         assertEquals("SKILL_UPGRADE_SOURCE_INVALID",assertThrows(SkillMarketplaceException.class,()->publisher.publish(publicationScope,publicationGrant,invalid,archive)).code());
         assertEquals("spv_pdf_1",market.selectProductForUpdate("0",ACTOR.clientId(),"sp_pdf").getCurrentProductVersionId());
