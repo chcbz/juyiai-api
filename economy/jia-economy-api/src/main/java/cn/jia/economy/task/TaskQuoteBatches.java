@@ -19,7 +19,7 @@ public interface TaskQuoteBatches {
         var ids=new TreeSet<String>();for(String id:agentIds){if(id==null||id.isBlank())throw new IllegalArgumentException("Missing candidate");ids.add(id);}agentIds=List.copyOf(ids);
     }}
     enum State{AVAILABLE,UNAVAILABLE}
-    enum Reason{NO_BASELINE,OUT_OF_DISTRIBUTION,USAGE_INCOMPLETE,BILLING_ROUTE_MISSING,PRICE_MISSING,COST_INPUT_MISSING}
+    enum Reason{NO_BASELINE,OUT_OF_DISTRIBUTION,USAGE_INCOMPLETE,BILLING_ROUTE_MISSING,PRICE_MISSING,COST_INPUT_MISSING,CAPABILITY_MISMATCH}
     record Summary(String method,String version,int sampleCount,String qualityStatus){}
     record Item(String agentId,State state,String quoteId,String recommendationId,Money amount,Reason unavailableReason,Summary estimateSummary){public Item{
         Objects.requireNonNull(agentId);Objects.requireNonNull(recommendationId);Objects.requireNonNull(state);
