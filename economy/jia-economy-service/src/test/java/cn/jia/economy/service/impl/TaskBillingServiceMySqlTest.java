@@ -624,6 +624,9 @@ class TaskBillingServiceMySqlTest {
     }
     @Test void onlyOwnedTrainingPublicationApprovalCanEnrollAndReplayDoesNotAdvanceGeneration(){
         installPublicationSchema();
+        new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
+        var scopedMigration=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-scoped-group-source-invalidation-v1.sql"));
+        scopedMigration.setSeparator("$$");scopedMigration.execute(jdbc.getDataSource());
         var json=new ObjectMapper();var enrollment=new GroupPublicationEnrollment(maintenance,json);
         String t=SCOPE.tenantId(),c=SCOPE.clientId(), sample=GroupPublicationEnrollment.digest("{}"),policy="f".repeat(64),key="d".repeat(64);
         String review=json.writeValueAsString(java.util.Map.of("caseId","case","decision","ACCEPTED","manifestSha",sample));
@@ -645,6 +648,9 @@ class TaskBillingServiceMySqlTest {
     }
     @Test void sourceWithdrawalOrEvidenceChangeRevokesAllAndOnlyRegisteredGroupsInSameCommit(){
         installPublicationSchema();
+        new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
+        var scopedMigration=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-scoped-group-source-invalidation-v1.sql"));
+        scopedMigration.setSeparator("$$");scopedMigration.execute(jdbc.getDataSource());
         String original="{\"purpose\":\"GROUP_AGGREGATE\",\"approvalRef\":\"test-only\"}";jdbc.update("INSERT INTO economy_budget_publish_approval(approval_sha,authority_json) VALUES(SHA2(?,256),?)",original,original);
         String approval=jdbc.queryForObject("SELECT approval_sha FROM economy_budget_publish_approval",String.class);
         String t=SCOPE.tenantId(),c=SCOPE.clientId(),sample="a".repeat(64),p="b".repeat(64),rev="c".repeat(64);
@@ -816,6 +822,75 @@ class TaskBillingServiceMySqlTest {
     }
     private TaskBenchmarkAdmission.ScopedEnrollment preparePaid(PaidCase c){return scopedAdmissions.prepareScopedPaid(TASK,c.manifest().caseId(),c.sha(),"agent",c.observed());}
     private Charge reservePaid(PaidCase c){return inTask(TASK,()->billing.reserve(TASK,c.quoteId(),c.quote().binding(),"payer-1",preparePaid(c)));}
+
+    private record PaidPublication(PaidCase source,String sample,String review,String approval) {}
+    private PaidPublication scopedPublication(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose){
+        var c=scopedPaidCase(purpose,false);reservePaid(c);installPublicationSchema();
+        var migration=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-scoped-group-source-invalidation-v1.sql"));
+        migration.setSeparator("$$");migration.execute(jdbc.getDataSource());
+        String sample=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class);
+        jdbc.update("UPDATE economy_task_cost_sample SET lifecycle_state='ACCEPTED',sample_state='MATCHED'");
+        // Synthetic closure/review: verifies enrollment/withdrawal only, not usage completeness or actual review.
+        jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,1,1,1)",sample,"a".repeat(64));
+        var json=new ObjectMapper();String review=json.writeValueAsString(Map.of("caseId",c.manifest().caseId(),"decision","ACCEPTED","manifestSha",c.sha()));
+        String reviewSha=GroupPublicationEnrollment.digest(review);
+        jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,reviewSha,review);
+        var approval=new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",SCOPE.tenantId(),SCOPE.clientId(),c.manifest().groupSha(),c.manifest().policy().sha(),TASK.ownerJiacn(),TASK.taskId(),c.manifest().caseId(),sample,1,c.sha(),reviewSha,"publication-fixture");
+        return new PaidPublication(c,sample,reviewSha,importTestApproval(approval,json));
+    }
+    private void registerPaid(PaidPublication p){
+        tx.executeWithoutResult(st->new GroupPublicationEnrollment(maintenance,new ObjectMapper()).register(SCOPE,p.approval()));
+    }
+    @Test void scopedPublicationUsesOriginalPaidIdentityAndSurvivesSettlement(){
+        var p=scopedPublication(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN);
+        assertNotEquals(p.sample(),p.source().sha());registerPaid(p);registerPaid(p);
+        assertEquals(1,count("economy_budget_group_member"));
+        assertEquals(1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Integer.class));
+        assertEquals(State.CAPTURED,inTask(TASK,()->billing.capture(TASK)).state());
+        registerPaid(p);assertEquals(1,count("economy_budget_group_member"));
+        assertEquals(p.sample(),jdbc.queryForObject("SELECT sample_id FROM economy_budget_group_member",String.class));
+        assertEquals(p.source().sha(),jdbc.queryForObject("SELECT manifest_sha FROM economy_budget_group_member",String.class));
+        assertEquals(0,count("economy_budget_group_revision")); // Enrollment is not statistical publication.
+    }
+    @Test void scopedPublicationCannotRelabelHoldoutAsTraining(){
+        var p=scopedPublication(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.HOLDOUT);
+        assertThrows(GroupPublicationEnrollment.NotApproved.class,()->registerPaid(p));
+        assertEquals(0,count("economy_budget_group_member"));assertEquals(0,count("economy_budget_group_head"));
+    }
+    @Test void scopedPublicationRequiresOriginalScopePolicyGroupAndQuotePins(){
+        var p=scopedPublication(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN);
+        for(String change:List.of("scope_sha256=REPEAT('0',64)","scope_shape_sha256=REPEAT('0',64)",
+                "scoped_group_sha256=REPEAT('0',64)","scoped_policy_sha256=REPEAT('0',64)",
+                "initial_requirement_sha256=REPEAT('0',64)","initial_input_snapshot_sha256=REPEAT('0',64)",
+                "initial_feature_sha256=REPEAT('0',64)","evidence_revision=2","quote_id=NULL")){
+            tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_task_cost_sample SET "+change);
+                assertThrows(GroupPublicationEnrollment.NotApproved.class,()->new GroupPublicationEnrollment(maintenance,new ObjectMapper()).register(SCOPE,p.approval()));
+                assertEquals(0,count("economy_budget_group_member"));st.setRollbackOnly();});
+        }
+        var c=p.source();var bad=new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",SCOPE.tenantId(),SCOPE.clientId(),"0".repeat(64),c.manifest().policy().sha(),TASK.ownerJiacn(),TASK.taskId(),c.manifest().caseId(),p.sample(),1,c.sha(),p.review(),"wrong-group");
+        String badSha=importTestApproval(bad,new ObjectMapper());
+        assertThrows(GroupPublicationEnrollment.NotApproved.class,()->tx.executeWithoutResult(st->new GroupPublicationEnrollment(maintenance,new ObjectMapper()).register(SCOPE,badSha)));
+        registerPaid(p);assertEquals(1,count("economy_budget_group_member"));
+    }
+    @Test void scopedPublicationCaseAndScopeWithdrawalInvalidatesRealSampleMembership(){
+        var p=scopedPublication(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN);registerPaid(p);
+        for(String change:List.of("UPDATE economy_task_benchmark_case SET retired=TRUE",
+                "DELETE FROM economy_task_benchmark_case",
+                "UPDATE economy_task_cost_sample SET scope_sha256=REPEAT('0',64)",
+                "UPDATE economy_task_cost_sample SET scope_shape_sha256=REPEAT('0',64)",
+                "UPDATE economy_task_cost_sample SET scoped_group_sha256=REPEAT('0',64)",
+                "UPDATE economy_task_cost_sample SET scoped_policy_sha256=REPEAT('0',64)",
+                "UPDATE economy_task_benchmark_review SET withdrawn=TRUE",
+                "UPDATE economy_budget_publish_approval SET withdrawn=TRUE")){
+            tx.executeWithoutResult(st->{jdbc.update("UPDATE economy_budget_group_head SET status='ACTIVE',active_revision=1");
+                jdbc.update(change);assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='DIRTY' AND active_revision IS NULL AND generation=2",Integer.class));
+                st.setRollbackOnly();});
+            assertEquals(1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Integer.class));
+        }
+        jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
+        assertThrows(GroupPublicationEnrollment.NotApproved.class,()->registerPaid(p));
+        assertEquals(2,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Integer.class));
+    }
 
     @Test void scopedPaidAdmissionCreatesExactlyOneQuoteLinkedSampleAndNeverReenrollsReplay(){
         var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false);

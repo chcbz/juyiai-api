@@ -52,7 +52,7 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
         if(!row.benchmarkCaseId().equals(manifest.caseId()) || !task.equals(manifest.task()) || !agent.equals(manifest.agentId()))throw new NotAdmitted();
         return prepareScoped(task,agent,manifest,row.manifestSha(),observer.apply(manifest.policy()));
     }
-    private static ScopedBenchmarkManifest decodeScoped(String raw,String sha){
+    static ScopedBenchmarkManifest decodeScoped(String raw,String sha){
         if(raw==null || sha==null || CanonicalValueEncoding.utf8(raw).length>1048576 || !CanonicalValueEncoding.sha256(CanonicalValueEncoding.utf8(raw)).equals(sha))
             throw new IllegalStateException("SCOPED_BENCHMARK_AUTHORITY_CORRUPT");
         try{return SCOPED_JSON.readValue(raw,ScopedBenchmarkManifest.class);}
