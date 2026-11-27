@@ -69,5 +69,19 @@ public final class CapabilityQuotePublication {
             one(mapper.insertBinding(actor.tenantId(),actor.clientId(),productVersionId,spec.capabilityId(),spec.version(),declaration.sha()));
         }
     }
+    /** Called only inside the existing skill-maintainer authorization transaction. Never deletes semantics/bindings. */
+    public record Withdrawal(String specSha,String disposition) { }
+    public Withdrawal withdrawWithinPublication(Scope actor,String capabilityId,String version) {
+        require(TransactionSynchronizationManager.isActualTransactionActive(),503,"SKILL_PUBLICATION_TRANSACTION_REQUIRED");
+        var stored=mapper.lockSpec(actor.tenantId(),actor.clientId(),capabilityId,version);
+        require(stored!=null,404,"RESOURCE_NOT_FOUND");
+        try {
+            var spec=CapabilityQuoteSpecJson.readStored(stored.specJson(),stored.specSha());
+            require(spec.capabilityId().equals(capabilityId) && spec.version().equals(version),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+        } catch(IllegalStateException corrupt){throw new SkillMarketplaceException(503,"CAPABILITY_QUOTE_SPEC_CORRUPT");}
+        if("WITHDRAWN".equals(stored.status()))return new Withdrawal(stored.specSha(),"RECORDED");
+        require("ACTIVE".equals(stored.status()),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+        one(mapper.withdraw(actor.tenantId(),actor.clientId(),capabilityId,version,stored.specSha()));return new Withdrawal(stored.specSha(),"WITHDRAWN");
+    }
     private static void one(int affected) {require(affected==1,409,"SKILL_PRODUCT_CHANGED");}
 }

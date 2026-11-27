@@ -38,6 +38,12 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
     private ObjectProvider<AgentTaskExecutionGrantService> inputCatalogues;
     private AgentTaskMetaDao taskRoots;
     private AgentTaskRequirementConfirmationActor confirmationActor;
+    private cn.jia.agent.skill.PublishedCapabilityQuoteSpecs capabilitySpecifications;
+
+    @Inject void capabilitySpecifications(cn.jia.agent.skill.PublishedCapabilityQuoteSpecs specifications) {
+        this.capabilitySpecifications=Objects.requireNonNull(specifications);
+    }
+
 
     @Inject void confirmationActor(AgentTaskRequirementConfirmationActor actor) {
         this.confirmationActor=Objects.requireNonNull(actor);
@@ -117,6 +123,8 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
                     for (var input:catalogue.inputs()) refs.add(input.fileId()+"@"+input.version());
                     for (var item:command.payload().workItems())
                         if (!refs.containsAll(item.inputRefs())) throw new IllegalArgumentException("Scope input is not authorized");
+                    if (capabilitySpecifications==null) throw new IllegalStateException("Published scope specifications unavailable");
+                    capabilitySpecifications.validateForConfirmation(scope.tenantId(),scope.clientId(),command.payload().workItems());
                     long revision=Math.addExact(previous.revision(),1);
                     var payload=command.payload();
                     String requirementSha=payload.requirementDigest(command.title(),command.description(),catalogue.digest());

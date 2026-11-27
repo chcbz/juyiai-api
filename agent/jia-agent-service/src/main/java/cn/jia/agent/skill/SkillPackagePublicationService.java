@@ -182,6 +182,21 @@ public final class SkillPackagePublicationService {
             return new RetirementReceipt(p.getProductId(),"RETIRED",next,"RETIRED");
         });
     }
+    public record WithdrawQuoteSpec(String capabilityId,String capabilityVersion) { }
+    public record QuoteSpecWithdrawalReceipt(String capabilityId,String capabilityVersion,String specSha,String status,String disposition) { }
+    public QuoteSpecWithdrawalReceipt withdrawQuoteSpec(Scope actor,Grant grant,WithdrawQuoteSpec command) {
+        require(actor!=null && grant!=null && grant.publish(),403,"SKILL_PUBLICATION_FORBIDDEN");
+        require(command!=null,400,"BAD_REQUEST");
+        for(var id:List.of(new AbstractMap.SimpleEntry<>(command.capabilityId(),128),
+                new AbstractMap.SimpleEntry<>(command.capabilityVersion(),64))) {
+            require(id.getKey()!=null && !id.getKey().isBlank() && id.getKey().codePointCount(0,id.getKey().length())<=id.getValue(),400,"BAD_REQUEST");
+            try {cn.jia.core.util.CanonicalValueEncoding.utf8(id.getKey());}catch(IllegalArgumentException invalid){throw new SkillMarketplaceException(400,"BAD_REQUEST");}
+        }
+        return positions.withSkillManagementAuthority(actor,grant,()->{
+            var result=quoteSpecifications.withdrawWithinPublication(actor,command.capabilityId(),command.capabilityVersion());
+            return new QuoteSpecWithdrawalReceipt(command.capabilityId(),command.capabilityVersion(),result.specSha(),"WITHDRAWN",result.disposition());
+        });
+    }
     private Receipt persist(Scope a,Publish c,byte[] digest,byte[] permissions,long byteLength,CapabilityQuotePublication.Prepared quoteSpecs) {
         var product=market.selectProductForUpdate(a.tenantId(),a.clientId(),c.productId());long now=System.currentTimeMillis();
         if(product==null){require(c.expectedProductVersion()==0,409,"SKILL_PRODUCT_CHANGED");product=new SkillProductEntity().setProductId(c.productId()).setSellerType(PlatformSkillPackageCatalog.SELLER_TYPE).setSellerId(PlatformSkillPackageCatalog.SELLER_ID).setCreatorAgentId(null).setName(c.name()).setDescription(c.description()).setStatus("DRAFT").setCurrentProductVersionId(null).setVersion(1L).setTenantId(a.tenantId()).setClientId(a.clientId()).setCreateTime(now).setUpdateTime(now);one(market.insertProduct(product));}

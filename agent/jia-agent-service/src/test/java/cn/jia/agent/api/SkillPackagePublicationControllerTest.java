@@ -66,6 +66,27 @@ class SkillPackagePublicationControllerTest {
         assertThrows(IllegalArgumentException.class,()->controller.publish(actor(false),request,metadata(",\"quoteSpecs\":["+spec.replace("\"lo\":\"0\"","\"lo\":0")+"]"),file));
         verifyNoMoreInteractions(service);
     }
+    @Test void withdrawalUsesStandardEnvelopeAndExistingPositionAuthorityAtTheActualHttpBoundary() throws Exception {
+        var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
+        var converters=new java.util.ArrayList<org.springframework.http.converter.HttpMessageConverter<?>>();
+        converters.add(new org.springframework.http.converter.json.JacksonJsonHttpMessageConverter(tools.jackson.databind.json.JsonMapper.builder().build()));
+        new cn.jia.core.config.ApiEnvelopeJsonConfig().extendMessageConverters(converters);
+        var mvc=org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller)
+                .setMessageConverters(converters.toArray(org.springframework.http.converter.HttpMessageConverter[]::new)).build();
+        String body="""
+            {"protocolVersion":1,"requestId":"withdraw","data":{"capabilityId":"text.summary","capabilityVersion":"1",
+             "positionAuthority":{"appointmentId":"appointment","appointmentRevision":"1","positionRevision":"2","agentId":"wuyong","bindingId":"7"}}}
+            """;
+        var route="/agent/skill-maintenance/capability-quote-spec-withdrawal";
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(route).principal(actor(false)).contentType("application/json").content(body))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isOk());
+        verify(service).withdrawQuoteSpec(any(),argThat(g->g.publish() && g.agentId().equals("wuyong")),eq(new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1")));
+        for(String invalid:List.of(body.replace("\"capabilityVersion\":\"1\"","\"capabilityVersion\":1"),
+                body.replace("\"capabilityVersion\":\"1\"","\"capabilityVersion\":\"1\",\"capabilityVersion\":\"2\""),body.replace("positionAuthority","role")))
+            mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(route).principal(actor(true)).contentType("application/json").content(invalid))
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isBadRequest());
+        verifyNoMoreInteractions(service);
+    }
     @Test void adminRoleDoesNotReplaceRequiredAppointment() {
         var service=mock(SkillPackagePublicationService.class);var controller=new SkillPackagePublicationController(service);
         var request=new MockHttpServletRequest("POST","/agent/skill-maintenance/product-versions");

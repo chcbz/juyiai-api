@@ -8,6 +8,11 @@ import cn.jia.agent.security.AuthenticatedRequirementConfirmationActor;
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
 import cn.jia.agent.service.AgentTaskRequirementSnapshotService;
 import cn.jia.agent.skill.SkillManagementMySqlFixture;
+import cn.jia.agent.skill.*;
+import cn.jia.agent.skill.quote.CapabilityQuoteSpec;
+import cn.jia.agent.mapper.skill.*;
+import cn.jia.agent.service.PositionAuthority;
+import cn.jia.agent.config.skill.CapabilityQuoteSpecSchemaInitializer;
 import cn.jia.core.context.EsContext;
 import cn.jia.core.context.EsContextHolder;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
@@ -42,6 +47,10 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
     private AgentTaskMetaDaoImpl roots;
     private AgentTaskRequirementSnapshotServiceImpl service;
     private AgentTaskExecutionGrantService catalogues;
+    private SkillPackagePublicationService publisher;
+    private PublishedCapabilityQuoteSpecs specifications;
+    private final PositionAuthority.Scope publisherScope=new PositionAuthority.Scope("0","client","owner");
+    private final PositionAuthority.Grant publisherGrant=new PositionAuthority.Grant("appointment",1,1,"agent",1,null,true);
 
     @BeforeEach void setup() throws Exception {
         database="cyf_scope_"+UUID.randomUUID().toString().replace("-","");
@@ -62,14 +71,21 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
                 +"VALUES ('0','client','owner','task',0,0,'open')");
         jdbc.execute("CREATE TABLE agent_task_funding(tenant_id VARCHAR(50),client_id VARCHAR(50),owner_jiacn VARCHAR(50),"
                 +"task_id VARCHAR(100)) ENGINE=InnoDB COLLATE=utf8mb4_0900_bin");
+        new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new ClassPathResource("db/economy-v0-skill-marketplace.sql")).execute(source);
+        new CapabilityQuoteSpecSchemaInitializer(jdbc).afterPropertiesSet();
         var configuration=new MybatisConfiguration();configuration.setMapUnderscoreToCamelCase(true);
+        configuration.addMapper(SkillCatalogMapper.class);configuration.addMapper(CapabilityQuoteSpecMapper.class);
         configuration.addMapper(AgentTaskMetaMapper.class);
         var factory=new MybatisSqlSessionFactoryBean();factory.setDataSource(source);factory.setConfiguration(configuration);
+        var session=new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
         roots=new AgentTaskMetaDaoImpl();
         var field=cn.jia.common.dao.BaseDaoImpl.class.getDeclaredField("baseMapper");field.setAccessible(true);
-        field.set(roots,new SqlSessionTemplate(Objects.requireNonNull(factory.getObject())).getMapper(AgentTaskMetaMapper.class));
+        field.set(roots,session.getMapper(AgentTaskMetaMapper.class));
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,new AgentTaskMutationTransactionImpl(roots,manager));
         service.confirmationActor(new AuthenticatedRequirementConfirmationActor());
+        specifications=new PublishedCapabilityQuoteSpecs(session.getMapper(CapabilityQuoteSpecMapper.class));
+        service.capabilitySpecifications(specifications);
+        publishSpecifications(session);
         catalogues=mock(AgentTaskExecutionGrantService.class);
         when(catalogues.snapshotTaskInputsWithinLockedTask(OWNER,"task")).thenReturn(new AgentTaskExecutionGrantService.InputCatalogue(
                 "0".repeat(64),List.of(new AgentTaskExecutionGrantService.AuthorizedInput("f-text",1,"INPUT","text/plain",1000,"a".repeat(64)),
@@ -77,6 +93,26 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
         @SuppressWarnings("unchecked") ObjectProvider<AgentTaskExecutionGrantService> provider=mock(ObjectProvider.class);
         when(provider.getObject()).thenReturn(catalogues);service.scopeDependencies(provider,roots);
         authenticate();tx.execute(s->service.captureOnCreate(OWNER,"task","Title",null));
+    }
+
+    private void publishSpecifications(SqlSessionTemplate session) throws Exception {
+        var authority=mock(PositionAuthority.class);
+        when(authority.withSkillManagementAuthority(org.mockito.ArgumentMatchers.eq(publisherScope),org.mockito.ArgumentMatchers.eq(publisherGrant),org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(i->tx.execute(status->i.<java.util.function.Supplier<?>>getArgument(2).get()));
+        @SuppressWarnings("unchecked") ObjectProvider<SkillPackages> packageProvider=mock(ObjectProvider.class);
+        when(packageProvider.getIfUnique()).thenReturn(new SkillPackages(java.nio.file.Files.createTempDirectory(scratch,"scope-packages-")));
+        publisher=new SkillPackagePublicationService(session.getMapper(SkillCatalogMapper.class),packageProvider,authority,
+                new CapabilityQuotePublication(session.getMapper(CapabilityQuoteSpecMapper.class)));
+        var pack=new cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog().requirePackage("spv_repo_inspector_1_0_0");var product=pack.product();
+        var declared=new ArrayList<CapabilityQuoteSpec>();
+        for(var entry:List.of(List.of("text.summary","words","unit/words"),List.of("visual.asset","count","unit/items"),List.of("document.extract","count","unit/items"))) {
+            declared.add(new CapabilityQuoteSpec(CapabilityQuoteSpec.SCHEMA,entry.get(0),"1",
+                    Map.of("deliverables."+entry.get(1),new CapabilityQuoteSpec.Field(ConfirmedScope.ValueType.INTEGER,entry.get(2),true,"1","10000",Set.of(),null)),
+                    List.of(new CapabilityQuoteSpec.CostDimension("size",CapabilityQuoteSpec.Source.DELIVERABLE,entry.get(1),ConfirmedScope.ValueType.INTEGER,entry.get(2),null,Set.of())),
+                    List.of(new CapabilityQuoteSpec.Bucket("all",Map.of("size",new CapabilityQuoteSpec.Range("1","10001",Set.of()))))));
+        }
+        publisher.publish(publisherScope,publisherGrant,new SkillPackagePublicationService.Publish("fixture","fixture-v1",product.name(),product.description(),
+                product.skillKey(),product.skillVersion(),0,"NONE","[]",HexFormat.of().formatHex(product.packageSha256()),null,0,null,false,declared),pack.bytes());
     }
 
     @AfterEach void cleanup() {
@@ -191,6 +227,53 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
         assertThrows(IllegalStateException.class,()->service.confirmScope(OWNER,"task",1,"new",text()));
         assertEquals(1,version());assertEquals(2,snapshots());
         verify(catalogues,times(1)).snapshotTaskInputsWithinLockedTask(OWNER,"task");
+    }
+
+    @Test void scopeConfirmationRequiresPublishedBindingAndValidDeclaredFields() {
+        var invalid=command("text.summary","words","unit/words","10001",List.of("f-text@1"));
+        assertEquals(400,assertThrows(SkillMarketplaceException.class,()->service.confirmScope(OWNER,"task",0,"bad",invalid)).status());
+        jdbc.update("DELETE FROM agent_skill_quote_spec_binding WHERE capability_id='text.summary'");
+        assertEquals(409,assertThrows(SkillMarketplaceException.class,this::confirm).status());
+        assertEquals(0,version());assertEquals(1,snapshots());assertNull(service.readCurrent(OWNER,"task").confirmedScope());
+    }
+    @Test void authorizedWithdrawalStopsNewConfirmationsWithoutRewritingConfirmedHistory() {
+        var original=confirm();var withdrawal=new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1");
+        assertEquals("WITHDRAWN",publisher.withdrawQuoteSpec(publisherScope,publisherGrant,withdrawal).disposition());
+        assertEquals("RECORDED",publisher.withdrawQuoteSpec(publisherScope,publisherGrant,withdrawal).disposition());
+        assertEquals(original,confirm());assertEquals(original,service.read(OWNER,"task",2));
+        assertEquals(409,assertThrows(SkillMarketplaceException.class,()->service.confirmScope(OWNER,"task",1,"new",text())).status());
+        assertEquals(1,version());assertEquals(2,snapshots());
+        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM agent_skill_quote_spec_binding",Integer.class));
+    }
+    @Test void publishedScopeConsumerRejectsCorruptSemanticsAndCrossClientKeys() {
+        var key=new CapabilityQuoteSpecMapper.SpecKey("text.summary","1");
+        assertEquals(1,specifications.readActive("0","client",List.of(key,key)).size());
+        assertEquals(409,assertThrows(SkillMarketplaceException.class,()->specifications.readActive("0","Client",List.of(key))).status());
+        assertEquals(409,assertThrows(SkillMarketplaceException.class,()->specifications.readActive("other","client",List.of(key))).status());
+        jdbc.update("UPDATE agent_capability_quote_spec SET spec_json=JSON_SET(spec_json,'$.version','2') WHERE capability_id='text.summary'");
+        assertEquals(503,assertThrows(SkillMarketplaceException.class,this::confirm).status());
+        assertEquals(0,version());assertEquals(1,snapshots());
+    }
+    @Test void withdrawalWaitsForTheRealConfirmedSpecificationShareLock() throws Exception {
+        var written=new CountDownLatch(1);var release=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)) {
+            var confirmation=pool.submit(()->{authenticate();try{return tx.execute(s->{var row=confirm();written.countDown();await(release);return row;});}finally{clearIdentity();}});
+            Future<SkillPackagePublicationService.QuoteSpecWithdrawalReceipt> withdrawal=null;
+            try {
+                assertTrue(written.await(10,TimeUnit.SECONDS));
+                withdrawal=pool.submit(()->publisher.withdrawQuoteSpec(publisherScope,publisherGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1")));
+                long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);boolean waiting=false;
+                while(System.nanoTime()<deadline) {
+                    int locks=jdbc.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l "
+                            +"ON w.REQUESTING_ENGINE_LOCK_ID=l.ENGINE_LOCK_ID AND w.ENGINE=l.ENGINE WHERE l.OBJECT_SCHEMA=? AND l.OBJECT_NAME='agent_capability_quote_spec'",Integer.class,database);
+                    if(locks>0){waiting=true;break;}if(withdrawal.isDone())break;Thread.sleep(20);
+                }
+                assertTrue(waiting,"Observe an actual MySQL wait, not only an unfinished future");
+            } finally {release.countDown();}
+            assertNotNull(withdrawal);var original=confirmation.get(10,TimeUnit.SECONDS);
+            assertEquals("WITHDRAWN",withdrawal.get(10,TimeUnit.SECONDS).status());assertEquals(original,confirm());
+        }
+        assertEquals(1,version());assertEquals(2,snapshots());
     }
 
     @Test void mapperVersionCasIsExactEvenUnderCaseInsensitiveRootCollation() {

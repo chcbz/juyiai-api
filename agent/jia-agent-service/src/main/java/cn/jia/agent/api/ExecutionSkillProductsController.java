@@ -73,6 +73,21 @@ public final class ExecutionSkillProductsController extends ExecutionDomainContr
             var prepared=products.prepare(a.scope(),a.grant(),command,bytes);return s->{require(prepared.matches(s,subject(c,s).grant()),403,"POSITION_AUTHORITY_CHANGED");var v=products.commitPrepared(prepared);
             return Map.of("productId",v.productId(),"productVersionId",v.productVersionId(),"productVersion",Long.toString(v.productVersion()),"packageSha256",v.packageSha256(),"disposition",v.disposition());};});
     }
+    private ResponseEntity<?> withdrawQuoteSpec(Call<Input> c,boolean receiptOnly) {
+        var p=intent(c.input(),"capabilityId","capabilityVersion");
+        return change(c,"capability-quote-spec-withdrawals",true,p,receiptOnly,()->s->{
+            var result=products.withdrawQuoteSpec(s,subject(c,s).grant(),new SkillPackagePublicationService.WithdrawQuoteSpec(
+                    text(p,"capabilityId"),text(p,"capabilityVersion")));
+            return Map.of("capabilityId",result.capabilityId(),"capabilityVersion",result.capabilityVersion(),
+                    "specSha",result.specSha(),"status",result.status(),"disposition",result.disposition());
+        });
+    }
+    @PostMapping("/capability-quote-spec-withdrawals/commit") public ResponseEntity<?> withdrawQuoteSpecCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth) {
+        return withdrawQuoteSpec(call(auth,e,r,req),false);
+    }
+    @PostMapping("/capability-quote-spec-withdrawals/receipt") public ResponseEntity<?> withdrawQuoteSpecReceipt(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth) {
+        return withdrawQuoteSpec(call(auth,e,r,req),true);
+    }
     @ExceptionHandler(SkillMarketplaceException.class) public ResponseEntity<?> marketplaceFailure(SkillMarketplaceException f){return ResponseEntity.status(f.status()).header("Cache-Control","private, no-store").body(cn.jia.core.entity.JsonResult.failure(f.code(),"Marketplace operation unavailable"));}
     @PostMapping(path="/skill-product-versions/commit",consumes="application/json") public ResponseEntity<?> publishCommit(@PathVariable String e,@PathVariable String r,@RequestBody JsonRequest<Input> req,Authentication auth){return publish(call(auth,e,r,req),false,null);}
     @PostMapping(path="/skill-product-versions/commit",consumes="multipart/form-data")

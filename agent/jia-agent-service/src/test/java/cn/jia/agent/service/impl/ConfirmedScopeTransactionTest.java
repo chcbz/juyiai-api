@@ -35,6 +35,7 @@ class ConfirmedScopeTransactionTest {
     AgentTaskMutationTransactionImpl mutations;
     AgentTaskExecutionGrantService catalogues;
     AgentTaskRequirementSnapshotServiceImpl service;
+    cn.jia.agent.skill.PublishedCapabilityQuoteSpecs specifications;
 
     @BeforeEach void setup() throws Exception {
         var ds=new DriverManagerDataSource("jdbc:h2:mem:scope-"+UUID.randomUUID()+";MODE=MySQL;DB_CLOSE_DELAY=-1","sa","");
@@ -70,6 +71,7 @@ class ConfirmedScopeTransactionTest {
         mutations=new AgentTaskMutationTransactionImpl(roots,manager);
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,mutations);
         service.confirmationActor(new cn.jia.agent.security.AuthenticatedRequirementConfirmationActor());
+        specifications=mock(cn.jia.agent.skill.PublishedCapabilityQuoteSpecs.class);service.capabilitySpecifications(specifications);
         catalogues=mock(AgentTaskExecutionGrantService.class);
         when(catalogues.snapshotTaskInputsWithinLockedTask(OWNER,"task")).thenReturn(new AgentTaskExecutionGrantService.InputCatalogue(INPUTS,
                 List.of(new AgentTaskExecutionGrantService.AuthorizedInput("f-text",1,"INPUT","text/plain",1000,"a".repeat(64)))));
@@ -129,6 +131,15 @@ class ConfirmedScopeTransactionTest {
         assertEquals(first.confirmedScope(),read);
         assertEquals(first,confirm());assertEquals(1,version());assertEquals(2,snapshots());
         verify(catalogues,times(1)).snapshotTaskInputsWithinLockedTask(OWNER,"task");
+    }
+    @Test void confirmationConsumesPublishedSpecificationsButHistoricalReplayDoesNotRevalidateThem() {
+        var first=confirm();
+        verify(specifications).validateForConfirmation("0","client",command(List.of("f-text@1")).payload().workItems());
+        doThrow(new cn.jia.agent.skill.SkillMarketplaceException(409,"CAPABILITY_QUOTE_SPEC_UNAVAILABLE"))
+                .when(specifications).validateForConfirmation(anyString(),anyString(),anyList());
+        assertEquals(first,confirm());
+        assertThrows(cn.jia.agent.skill.SkillMarketplaceException.class,()->service.confirmScope(OWNER,"task",1,"new",command(List.of("f-text@1"))));
+        assertEquals(1,version());assertEquals(2,snapshots());
     }
     @Test void fundedReplayIsReadOnlyButNewConfirmationAndOverwriteAreRejected() {
         var first=confirm();fund();assertEquals(first,confirm());

@@ -70,6 +70,20 @@ class ExecutionQuoteSpecPublicationTest {
         assertEquals(2,saved.values().stream().map(Receipt::inputSha256).distinct().count());
         verify(products,times(2)).commitPrepared(any());
     }
+    @Test void nativeWithdrawalReusesLiveAuthorityAndItsOwnDurableReceiptWithoutRepublishing() {
+        var request=new JsonRequest<>(1,"withdraw",new ExecutionSkillProductsController.Input(
+                Map.of("capabilityId","input.count","capabilityVersion","1"),"a".repeat(64),new RunningExecutionEndpoint.Fence("1","fixture")));
+        when(products.withdrawQuoteSpec(eq(scope),eq(grant),any())).thenReturn(new SkillPackagePublicationService.QuoteSpecWithdrawalReceipt(
+                "input.count","1","b".repeat(64),"WITHDRAWN","WITHDRAWN"));
+        assertEquals(200,controller.withdrawQuoteSpecCommit("e","r",request,auth).getStatusCode().value());
+        assertEquals(200,controller.withdrawQuoteSpecReceipt("e","r",request,auth).getStatusCode().value());
+        assertEquals(200,controller.withdrawQuoteSpecCommit("e","r",request,auth).getStatusCode().value());
+        verify(products,times(1)).withdrawQuoteSpec(eq(scope),eq(grant),eq(new SkillPackagePublicationService.WithdrawQuoteSpec("input.count","1")));
+        verify(products,never()).prepare(any(),any(),any(),any());assertEquals(1,saved.size());
+        var changed=new JsonRequest<>(1,"withdraw",new ExecutionSkillProductsController.Input(
+                Map.of("capabilityId","input.count","capabilityVersion","2"),"a".repeat(64),new RunningExecutionEndpoint.Fence("1","fixture")));
+        assertEquals(404,assertThrows(PositionSkillException.class,()->controller.withdrawQuoteSpecReceipt("e","r",changed,auth)).status());
+    }
     @Test void invalidOrDuplicateSpecificationsDoNotPrepareOrMutatePackages() {
         for(Object value:List.of("not-an-array",List.of(spec("10"),spec("10")),List.of(Map.of("schema","unknown"))))
             assertEquals(400,assertThrows(PositionSkillException.class,()->controller.publishCommit("e","r",request(value),auth)).status());

@@ -122,10 +122,20 @@ class CapabilityQuotePublicationMySqlTest extends SkillManagementMySqlFixture {
         assertEquals(0,count("agent_capability_quote_spec"));assertEquals(0,count("agent_skill_product"));
     }
     @Test void withdrawnSpecDoesNotReviveThroughNewPublicationButHistoricalReplayIsReadable() throws Exception {
-        publish(actor,1,0,declared());jdbc.update("UPDATE agent_capability_quote_spec SET status='WITHDRAWN'");
+        publish(actor,1,0,declared());
+        assertEquals("WITHDRAWN",publisher.withdrawQuoteSpec(actor,grant,new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1")).disposition());
+        assertEquals("RECORDED",publisher.withdrawQuoteSpec(actor,grant,new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1")).disposition());
         assertEquals("RECORDED",publish(actor,1,0,declared()).disposition());
         assertEquals("CAPABILITY_QUOTE_SPEC_WITHDRAWN",assertThrows(SkillMarketplaceException.class,()->publish(actor,2,2,declared())).code());
         assertEquals(1,count("agent_skill_product_version"));assertEquals("WITHDRAWN",jdbc.queryForObject("SELECT status FROM agent_capability_quote_spec",String.class));
+    }
+    @Test void withdrawalRequiresOriginalPositionAuthorityAndCannotCrossThePublicationDomain() throws Exception {
+        publish(actor,1,0,declared());var command=new SkillPackagePublicationService.WithdrawQuoteSpec("text.summary","1");
+        assertEquals(403,assertThrows(SkillMarketplaceException.class,()->publisher.withdrawQuoteSpec(actor,null,command)).status());
+        assertEquals(404,assertThrows(SkillMarketplaceException.class,()->publisher.withdrawQuoteSpec(new PositionAuthority.Scope("other","client","owner"),grant,command)).status());
+        when(authority.withSkillManagementAuthority(any(),eq(grant),any())).thenThrow(new cn.jia.agent.position.PositionSkillException(403,"POSITION_AUTHORITY_REVOKED"));
+        assertThrows(cn.jia.agent.position.PositionSkillException.class,()->publisher.withdrawQuoteSpec(actor,grant,command));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT status FROM agent_capability_quote_spec",String.class));assertEquals(1,count("agent_skill_quote_spec_binding"));
     }
     @Test void corruptedJsonCannotBecomeNewPricingEvidenceAndDirectBindRequiresAnExistingTransaction() throws Exception {
         publish(actor,1,0,declared());jdbc.update("UPDATE agent_capability_quote_spec SET spec_json=JSON_SET(spec_json,'$.version','2')");
