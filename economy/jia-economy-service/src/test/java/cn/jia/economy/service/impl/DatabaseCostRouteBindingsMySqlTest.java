@@ -55,6 +55,8 @@ class DatabaseCostRouteBindingsMySqlTest {
         assertThrows(CostRouteBindings.Conflict.class,()->tx.execute(s->service.publish(scope,r,0,route("a"))));
         assertEquals(Long.valueOf(3),tx.execute(s->service.withdraw(scope,r,2)));assertEquals(Long.valueOf(3),tx.execute(s->service.withdraw(scope,r,2)));
         assertTrue(service.read(scope,List.of(r),false).isEmpty());
+        var tombstone=service.inspect(scope,r).orElseThrow();assertEquals(3,tombstone.revision());assertNull(tombstone.route());
+        assertTrue(service.inspect(scope,ref("missing")).isEmpty());
         assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision",Integer.class));
         assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision WHERE route_json IS NULL",Integer.class));
     }
@@ -151,6 +153,25 @@ class DatabaseCostRouteBindingsMySqlTest {
     @Test void maintenanceRejectsMissingReferenceConstraint(){
         jdbc.execute("ALTER TABLE economy_cost_route_head DROP FOREIGN KEY fk_cost_route_head_revision");
         assertThrows(IllegalStateException.class,()->new CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet());
+    }
+    @Test void unrelatedMappingCanCommitWhileAdoptedMappingIsShareLocked()throws Exception{
+        var adopted=ref("adopted");var other=ref("other");
+        tx.executeWithoutResult(s->{service.publish(scope,adopted,0,route("a"));service.publish(scope,other,0,route("b"));});
+        var acquired=new CountDownLatch(1);var release=new CountDownLatch(1);
+        try(var pool=Executors.newFixedThreadPool(2)){
+            var holder=pool.submit(()->tx.execute(s->{
+                service.read(scope,List.of(adopted),true);acquired.countDown();
+                try{assertTrue(release.await(15,TimeUnit.SECONDS));}
+                catch(InterruptedException e){Thread.currentThread().interrupt();throw new AssertionError(e);}return null;
+            }));
+            try{
+                assertTrue(acquired.await(10,TimeUnit.SECONDS));
+                var writer=pool.submit(()->tx.execute(s->service.publish(scope,other,1,route("changed"))));
+                assertEquals(2,writer.get(5,TimeUnit.SECONDS).revision());
+                assertEquals(1,release.getCount(),"unrelated write committed before releasing adopted mapping lock");
+            }finally{release.countDown();}
+            holder.get(10,TimeUnit.SECONDS);
+        }
     }
     private void awaitMappingLockWait(Future<?> writer)throws Exception{
         long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(10);

@@ -51,4 +51,35 @@ class PrivateNativeToolReceiptMySqlTest {
         assertThrows(RuntimeException.class,()->write(hash));assertEquals(0,jdbc.queryForObject("SELECT revision FROM fixture_binding",Integer.class));
         assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_private_tool_call_receipt",Integer.class));
     }
+    private cn.jia.economy.service.impl.DatabaseCostRouteBindings routeStore()throws Exception{
+        new cn.jia.economy.config.CostRouteBindingSchemaInitializer(jdbc).afterPropertiesSet();
+        var config=new Configuration();config.setMapUnderscoreToCamelCase(true);config.addMapper(cn.jia.economy.mapper.CostRouteBindingMapper.class);
+        var factory=new SqlSessionFactoryBean();factory.setConfiguration(config);factory.setDataSource(jdbc.getDataSource());
+        return new cn.jia.economy.service.impl.DatabaseCostRouteBindings(new SqlSessionTemplate(factory.getObject()).getMapper(cn.jia.economy.mapper.CostRouteBindingMapper.class),new tools.jackson.databind.ObjectMapper());
+    }
+    private Map<String,Object> publishRoute(CostRouteMaintenanceOperations operations){
+        var reference=new cn.jia.economy.pricing.CostRouteReference("MODEL_RESPONSE","INFERENCE","namespace","model","TOKENS_V1");
+        var change=CostRouteMaintenanceOperations.prepare(reference,"0","PUBLISH",Map.of("type","TOKEN","channel","channel","model","model","tier","tier","basis","TOKENS_V1"));
+        var digest=cn.jia.agent.position.PositionSkillService.hash(cn.jia.agent.service.SkillCanonicalJson.write(change.intent()));
+        return tx.execute(status->{
+            jdbc.queryForObject("SELECT revision FROM fixture_binding WHERE id=1 FOR UPDATE",Integer.class);
+            return receipts.apply(key,"cost-route-bindings",digest,()->operations.apply(new cn.jia.agent.service.PositionAuthority.Scope("tenant","client","owner"),change));
+        });
+    }
+    @Test void routeRevisionAndExecutionReceiptCommitOnceInTheSameTransaction()throws Exception{
+        var operations=new CostRouteMaintenanceOperations(routeStore());
+        var first=publishRoute(operations);assertEquals(first,publishRoute(operations));assertEquals("ACTIVE",first.get("state"));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision",Integer.class));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_head",Integer.class));
+        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM agent_private_tool_call_receipt",Integer.class));
+    }
+    @Test void failedExecutionReceiptRollsBackBothRouteHeadAndImmutableRevision()throws Exception{
+        var operations=new CostRouteMaintenanceOperations(routeStore());
+        jdbc.execute("CREATE TRIGGER reject_route_receipt BEFORE INSERT ON agent_private_tool_call_receipt FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='fixture receipt failure'");
+        assertThrows(RuntimeException.class,()->publishRoute(operations));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_revision",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_cost_route_head",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM agent_private_tool_call_receipt",Integer.class));
+    }
+
 }

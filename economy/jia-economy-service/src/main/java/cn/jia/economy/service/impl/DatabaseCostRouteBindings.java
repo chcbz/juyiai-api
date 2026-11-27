@@ -55,7 +55,7 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
             if(route!=null){route(route);basis(ref,route);}
             if(!ref.sha().equals(row.referenceSha()) || !sha(ref,row.revision(),route).equals(row.bindingSha()))throw new IllegalArgumentException();
             return new Binding(ref,row.revision(),row.bindingSha(),route);
-        }catch(RuntimeException corrupt){throw new IllegalStateException("COST_ROUTE_BINDING_CORRUPT");}
+        }catch(RuntimeException corrupt){throw new Corrupt();}
     }
     private static void basis(CostRouteReference ref,Route route){if(route instanceof TokenRoute r && !ref.normalizationBasis().equals(r.normalizationBasis()))throw new IllegalArgumentException("Cost route basis mismatch");}
     @Override public Map<CostRouteReference,Binding> read(EconomyScope scope,List<CostRouteReference> references,boolean lock){
@@ -63,9 +63,18 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
         var wanted=new TreeMap<String,CostRouteReference>();for(var ref:references){var old=wanted.put(ref.sha(),ref);if(old!=null&&!old.equals(ref))throw new IllegalArgumentException("Cost route identity conflict");}
         var keys=List.copyOf(wanted.keySet());var result=new HashMap<CostRouteReference,Binding>();var seen=new HashSet<String>();
         for(int i=0;i<keys.size();i+=128){var batch=keys.subList(i,Math.min(i+128,keys.size()));for(var row:mapper.read(scope.tenantId(),scope.clientId(),batch,lock)){
-            var b=decode(scope,row);if(!batch.contains(row.referenceSha()) || !b.reference().equals(wanted.get(row.referenceSha())) || !seen.add(row.referenceSha()))throw new IllegalStateException("COST_ROUTE_BINDING_CORRUPT");
+            var b=decode(scope,row);if(!batch.contains(row.referenceSha()) || !b.reference().equals(wanted.get(row.referenceSha())) || !seen.add(row.referenceSha()))throw new Corrupt();
             if(b.route()!=null)result.put(b.reference(),b);
         }}return Map.copyOf(result);
+    }
+    @Override public Optional<Binding> inspect(EconomyScope scope,CostRouteReference reference){
+        scope(scope);Objects.requireNonNull(reference);
+        var rows=mapper.read(scope.tenantId(),scope.clientId(),List.of(reference.sha()),false);
+        if(rows.isEmpty())return Optional.empty();
+        if(rows.size()!=1)throw new Corrupt();
+        var binding=decode(scope,rows.getFirst());
+        if(!binding.reference().equals(reference))throw new Corrupt();
+        return Optional.of(binding);
     }
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public Binding publish(EconomyScope scope,CostRouteReference reference,long expectedRevision,Route route){Objects.requireNonNull(route);route(route);basis(reference,route);return change(scope,reference,expectedRevision,route);}
@@ -76,8 +85,8 @@ public class DatabaseCostRouteBindings implements CostRouteBindings {
         Long current=mapper.lockHead(scope.tenantId(),scope.clientId(),reference.sha());
         if(current!=null){
             var rows=mapper.read(scope.tenantId(),scope.clientId(),List.of(reference.sha()),true);
-            if(rows.size()!=1)throw new IllegalStateException("COST_ROUTE_BINDING_CORRUPT");var old=decode(scope,rows.getFirst());
-            if(!old.reference().equals(reference)||old.revision()!=current)throw new IllegalStateException("COST_ROUTE_BINDING_CORRUPT");
+            if(rows.size()!=1)throw new Corrupt();var old=decode(scope,rows.getFirst());
+            if(!old.reference().equals(reference)||old.revision()!=current)throw new Corrupt();
             if((current==expected || current==expected+1)&&Objects.equals(old.route(),target))return old;
             if(current!=expected)throw new Conflict();
         }else if(expected!=0 || target==null)throw new Conflict();

@@ -1,0 +1,18 @@
+{
+  "reference": {
+    "kind": "MODEL_RESPONSE",
+    "component": "INFERENCE",
+    "namespace": "namespace",
+    "modelOrTool": "model",
+    "normalizationBasis": "TOKENS_V1"
+  },
+  "expectedRevision": "0",
+  "action": "PUBLISH",
+  "route": {
+    "type": "TOKEN",
+    "channel": "channel",
+    "model": "model",
+    "tier": "tier",
+    "basis": "TOKENS_V1"
+  }
+}
