@@ -58,6 +58,7 @@ dependencies {
     testImplementation 'org.springframework.security:spring-security-oauth2-jose'
     testImplementation platform("org.springframework.boot:spring-boot-dependencies:${libs.versions.spring.boot.asProvider().get()}")
     testImplementation 'io.projectreactor:reactor-test'
+    testImplementation 'io.micrometer:micrometer-core' // In-memory meter export for the quote HTTP fixture only.
     testRuntimeOnly libs.mysql
     testRuntimeOnly libs.h2
 }
