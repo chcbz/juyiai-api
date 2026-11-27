@@ -43,15 +43,17 @@ public final class SkillManagementService {
     private final ObjectProvider<SkillCapabilityLookup> capabilities;
     private final TransactionTemplate tx;
     private final HostingRentWorkAdmission hosting;
+    private final PublishedCapabilityQuoteSpecs quoteSpecifications;
     public SkillManagementService(SkillManagementMapper db,SkillCatalogMapper market,
             SkillInstallationMapper app,SkillMarketplaceService marketplace,SkillTradeService trade,SkillAgentVersions versions,
             AgentRuntimeDao runtimes,AgentRuntimeV1InstallationDao installations,AgentRuntimeAuthenticationService authentication,AgentIdentityService identities,
             ObjectProvider<SkillPackages> packages,ObjectProvider<SkillInstallCommandWriter> writer,
             ObjectProvider<AgentManagedSessionLookup> sessions,ObjectProvider<SkillCapabilityLookup> capabilities,
-            PlatformTransactionManager manager, HostingRentWorkAdmission hosting) {
+            PlatformTransactionManager manager, HostingRentWorkAdmission hosting, PublishedCapabilityQuoteSpecs quoteSpecifications) {
         this.db=db;this.market=market;this.app=app;this.marketplace=marketplace;this.trade=trade;this.versions=versions;this.runtimes=runtimes;
         this.installations=installations;this.authentication=authentication;this.identities=identities;this.packages=packages;this.writer=writer;
         this.sessions=sessions;this.capabilities=capabilities;this.tx=new TransactionTemplate(manager);this.hosting=hosting;
+        this.quoteSpecifications=Objects.requireNonNull(quoteSpecifications);
     }
     public record CapabilityChanged(String tenant,String client,String agent) {}
     private org.springframework.context.ApplicationEventPublisher events;
@@ -197,7 +199,7 @@ public final class SkillManagementService {
                 }
             }
             boolean install=grant.desired();String action=install?(src==null?"INSTALL":"UPGRADE"):"DISABLE";
-            var prepared=install?describe(market.selectApprovedProductVersion(a.tenantId(),a.clientId(),input.skill().productVersionId()),input.description()):null;
+            var prepared=install?describe(a,market.selectApprovedProductVersion(a.tenantId(),a.clientId(),input.skill().productVersionId()),input.description()):null;
             var target=install?prepared.target():ref(src);var details=install?prepared.details():decode(src.getDetailsJson(),"VersionDetails");
             if(install)target.put("skillInstallationId","psi_"+hash("cyf.skill.position.installation.v1",changeId));
             long revision=Math.addExact(state.getSkillRevision(),1),now=System.currentTimeMillis();
@@ -403,15 +405,17 @@ public final class SkillManagementService {
         require(v!=null,409,"SKILL_VERSION_NOT_PUBLISHED");
         require(admin||"NONE".equals(v.getDeploymentRestriction()),403,"AGENT_FORBIDDEN");
         var pkg=packages.getObject().describe(v);var manifest=packages.getObject().manifest(pkg);
-        return describe(v,pkg);
+        return describe(a,v,pkg);
     }
-    private Prepared describe(SkillProductVersionEntity v,SkillPackages.Description pkg) {
+    private Prepared describe(HostingRentHttp.Actor a,SkillProductVersionEntity v,SkillPackages.Description pkg) {
         var manifest=packages.getObject().manifest(pkg);
         var permissions=SkillMarketplaceHttp.permissions(v.getApprovedPermissionsManifest());
         var sorted=new ArrayList<>(permissions);sorted.sort(UTF8);require(sorted.equals(permissions),409,"SKILL_PERMISSIONS_MISMATCH");
         var target=map("skillInstallationId",id("si_"),"productVersionId",v.getProductVersionId(),"skillVersion",v.getSkillVersion(),
                 "packageSha256",HexFormat.of().formatHex(v.getPackageSha256()),"manifestSha256",manifest==null?null:manifest.manifestSha256(),
                 "byteLength",v.getPackageSize().toString(),"kind",manifest==null?"INSTRUCTION":"EXECUTABLE");
+        var quoteBindings=quoteSpecifications.bindingsForVersion(a.tenantId(),a.clientId(),v.getProductVersionId());
+        if(!quoteBindings.isEmpty())target.put("quoteSpecBindings",quoteBindings);
         var types=new ArrayList<String>();var requirements=new ArrayList<String>();
         if(manifest!=null) {
             manifest.document().at("/inputs/acceptedMimeTypes").forEach(n->types.add(n.asText()));

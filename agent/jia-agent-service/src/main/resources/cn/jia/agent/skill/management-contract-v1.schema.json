@@ -137,6 +137,15 @@
             "EXECUTABLE",
             "INSTRUCTION"
           ]
+        },
+        "quoteSpecBindings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/CapabilityQuoteSpecBinding"
+          }
         }
       },
       "allOf": [
@@ -2750,6 +2759,30 @@
           "$ref": "#/definitions/Sha256"
         },
         "approvedPermissionsSha256": {
+          "$ref": "#/definitions/Sha256"
+        }
+      }
+    },
+    "CapabilityQuoteSpecBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilityId",
+        "capabilityVersion",
+        "specSha"
+      ],
+      "properties": {
+        "capabilityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "capabilityVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "specSha": {
           "$ref": "#/definitions/Sha256"
         }
       }

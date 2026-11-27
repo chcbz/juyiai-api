@@ -17,6 +17,23 @@ public final class PublishedCapabilityQuoteSpecs {
     private final CapabilityQuoteSpecMapper mapper;
     public PublishedCapabilityQuoteSpecs(CapabilityQuoteSpecMapper mapper) {this.mapper=Objects.requireNonNull(mapper);}
 
+    /** Immutable package metadata, not an execution grant. A skill without cost declarations remains installable. */
+    public List<Map<String,String>> bindingsForVersion(String tenant,String client,String productVersion) {
+        var rows=mapper.forApprovedVersion(tenant,client,productVersion);
+        require(rows.size()<=CapabilityQuoteSpecJson.MAX_SPECS,503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+        var keys=new HashSet<SpecKey>();var result=new ArrayList<Map<String,String>>();
+        for(var row:rows) {
+            require(keys.add(new SpecKey(row.capabilityId(),row.version())),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+            CapabilityQuoteSpec spec;
+            try {spec=CapabilityQuoteSpecJson.readStored(row.specJson(),row.specSha());}
+            catch(IllegalStateException corrupt){throw new SkillMarketplaceException(503,"CAPABILITY_QUOTE_SPEC_CORRUPT");}
+            require(spec.capabilityId().equals(row.capabilityId()) && spec.version().equals(row.version())
+                    && Set.of("ACTIVE","WITHDRAWN").contains(row.status()),503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+            if("ACTIVE".equals(row.status()))result.add(Map.of("capabilityId",row.capabilityId(),"capabilityVersion",row.version(),"specSha",row.specSha()));
+        }
+        return List.copyOf(result);
+    }
+
     /** New confirmations lock the adopted rows through the original task transaction. Historical replay skips this. */
     public void validateForConfirmation(String tenant,String client,List<WorkItem> items) {
         require(TransactionSynchronizationManager.isActualTransactionActive(),503,"CAPABILITY_QUOTE_SPEC_TRANSACTION_REQUIRED");

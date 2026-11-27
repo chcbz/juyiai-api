@@ -77,10 +77,10 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         admin.execute("CREATE DATABASE `"+database+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin");
         var ds=source(database);jdbc=new JdbcTemplate(ds);manager=new DataSourceTransactionManager(ds);tx=new TransactionTemplate(manager);
         for(String resource:List.of("db/economy-v0-foundation.sql","db/economy-v0-skill-marketplace.sql","db/economy-v0-skill-application.sql",
-                "db/task-scheduled-work-v1.sql","db/agent-command-transport-schema.sql","db/economy-skill-management-sm-c1.sql","db/agent-skill-execution-v1.sql"))
+                "db/agent-capability-quote-spec-v1.sql","db/task-scheduled-work-v1.sql","db/agent-command-transport-schema.sql","db/economy-skill-management-sm-c1.sql","db/agent-skill-execution-v1.sql"))
             new ResourceDatabasePopulator(new ClassPathResource(resource)).execute(ds);
         var config=new org.apache.ibatis.session.Configuration();config.setMapUnderscoreToCamelCase(true);
-        for(Class<?> type:List.of(ScheduledWorkMapper.class,SkillCatalogMapper.class,SkillInstallationMapper.class,SkillTradeMapper.class,EconomyLedgerMapper.class,
+        for(Class<?> type:List.of(ScheduledWorkMapper.class,CapabilityQuoteSpecMapper.class,SkillCatalogMapper.class,SkillInstallationMapper.class,SkillTradeMapper.class,EconomyLedgerMapper.class,
                 SkillManagementMapper.class,SkillExecutionMapper.class,AgentCommandTransportMapper.class,AgentCommandRecoveryMapper.class,AgentSkillInstallRecoveryMapper.class,AgentOutboxRelayMapper.class))config.addMapper(type);
         var factory=new SqlSessionFactoryBean();factory.setDataSource(ds);factory.setConfiguration(config);
         sql=new SqlSessionTemplate(Objects.requireNonNull(factory.getObject()));
@@ -127,7 +127,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         marketplace=new SkillMarketplaceService(market,app,trade,versions,runtimes,provider(writer),provider(packages),provider(authentication),provider(sessions),manager,positionService);
         rentalMapper=mock(cn.jia.economy.mapper.EconomyHostingRentMapper.class);
         rentalAdmission=new HostingRentWorkAdmission(rentalMapper,true);
-        service=new SkillManagementService(db,market,app,marketplace,trade,versions,runtimes,installations,authentication,identityLocks,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission);
+        service=new SkillManagementService(db,market,app,marketplace,trade,versions,runtimes,installations,authentication,identityLocks,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission,new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)));
         dispatch=new SkillInstallDispatchService(app,market,marketplace,versions,authentication,commands,provider(sessions),manager);dispatch.setManagement(service);
         recoveryMapper=sql.getMapper(AgentSkillInstallRecoveryMapper.class);
         recoveryDao=new AgentCommandRecoveryDaoImpl(sql.getMapper(AgentCommandRecoveryMapper.class), new cn.jia.core.security.FixedTenantAdmissionPolicy("0", null));
@@ -195,7 +195,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         when(agents.requireApiKeyOwnedAgent(ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
         when(agents.requireOwnedAgentCapabilities(ACTOR.tenantId(),ACTOR.clientId(),ACTOR.ownerJiacn(),AGENT)).thenReturn(dto);
         versions=new SkillAgentVersions(app,rows,provider(agents),owner,manager);
-        service=new SkillManagementService(db,market,app,marketplace,trade,versions,rows,installs,authentication,identities,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission);
+        service=new SkillManagementService(db,market,app,marketplace,trade,versions,rows,installs,authentication,identities,provider(packages),provider(writer),provider(sessions),provider(capabilities),manager,rentalAdmission,new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)));
     }
     /** Immutable snapshot of ALL relevant SQL business rows, including versions and transport leases. */
     protected Map<String,Object> businessSnapshot() {
@@ -416,12 +416,17 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         when(authority.withSkillManagementAuthority(eq(publicationScope),eq(publicationGrant),any())).thenAnswer(invocation->
                 new org.springframework.transaction.support.TransactionTemplate(manager).execute(status->
                         ((java.util.function.Supplier<?>)invocation.getArgument(2)).get()));
-        var publisher=new SkillPackagePublicationService(market,packageProvider,authority,mock(CapabilityQuotePublication.class));
-        var invalid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",HexFormat.of().formatHex(SkillPackageStore.sha256(archive)),null,2,"missing-source");
+        var publisher=new SkillPackagePublicationService(market,packageProvider,authority,new CapabilityQuotePublication(sql.getMapper(CapabilityQuoteSpecMapper.class)));
+        var spec=new cn.jia.agent.skill.quote.CapabilityQuoteSpec("CAPABILITY_QUOTE_SPEC_V1","document.export","1",Map.of(),
+                List.of(new cn.jia.agent.skill.quote.CapabilityQuoteSpec.CostDimension("inputs",cn.jia.agent.skill.quote.CapabilityQuoteSpec.Source.INPUT_COUNT,
+                        null,cn.jia.agent.requirement.ConfirmedScope.ValueType.INTEGER,"unit/items",null,Set.of())),
+                List.of(new cn.jia.agent.skill.quote.CapabilityQuoteSpec.Bucket("all",Map.of("inputs",new cn.jia.agent.skill.quote.CapabilityQuoteSpec.Range("0",null,Set.of())))));
+        var invalid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",HexFormat.of().formatHex(SkillPackageStore.sha256(archive)),null,2,"missing-source",false,List.of(spec));
         assertEquals("SKILL_UPGRADE_SOURCE_INVALID",assertThrows(SkillMarketplaceException.class,()->publisher.publish(publicationScope,publicationGrant,invalid,archive)).code());
         assertEquals("spv_pdf_1",market.selectProductForUpdate("0",ACTOR.clientId(),"sp_pdf").getCurrentProductVersionId());
         assertNull(market.selectApprovedProductVersion("0",ACTOR.clientId(),"spv_pdf_2"));
-        var valid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",invalid.packageSha256(),null,2,"spv_pdf_1");
+        assertEquals(0,count("agent_capability_quote_spec"));assertEquals(0,count("agent_skill_quote_spec_binding"));
+        var valid=new SkillPackagePublicationService.Publish("sp_pdf","spv_pdf_2","PDF","synthetic fixture","pdf-export","2.0.0",5_000_000L,"NONE","[]",invalid.packageSha256(),null,2,"spv_pdf_1",false,List.of(spec));
         assertEquals("PUBLISHED",publisher.publish(publicationScope,publicationGrant,valid,archive).disposition());
         assertEquals("RECORDED",publisher.publish(publicationScope,publicationGrant,valid,archive).disposition());
         assertEquals("COVERED",db.upgradePolicy("0",ACTOR.clientId(),"spv_pdf_1","spv_pdf_2"));
@@ -429,8 +434,16 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         var upgrade=packageChange("UPGRADE",sourceInstallation,text(first,"skillRevision"),"spv_pdf_2");
         assertNotNull(upgrade.get("orderId"));assertEquals("20",object(upgrade.get("price")).get("amountMinor"));
         assertEquals("INSTRUCTION",object(upgrade.get("target")).get("kind"));
+        var expectedBindings=List.of(map("capabilityId","document.export","capabilityVersion","1","specSha",spec.specSha()));
+        assertEquals(expectedBindings,object(upgrade.get("target")).get("quoteSpecBindings"));
+        assertEquals(expectedBindings,object(command(upgrade).get("target")).get("quoteSpecBindings"));
         finishInstall(upgrade);assertEquals("SUCCEEDED",current(upgrade).get("status"));
         assertEquals(orders+1,count("economy_skill_order"));
+        var auth=db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),text(object(upgrade.get("target")),"skillInstallationId"));
+        assertEquals(expectedBindings,read(auth.getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
+        publisher.withdrawQuoteSpec(publicationScope,publicationGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("document.export","1"));
+        assertTrue(new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)).bindingsForVersion("0",ACTOR.clientId(),"spv_pdf_2").isEmpty());
+        assertEquals(expectedBindings,read(db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),auth.getInstallationId()).getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
     }
     @Test void instructionNativeBindingUsesRealInstallationAndDisablingClosesAdmission() throws Exception {
         publishInstruction();var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);

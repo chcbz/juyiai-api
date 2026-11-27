@@ -20,7 +20,11 @@ class SkillManagementCodecTest {
             var e=it.next();assertEquals(e.getValue().asText(),HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(resource(e.getKey()))),e.getKey());
         }
         try(var in=SkillManagementCodec.class.getResourceAsStream("management-contract-v1.schema.json")) {
-            assertArrayEquals(resource("management-contract-v1.schema.json"),Objects.requireNonNull(in).readAllBytes());
+            var active=(com.fasterxml.jackson.databind.node.ObjectNode)JSON.readTree(Objects.requireNonNull(in).readAllBytes());
+            var definitions=(com.fasterxml.jackson.databind.node.ObjectNode)active.get("definitions");
+            assertNotNull(definitions.remove("CapabilityQuoteSpecBinding"));
+            assertNotNull(((com.fasterxml.jackson.databind.node.ObjectNode)definitions.get("PackageRef").get("properties")).remove("quoteSpecBindings"));
+            assertEquals(JSON.readTree(resource("management-contract-v1.schema.json")),active,"Only the explicit additive cost-binding extension differs; original fixture bytes remain pinned");
         }
     }
     @Test void allFrozenPositiveAndNegativeDtos() throws Exception {

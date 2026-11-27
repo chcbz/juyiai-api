@@ -49,6 +49,17 @@ class PublishedCapabilityQuoteSpecsTest {
         when(mapper.published("0","client",List.of(key),false)).thenReturn(List.of(row,row));
         assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.readActive("0","client",List.of(key))).status());
     }
+    @Test void installationMetadataComesOnlyFromVerifiedActiveSemanticBindings() {
+        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of());
+        assertTrue(service.bindingsForVersion("0","client","version").isEmpty());
+        var row=stored("cap");
+        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(row));
+        assertEquals(List.of(Map.of("capabilityId","cap","capabilityVersion","1","specSha",row.specSha())),service.bindingsForVersion("0","client","version"));
+        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(new StoredSpec("cap","1",row.specSha(),row.specJson(),"WITHDRAWN")));
+        assertTrue(service.bindingsForVersion("0","client","version").isEmpty());
+        when(mapper.forApprovedVersion("0","client","version")).thenReturn(List.of(new StoredSpec("cap","1","0".repeat(64),row.specJson(),"WITHDRAWN")));
+        assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.bindingsForVersion("0","client","version")).status());
+    }
     @Test void confirmationUsesSharedLocksAndRejectsUndeclaredUserConstraints() {
         var item=new ConfirmedScope.WorkItem("w","cap","1",Map.of(),Map.of(),List.of(),List.of());
         assertEquals(503,assertThrows(SkillMarketplaceException.class,()->service.validateForConfirmation("0","client",List.of(item))).status());
