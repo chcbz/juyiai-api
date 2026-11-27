@@ -14,6 +14,8 @@ import java.util.Objects;
 @org.springframework.context.annotation.Profile("schema-maintenance")
 public final class AgentTaskRequirementSnapshotSchemaInitializer implements InitializingBean {
     private static final String TABLE = "agent_task_requirement_snapshot";
+    private static final List<String> SCOPE_COLUMNS = List.of("scope_schema", "scope_json", "scope_sha256",
+            "scope_input_sha256", "scope_confirmed_at");
 
     private final JdbcTemplate jdbc;
 
@@ -30,6 +32,7 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
         Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM information_schema.tables "
                 + "WHERE table_schema=DATABASE() AND table_name=?", Integer.class, TABLE);
         if (count == null || count == 0) jdbc.execute(ddl());
+        validate(false); // Reject base-schema drift before issuing any additive ALTER.
         evolveScopeColumns(TABLE);
         validate();
         // Explicit schema-maintenance only. Production backfill is a separate controlled migration.
@@ -78,7 +81,9 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
         } catch (Exception e) { throw new IllegalStateException("Invalid snapshot DDL", e); }
     }
 
-    void validate() {
+    void validate() { validate(true); }
+
+    private void validate(boolean requireScopeColumns) {
         Map<String,Object> table = jdbc.queryForMap("SELECT engine,table_collation FROM "
                 + "information_schema.tables WHERE table_schema=DATABASE() AND table_name=?", TABLE);
         if (!"InnoDB".equalsIgnoreCase(Objects.toString(table.get("engine"), ""))
@@ -87,9 +92,11 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
         var columns = jdbc.queryForList("SELECT column_name,column_type,is_nullable,collation_name "
                 + "FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? "
                 + "ORDER BY ordinal_position", TABLE);
-        if (!columns.stream().map(r -> Objects.toString(r.get("column_name"), "")).toList()
-                .equals(List.of("id","tenant_id","client_id","owner_jiacn","task_id",
-                        "revision","confirmation_id","task_version_at_confirmation","title","description","content_sha256","source","created_at","scope_schema","scope_json","scope_sha256","scope_input_sha256","scope_confirmed_at")))
+        var expected = new java.util.ArrayList<>(List.of("id","tenant_id","client_id","owner_jiacn","task_id",
+                "revision","confirmation_id","task_version_at_confirmation","title","description","content_sha256","source","created_at"));
+        if (requireScopeColumns) expected.addAll(SCOPE_COLUMNS);
+        if (!columns.stream().map(r -> Objects.toString(r.get("column_name"), ""))
+                .filter(name -> requireScopeColumns || !SCOPE_COLUMNS.contains(name)).toList().equals(expected))
             throw new IllegalStateException("Snapshot columns drift");
         for (var r : columns) {
             String name = Objects.toString(r.get("column_name"), "");
@@ -99,7 +106,7 @@ public final class AgentTaskRequirementSnapshotSchemaInitializer implements Init
             if ((name.equals("title") || name.equals("description"))
                     && !"mediumtext".equalsIgnoreCase(Objects.toString(r.get("column_type"), "")))
                 throw new IllegalStateException("Snapshot text width drift: " + name);
-            if ((!name.equals("description") && !name.startsWith("scope_")) && !"NO".equalsIgnoreCase(Objects.toString(r.get("is_nullable"), "")))
+            if ((!name.equals("description") && !SCOPE_COLUMNS.contains(name)) && !"NO".equalsIgnoreCase(Objects.toString(r.get("is_nullable"), "")))
                 throw new IllegalStateException("Snapshot nullability drift: " + name);
         }
         List<Map<String,Object>> indexes = jdbc.queryForList("SELECT index_name,non_unique,seq_in_index,column_name,sub_part "

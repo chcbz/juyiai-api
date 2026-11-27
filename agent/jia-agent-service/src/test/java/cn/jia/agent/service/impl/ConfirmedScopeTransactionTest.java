@@ -69,6 +69,7 @@ class ConfirmedScopeTransactionTest {
                         "ownerJiacn",i.getArgument(2),"taskId",i.getArgument(3),"expectedVersion",i.getArgument(4),"updateTime",1L)));
         mutations=new AgentTaskMutationTransactionImpl(roots,manager);
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,mutations);
+        service.confirmationActor(new cn.jia.agent.security.AuthenticatedRequirementConfirmationActor());
         catalogues=mock(AgentTaskExecutionGrantService.class);
         when(catalogues.snapshotTaskInputsWithinLockedTask(OWNER,"task")).thenReturn(new AgentTaskExecutionGrantService.InputCatalogue(INPUTS,
                 List.of(new AgentTaskExecutionGrantService.AuthorizedInput("f-text",1,"INPUT","text/plain",1000,"a".repeat(64)))));
@@ -92,6 +93,32 @@ class ConfirmedScopeTransactionTest {
     long version() {return jdbc.queryForObject("SELECT task_version FROM agent_task_meta",Long.class);}
     int snapshots() {return jdbc.queryForObject("SELECT COUNT(*) FROM agent_task_requirement_snapshot",Integer.class);}
     void fund() {jdbc.update("INSERT INTO agent_task_funding VALUES ('0','client','owner','task')");}
+
+    @Test void confirmationRequiresMatchingAuthenticatedJwtAndRequestContext() {
+        var valid=SecurityContextHolder.getContext().getAuthentication();
+        SecurityContextHolder.clearContext();
+        assertThrows(IllegalArgumentException.class,this::confirm);
+        SecurityContextHolder.getContext().setAuthentication(
+                new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("owner","unused",List.of()));
+        assertThrows(IllegalArgumentException.class,this::confirm);
+        SecurityContextHolder.getContext().setAuthentication(valid);
+        EsContextHolder.getContext().setClientId("other-client");
+        assertThrows(IllegalArgumentException.class,this::confirm);
+        EsContextHolder.getContext().setClientId("client");
+        EsContextHolder.getContext().setJiacn("other-owner");
+        assertThrows(IllegalArgumentException.class,this::confirm);
+        EsContextHolder.clearContext();
+        assertThrows(IllegalArgumentException.class,this::confirm);
+        assertEquals(0,version());assertEquals(1,snapshots());
+        verifyNoInteractions(catalogues);
+    }
+
+    @Test void confirmationFailsClosedWithoutSecurityAdapter() {
+        var unconfigured=new AgentTaskRequirementSnapshotServiceImpl(jdbc,mutations);
+        assertThrows(IllegalStateException.class,()->unconfigured.confirmScope(OWNER,"task",0,"missing_adapter",
+                command(List.of("f-text@1"))));
+        assertEquals(0,version());assertEquals(1,snapshots());
+    }
 
     @Test void persistsAndReadsExactScopeAndAdvancesOnlyOnce() {
         var first=confirm();assertEquals(2,first.revision());assertEquals(1,version());assertEquals(2,snapshots());

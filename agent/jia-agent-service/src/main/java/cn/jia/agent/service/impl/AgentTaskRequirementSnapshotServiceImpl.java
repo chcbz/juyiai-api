@@ -1,11 +1,11 @@
 package cn.jia.agent.service.impl;
 
 import cn.jia.agent.service.AgentTaskExecutionGrantService;
+import cn.jia.agent.service.AgentTaskRequirementConfirmationActor;
 import cn.jia.agent.dao.AgentTaskMetaDao;
 import cn.jia.agent.dao.impl.AgentTaskScopedRequirementStore;
 import cn.jia.agent.requirement.ConfirmedScope;
 import org.springframework.beans.factory.ObjectProvider;
-import cn.jia.core.context.EsContextHolder;
 import cn.jia.agent.exception.AgentTaskCollaborationException;
 import cn.jia.agent.service.AgentTaskMutationTransaction;
 import cn.jia.agent.service.AgentTaskRequirementReadException;
@@ -14,8 +14,6 @@ import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -39,6 +37,11 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
     private final AgentTaskScopedRequirementStore scopedRequirements;
     private ObjectProvider<AgentTaskExecutionGrantService> inputCatalogues;
     private AgentTaskMetaDao taskRoots;
+    private AgentTaskRequirementConfirmationActor confirmationActor;
+
+    @Inject void confirmationActor(AgentTaskRequirementConfirmationActor actor) {
+        this.confirmationActor=Objects.requireNonNull(actor);
+    }
 
     /** Lazy catalogue dependency avoids the existing grant -> requirements constructor cycle. */
     @Inject void scopeDependencies(ObjectProvider<AgentTaskExecutionGrantService> catalogues,AgentTaskMetaDao tasks) {
@@ -64,14 +67,11 @@ public final class AgentTaskRequirementSnapshotServiceImpl implements AgentTaskR
         return created;
     }
 
-    private static void requireAuthenticatedOwner(AgentTaskExecutionGrantService.Scope scope) {
-        var principal=SecurityContextHolder.getContext().getAuthentication();
-        var context=EsContextHolder.getContext();
-        if (context==null || !scope.ownerJiacn().equals(context.getJiacn())
-                || !scope.clientId().equals(context.getClientId())
-                || !(principal instanceof JwtAuthenticationToken jwt) || !jwt.isAuthenticated()
-                || !scope.ownerJiacn().equals(jwt.getToken().getClaims().get("jiacn"))
-                || !scope.clientId().equals(jwt.getToken().getClaims().get("client_id")))
+    private void requireAuthenticatedOwner(AgentTaskExecutionGrantService.Scope scope) {
+        if (confirmationActor==null) throw new IllegalStateException("Confirmation security boundary unavailable");
+        var owner=confirmationActor.authenticatedOwner();
+        if (owner==null || !scope.ownerJiacn().equals(owner.ownerJiacn())
+                || !scope.clientId().equals(owner.clientId()))
             throw new IllegalArgumentException("Authenticated task owner required for re-confirmation");
     }
 

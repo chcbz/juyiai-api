@@ -64,6 +64,7 @@ class AgentTaskRequirementSnapshotServiceImplTest {
                     return ((AgentTaskMutationTransaction.LockedTaskMutation<?>)i.getArgument(4)).apply(task);
                 });
         service=new AgentTaskRequirementSnapshotServiceImpl(jdbc,transactions);
+        service.confirmationActor(new cn.jia.agent.security.AuthenticatedRequirementConfirmationActor());
         TransactionSynchronizationManager.setActualTransactionActive(true);
         TransactionSynchronizationManager.setCurrentTransactionReadOnly(false);
         EsContext context=new EsContext();context.setClientId("client");context.setJiacn("owner");

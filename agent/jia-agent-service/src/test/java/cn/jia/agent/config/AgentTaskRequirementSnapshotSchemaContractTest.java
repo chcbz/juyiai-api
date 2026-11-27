@@ -26,6 +26,27 @@ class AgentTaskRequirementSnapshotSchemaContractTest {
         assertFalse(ddl.contains("update agent_task_requirement_snapshot"));
     }
 
+    @Test void existingBaseDriftIsRejectedBeforeAdditiveMigration() throws Exception {
+        var jdbc=mock(JdbcTemplate.class);
+        var ds=mock(javax.sql.DataSource.class);
+        var connection=mock(java.sql.Connection.class);
+        var metadata=mock(java.sql.DatabaseMetaData.class);
+        when(jdbc.getDataSource()).thenReturn(ds);
+        when(ds.getConnection()).thenReturn(connection);
+        when(connection.getMetaData()).thenReturn(metadata);
+        when(metadata.getDatabaseProductName()).thenReturn("MySQL");
+        when(metadata.getDatabaseMajorVersion()).thenReturn(8);
+        when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(),org.mockito.ArgumentMatchers.eq(Integer.class),
+                org.mockito.ArgumentMatchers.eq("agent_task_requirement_snapshot"))).thenReturn(1);
+        when(jdbc.queryForMap(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("agent_task_requirement_snapshot")))
+                .thenReturn(Map.of("engine","MyISAM","table_collation","utf8mb4_0900_bin"));
+        var failure=assertThrows(IllegalStateException.class,
+                ()->new AgentTaskRequirementSnapshotSchemaInitializer(jdbc).afterPropertiesSet());
+        assertEquals("Snapshot table engine/collation drift",failure.getMessage());
+        verify(jdbc,never()).execute(org.mockito.ArgumentMatchers.anyString());
+    }
+
     @Test void partialOwnerIndexWithCorrectNameFailsStructuralCheck() {
         var indexes=List.<Map<String,Object>>of(Map.of("index_name","uk_atrs_scope_revision",
                 "non_unique",0,"seq_in_index",1,"column_name","tenant_id","sub_part",0));
