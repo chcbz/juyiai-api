@@ -4,6 +4,7 @@ import cn.jia.core.security.FixedTenantAdmissionPolicy;
 import cn.jia.task.scheduling.*;
 import cn.jia.task.mapper.ScheduledWorkMapper;
 import cn.jia.agent.dao.*;
+import cn.jia.agent.skill.quote.MeasuredCostProfile.Slot;
 import cn.jia.agent.dao.impl.*;
 import cn.jia.agent.entity.*;
 import cn.jia.agent.hosting.*;
@@ -117,7 +118,7 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         Path packageRoot=Files.createDirectory(scratch.resolve(database+"-packages"),
                 java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
                         java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")));
-        packages=new SkillPackages(packageRoot);sessions=mock(AgentManagedSessionLookup.class);
+        packages=spy(new SkillPackages(packageRoot));sessions=mock(AgentManagedSessionLookup.class);
         when(sessions.isReady(eq("0"),eq(ACTOR.clientId()),eq(AGENT),any())).thenReturn(true);
         when(sessions.dispatch(anyString(),anyString(),anyString(),any(),any())).thenReturn(AgentRawCommandDispatchResult.sent(1,1));
         capabilities=mock(SkillCapabilityLookup.class);when(capabilities.lookup(any(),any())).thenReturn(SkillCapabilityLookup.View.unavailable(SkillCapabilityLookup.State.DISCONNECTED));
@@ -441,9 +442,45 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertEquals(orders+1,count("economy_skill_order"));
         var auth=db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),text(object(upgrade.get("target")),"skillInstallationId"));
         assertEquals(expectedBindings,read(auth.getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
+        var slot=new Slot(0,"document.export","1",spec.specSha(),List.of(),"pdf-export","2.0.0",
+                text(object(upgrade.get("target")),"packageSha256"),auth.getInstallationId());
+        assertCostProfileInstallationFacts(slot);
         publisher.withdrawQuoteSpec(publicationScope,publicationGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("document.export","1"));
         assertTrue(new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)).bindingsForVersion("0",ACTOR.clientId(),"spv_pdf_2").isEmpty());
+        assertTrue(costBindings(scope(),List.of(slot)).isEmpty(),"withdrawn semantics cannot authorize new cost metadata");
+        assertTrue(service.descriptors(scope()).stream().anyMatch(d->auth.getInstallationId().equals(d.installationId())),
+                "cost withdrawal is not execution revocation");
         assertEquals(expectedBindings,read(db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),auth.getInstallationId()).getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
+    }
+    private Set<Slot> costBindings(SkillCapabilityLookup.Scope scope,Collection<Slot> slots) {
+        return service.costProfileBindings(scope,runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId(),slots);
+    }
+    private void assertCostProfileInstallationFacts(Slot slot) {
+        clearInvocations(packages,sessions,capabilities);
+        assertEquals(Set.of(slot),costBindings(scope(),List.of(slot,slot)));
+        assertTrue(costBindings(new SkillCapabilityLookup.Scope("0",ACTOR.clientId(),"wrong-owner",AGENT),List.of(slot)).isEmpty());
+        assertTrue(costBindings(new SkillCapabilityLookup.Scope("0","other-client",ACTOR.ownerJiacn(),AGENT),List.of(slot)).isEmpty());
+        assertTrue(service.costProfileBindings(scope(),"other-runtime",runtime.getRuntimeHostId(),List.of(slot)).isEmpty());
+        assertTrue(service.costProfileBindings(scope(),runtime.getRuntimeInstallationId(),"other-host",List.of(slot)).isEmpty());
+        var wrongHash=new Slot(0,slot.capabilityId(),slot.capabilityVersion(),"0".repeat(64),List.of(),slot.skillKey(),slot.skillVersion(),slot.packageSha(),slot.installId());
+        var wrongVersion=new Slot(0,slot.capabilityId(),slot.capabilityVersion(),slot.specSha(),List.of(),slot.skillKey(),"9.0.0",slot.packageSha(),slot.installId());
+        var wrongPackage=new Slot(0,slot.capabilityId(),slot.capabilityVersion(),slot.specSha(),List.of(),slot.skillKey(),slot.skillVersion(),"0".repeat(64),slot.installId());
+        assertEquals(Set.of(slot),costBindings(scope(),List.of(slot,wrongHash,wrongVersion,wrongPackage)));
+        runtime.setStatus("offline");
+        try {assertEquals(Set.of(slot),costBindings(scope(),List.of(slot)),"offline is not cost metadata revocation");}
+        finally {runtime.setStatus("online");}
+        jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=0 WHERE active_installation_id=?",slot.installId());
+        try {assertTrue(costBindings(scope(),List.of(slot)).isEmpty());}
+        finally {jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=1 WHERE active_installation_id=?",slot.installId());}
+        jdbc.update("UPDATE agent_skill_managed_state SET pending_change_id='pending-fixture' WHERE active_installation_id=?",slot.installId());
+        try {assertTrue(costBindings(scope(),List.of(slot)).isEmpty());}
+        finally {jdbc.update("UPDATE agent_skill_managed_state SET pending_change_id=NULL WHERE active_installation_id=?",slot.installId());}
+        var original=jdbc.queryForObject("SELECT package_json FROM agent_skill_installation_authorization WHERE installation_id=?",String.class,slot.installId());
+        jdbc.update("UPDATE agent_skill_installation_authorization SET package_json=JSON_REMOVE(package_json,'$.quoteSpecBindings') WHERE installation_id=?",slot.installId());
+        try {assertTrue(costBindings(scope(),List.of(slot)).isEmpty(),"no retroactive binding of old installation");}
+        finally {jdbc.update("UPDATE agent_skill_installation_authorization SET package_json=? WHERE installation_id=?",original,slot.installId());}
+        assertEquals(Set.of(slot),costBindings(scope(),List.of(slot)));
+        verifyNoInteractions(packages,sessions,capabilities);
     }
     @Test void instructionNativeBindingUsesRealInstallationAndDisablingClosesAdmission() throws Exception {
         publishInstruction();var first=packageChange("INSTALL",null,"0","spv_pdf_1");finishInstall(first);first=current(first);

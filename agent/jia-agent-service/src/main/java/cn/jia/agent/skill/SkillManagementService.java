@@ -8,6 +8,7 @@ import cn.jia.agent.hosting.HostingRentWorkAdmission;
 import cn.jia.agent.security.AgentRuntimeAuthenticationService;
 import cn.jia.agent.service.*;
 import cn.jia.agent.entity.skill.*;
+import cn.jia.agent.skill.quote.MeasuredCostProfile.Slot;
 import cn.jia.economy.service.skill.*;
 import cn.jia.agent.mapper.skill.*;
 import org.springframework.beans.factory.ObjectProvider;
@@ -1257,21 +1258,35 @@ public final class SkillManagementService {
                 ||!i.getTargetAgentId().equals(order.getTargetAgentId()))return null;
         return new AuthorizationOrigin(text(proof,"actorId"),text(proof,"ownerJiacn"),text(proof,"agentId"),text(proof,"skillKey"));
     }
+    /** Database authorization facts shared by descriptor loading and cost metadata. No package IO here. */
+    private record InstalledAuthorization(AuthorizationOrigin origin, Map<String,Object> target,
+            SkillProductVersionEntity approved) {}
+    private InstalledAuthorization installedAuthorization(SkillCapabilityLookup.Scope scope,
+            SkillInstallationAuthorizationEntity auth, SkillRelationshipAuthorizations.Relationship relationship) {
+        var context=origin(auth,relationship);
+        if(context==null||!scope.ownerJiacn().equals(context.ownerJiacn())||!scope.agentId().equals(context.agentId()))return null;
+        var installation=app.installation(scope.tenantId(),scope.clientId(),auth.getInstallationId());
+        var entitlement=db.readEntitlement(scope.tenantId(),scope.clientId(),auth.getEntitlementId());
+        if(!validInstallation(scope,auth,installation,entitlement,relationship))return null;
+        var target=ref(auth);
+        var approved=market.selectApprovedProductVersion(scope.tenantId(),scope.clientId(),text(target,"productVersionId"));
+        if(approved==null||!HexFormat.of().formatHex(approved.getPackageSha256()).equals(target.get("packageSha256")))return null;
+        if(!retained(auth,relationship)&&installation.getOrderId()!=null) {
+            var order=trade.order(scope.tenantId(),scope.clientId(),installation.getOrderId());
+            if(order==null||!"ACTIVE".equals(order.getStatus()))return null;
+        }
+        return new InstalledAuthorization(context,target,approved);
+    }
+
     public List<InstalledSkillDescriptorLookup.Descriptor> descriptors(SkillCapabilityLookup.Scope scope) {
         var rows=new ArrayList<InstalledSkillDescriptorLookup.Descriptor>();
         var authorizations=db.authorizationsForAgent(scope.tenantId(),scope.clientId(),scope.agentId());
         if(authorizations.isEmpty())return rows;
         var relationship=relationship(scope);
         for(var auth:authorizations) {
-            var context=origin(auth,relationship);
-            if(context==null||!scope.ownerJiacn().equals(context.ownerJiacn())||!scope.agentId().equals(context.agentId()))continue;
-            var i=app.installation(scope.tenantId(),scope.clientId(),auth.getInstallationId());
-            var e=db.readEntitlement(scope.tenantId(),scope.clientId(),auth.getEntitlementId());
-            if(!validInstallation(scope,auth,i,e,relationship))continue;
-            var target=ref(auth);var approved=market.selectApprovedProductVersion(scope.tenantId(),scope.clientId(),text(target,"productVersionId"));
-            if(approved==null||!HexFormat.of().formatHex(approved.getPackageSha256()).equals(target.get("packageSha256")))continue;
-            if(!retained(auth,relationship)&&i.getOrderId()!=null) {var o=trade.order(scope.tenantId(),scope.clientId(),i.getOrderId());if(o==null||!"ACTIVE".equals(o.getStatus()))continue;}
-            var pkg=packages.getObject().describe(approved);var manifest=packages.getObject().manifest(pkg);
+            var installed=installedAuthorization(scope,auth,relationship);if(installed==null)continue;
+            var context=installed.origin();var target=installed.target();
+            var pkg=packages.getObject().describe(installed.approved());var manifest=packages.getObject().manifest(pkg);
             if(manifest==null) {
                 if(!"INSTRUCTION".equals(target.get("kind"))||target.get("manifestSha256")!=null)continue;
             } else if(!"EXECUTABLE".equals(target.get("kind"))||!manifest.manifestSha256().equals(target.get("manifestSha256")))continue;
@@ -1279,6 +1294,47 @@ public final class SkillManagementService {
                     text(target,"packageSha256"),manifest==null?null:manifest.manifestSha256(),manifest==null?null:manifest.document().toString(),runtimeInstallation(auth,relationship),runtimeHost(auth,relationship),null,manifest==null && decodePermissions(auth.getPermissionsJson()).contains("execution:domain-api")));
         }
         return rows;
+    }
+
+    /** Read-only preparation: exact installed/approved semantic bindings, not an execution grant or
+     * proof that several skills can run as a combination. Caller owns authenticated Runtime/session
+     * fencing and must recheck current authorization at commit. Offline is not a metadata withdrawal.
+     * Reads no packages, manifests, Runtime catalog or remote service. */
+    public Set<Slot> costProfileBindings(
+            SkillCapabilityLookup.Scope scope, String runtimeInstallationId, String runtimeHostId,
+            Collection<Slot> requested) {
+        var slots=Set.copyOf(requested);if(slots.isEmpty())return Set.of();
+        var byInstallation=new HashMap<String,List<Slot>>();
+        for(var slot:slots)byInstallation.computeIfAbsent(slot.installId(),id->new ArrayList<>()).add(slot);
+        var relationship=relationship(scope);
+        var accepted=new HashSet<Slot>();
+        var states=new HashMap<String,SkillManagedStateEntity>();
+        var bindings=new HashMap<String,List<Map<String,String>>>();
+        for(var auth:db.authorizationsForAgent(scope.tenantId(),scope.clientId(),scope.agentId())) {
+            if(!byInstallation.containsKey(auth.getInstallationId())
+                    ||!Objects.equals(runtimeInstallationId,runtimeInstallation(auth,relationship))
+                    ||!Objects.equals(runtimeHostId,runtimeHost(auth,relationship)))continue;
+            var installed=installedAuthorization(scope,auth,relationship);if(installed==null)continue;
+            var skill=installed.origin().skillKey();var target=installed.target();
+            if(!states.containsKey(skill))states.put(skill,db.findState(scope.tenantId(),scope.clientId(),scope.agentId(),skill));
+            var state=states.get(skill);
+            if(state==null||!auth.getInstallationId().equals(state.getActiveInstallationId())
+                    ||!Boolean.TRUE.equals(state.getDesiredEnabled())||state.getPendingChangeId()!=null
+                    ||!"INSTRUCTION".equals(target.get("kind"))&&!Boolean.TRUE.equals(state.getAdmissionEnabled())
+                    ||!currentPositionSource(scope,auth,relationship))continue;
+            // The installed immutable target must already carry this binding: do not retroactively
+            // attach newly published semantics to an old installation or trust a Runtime assertion.
+            var delivered=target.get("quoteSpecBindings");if(!(delivered instanceof List<?> original))continue;
+            var active=bindings.computeIfAbsent(text(target,"productVersionId"),version->
+                    quoteSpecifications.bindingsForVersion(scope.tenantId(),scope.clientId(),version));
+            for(var slot:byInstallation.get(auth.getInstallationId())) {
+                var binding=Map.of("capabilityId",slot.capabilityId(),"capabilityVersion",slot.capabilityVersion(),"specSha",slot.specSha());
+                if(slot.installId().equals(auth.getInstallationId())&&slot.skillKey().equals(skill)
+                        &&slot.skillVersion().equals(target.get("skillVersion"))&&slot.packageSha().equals(target.get("packageSha256"))
+                        &&original.contains(binding)&&active.contains(binding))accepted.add(slot);
+            }
+        }
+        return Set.copyOf(accepted);
     }
     private boolean validInstallation(SkillCapabilityLookup.Scope scope,SkillInstallationAuthorizationEntity auth,SkillInstallationEntity i,SkillEntitlementEntity e) {
         return validInstallation(scope,auth,i,e,relationship(scope));
