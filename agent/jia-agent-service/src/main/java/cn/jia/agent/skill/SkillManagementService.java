@@ -1312,44 +1312,79 @@ public final class SkillManagementService {
         require(TransactionSynchronizationManager.isActualTransactionActive(),503,"SKILL_STATE_UNAVAILABLE");
         return costProfileBindings(scope,runtimeInstallationId,runtimeHostId,requested,true);
     }
+    /** Cost-independent installed capability fact. A collection of these facts is NOT a composite
+     * execution plan; only the existing executor's full-scope declaration can prove a combination. */
+    public record QuoteCapability(String capabilityId,String capabilityVersion,String specSha,
+            String skillKey,String skillVersion,String packageSha,String installId) {
+        private boolean matches(Slot slot) {
+            return capabilityId.equals(slot.capabilityId()) && capabilityVersion.equals(slot.capabilityVersion())
+                    && specSha.equals(slot.specSha()) && skillKey.equals(slot.skillKey())
+                    && skillVersion.equals(slot.skillVersion()) && packageSha.equals(slot.packageSha())
+                    && installId.equals(slot.installId());
+        }
+        @Override public String toString(){return "InstalledQuoteCapability[private]";}
+    }
+    /** Independent of Runtime cost-report presence, model routes and prices. Caller still owns the
+     * candidate/relationship/Runtime identity fence; this does not grant permission to execute. */
+    public Set<QuoteCapability> quoteCapabilities(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,String runtimeHostId) {
+        return quoteCapabilities(scope,runtimeInstallationId,runtimeHostId,null,false);
+    }
+    public Set<QuoteCapability> lockQuoteCapabilities(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,String runtimeHostId) {
+        require(TransactionSynchronizationManager.isActualTransactionActive(),503,"SKILL_STATE_UNAVAILABLE");
+        return quoteCapabilities(scope,runtimeInstallationId,runtimeHostId,null,true);
+    }
     private Set<Slot> costProfileBindings(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,
             String runtimeHostId,Collection<Slot> requested,boolean locking) {
         var slots=Set.copyOf(requested);if(slots.isEmpty())return Set.of();
-        var byInstallation=new HashMap<String,List<Slot>>();
-        for(var slot:slots)byInstallation.computeIfAbsent(slot.installId(),id->new ArrayList<>()).add(slot);
+        var installations=new HashSet<String>();for(var slot:slots)installations.add(slot.installId());
+        var capabilities=quoteCapabilities(scope,runtimeInstallationId,runtimeHostId,installations,locking);
+        var byInstallation=new HashMap<String,List<QuoteCapability>>();
+        for(var capability:capabilities)byInstallation.computeIfAbsent(capability.installId(),id->new ArrayList<>()).add(capability);
+        var accepted=new HashSet<Slot>();
+        for(var slot:slots)if(byInstallation.getOrDefault(slot.installId(),List.of()).stream().anyMatch(c->c.matches(slot)))accepted.add(slot);
+        return Set.copyOf(accepted);
+    }
+    /** The same authority projection serves both ordinary capability checks and cost-report validation.
+     * Restricting installations is an optimization, never an alternate authorization path. */
+    private Set<QuoteCapability> quoteCapabilities(SkillCapabilityLookup.Scope scope,String runtimeInstallationId,
+            String runtimeHostId,Set<String> requestedInstallations,boolean locking) {
         var relationship=relationship(scope);
-        var eligible=new HashMap<Slot,String>();
+        var authorizations=db.authorizationsForAgent(scope.tenantId(),scope.clientId(),scope.agentId()).stream()
+                .filter(auth->requestedInstallations==null || requestedInstallations.contains(auth.getInstallationId()))
+                .filter(auth->Objects.equals(runtimeInstallationId,runtimeInstallation(auth,relationship))
+                        && Objects.equals(runtimeHostId,runtimeHost(auth,relationship))).toList();
+        // Lock authoritative skill roots, not skill names asserted by a cost reporter.
+        var skillKeys=new TreeSet<String>();
+        for(var auth:authorizations){var context=origin(auth,relationship);
+            if(context!=null && scope.ownerJiacn().equals(context.ownerJiacn()) && scope.agentId().equals(context.agentId()))skillKeys.add(context.skillKey());}
         var states=new HashMap<String,SkillManagedStateEntity>();
-        if(locking)for(var skill:slots.stream().map(Slot::skillKey).distinct().sorted().toList())
-            states.put(skill,db.lockState(scope.tenantId(),scope.clientId(),scope.agentId(),skill));
-        for(var auth:db.authorizationsForAgent(scope.tenantId(),scope.clientId(),scope.agentId())) {
-            if(!byInstallation.containsKey(auth.getInstallationId())
-                    ||!Objects.equals(runtimeInstallationId,runtimeInstallation(auth,relationship))
-                    ||!Objects.equals(runtimeHostId,runtimeHost(auth,relationship)))continue;
+        for(var skill:skillKeys)states.put(skill,locking?db.lockState(scope.tenantId(),scope.clientId(),scope.agentId(),skill)
+                :db.findState(scope.tenantId(),scope.clientId(),scope.agentId(),skill));
+        record Eligible(String installation,InstalledAuthorization installed,List<?> delivered) {}
+        var eligible=new ArrayList<Eligible>();
+        for(var auth:authorizations) {
             var installed=installedAuthorization(scope,auth,relationship);if(installed==null)continue;
-            var skill=installed.origin().skillKey();var target=installed.target();
-            if(!states.containsKey(skill))states.put(skill,db.findState(scope.tenantId(),scope.clientId(),scope.agentId(),skill));
-            var state=states.get(skill);
+            var skill=installed.origin().skillKey();var target=installed.target();var state=states.get(skill);
             if(state==null||!auth.getInstallationId().equals(state.getActiveInstallationId())
                     ||!Boolean.TRUE.equals(state.getDesiredEnabled())||state.getPendingChangeId()!=null
                     ||!"INSTRUCTION".equals(target.get("kind"))&&!Boolean.TRUE.equals(state.getAdmissionEnabled())
                     ||!currentPositionSource(scope,auth,relationship))continue;
-            // The installed immutable target must already carry this binding: do not retroactively
-            // attach newly published semantics to an old installation or trust a Runtime assertion.
-            var delivered=target.get("quoteSpecBindings");if(!(delivered instanceof List<?> original))continue;
-            for(var slot:byInstallation.get(auth.getInstallationId())) {
-                var binding=Map.of("capabilityId",slot.capabilityId(),"capabilityVersion",slot.capabilityVersion(),"specSha",slot.specSha());
-                if(slot.installId().equals(auth.getInstallationId())&&slot.skillKey().equals(skill)
-                        &&slot.skillVersion().equals(target.get("skillVersion"))&&slot.packageSha().equals(target.get("packageSha256"))
-                        &&original.contains(binding))eligible.put(slot,text(target,"productVersionId"));
+            var delivered=target.get("quoteSpecBindings");if(delivered==null)continue;
+            require(delivered instanceof List<?>,503,"CAPABILITY_QUOTE_SPEC_CORRUPT");
+            eligible.add(new Eligible(auth.getInstallationId(),installed,(List<?>)delivered));
+        }
+        var versions=eligible.stream().map(e->text(e.installed().target(),"productVersionId")).toList();
+        var active=locking?quoteSpecifications.lockBindingsForVersions(scope.tenantId(),scope.clientId(),versions)
+                :quoteSpecifications.bindingsForVersions(scope.tenantId(),scope.clientId(),versions);
+        var accepted=new HashSet<QuoteCapability>();
+        for(var row:eligible){var target=row.installed().target();
+            for(var binding:active.get(text(target,"productVersionId"))) {
+                // New declarations must not be retroactively attached to an old installed package.
+                if(!row.delivered().contains(binding))continue;
+                accepted.add(new QuoteCapability(binding.get("capabilityId"),binding.get("capabilityVersion"),binding.get("specSha"),
+                        row.installed().origin().skillKey(),text(target,"skillVersion"),text(target,"packageSha256"),row.installation()));
             }
         }
-        var active=locking?quoteSpecifications.lockBindingsForVersions(scope.tenantId(),scope.clientId(),eligible.values())
-                :quoteSpecifications.bindingsForVersions(scope.tenantId(),scope.clientId(),eligible.values());
-        var accepted=new HashSet<Slot>();
-        eligible.forEach((slot,version)->{
-            if(active.get(version).contains(Map.of("capabilityId",slot.capabilityId(),"capabilityVersion",slot.capabilityVersion(),"specSha",slot.specSha())))accepted.add(slot);
-        });
         return Set.copyOf(accepted);
     }
     private boolean validInstallation(SkillCapabilityLookup.Scope scope,SkillInstallationAuthorizationEntity auth,SkillInstallationEntity i,SkillEntitlementEntity e) {

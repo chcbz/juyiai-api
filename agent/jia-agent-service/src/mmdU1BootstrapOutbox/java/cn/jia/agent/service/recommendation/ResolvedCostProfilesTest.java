@@ -108,9 +108,15 @@ class ResolvedCostProfilesTest {
         var prepared=service.prepareScoped(DOMAIN,scopedInputs("1"),candidates);
         assertEquals(109,prepared.candidates().size());assertTrue(prepared.selected("no-measurement").isEmpty());
         assertTrue(prepared.group("no-measurement","f",H).isEmpty());
+        assertTrue(prepared.configuration("no-measurement").isEmpty());
+        assertThrows(IllegalArgumentException.class,()->prepared.configuration("other"));
         var key=prepared.group("agent-0","f",H).orElseThrow().key();
         for(int i=0;i<108;i++){
             assertEquals(0,prepared.selected("agent-"+i).orElseThrow().selectionPriority());
+            var resolved=prepared.configuration("agent-"+i).orElseThrow();
+            assertEquals(prepared.selected("agent-"+i).orElseThrow(),resolved.measurement());
+            assertEquals(prepared.configuration("agent-0").orElseThrow().configSemanticSha(),resolved.configSemanticSha());
+            if(i>0)assertNotEquals(prepared.configuration("agent-0").orElseThrow().configSha(),resolved.configSha());
             assertEquals(key,prepared.group("agent-"+i,"f",H).orElseThrow().key());
         }
         assertThrows(IllegalArgumentException.class,()->prepared.group("other","f",H));
@@ -127,6 +133,7 @@ class ResolvedCostProfilesTest {
         var preferred=scopedProfile("i",0,missing);
         var prepared=service.prepareScoped(DOMAIN,scopedInputs("1"),Map.of("agent",List.of(scopedProfile("i",1,unused),preferred)));
         assertEquals(preferred,prepared.selected("agent").orElseThrow());assertTrue(prepared.group("agent","f",H).isEmpty());
+        assertTrue(prepared.configuration("agent").isEmpty());
         service.recheckScoped(DOMAIN,prepared);
         verify(bindings).read(DOMAIN,List.of(missing),false);verifyNoMoreInteractions(bindings);
     }

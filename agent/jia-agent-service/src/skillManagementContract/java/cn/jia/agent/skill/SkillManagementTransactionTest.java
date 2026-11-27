@@ -444,12 +444,21 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertEquals(expectedBindings,read(auth.getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
         var slot=new Slot(0,"document.export","1",spec.specSha(),List.of(),"pdf-export","2.0.0",
                 text(object(upgrade.get("target")),"packageSha256"),auth.getInstallationId());
+        var capability=new SkillManagementService.QuoteCapability(slot.capabilityId(),slot.capabilityVersion(),slot.specSha(),
+                slot.skillKey(),slot.skillVersion(),slot.packageSha(),slot.installId());
+        // No runtime pricing schema/report has been initialized: capability must not depend on it.
+        assertEquals(Set.of(capability),service.quoteCapabilities(scope(),runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId()));
+        assertThrows(SkillMarketplaceException.class,()->service.lockQuoteCapabilities(scope(),runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId()));
+        assertTrue(service.quoteCapabilities(scope(),"other-runtime",runtime.getRuntimeHostId()).isEmpty());
+        assertTrue(service.quoteCapabilities(new SkillCapabilityLookup.Scope("0",ACTOR.clientId(),"other",AGENT),
+                runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId()).isEmpty());
         assertCostProfileInstallationFacts(slot);
         var registeredCosts=assertRegisteredCostProfile(slot);
         publisher.withdrawQuoteSpec(publicationScope,publicationGrant,new SkillPackagePublicationService.WithdrawQuoteSpec("document.export","1"));
         assertTrue(new PublishedCapabilityQuoteSpecs(sql.getMapper(CapabilityQuoteSpecMapper.class)).bindingsForVersion("0",ACTOR.clientId(),"spv_pdf_2").isEmpty());
         assertTrue(costBindings(scope(),List.of(slot)).isEmpty(),"withdrawn semantics cannot authorize new cost metadata");
         assertTrue(registeredCosts.get().isEmpty(),"registered measurements cannot revive a withdrawn capability specification");
+        assertTrue(service.quoteCapabilities(scope(),runtime.getRuntimeInstallationId(),runtime.getRuntimeHostId()).isEmpty());
         assertTrue(service.descriptors(scope()).stream().anyMatch(d->auth.getInstallationId().equals(d.installationId())),
                 "cost withdrawal is not execution revocation");
         assertEquals(expectedBindings,read(db.findAuthorization(ACTOR.tenantId(),ACTOR.clientId(),auth.getInstallationId()).getPackageJson().getBytes(java.nio.charset.StandardCharsets.UTF_8),"PackageRef").get("quoteSpecBindings"));
@@ -493,12 +502,18 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertEquals(before,read.get());
         send.accept(Map.of("version","NATIVE_PRICING_PROFILES_V1","sequence","99","profiles",List.of(),"sha256","d".repeat(64)));
         assertTrue(read.get().isEmpty(),"old wire is not a second registration lane");
+        assertEquals(1,service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).size(),
+                "withdrawn cost evidence does not erase an installed capability");
         assertEquals(3,jdbc.queryForObject("SELECT pricing_sequence FROM agent_runtime WHERE agent_id=?",Long.class,AGENT));
         send.accept(report.apply(4).wire());
         jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=0 WHERE active_installation_id=?",slot.installId());
-        assertTrue(read.get().isEmpty());send.accept(report.apply(5).wire());
+        assertTrue(read.get().isEmpty());
+        assertTrue(service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).isEmpty(),"disabled skill cannot prove capability");
+        send.accept(report.apply(5).wire());
         jdbc.update("UPDATE agent_skill_managed_state SET desired_enabled=1 WHERE active_installation_id=?",slot.installId());
-        assertTrue(read.get().isEmpty());send.accept(report.apply(5).wire());assertTrue(read.get().isEmpty());
+        assertTrue(read.get().isEmpty());
+        assertTrue(service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).isEmpty(),"disabled skill cannot prove capability");
+        send.accept(report.apply(5).wire());assertTrue(read.get().isEmpty());
         send.accept(report.apply(6).wire());assertEquals(6,read.get().get(AGENT).seq());
         String original=read.get().get(AGENT).canonical();
         jdbc.update("UPDATE agent_runtime SET pricing_profiles_json='{}' WHERE agent_id=?",AGENT);
@@ -506,6 +521,8 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         jdbc.update("UPDATE agent_runtime SET pricing_profiles_json=? WHERE agent_id=?",original,AGENT);
         send.accept(new cn.jia.agent.skill.quote.CostProfileReport(7,List.of()).wire());
         assertTrue(cn.jia.agent.security.CostProfileReportJson.read(read.get().get(AGENT).canonical()).profiles().isEmpty());
+        assertEquals(1,service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId()).size(),
+                "empty cost report is not capability revocation");
         send.accept(report.apply(8).wire());assertEquals(8,read.get().get(AGENT).seq());
         var routes=java.util.stream.IntStream.range(0,32).mapToObj(i->new cn.jia.economy.pricing.CostRouteReference(
                 "MODEL_RESPONSE","INFERENCE","c".repeat(64),"fixture-model-"+i,"RESPONSES_TEXT_TOKENS_V1")).toList();
@@ -520,6 +537,9 @@ public class SkillManagementTransactionTest extends SkillManagementMySqlFixture 
         assertThrows(IllegalStateException.class,()->registry.read("0",ACTOR.clientId(),List.of(target),true));
         assertThrows(SkillMarketplaceException.class,()->service.lockCostProfileBindings(scope(),fence.runtimeInstallationId(),fence.hostId(),List.of(slot)));
         assertCostProfileFinishLocks(slot,()->assertEquals(read.get(),registry.read("0",ACTOR.clientId(),List.of(target),true)));
+        var installedCapabilities=service.quoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId());
+        assertCostProfileFinishLocks(slot,()->assertEquals(installedCapabilities,
+                service.lockQuoteCapabilities(scope(),fence.runtimeInstallationId(),fence.hostId())));
 
         verifyNoInteractions(packages,sessions,capabilities);
         return read;

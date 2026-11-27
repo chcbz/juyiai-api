@@ -45,8 +45,11 @@ public final class ResolvedCostProfiles {
             if(!candidates.contains(candidate))throw new IllegalArgumentException("Candidate was not prepared");
             return Optional.ofNullable(selected.get(candidate));
         }
+        /** The exact resolved plan adopted in this preparation, for the private pricing-profile pin.
+         * Never re-resolve from a newer map or substitute measurementSha for configSha. */
+        public Optional<CostProfile> configuration(String candidate){return selected(candidate).flatMap(routes::find);}
         public Optional<GroupMeanPricing.ScopeGroup> group(String candidate,String featureVersion,String policySha){
-            return selected(candidate).flatMap(routes::find).flatMap(profile->inputs.group(featureVersion,policySha,profile));
+            return configuration(candidate).flatMap(profile->inputs.group(featureVersion,policySha,profile));
         }
         public CapabilityQuoteSpec.MatchStatus inputStatus(){return inputs.status();}
         @Override public String toString(){return "ScopedPrepared[private]";}
