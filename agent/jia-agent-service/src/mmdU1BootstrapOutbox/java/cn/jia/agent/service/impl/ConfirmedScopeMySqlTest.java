@@ -47,6 +47,7 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
     private AgentTaskMetaDaoImpl roots;
     private AgentTaskRequirementSnapshotServiceImpl service;
     private AgentTaskExecutionGrantService catalogues;
+    @org.junit.jupiter.api.io.TempDir java.nio.file.Path packageScratch;
     private SkillPackagePublicationService publisher;
     private PublishedCapabilityQuoteSpecs specifications;
     private final PositionAuthority.Scope publisherScope=new PositionAuthority.Scope("0","client","owner");
@@ -100,7 +101,7 @@ class ConfirmedScopeMySqlTest extends SkillManagementMySqlFixture {
         when(authority.withSkillManagementAuthority(org.mockito.ArgumentMatchers.eq(publisherScope),org.mockito.ArgumentMatchers.eq(publisherGrant),org.mockito.ArgumentMatchers.any()))
                 .thenAnswer(i->tx.execute(status->i.<java.util.function.Supplier<?>>getArgument(2).get()));
         @SuppressWarnings("unchecked") ObjectProvider<SkillPackages> packageProvider=mock(ObjectProvider.class);
-        when(packageProvider.getIfUnique()).thenReturn(new SkillPackages(java.nio.file.Files.createTempDirectory(scratch,"scope-packages-")));
+        when(packageProvider.getIfUnique()).thenReturn(new SkillPackages(java.nio.file.Files.createTempDirectory(packageScratch,"scope-packages-")));
         publisher=new SkillPackagePublicationService(session.getMapper(SkillCatalogMapper.class),packageProvider,authority,
                 new CapabilityQuotePublication(session.getMapper(CapabilityQuoteSpecMapper.class)));
         var pack=new cn.jia.agent.config.skill.skillseed.PlatformSkillPackageCatalog().requirePackage("spv_repo_inspector_1_0_0");var product=pack.product();
