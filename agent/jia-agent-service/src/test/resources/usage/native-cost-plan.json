@@ -1,0 +1,48 @@
+{
+  "kind": "SYNTHETIC_WIRE_FIXTURE",
+  "configurationSha256": "7164d7fca051575950cd7d8b412cd9305697a87e5b735f435636bf32f1d1f111",
+  "plan": {
+    "schemaVersion": 2,
+    "executionId": "exec1",
+    "runId": "run1",
+    "captureId": "49d27b483b3fb776ef456068bc7bd2ee4f2f7160ee29bec20e6d99694664ddb1",
+    "kind": "PLAN",
+    "recordId": "9562767c1a2eb20208c4a99c88eb38ea63bce2f1371f45333e876d50fd4e120f",
+    "sourceRevision": "1",
+    "previousEvidenceSha256": null,
+    "observedAt": 0,
+    "observation": {
+      "captureProtocol": "METERED_CAPTURE_V2",
+      "snapshotSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "executionConfigSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "engineVersion": "codex-cli-0.167.0",
+      "coveragePolicyVersion": "NATIVE_LOCAL_ARTIFACT_TEXT_V1",
+      "rootSourceId": "source_model",
+      "costConfiguration": {
+        "executionStrategyVersion": "NATIVE_LOCAL_FILES_V1",
+        "contextPolicyId": "native-execution-context-1",
+        "contextPolicyVersion": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "toolPolicyVersion": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "capturePolicyVersion": "NATIVE_LOCAL_ARTIFACT_TEXT_V1",
+        "routeRefs": [
+          {
+            "kind": "MODEL_RESPONSE",
+            "component": "INFERENCE",
+            "namespace": "test_gateway",
+            "modelOrTool": "fixture-model",
+            "normalizationBasis": "RESPONSES_TEXT_TOKENS_V1"
+          }
+        ]
+      },
+      "dispatchGroup": {
+        "version": "NATIVE_DISPATCH_GROUP_V1",
+        "executionConfigSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "routeSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "toolConfigSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    "evidenceSha256": "460a63b2f19b33d2bcfdc6755315da2195bf5e4cf724455297300c2047f007c2",
+    "receiptId": "9419090524472174df716924e8a2eef65a6daac96ef12fd3c698314a05b36686",
+    "expectedRevision": null
+  }
+}

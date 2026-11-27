@@ -14,14 +14,11 @@ public record MeasuredCostProfile(String profileId, long revision, int selection
 
     public MeasuredCostProfile {
         id(profileId,128);require(revision>0 && selectionPriority>=0,"Invalid profile revision/priority");
-        id(executionStrategyVersion,64);id(contextPolicyId,128);sha(contextPolicyVersion);sha(toolPolicyVersion);id(capturePolicyVersion,64);
+        var configuration=new CostConfigurationObservation(executionStrategyVersion,contextPolicyId,contextPolicyVersion,toolPolicyVersion,capturePolicyVersion,routeRefs);
         scopePattern=List.copyOf(Objects.requireNonNull(scopePattern));
         require(!scopePattern.isEmpty() && scopePattern.size()<=MAX_SLOTS,"Invalid profile scope size");
         for(int i=0;i<scopePattern.size();i++)require(scopePattern.get(i).slot()==i,"Scope slots must be ordered and contiguous");
-        routeRefs=List.copyOf(Objects.requireNonNull(routeRefs));
-        require(!routeRefs.isEmpty() && routeRefs.size()<=MAX_ROUTES,"Invalid profile routes");
-        require(new HashSet<>(routeRefs).size()==routeRefs.size(),"Duplicate pricing route");
-        routeRefs=routeRefs.stream().sorted(MeasuredCostProfile::compareRoutes).toList();
+        routeRefs=configuration.routeRefs();
     }
 
     public record Slot(int slot,String capabilityId,String capabilityVersion,String specSha,List<Integer> dependsOn,
@@ -78,10 +75,9 @@ public record MeasuredCostProfile(String profileId, long revision, int selection
         // Include package content independently of install IDs. A producer cannot accidentally collapse changed bytes using a stale policy label.
         var packages=scopePattern.stream().map(s->Map.of("skillKey",s.skillKey(),"skillVersion",s.skillVersion(),"packageSha",s.packageSha()))
                 .distinct().sorted((a,b)->{for(String k:List.of("skillKey","skillVersion","packageSha")){int c=CanonicalValueEncoding.compareUtf8(a.get(k),b.get(k));if(c!=0)return c;}return 0;}).toList();
-        return Map.of("executionStrategyVersion",executionStrategyVersion,"contextPolicyId",contextPolicyId,
-                "contextPolicyVersion",contextPolicyVersion,"toolPolicyVersion",toolPolicyVersion,
-                "capturePolicyVersion",capturePolicyVersion,"skillPackages",packages,"routeRefs",routeRefs.stream().map(CostRouteReference::canonical).toList());
+        var result=new HashMap<>(configuration().canonical());result.put("skillPackages",packages);return Map.copyOf(result);
     }
+    public CostConfigurationObservation configuration(){return new CostConfigurationObservation(executionStrategyVersion,contextPolicyId,contextPolicyVersion,toolPolicyVersion,capturePolicyVersion,routeRefs);}
     public String measurementSemanticSha() {return CanonicalValueEncoding.digest(compatibleMeasurement());}
     public Map<String,Object> canonical() {
         var result=new HashMap<>(compatibleMeasurement());result.remove("skillPackages");
@@ -90,11 +86,6 @@ public record MeasuredCostProfile(String profileId, long revision, int selection
     }
     public String measurementSha() {return CanonicalValueEncoding.digest(canonical());}
     @Override public String toString(){return "MeasuredCostProfile[private]";}
-    private static int compareRoutes(CostRouteReference a,CostRouteReference b) {
-        var left=List.of(a.kind(),a.component(),a.namespace(),a.modelOrTool(),a.normalizationBasis());
-        var right=List.of(b.kind(),b.component(),b.namespace(),b.modelOrTool(),b.normalizationBasis());
-        for(int i=0;i<left.size();i++){int c=CanonicalValueEncoding.compareUtf8(left.get(i),right.get(i));if(c!=0)return c;}return 0;
-    }
     private static void id(String value,int max) {require(value!=null && !value.isBlank() && value.equals(value.strip()) && value.codePointCount(0,value.length())<=max,"Invalid cost identity");CanonicalValueEncoding.utf8(value);}
     private static void sha(String value) {require(value!=null && value.matches("[0-9a-f]{64}"),"Invalid configuration digest");}
     private static void require(boolean valid,String message) {if(!valid)throw new IllegalArgumentException(message);}

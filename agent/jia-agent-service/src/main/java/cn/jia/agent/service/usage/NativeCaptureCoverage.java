@@ -85,6 +85,20 @@ final class NativeCaptureCoverage {
         return new cn.jia.economy.usage.UsageCaptureProjection.DispatchGroup(g.get("version").asText(),g.get("executionConfigSha256").asText(),
             g.get("routeSha256").asText(),g.get("toolConfigSha256").asText(),plan.get("coveragePolicyVersion").asText(),planSha);
     }
+    cn.jia.agent.skill.quote.CostConfigurationObservation costConfiguration(){
+        if(plan==null || !plan.has("costConfiguration"))return null;
+        return NativeCaptureEvidence.costConfiguration(JSON.convertValue(plan.get("costConfiguration"),Map.class));
+    }
+    private boolean matchesObservedRootConfiguration(){
+        var observed=costConfiguration();if(observed==null)return true;
+        var parents=observed.routeRefs().stream().filter(r->"MODEL_RESPONSE".equals(r.kind())).toList();
+        if(parents.size()!=1)return false;
+        var parent=parents.getFirst();var root=groups.get(new Source(plan.path("rootSourceId").asText(),"0"));
+        return root!=null && root.source!=null && "INFERENCE".equals(parent.component())
+            && parent.namespace().equals(root.source.path("channelNamespace").asText())
+            && parent.normalizationBasis().equals(root.source.path("adapterVersion").asText())
+            && (!plan.has("imageRoute") || parent.modelOrTool().equals(plan.path("imageRoute").path("model").asText()));
+    }
     Result finish(){return finish(row->false);}
     Result finish(java.util.function.Predicate<Row> hasMeasuredChild){
         BigInteger observed=BigInteger.ZERO;
@@ -102,6 +116,7 @@ final class NativeCaptureCoverage {
             if(!g.max.equals(BigInteger.valueOf(g.requests))||!number(g.closed,"reservedSequenceHighWatermark").equals(BigInteger.valueOf(g.requests))
                     ||g.refs.size()!=g.responses||!drained(g.closed)||!g.members.finish().equals(g.closed.get("recordsSha256").asText()))incomplete=true;
         }
+        if(!matchesObservedRootConfiguration())incomplete=true;
         if(!waiting&&!incomplete&&"NATIVE_PINNED_IMAGE_V1".equals(plan.path("coveragePolicyVersion").asText())&&(approved==null||!hasMeasuredChild.test(closeRow)))incomplete=true;
         return new Result(waiting?Coverage.WAITING_EVIDENCE:incomplete?Coverage.INCOMPLETE:Coverage.COMPLETE,observed);
     }
