@@ -599,6 +599,11 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             throw conflict("requestId was already admitted under a different revision");
         }
 
+        // Preserve the priced confirmed scope in each NEW private task context. Replay uses its
+        // original persisted snapshot; later dialogue does not rewrite or re-confirm that scope.
+        var confirmedScope=taskGrant==null?null:requireDispatchAuthority().confirmedScope(
+                tenantId,ownerJiacn,clientId,scope.taskId(),taskGrant);
+
         // New private requests only, after replay resolution and before durable acceptance.
         // Bounty followups use their original task grant even when rent expires or is finishing.
         if ("private".equals(scope.scopeType())) {
@@ -694,6 +699,7 @@ public class ChatDeliberationService implements TaskDiscussionCancellation {
             }
             if (taskGrant != null) {
                 var boundFacts = new LinkedHashMap<>(facts);
+                if(confirmedScope!=null)boundFacts.put("confirmedScope",ChatBountyRequirementContent.scopeFacts(confirmedScope));
                 boolean capture = captureTextBootstrap && contextDraft && List.of(targetAgentId).equals(facts.get("participantAgentIds"))
                         && !facts.containsKey("materialsInput") && contextHistory != null && !contextHistory.hasEarlierRequest(request);
                 // The task root and Chat admission share this transaction. Persist once, before hashing the snapshot.

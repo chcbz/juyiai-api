@@ -2428,6 +2428,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var deliberation = new ChatDeliberationService(dao, conversations, messages, agents);
         var dispatch = new ChatDispatchAuthorityService(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatDispatchAuthorityMapper.class), dao,
                 actualAuthority, assignment, roots);
+        dispatch.setRequirements(requirements);
         deliberation.setDispatchAuthority(dispatch);
         deliberation.setContextHistory(recommendationSql.getMapper(cn.jia.chat.deliberation.ChatContextHistoryMapper.class));
         quoteWorkspace(); // Real empty task-linked input catalog for this new task.

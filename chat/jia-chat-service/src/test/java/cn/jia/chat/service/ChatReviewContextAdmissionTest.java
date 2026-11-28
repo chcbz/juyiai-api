@@ -182,4 +182,26 @@ class ChatReviewContextAdmissionTest {
         verifyNoInteractions(agents);verify(dao,never()).insertRequest(any());
     }
 
+
+    @Test void confirmedQuantitiesAndDependenciesEnterPrivateContextNotVisibleUserText() {
+        var confirmed=ChatDispatchAuthorityServiceTest.scopedRequirement();
+        when(authority.confirmedScope(eq("0"),eq("owner"),eq("client"),eq(scope.taskId()),any())).thenReturn(confirmed);
+        admit();
+        var snapshot=ArgumentCaptor.forClass(ChatContextSnapshotEntity.class);verify(dao).insertSnapshot(snapshot.capture());
+        var frozen=ChatDeliveryRevisionContractTest.JSON.readTree(snapshot.getValue().getFactsManifestJson()).get("confirmedScope");
+        assertEquals(confirmed.scopeSha256(),frozen.get("scopeSha256").asText());
+        assertEquals("2",frozen.get("requirementRevision").asText());
+        assertEquals("3",frozen.get("workItems").get(0).get("deliverables").get("count").get("value").asText());
+        assertEquals("unit/items",frozen.get("workItems").get(0).get("deliverables").get("count").get("unit").asText());
+        assertEquals("summary",frozen.get("workItems").get(1).get("dependsOn").get(0).asText());
+        assertEquals("file@1",frozen.get("workItems").get(0).get("inputRefs").get(0).asText());
+        var user=ArgumentCaptor.forClass(ChatMessageEntity.class);verify(messages).insertScoped(eq("0"),eq("client"),user.capture());
+        assertEquals(input.getContent(),user.getValue().getContent());
+        assertFalse(user.getValue().getMetadata().contains("confirmedScope"));
+    }
+    @Test void missingFrozenRequirementFailsBeforeUserOrDispatchWrites() {
+        when(authority.confirmedScope(anyString(),anyString(),anyString(),anyString(),any())).thenThrow(new IllegalStateException("missing exact revision"));
+        assertThrows(IllegalStateException.class,this::admit);
+        verify(messages,never()).insertScoped(any(),any(),any());verify(dao,never()).insertRequest(any());verify(dao,never()).insertOutbox(any());
+    }
 }

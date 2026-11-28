@@ -790,6 +790,9 @@ def taskQuoteRegressionSourceSet = sourceSets.create('taskQuoteRegression') {
         include 'cn/jia/chat/service/recommendation/RecommendationUsageJournalTest.java'
         include 'cn/jia/chat/service/recommendation/RecommendationUsageRecoveryTest.java'
         include 'cn/jia/chat/service/usage/ChatUsageCostRecorderTest.java'
+        include 'cn/jia/chat/service/ChatDispatchAuthorityServiceTest.java'
+        include 'cn/jia/chat/service/ChatReviewContextAdmissionTest.java'
+        include 'cn/jia/chat/service/ChatDeliveryRevisionContractTest.java'
     }
     resources.srcDir 'src/test/resources'
     compileClasspath += sourceSets.main.output

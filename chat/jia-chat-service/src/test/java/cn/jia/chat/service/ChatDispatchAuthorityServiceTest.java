@@ -190,4 +190,35 @@ class ChatDispatchAuthorityServiceTest {
         assertThrows(ChatDeliberationException.class, () -> service.incomingContextRejection("0","client","B","agent-B","dispatch"));
     }
 
+
+    static cn.jia.agent.requirement.ConfirmedScope scopedRequirement() {
+        var quantity=new cn.jia.agent.requirement.ConfirmedScope.Scalar(cn.jia.agent.requirement.ConfirmedScope.ValueType.INTEGER,"unit/items","3");
+        var first=new cn.jia.agent.requirement.ConfirmedScope.WorkItem("summary","text.summary","1",Map.of(),Map.of("count",quantity),List.of("file@1"),List.of());
+        var second=new cn.jia.agent.requirement.ConfirmedScope.WorkItem("report","document.report","2",Map.of(),Map.of("count",quantity),List.of(),List.of("summary"));
+        var payload=new cn.jia.agent.requirement.ConfirmedScope.Payload(cn.jia.agent.requirement.ConfirmedScope.VERSION,List.of(first,second),"Produce the confirmed report without changing quantities");
+        String input="a".repeat(64);
+        return new cn.jia.agent.requirement.ConfirmedScope(2,payload.requirementDigest("Title",null,input),payload.digest(input),input,payload.schemaVersion(),100,payload.workItems(),payload.acceptanceText());
+    }
+    @Test void confirmedScopeComesOnlyFromTheGrantedImmutableRevision() {
+        var requirements=mock(cn.jia.agent.service.AgentTaskRequirementSnapshotService.class);service.setRequirements(requirements);
+        var scoped=scopedRequirement();
+        var grant=new AgentTaskExecutionGrantService.Admission("grant",1,7,"agent-B",null,false,List.of(),null,null,7L,2L,scoped.requirementSha256(),null,null);
+        var owner=new AgentTaskExecutionGrantService.Scope("0","client","A");
+        var snapshot=new cn.jia.agent.service.AgentTaskRequirementSnapshotService.Snapshot("0","client","A","task-A",2,"Title",null,scoped.requirementSha256(),"SCOPED",scoped);
+        when(requirements.read(owner,"task-A",2)).thenReturn(snapshot);
+        assertSame(scoped,service.confirmedScope("0","A","client","task-A",grant));
+        verify(requirements).read(owner,"task-A",2);verifyNoMoreInteractions(requirements);
+        when(requirements.read(owner,"task-A",2)).thenReturn(new cn.jia.agent.service.AgentTaskRequirementSnapshotService.Snapshot("0","client","A","task-A",2,"Title",null,"b".repeat(64),"SCOPED",scoped));
+        assertThrows(RuntimeException.class,()->service.confirmedScope("0","A","client","task-A",grant));
+        when(requirements.read(owner,"task-A",2)).thenReturn(new cn.jia.agent.service.AgentTaskRequirementSnapshotService.Snapshot("0","client","other-owner","task-A",2,"Title",null,scoped.requirementSha256(),"SCOPED",scoped));
+        assertThrows(RuntimeException.class,()->service.confirmedScope("0","A","client","task-A",grant));
+        when(requirements.read(owner,"task-A",2)).thenReturn(null);
+        assertThrows(RuntimeException.class,()->service.confirmedScope("0","A","client","task-A",grant));
+    }
+    @Test void unscopedOriginalIsNotFabricatedIntoConfirmedScope() {
+        var requirements=mock(cn.jia.agent.service.AgentTaskRequirementSnapshotService.class);service.setRequirements(requirements);
+        var grant=new AgentTaskExecutionGrantService.Admission("grant",1,7,"agent-B",null,false,List.of(),null,null,7L,2L,"a".repeat(64),null,null);
+        when(requirements.read(any(),eq("task-A"),eq(2L))).thenReturn(new cn.jia.agent.service.AgentTaskRequirementSnapshotService.Snapshot("0","client","A","task-A",2,"Title",null,"a".repeat(64),"TEXT"));
+        assertNull(service.confirmedScope("0","A","client","task-A",grant));
+    }
 }

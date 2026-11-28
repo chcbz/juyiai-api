@@ -27,6 +27,27 @@ public class ChatDispatchAuthorityService {
         this.mapper=mapper; this.turns=turns; this.authority=authority; this.grants=grants; this.tasks=tasks;
     }
 
+    private cn.jia.agent.service.AgentTaskRequirementSnapshotService requirements;
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setRequirements(cn.jia.agent.service.AgentTaskRequirementSnapshotService value) {
+        requirements=Objects.requireNonNull(value);
+    }
+
+    /** The original grant selects an immutable requirement, not the mutable task plan.
+     * This is private execution context, never a user confirmation or new execution authority. */
+    public cn.jia.agent.requirement.ConfirmedScope confirmedScope(String tenant,String owner,String client,
+            String taskId,AgentTaskExecutionGrantService.Admission grant) {
+        if(requirements==null || grant==null || grant.requirementRevision()==null)throw denied();
+        var snapshot=requirements.read(new AgentTaskExecutionGrantService.Scope(tenant,client,owner),taskId,grant.requirementRevision());
+        if(snapshot==null || !Objects.equals(snapshot.tenantId(),tenant) || !Objects.equals(snapshot.clientId(),client)
+                || !Objects.equals(snapshot.ownerJiacn(),owner) || !Objects.equals(snapshot.taskId(),taskId)
+                || snapshot.revision()!=grant.requirementRevision() || !Objects.equals(snapshot.sha256(),grant.requirementSha256()))throw denied();
+        var scope=snapshot.confirmedScope();
+        if(scope!=null && (scope.requirementRevision()!=snapshot.revision()
+                || !scope.requirementSha256().equals(snapshot.sha256())))throw denied();
+        return scope;
+    }
+
     /** Only NEW admission may resolve a current baseline; every subsequent use reads the saved tuple. */
     public AgentTaskExecutionGrantService.Admission admission(String tenant, String owner, String client,
             String taskId, String agentId) {
