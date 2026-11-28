@@ -4061,13 +4061,17 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     }
 
     /** Synthetic approved case and authoritative-port observations, with real assignment/wallet SQL. */
-    private void prepareScopedAssignment(){
-        String h="a".repeat(64),digest=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).digest();
+    private void prepareScopedAssignment(){prepareScopedAssignment(false);}
+    private void prepareScopedAssignment(boolean storedBytes){
+        var catalogue=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK));
+        String h="a".repeat(64),digest=catalogue.digest();
         var spec=new CapabilityQuoteSpec(CapabilityQuoteSpec.SCHEMA,"text.summary","1",
                 Map.of("deliverables.count",new CapabilityQuoteSpec.Field(ConfirmedScope.ValueType.INTEGER,"unit/items",true,"1","100",java.util.Set.of(),null)),
-                List.of(new CapabilityQuoteSpec.CostDimension("size",CapabilityQuoteSpec.Source.DELIVERABLE,"count",ConfirmedScope.ValueType.INTEGER,"unit/items",null,java.util.Set.of())),
+                List.of(new CapabilityQuoteSpec.CostDimension("size",storedBytes?CapabilityQuoteSpec.Source.INPUT_SUM:CapabilityQuoteSpec.Source.DELIVERABLE,
+                        storedBytes?"byteLength":"count",ConfirmedScope.ValueType.INTEGER,storedBytes?"unit/bytes":"unit/items",
+                        storedBytes?"WORKSPACE_FILE_FACTS_V1":null,java.util.Set.of())),
                 List.of(new CapabilityQuoteSpec.Bucket("small",Map.of("size",new CapabilityQuoteSpec.Range("1","10",java.util.Set.of())))));
-        var item=new ConfirmedScope.WorkItem("w0","text.summary","1",Map.of(),Map.of("count",new ConfirmedScope.Scalar(ConfirmedScope.ValueType.INTEGER,"unit/items","2")),List.of(),List.of());
+        var item=new ConfirmedScope.WorkItem("w0","text.summary","1",Map.of(),Map.of("count",new ConfirmedScope.Scalar(ConfirmedScope.ValueType.INTEGER,"unit/items","2")),storedBytes?List.of("file-0@1"):List.of(),List.of());
         var payload=new ConfirmedScope.Payload(ConfirmedScope.VERSION,List.of(item),"fixture acceptance");
         var scope=new ConfirmedScope(1,payload.requirementDigest("Fixture title","Fixture description",digest),payload.digest(digest),digest,ConfirmedScope.VERSION,1,List.of(item),payload.acceptanceText());
         var requirements=(AgentTaskRequirementSnapshotService)ReflectionTestUtils.getField(assignment,"requirementSnapshots");
@@ -4081,7 +4085,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var key=new cn.jia.agent.mapper.skill.CapabilityQuoteSpecMapper.SpecKey("text.summary","1");
         when(scopedSpecs.lockActive(eq(TENANT),eq(CLIENT),anyList())).thenReturn(Map.of(key,spec));
         when(scopedRoutes.read(eq(BILLING_TASK.scope()),anyList(),anyBoolean())).thenReturn(Map.of(ref,new CostRouteBindings.Binding(ref,1,h,route)));
-        var inputs=ScopedCostInputs.prepare(scope,Map.of(new ScopedCostInputs.Capability("text.summary","1"),spec),Map.of());
+        // Independent expected storage fact: the real SQL fixture uploaded seven bytes at file-0 version 1.
+        var expectedMetadata=storedBytes?Map.of("file-0@1",new CapabilityQuoteSpec.InputMetadata("file-0@1",1,"text/plain","b".repeat(64),
+                "WORKSPACE_FILE_FACTS_V1","STORED_FILE_VERSION_V1",Map.of("byteLength",new ConfirmedScope.Scalar(ConfirmedScope.ValueType.INTEGER,"unit/bytes","7"))))
+                :Map.<String,CapabilityQuoteSpec.InputMetadata>of();
+        var inputs=ScopedCostInputs.prepare(scope,Map.of(new ScopedCostInputs.Capability("text.summary","1"),spec),expectedMetadata);
         var config=new CostProfile(measured,List.of(new CostProfile.Route(ref,route)));var input=inputs.input(config).orElseThrow();
         var policy=new GroupMeanPricing.ScopedPolicy("scope-1",input.specShas(),input.scopeShapeSha(),"config-1",GroupMeanPricing.ScopedPolicy.definitionsSha(input.specShas()),3);
         var group=inputs.group(policy.featureVersion(),policy.sha(),config).orElseThrow();
@@ -4094,6 +4102,31 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var basis=new ScopedTaskQuoteSnapshot.Basis("FIXED_FALLBACK",null,cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE);
         var quote=new ScopedTaskQuoteSnapshot(ScopedTaskQuoteSnapshot.SCHEMA,binding,pin,basis,null,null,null,1);
         quoteId=locked(()->billing.storeOffersBatch(BILLING_TASK,PAYER,List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+    }
+    private void prepareScopedStoredFile() throws Exception {
+        var workspace=quoteWorkspace();
+        ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());
+        ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
+        attachQuoteFile(0);prepareScopedAssignment(true);
+    }
+    @Test void scopedBenchmarkStoredBytesUseRealWorkspaceThroughHttpAssignmentAndReplay() throws Exception {
+        prepareScopedStoredFile();startHttp();
+        httpPost("/point-and-deliberate",pointBody(),"assign-http",false,401);assertAssignmentAbsent(2);
+        pointHttp(200);pointHttp(200);
+        assertEquals(99,wallet(independent));assertEquals("HELD",charge());
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals(1,count("agent_task_execution_grant"));
+        assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        assertEquals("case-scoped",jdbc.queryForObject("SELECT benchmark_case_id FROM economy_task_cost_sample",String.class));
+        assertEquals(quoteId,jdbc.queryForObject("SELECT quote_id FROM economy_task_cost_sample",String.class));
+        var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).inputs().getFirst();
+        assertEquals("file-0",input.fileId());assertEquals(1,input.version());assertEquals(7,input.byteLength());
+    }
+    @Test void scopedBenchmarkStoredBytesChangedBeforeAssignmentCannotUseFrozenManifest() throws Exception {
+        prepareScopedStoredFile();
+        // Deliberate corrupt-source injection, not a supported edit of an immutable file version.
+        jdbc.update("UPDATE agent_personal_workspace_file_version SET byte_length=70 WHERE file_id='file-0'");
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assign);
+        assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));
     }
     @Test void scopedBenchmarkAssignmentReservesOneSampleAndReplayDoesNotReadCurrentConfiguration(){
         prepareScopedAssignment();var grant=assign();assertEquals(99,wallet(jdbc));assertEquals("HELD",charge());
