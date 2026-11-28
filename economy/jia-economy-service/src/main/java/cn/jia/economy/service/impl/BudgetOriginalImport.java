@@ -16,10 +16,10 @@ import tools.jackson.databind.json.JsonMapper;
 
 /** Maintenance-only import of externally authorized original bytes. Not component-scanned:
  * the isolated maintenance context must explicitly install it. Does not approve, confirm scope,
- * enroll samples, authorize spending, choose a policy, register membership or publish a price. */
+ * enroll samples, activate sponsored spending, choose a policy, register membership or publish a price. */
 public class BudgetOriginalImport {
     public static final int MAX_BYTES=1048576;
-    public enum Kind { CASE, STUDY, AGGREGATE }
+    public enum Kind { CASE, SPONSORSHIP, REVIEW, STUDY, AGGREGATE }
     private static final ObjectMapper JSON=JsonMapper.builder(JsonFactory.builder()
             .streamReadConstraints(StreamReadConstraints.builder().maxNestingDepth(24).maxStringLength(MAX_BYTES).build())
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
@@ -37,6 +37,8 @@ public class BudgetOriginalImport {
         byte[] bytes=CanonicalValueEncoding.utf8(body);
         require(bytes.length>0 && bytes.length<=MAX_BYTES && sha.equals(CanonicalValueEncoding.sha256(bytes)));
         var root=JSON.readTree(body);
+        if("benchmark-sponsorship-v1".equals(root.path("schema").asText(null)))return sponsorship(scope,sha,body);
+        if("benchmark-review-v1".equals(root.path("schema").asText(null)))return review(scope,sha,body);
         if(ScopedBenchmarkManifest.SCHEMA.equals(root.path("schema").asText(null))){
             var manifest=TaskBenchmarkAdmissionService.decodeScoped(body,sha);
             require(scope.equals(manifest.task().scope()));id(manifest.task().ownerJiacn(),100);
@@ -44,7 +46,7 @@ public class BudgetOriginalImport {
             var existing=db.benchmark(manifest);
             if(existing!=null){same(existing,sha,body);return Kind.CASE;}
             // The separate unique task key must not silently substitute another case.
-            require(db.taskBenchmark(manifest)==null);
+            require(db.taskBenchmark(manifest)==null && !db.hasActivity(manifest.task()));
             try{require(db.insertBenchmark(manifest,sha,body)==1);}
             catch(DuplicateKeyException raced){same(db.benchmark(manifest),sha,body);}
             // Admission remains prospective: the original task-root consumer independently checks
@@ -68,6 +70,43 @@ public class BudgetOriginalImport {
         try{require(db.insertApproval(sha,body)==1);}
         catch(DuplicateKeyException raced){same(db.approval(sha),sha,body);}
         return kind;
+    }
+    private ScopedBenchmarkManifest sourceCase(EconomyScope scope,String caseId,String sha){
+        var original=db.sourceCase(scope,caseId);
+        require(original!=null && !original.withdrawn() && sha.equals(original.sha()));
+        var manifest=TaskBenchmarkAdmissionService.decodeScoped(original.body(),sha);
+        require(scope.equals(manifest.task().scope()) && caseId.equals(manifest.caseId()));
+        return manifest;
+    }
+    private Kind sponsorship(EconomyScope scope,String sha,String body){
+        var authority=TaskBenchmarkAdmissionService.decodeSponsorship(body,sha);var task=authority.task();
+        require(scope.equals(task.scope()));id(task.ownerJiacn(),100);id(task.taskId(),100);
+        var manifest=sourceCase(scope,authority.caseId(),authority.manifestSha256());
+        require(task.equals(manifest.task()) && authority.agentId().equals(manifest.agentId()));
+        var previous=db.sponsorship(task);
+        if(previous!=null){same(previous,sha,body);return Kind.SPONSORSHIP;}
+        require(!db.hasActivity(task));
+        try{require(db.insertSponsorship(task,sha,body)==1);}
+        catch(DuplicateKeyException raced){same(db.sponsorship(task),sha,body);}
+        // Only APPROVED is inserted. Task-root activation still independently checks exact
+        // assignment/action/intent and rejects any prior charge/member/sample/capture.
+        return Kind.SPONSORSHIP;
+    }
+    private Kind review(EconomyScope scope,String sha,String body){
+        var review=JSON.readValue(body,cn.jia.economy.usage.BenchmarkSampleEvidence.Review.class);
+        require("ACCEPTED".equals(review.decision()));id(review.caseId(),100);
+        for(var pin:java.util.List.of(review.manifestSha(),review.terminalFactId(),review.membershipSha()))
+            require(pin.matches("[a-f0-9]{64}"));
+        require(!review.reviewerRef().isBlank() && !review.deliverableEvidenceRef().isBlank());
+        var manifest=sourceCase(scope,review.caseId(),review.manifestSha());
+        var sample=db.reviewedSample(manifest.task(),review);require(sample!=null);
+        var previous=db.review(sample,sha);
+        if(previous!=null){same(previous,sha,body);return Kind.REVIEW;}
+        try{require(db.insertReview(sample,sha,body)==1);}
+        catch(DuplicateKeyException raced){same(db.review(sample,sha),sha,body);}
+        // An accepted deliverable review is not proof of complete costs. The existing evidence
+        // reader still requires every closed member and its authenticated source records.
+        return Kind.REVIEW;
     }
     private static void same(BudgetOriginalImportMapper.Original existing,String sha,String body){
         require(existing!=null && !existing.withdrawn() && sha.equals(existing.sha()) && body.equals(existing.body()));
