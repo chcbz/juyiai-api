@@ -192,13 +192,14 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
         return true;
     }
 
+    static SponsorshipAuthority decodeSponsorship(String raw,String sha){
+        if(raw==null||sha==null||CanonicalValueEncoding.utf8(raw).length>1048576
+                ||!CanonicalValueEncoding.sha256(CanonicalValueEncoding.utf8(raw)).equals(sha))throw new IllegalStateException("Damaged sponsorship authority");
+        try{return SCOPED_JSON.readValue(raw,SponsorshipAuthority.class);}
+        catch(RuntimeException invalid){throw new IllegalStateException("Damaged sponsorship authority",invalid);}
+    }
     private Sponsorship decodeFunding(TaskBillingService.Task task, TaskBenchmarkMapper.FundingRow row) {
-        try {
-            String actual = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(row.authorityJson().getBytes(StandardCharsets.UTF_8)));
-            if (!actual.equals(row.authoritySha())) throw new IllegalStateException("Damaged sponsorship authority");
-        } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
-        var authority = json.readValue(row.authorityJson(), SponsorshipAuthority.class);
+        var authority = decodeSponsorship(row.authorityJson(),row.authoritySha());
         if (!task.equals(authority.task())) throw new NotAdmitted();
         if (db.charges(task) != 0) throw new IllegalStateException("Conflicting ordinary and sponsored funding");
         return new Sponsorship(row.authoritySha(), authority, SponsorshipState.valueOf(row.state()));

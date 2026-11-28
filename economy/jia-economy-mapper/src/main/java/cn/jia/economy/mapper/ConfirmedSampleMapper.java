@@ -228,22 +228,24 @@ public interface ConfirmedSampleMapper {
         """) List<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> responses(@Param("t") Task task,@Param("fact") String fact,
             @Param("agent") String agent,@Param("rev") long after,@Param("record") String afterRecord);
     record ReviewedScope(long evidenceRevision,String fact,long memberCount,String agent,String manifest,
-            String scopeSha,String shapeSha,String groupSha,String policySha,String requirementSha,String inputSha,String featureSha,String quoteJson) {}
+            String scopeSha,String shapeSha,String groupSha,String policySha,String requirementSha,String inputSha,String featureSha,String quoteJson,String sponsorJson,String sponsorSha) {}
     @Select("""
         SELECT s.evidence_revision,r.fact_id,r.member_count,b.manifest_json->>'$.agentId' AS agent,b.manifest_json AS manifest,
           s.scope_sha256 AS scope_sha,s.scope_shape_sha256 AS shape_sha,s.scoped_group_sha256 AS group_sha,
           s.scoped_policy_sha256 AS policy_sha,s.initial_requirement_sha256 AS requirement_sha,s.initial_input_snapshot_sha256 AS input_sha,
-          s.initial_feature_sha256 AS feature_sha,q.snapshot_json AS quote_json
+          s.initial_feature_sha256 AS feature_sha,q.snapshot_json AS quote_json,f.authority_json AS sponsor_json,f.authority_sha AS sponsor_sha
         FROM economy_task_cost_sample s JOIN economy_task_benchmark_case b ON b.tenant_id=s.tenant_id AND b.client_id=s.client_id
           AND b.owner_jiacn=s.owner_jiacn AND b.task_id=s.task_id AND b.benchmark_case_id=s.benchmark_case_id
           AND b.manifest_sha=#{sha} AND SHA2(b.manifest_json,256)=b.manifest_sha AND NOT b.retired
-        JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+        LEFT JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id AND q.client_id=s.client_id
           AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id
           AND q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1'
           AND CAST(q.snapshot_json->>'$.scopePin.scopeSha256' AS BINARY)=CAST(s.scope_sha256 AS BINARY)
           AND q.snapshot_json->>'$.binding.agentId'=b.manifest_json->>'$.agentId'
-        JOIN economy_task_charge ch ON ch.tenant_id=q.tenant_id AND ch.client_id=q.client_id AND ch.owner_jiacn=q.owner_jiacn
+        LEFT JOIN economy_task_charge ch ON ch.tenant_id=q.tenant_id AND ch.client_id=q.client_id AND ch.owner_jiacn=q.owner_jiacn
           AND ch.task_id=q.task_id AND ch.quote_id=q.quote_id AND ch.payer_user_id=q.payer_user_id AND ch.state IN ('HELD','CAPTURED')
+        LEFT JOIN economy_task_benchmark_sponsorship f ON s.quote_id IS NULL AND f.tenant_id=s.tenant_id
+          AND f.client_id=s.client_id AND f.owner_jiacn=s.owner_jiacn AND f.task_id=s.task_id AND f.state='ACCEPTED'
         JOIN economy_task_benchmark_closure x ON x.sample_id=s.sample_id AND x.completed AND x.terminal_fact_id=#{fact}
         JOIN economy_task_membership_receipt r ON r.tenant_id=s.tenant_id AND r.client_id=s.client_id AND r.owner_jiacn=s.owner_jiacn AND r.task_id=s.task_id
           AND r.fact_id=x.terminal_fact_id AND r.membership_verified AND r.outcome='ACCEPTED' AND r.member_count=x.attached_count AND r.membership_revision=x.after_revision
@@ -256,6 +258,9 @@ public interface ConfirmedSampleMapper {
         WHERE s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn} AND s.task_id=#{t.taskId}
           AND s.sample_id=#{sample} AND s.benchmark_case_id=#{id} AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.lifecycle_state='ACCEPTED'
           AND b.manifest_json->>'$.schema'='SCOPED_BENCHMARK_V1'
+          AND ((s.quote_id IS NOT NULL AND ch.quote_id IS NOT NULL) OR
+               (s.quote_id IS NULL AND f.authority_sha IS NOT NULL AND NOT EXISTS(SELECT 1 FROM economy_task_charge ordinary
+                 WHERE ordinary.tenant_id=s.tenant_id AND ordinary.client_id=s.client_id AND ordinary.owner_jiacn=s.owner_jiacn AND ordinary.task_id=s.task_id)))
         """) ReviewedScope reviewedScopedBenchmark(@Param("t") Task task,@Param("sample") String sample,
             @Param("id") String id,@Param("sha") String sha,@Param("fact") String fact,@Param("review") String review);
     record ScopedMember(long revision,String attached,Long capturePk,String captureId,String execution,String run,

@@ -83,9 +83,8 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
                 ||!group.key().equals(h.groupSha())||!group.policySha().equals(h.policySha())
                 ||!pin.requirementSha256().equals(h.requirementSha())||!pin.inputSnapshotDigest().equals(h.inputSha()))
             throw new IllegalStateException("Scoped sample source differs from original");
-        var quote=json.readValue(h.quoteJson(),cn.jia.economy.task.ScopedTaskQuoteSnapshot.class);
-        if(!pin.equals(quote.scopePin())||!manifest.agentId().equals(quote.binding().agentId())||!quote.featureSha().equals(h.featureSha()))
-            throw new IllegalStateException("Scoped sample paid binding differs");
+        if(!ScopedSampleFunding.matches(manifest,sha,sample,h.featureSha(),h.quoteJson(),h.sponsorJson(),h.sponsorSha(),json))
+            throw new IllegalStateException("Scoped sample funding differs from original");
         Object configuration=manifest.compatibleConfig().get("measurement");
         if(!(configuration instanceof java.util.Map<?,?>))return scopedResult(sample,h,0,CONFIG_UNKNOWN,java.util.List.of());
         String expected=cn.jia.core.util.CanonicalValueEncoding.digest(configuration);

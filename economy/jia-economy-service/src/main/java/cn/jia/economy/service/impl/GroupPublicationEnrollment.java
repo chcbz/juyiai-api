@@ -58,10 +58,8 @@ public class GroupPublicationEnrollment {
                 || !pin.scopeSha256().equals(sample.scopeSha()) || !group.scopeShapeSha().equals(sample.shapeSha())
                 || !group.key().equals(sample.groupSha()) || !group.policySha().equals(sample.policySha())
                 || !pin.requirementSha256().equals(sample.requirementSha()) || !pin.inputSnapshotDigest().equals(sample.inputSha()))throw new NotApproved();
-        // Quote proves only the original paid scope/agent binding, never actual execution or cost.
-        var quote=json.readValue(sample.quoteJson(),cn.jia.economy.task.ScopedTaskQuoteSnapshot.class);
-        if(!pin.equals(quote.scopePin()) || !manifest.agentId().equals(quote.binding().agentId())
-                || !quote.featureSha().equals(sample.featureSha()))throw new NotApproved();
+        if(!ScopedSampleFunding.matches(manifest,m.manifestSha(),m.sampleId(),sample.featureSha(),
+                sample.quoteJson(),sample.sponsorJson(),sample.sponsorSha(),json))throw new NotApproved();
     }
 
 }

@@ -490,7 +490,7 @@ class TaskBillingServiceMySqlTest {
         assertEquals(1,count("economy_budget_group_revision"));assertEquals(1,count("economy_budget_group_build_evidence"));
     }
     private void installPublicationSchema(){
-        installGroupSchema();for(var f:List.of("economy-usage-capture.sql","economy-task-benchmark-case-v1.sql","economy-task-benchmark-closure-v1.sql","economy-task-benchmark-review-v1.sql")){
+        installGroupSchema();for(var f:List.of("economy-usage-capture.sql","economy-task-benchmark-case-v1.sql","economy-task-benchmark-closure-v1.sql","economy-task-benchmark-review-v1.sql","economy-task-benchmark-sponsorship-v1.sql")){
             new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/"+f)).execute(jdbc.getDataSource());}
         var sql=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-source-invalidation-v1.sql"));sql.setSeparator("$$");sql.execute(jdbc.getDataSource());
         var approvals=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-budget-approval-v1.sql"));approvals.setSeparator("$$");approvals.execute(jdbc.getDataSource());
@@ -809,7 +809,8 @@ class TaskBillingServiceMySqlTest {
         return scopedPaidCase(purpose,zero,Map.<String,Object>of("strategy","native-summary","routes",List.of("text-model")));
     }
     private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero,Map<String,Object> config){return scopedPaidCase(purpose,zero,config,3);}
-    private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero,Map<String,Object> config,int minSupport){
+    private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero,Map<String,Object> config,int minSupport){return scopedPaidCase(purpose,zero,config,minSupport,true);}
+    private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero,Map<String,Object> config,int minSupport,boolean storeQuote){
         usageSchema();new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
         new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
         var quote=scopedSnapshot("agent",zero,zero);
@@ -820,7 +821,7 @@ class TaskBillingServiceMySqlTest {
         var manifest=new cn.jia.economy.task.ScopedBenchmarkManifest("SCOPED_BENCHMARK_V1",TASK,"case-1","agent","fixture-authority","review complete output",purpose,quote.scopePin(),policy,slots,List.of("short"),config,group.key());
         String body=new ObjectMapper().writeValueAsString(manifest),sha=GroupPublicationEnrollment.digest(body);
         jdbc.update("INSERT INTO economy_task_benchmark_case(tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,manifest_json,manifest_sha) VALUES(?,?,?,?,?,?,?)",SCOPE.tenantId(),SCOPE.clientId(),TASK.ownerJiacn(),TASK.taskId(),manifest.caseId(),body,sha);
-        var id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+        String id=storeQuote?inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId():null;
         return new PaidCase(manifest,sha,quote,id);
     }
     private TaskBenchmarkAdmission.ScopedEnrollment preparePaid(PaidCase c){return scopedAdmissions.prepareScopedPaid(TASK,c.manifest().caseId(),c.sha(),"agent",c.observed());}
@@ -900,9 +901,18 @@ class TaskBillingServiceMySqlTest {
         var measured=Map.<String,Object>of("fixture","independently-measured-config");
         return scopedReviewedSource(Map.of("measurement",measured,"routes",List.of("fixture-only")),3);
     }
-    private ScopedReview scopedReviewedSource(Map<String,Object> config,int minSupport){
-        var measured=config.get("measurement");var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false,config,minSupport);
-        reservePaid(c);installPublicationSchema();
+    private ScopedReview scopedReviewedSource(Map<String,Object> config,int minSupport){return scopedReviewedSource(config,minSupport,false);}
+    private ScopedReview scopedReviewedSource(Map<String,Object> config,int minSupport,boolean sponsored){
+        var measured=config.get("measurement");var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false,config,minSupport,!sponsored);
+        installPublicationSchema();
+        if(sponsored){
+            var authority=new TaskBenchmarkAdmission.SponsorshipAuthority("benchmark-sponsorship-v1",TASK,c.manifest().caseId(),c.sha(),"agent","fixture-action","a".repeat(64),"b".repeat(64),"synthetic sponsor only");
+            String raw=new ObjectMapper().writeValueAsString(authority);
+            jdbc.update("INSERT INTO economy_task_benchmark_sponsorship(tenant_id,client_id,owner_jiacn,task_id,authority_json,authority_sha) VALUES(?,?,?,?,?,SHA2(?,256))",SCOPE.tenantId(),SCOPE.clientId(),TASK.ownerJiacn(),TASK.taskId(),raw,raw);
+            inTask(TASK,()->scopedAdmissions.sponsorScope(TASK,"agent",authority.actionId(),authority.assignmentSha256(),authority.initialIntentSha256(),policy->c.observed()));
+            assertTrue(inTask(TASK,()->scopedAdmissions.settleSponsorship(TASK,TaskBenchmarkAdmission.SponsorshipState.ACCEPTED)));
+            var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-scoped-sponsor-source-invalidation-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
+        }else reservePaid(c);
         String sample=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class),fact="a".repeat(64),membership="b".repeat(64);
         jdbc.update("UPDATE economy_task_cost_sample SET lifecycle_state='ACCEPTED'");
         jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,2,2,1)",sample,fact);
@@ -971,7 +981,8 @@ class TaskBillingServiceMySqlTest {
 
     private record ScopedWorker(ScopedReview source,ConfirmedSampleEvidence.Decoder decoder,
                                 java.util.List<cn.jia.economy.pricing.CostRouteReference> refs,String study) {}
-    private ScopedWorker scopedWorkerFixture(int minSupport){
+    private ScopedWorker scopedWorkerFixture(int minSupport){return scopedWorkerFixture(minSupport,false);}
+    private ScopedWorker scopedWorkerFixture(int minSupport,boolean sponsored){
         var a=new cn.jia.economy.pricing.CostRouteReference("MODEL_RESPONSE","INFERENCE","provider","model-a","basis");
         var b=new cn.jia.economy.pricing.CostRouteReference("MODEL_RESPONSE","INFERENCE","provider","model-b","basis");var refs=List.of(a,b);
         var measurement=Map.<String,Object>of("executionStrategyVersion","native","contextPolicyId","context","contextPolicyVersion","a".repeat(64),
@@ -979,7 +990,7 @@ class TaskBillingServiceMySqlTest {
                 "skillPackages",List.of(Map.of("skillKey","summary","skillVersion","1","packageSha","c".repeat(64))));
         var routes=List.of(Map.of("reference",a.canonical(),"pricing",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("test-channel",route("0.1"),"standard","basis").canonical()),
                 Map.of("reference",b.canonical(),"pricing",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("test-channel",route("0.5"),"standard","basis").canonical()));
-        var p=scopedReviewedSource(Map.of("measurement",measurement,"routes",routes),minSupport);var m=p.source().manifest();var json=new ObjectMapper();
+        var p=scopedReviewedSource(Map.of("measurement",measurement,"routes",routes),minSupport,sponsored);var m=p.source().manifest();var json=new ObjectMapper();
         var publication=new GroupPublicationEnrollment.Approval("GROUP_AGGREGATE","TRAIN",SCOPE.tenantId(),SCOPE.clientId(),m.groupSha(),m.policy().sha(),TASK.ownerJiacn(),TASK.taskId(),m.caseId(),p.sample(),1,p.source().sha(),p.review(),"synthetic-publish-approval");
         transactional(new GroupPublicationEnrollment(maintenance,json)).register(SCOPE,importTestApproval(publication,json));
         var ddl=new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-group-study-v1.sql"));ddl.setSeparator("$$");ddl.execute(jdbc.getDataSource());
@@ -1008,6 +1019,52 @@ class TaskBillingServiceMySqlTest {
                 transactional(new GroupReviewedUsage(maintenance,new GroupPublicationEnrollment(maintenance,json),originals,transactional(new ConfirmedSampleEvidenceReader(originals,json)))),transactional(publisher),json);
     }
     private GroupBudgetQuotes.Decision scopedDecision(ScopedWorker w){var key=new GroupBudgetQuotes.Key(w.source().source().manifest().groupSha());return new GroupBudgetQuotesService(baselines).prepare(SCOPE,java.util.Set.of(key)).get(key);}
+    @Test void scopedSponsoredWorkerPublishesWithoutAnyQuoteOrChargeAndRetainsHistoricalFunding(){
+        var w=scopedWorkerFixture(1,true);var service=scopedWorkerService(new GroupBaselinePublisher(maintenance,new ObjectMapper()),TaskPricingTestFixture.service(jdbc));
+        service.runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());assertEquals(60,assertInstanceOf(GroupBudgetQuotes.Mean.class,scopedDecision(w)).amountWen());
+        assertEquals(0,count("economy_task_quote"));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));assertEquals(100,wallet());
+        assertEquals(w.source().source().sha(),w.source().sample());assertEquals(1,count("economy_budget_group_revision"));
+        jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=TRUE");
+        assertEquals(60,assertInstanceOf(GroupBudgetQuotes.Mean.class,scopedDecision(w)).amountWen());
+        assertEquals(ConfirmedSampleEvidence.Verdict.MATCHED,measureScoped(w.source(),w.decoder()).assessment().verdict());
+        service.runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());assertEquals(1,count("economy_budget_group_revision"));
+    }
+    @Test void scopedSponsoredMissingOrUnsettledFundingInvalidatesPublishedBasisAndCannotReadUsage(){
+        var w=scopedWorkerFixture(1,true);scopedWorkerService(new GroupBaselinePublisher(maintenance,new ObjectMapper()),TaskPricingTestFixture.service(jdbc)).runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());
+        long generation=jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Long.class);
+        for(String change:List.of("DELETE FROM economy_task_benchmark_sponsorship","UPDATE economy_task_benchmark_sponsorship SET state='APPROVED'",
+                "UPDATE economy_task_benchmark_sponsorship SET state='ACTIVE'","UPDATE economy_task_benchmark_sponsorship SET state='CANCELLED'")){
+            tx.executeWithoutResult(st->{jdbc.update(change);assertInstanceOf(GroupBudgetQuotes.Fixed.class,scopedDecision(w));
+                assertEquals(generation+1,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Long.class));
+                org.mockito.Mockito.clearInvocations(w.decoder());assertNull(measureScoped(w.source(),w.decoder()));org.mockito.Mockito.verifyNoInteractions(w.decoder());
+                st.setRollbackOnly();});
+        }
+        assertInstanceOf(GroupBudgetQuotes.Mean.class,scopedDecision(w));assertEquals(1,count("economy_budget_group_revision"));
+    }
+    @Test void scopedSponsoredCorruptOrMismatchedAuthorityIsNotFreeSourceEvidence(){
+        var w=scopedWorkerFixture(1,true);
+        for(String change:List.of("UPDATE economy_task_benchmark_sponsorship SET authority_sha=REPEAT('0',64)",
+                "UPDATE economy_task_benchmark_sponsorship SET authority_json=JSON_SET(authority_json,'$.agentId','wrong'),authority_sha=SHA2(authority_json,256)",
+                "UPDATE economy_task_benchmark_sponsorship SET authority_json=JSON_SET(authority_json,'$.manifestSha256',REPEAT('0',64)),authority_sha=SHA2(authority_json,256)")){
+            tx.executeWithoutResult(st->{jdbc.update(change);org.mockito.Mockito.clearInvocations(w.decoder());
+                assertThrows(IllegalStateException.class,()->measureScoped(w.source(),w.decoder()));org.mockito.Mockito.verifyNoInteractions(w.decoder());st.setRollbackOnly();});
+        }
+        assertEquals(ConfirmedSampleEvidence.Verdict.MATCHED,measureScoped(w.source(),w.decoder()).assessment().verdict());
+    }
+    @Test void scopedSponsoredAuthorityChangeBetweenReadAndPublishRejectsStaleGeneration(){
+        var w=scopedWorkerFixture(1,true);var json=new ObjectMapper();
+        var publisher=new GroupBaselinePublisher(maintenance,json){
+            @Override Prepared calculateScoped(cn.jia.economy.mapper.GroupBaselineMaintenanceMapper.Work work,String claim,cn.jia.economy.pricing.GroupTariffSnapshot.Scoped tariff,List<ScopedEligible> members,int support,String approval){
+                var prepared=super.calculateScoped(work,claim,tariff,members,support,approval);
+                jdbc.update("UPDATE economy_task_benchmark_sponsorship SET state='CANCELLED'");return prepared;
+            }
+        };
+        scopedWorkerService(publisher,TaskPricingTestFixture.service(jdbc)).runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());
+        assertEquals(0,count("economy_budget_group_revision"));assertInstanceOf(GroupBudgetQuotes.Fixed.class,scopedDecision(w));
+        scopedWorkerService(new GroupBaselinePublisher(maintenance,json),TaskPricingTestFixture.service(jdbc)).runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());
+        assertEquals("WAIT_INPUT",jdbc.queryForObject("SELECT status FROM economy_budget_group_head",String.class));
+    }
+
     @Test void scopedWorkerPublishesDistinctModelCostsAndReviewWithdrawalRevokesNewOffers(){
         var w=scopedWorkerFixture(1);var prices=org.mockito.Mockito.spy(TaskPricingTestFixture.service(jdbc));var service=scopedWorkerService(new GroupBaselinePublisher(maintenance,new ObjectMapper()),prices);
         service.runDue(SCOPE.tenantId(),SCOPE.clientId(),w.decoder());var mean=assertInstanceOf(GroupBudgetQuotes.Mean.class,scopedDecision(w));
@@ -1112,7 +1169,7 @@ class TaskBillingServiceMySqlTest {
     }
     @Test void scopedSampleMigrationResumesWithoutBackfillingOrdinarySamplesAndRejectsDrift(){
         usageSchema();var quote=scopedSnapshot("agent",false,false);
-        var id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
+        String id=inTask(TASK,()->billing.storeOffersBatch(TASK,"payer-1",List.of(new TaskBillingService.ScopedWrite(quote)))).getFirst().quoteId();
         inTask(TASK,()->billing.reserve(TASK,id,quote.binding(),"payer-1"));
         jdbc.execute("ALTER TABLE economy_task_cost_sample ADD COLUMN scope_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL FIRST");
         var migration=new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc);migration.afterPropertiesSet();migration.afterPropertiesSet();

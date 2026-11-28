@@ -4155,6 +4155,20 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         String raw=new ObjectMapper().writeValueAsString(authority);
         jdbc.update("INSERT INTO economy_task_benchmark_sponsorship(tenant_id,client_id,owner_jiacn,task_id,authority_json,authority_sha) VALUES(?,?,?,?,?,SHA2(?,256))",TENANT,CLIENT,OWNER,TASK,raw,raw);
     }
+    @Test void scopedBenchmarkSponsoredAcceptanceUsesOriginalDecisionWithoutWalletCharge(){
+        prepareScopedAssignment();importScopedSponsor(scopedSponsorAuthority());assignScopedSponsor();prepareSubmitted();
+        decide("accepted");assertEquals("ACCEPTED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertTrue(decide("accepted").getReplayed());assertEquals(100,wallet(jdbc));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+        assertEquals(1,count("economy_task_cost_sample"));
+    }
+    @Test void scopedBenchmarkSponsoredCancellationUsesOriginalCancellationWithoutRefund() throws Exception {
+        prepareCancellation();prepareScopedAssignment();importScopedSponsor(scopedSponsorAuthority());assignScopedSponsor();
+        var receipt=cancel();assertEquals("cancelled",receipt.status());assertEquals(receipt,cancel());
+        assertEquals("CANCELLED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertEquals(100,wallet(jdbc));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+        assertEquals("REVOKED",jdbc.queryForObject("SELECT state FROM agent_task_execution_grant",String.class));
+        assertEquals("DEAD",jdbc.queryForObject("SELECT status FROM agent_task_bounty_bootstrap_outbox",String.class));
+    }
     private AgentTaskExecutionGrantDTO assignScopedSponsor(){return assignment.assignSponsoredForDeliberation(SCOPE,TASK,"scope-sponsored",AGENT,0,1);}
     @Test void scopedBenchmarkSponsoredAssignmentCreatesNoChargeAndReplaysOriginalAuthority(){
         prepareScopedAssignment();var authority=scopedSponsorAuthority();importScopedSponsor(authority);int quotes=count("economy_task_quote");

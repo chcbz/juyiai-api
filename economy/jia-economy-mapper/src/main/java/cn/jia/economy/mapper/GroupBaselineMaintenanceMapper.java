@@ -55,23 +55,28 @@ public interface GroupBaselineMaintenanceMapper {
     @Select("SELECT manifest_json FROM economy_task_benchmark_case WHERE tenant_id=#{tenant} AND client_id=#{client} AND owner_jiacn=#{sourceOwner} AND task_id=#{sourceTask} AND benchmark_case_id=#{caseId} AND manifest_sha=#{manifestSha} AND SHA2(manifest_json,256)=manifest_sha AND NOT retired FOR SHARE") String lockCaseOriginal(Member member);
     @Select("SELECT review_sha FROM economy_task_benchmark_review WHERE sample_id=#{sampleId} AND review_sha=#{reviewSha} AND SHA2(review_json,256)=review_sha AND NOT withdrawn AND review_json->>'$.decision'='ACCEPTED' AND review_json->>'$.manifestSha'=#{manifestSha} AND review_json->>'$.caseId'=#{caseId} FOR SHARE") String lockReview(Member member);
     @Select("SELECT evidence_revision FROM economy_task_cost_sample WHERE sample_id=#{sampleId} AND tenant_id=#{tenant} AND client_id=#{client} AND owner_jiacn=#{sourceOwner} AND task_id=#{sourceTask} AND benchmark_case_id=#{caseId} AND quote_id IS NULL AND lifecycle_state='ACCEPTED' AND sample_definition_version='TASK_LIFECYCLE_V1' FOR SHARE") Long lockSample(Member member);
-    /** Paid scoped sample identity is the original sample id, not the manifest digest. */
+    /** Paid or independently sponsored source, never infer free funding from a missing quote. */
     record ScopedSample(long evidenceRevision,String scopeSha,String shapeSha,String groupSha,String policySha,
-            String requirementSha,String inputSha,String featureSha,String quoteJson) {}
+            String requirementSha,String inputSha,String featureSha,String quoteJson,String sponsorJson,String sponsorSha) {}
     @Select("""
         SELECT s.evidence_revision,s.scope_sha256 AS scope_sha,s.scope_shape_sha256 AS shape_sha,
           s.scoped_group_sha256 AS group_sha,s.scoped_policy_sha256 AS policy_sha,
           s.initial_requirement_sha256 AS requirement_sha,s.initial_input_snapshot_sha256 AS input_sha,
-          s.initial_feature_sha256 AS feature_sha,q.snapshot_json AS quote_json
+          s.initial_feature_sha256 AS feature_sha,q.snapshot_json AS quote_json,f.authority_json AS sponsor_json,f.authority_sha AS sponsor_sha
         FROM economy_task_cost_sample s
-        JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id
+        LEFT JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id
           AND q.client_id=s.client_id AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id
-        JOIN economy_task_charge c ON c.tenant_id=q.tenant_id AND c.client_id=q.client_id
+        LEFT JOIN economy_task_charge c ON c.tenant_id=q.tenant_id AND c.client_id=q.client_id
           AND c.owner_jiacn=q.owner_jiacn AND c.task_id=q.task_id AND c.quote_id=q.quote_id
           AND c.payer_user_id=q.payer_user_id AND c.state IN ('HELD','CAPTURED')
+        LEFT JOIN economy_task_benchmark_sponsorship f ON s.quote_id IS NULL AND f.tenant_id=s.tenant_id
+          AND f.client_id=s.client_id AND f.owner_jiacn=s.owner_jiacn AND f.task_id=s.task_id AND f.state='ACCEPTED'
         WHERE s.sample_id=#{sampleId} AND s.tenant_id=#{tenant} AND s.client_id=#{client}
           AND s.owner_jiacn=#{sourceOwner} AND s.task_id=#{sourceTask} AND s.benchmark_case_id=#{caseId}
           AND s.lifecycle_state='ACCEPTED' AND s.sample_definition_version='TASK_LIFECYCLE_V1'
+          AND ((s.quote_id IS NOT NULL AND c.quote_id IS NOT NULL) OR
+               (s.quote_id IS NULL AND f.authority_sha IS NOT NULL AND NOT EXISTS(SELECT 1 FROM economy_task_charge ordinary
+                 WHERE ordinary.tenant_id=s.tenant_id AND ordinary.client_id=s.client_id AND ordinary.owner_jiacn=s.owner_jiacn AND ordinary.task_id=s.task_id)))
         FOR SHARE
         """) ScopedSample lockScopedSample(Member member);
     @Insert("INSERT INTO economy_budget_domain_epoch(tenant_id,client_id,book_epoch) VALUES(#{tenant},#{client},1) ON DUPLICATE KEY UPDATE book_epoch=book_epoch") int ensureDomain(Member member);
