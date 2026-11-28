@@ -149,6 +149,25 @@ public class TaskBenchmarkAdmissionService implements TaskBenchmarkAdmission {
     }
 
     @Override @Transactional(propagation=Propagation.MANDATORY)
+    public Sponsorship sponsorScope(TaskBillingService.Task task,String agent,String action,String assignmentSha,
+            String initialIntentSha,java.util.function.Function<cn.jia.economy.pricing.GroupMeanPricing.ScopedPolicy,ObservedScopeGroup> observer){
+        requireTransaction();java.util.Objects.requireNonNull(observer);
+        var row=db.funding(task);if(row==null||row.withdrawn())throw new NotAdmitted();
+        var funding=decodeFunding(task,row);var authority=funding.authority();
+        if(funding.state()!=SponsorshipState.APPROVED||!authority.agentId().equals(agent)||!authority.actionId().equals(action)
+                ||!authority.assignmentSha256().equals(assignmentSha)||!authority.initialIntentSha256().equals(initialIntentSha))throw new NotAdmitted();
+        var raw=db.approved(task,authority.caseId(),authority.manifestSha256());if(raw==null)throw new NotAdmitted();
+        var manifest=decodeScoped(raw,authority.manifestSha256());
+        if(!task.equals(manifest.task())||!authority.caseId().equals(manifest.caseId())||!agent.equals(manifest.agentId()))throw new NotAdmitted();
+        var observed=observer.apply(manifest.policy());
+        if(observed==null||!observed.scopePin().equals(manifest.scopePin())||!observed.group().key().equals(manifest.groupSha())
+                ||db.samples(task)!=0||db.hasEvidence(task))throw new NotAdmitted();
+        if(db.seedScopedSponsored(manifest,authority.manifestSha256(),ScopedTaskQuoteSnapshot.featureSha(manifest.scopePin()),manifest.group().scopeShapeSha())!=1)throw new NotAdmitted();
+        transition(task,funding,SponsorshipState.ACTIVE);
+        return new Sponsorship(funding.authoritySha256(),authority,SponsorshipState.ACTIVE);
+    }
+
+    @Override @Transactional(propagation=Propagation.MANDATORY)
     public Sponsorship sponsorship(TaskBillingService.Task task) {
         var row = db.funding(task);
         if (row == null) return null;

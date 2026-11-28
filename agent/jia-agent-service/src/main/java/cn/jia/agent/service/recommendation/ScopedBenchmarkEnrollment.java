@@ -30,6 +30,20 @@ public final class ScopedBenchmarkEnrollment {
             Snapshot requirement,InputCatalogue catalogue){
         return admission.prepareScopedPaidIfPresent(task,target.agentId(),policy->observe(task,target,requirement,catalogue,policy));
     }
+    public static String sponsoredInitialIntentSha(String assignmentSha,String requirementSha,String inputDigest){
+        return cn.jia.core.util.CanonicalValueEncoding.digest(Map.of("schema","SCOPED_SPONSORED_INITIAL_INTENT_V1",
+                "assignmentSha",assignmentSha,"requirementSha",requirementSha,"inputSnapshotDigest",inputDigest,"operation","DELIBERATE"));
+    }
+    public void sponsor(TaskBillingService.Task task,Target target,Snapshot requirement,InputCatalogue catalogue,String action,String assignmentSha){
+        admission.sponsorScope(task,target.agentId(),action,assignmentSha,sponsoredInitialIntentSha(assignmentSha,requirement.sha256(),catalogue.digest()),
+                policy->observe(task,target,requirement,catalogue,policy));
+    }
+    public void replaySponsor(TaskBillingService.Task task,String agent,String action,String assignmentSha,String requirementSha,String inputDigest){
+        var funding=admission.sponsorship(task);if(funding==null)throw new TaskBenchmarkAdmission.NotAdmitted();
+        var a=funding.authority();
+        if(!a.agentId().equals(agent)||!a.actionId().equals(action)||!a.assignmentSha256().equals(assignmentSha)
+                ||!a.initialIntentSha256().equals(sponsoredInitialIntentSha(assignmentSha,requirementSha,inputDigest)))throw new TaskBenchmarkAdmission.NotAdmitted();
+    }
     private TaskBenchmarkAdmission.ObservedScopeGroup observe(TaskBillingService.Task task,Target target,
             Snapshot requirement,InputCatalogue catalogue,GroupMeanPricing.ScopedPolicy policy){
         var scope=requirement.confirmedScope();

@@ -4138,6 +4138,61 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assign();verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);assertEquals(50,wallet(jdbc));
     }
 
+    private TaskBenchmarkAdmission.SponsorshipAuthority scopedSponsorAuthority(){
+        var catalogue=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK));assertTrue(catalogue.inputs().isEmpty());
+        String manifestSha=jdbc.queryForObject("SELECT manifest_sha FROM economy_task_benchmark_case",String.class);
+        var requirements=(AgentTaskRequirementSnapshotService)ReflectionTestUtils.getField(assignment,"requirementSnapshots");
+        String requirementSha=requirements.read(SCOPE,TASK,1).sha256();
+        // Independent encoding of the existing initial-operation assignment contract, no quote or payer identity.
+        String assignmentSha=cn.jia.core.util.CanonicalValueEncoding.sha256(cn.jia.core.util.CanonicalValueEncoding.utf8(
+                "ASSIGN_AND_START_INITIAL_OPERATION_V1\n"+TASK+"\n"+AGENT+"\n0\n1\n[\"DELIBERATE\",\"EXECUTE_SKILL\"]\n[]\nDELIBERATE"));
+        String initial=cn.jia.core.util.CanonicalValueEncoding.digest(Map.of("schema","SCOPED_SPONSORED_INITIAL_INTENT_V1",
+                "assignmentSha",assignmentSha,"requirementSha",requirementSha,"inputSnapshotDigest",catalogue.digest(),"operation","DELIBERATE"));
+        return new TaskBenchmarkAdmission.SponsorshipAuthority("benchmark-sponsorship-v1",BILLING_TASK,"case-scoped",manifestSha,AGENT,
+                "ASSIGN_AND_START:scope-sponsored",assignmentSha,initial,"synthetic sponsorship, not production approval");
+    }
+    private void importScopedSponsor(TaskBenchmarkAdmission.SponsorshipAuthority authority){
+        String raw=new ObjectMapper().writeValueAsString(authority);
+        jdbc.update("INSERT INTO economy_task_benchmark_sponsorship(tenant_id,client_id,owner_jiacn,task_id,authority_json,authority_sha) VALUES(?,?,?,?,?,SHA2(?,256))",TENANT,CLIENT,OWNER,TASK,raw,raw);
+    }
+    private AgentTaskExecutionGrantDTO assignScopedSponsor(){return assignment.assignSponsoredForDeliberation(SCOPE,TASK,"scope-sponsored",AGENT,0,1);}
+    @Test void scopedBenchmarkSponsoredAssignmentCreatesNoChargeAndReplaysOriginalAuthority(){
+        prepareScopedAssignment();var authority=scopedSponsorAuthority();importScopedSponsor(authority);int quotes=count("economy_task_quote");
+        var first=assignScopedSponsor();assertEquals(100,wallet(jdbc));assertEquals(0,count("economy_task_charge"));assertEquals(0,count("economy_transaction"));
+        assertEquals(quotes,count("economy_task_quote"));assertEquals(1,count("economy_task_cost_sample"));
+        assertNull(jdbc.queryForObject("SELECT quote_id FROM economy_task_cost_sample",String.class));
+        assertEquals(authority.manifestSha256(),jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class));
+        assertEquals("ACTIVE",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        assertEquals(1,count("agent_task_execution_grant"));assertEquals(1,count("agent_task_bounty_bootstrap_outbox"));
+        clearInvocations(scopedProfiles,scopedSpecs,scopedRoutes);jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=TRUE");
+        assertEquals(first.getGrantId(),assignScopedSponsor().getGrantId());verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+        assertEquals(1,count("economy_task_cost_sample"));assertEquals(100,wallet(jdbc));
+    }
+    @Test void scopedBenchmarkSponsoredAssignmentRequiresSeparateExactAuthority(){
+        prepareScopedAssignment();assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assignScopedSponsor);
+        assertAssignmentAbsent(2);verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+        var a=scopedSponsorAuthority();importScopedSponsor(new TaskBenchmarkAdmission.SponsorshipAuthority(a.schema(),a.task(),a.caseId(),a.manifestSha256(),a.agentId(),a.actionId(),a.assignmentSha256(),"f".repeat(64),a.approvalRef()));
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assignScopedSponsor);assertAssignmentAbsent(2);
+        assertEquals(0,count("economy_task_cost_sample"));assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+    }
+    @Test void scopedBenchmarkSponsoredBootstrapFailureRollsBackFundingAndSample(){
+        prepareScopedAssignment();importScopedSponsor(scopedSponsorAuthority());failBootstrap=true;
+        assertThrows(InjectedFailure.class,this::assignScopedSponsor);assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));
+        assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+        failBootstrap=false;assignScopedSponsor();assertEquals(1,count("economy_task_cost_sample"));assertEquals(0,count("economy_task_charge"));
+    }
+    @Test void scopedBenchmarkSponsoredConfigurationChangeCannotUseManifestAsObservation(){
+        prepareScopedAssignment();importScopedSponsor(scopedSponsorAuthority());when(scopedProfiles.atAssignment(any())).thenReturn(null);
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assignScopedSponsor);assertAssignmentAbsent(2);assertEquals(0,count("economy_task_cost_sample"));
+        assertEquals("APPROVED",jdbc.queryForObject("SELECT state FROM economy_task_benchmark_sponsorship",String.class));
+    }
+    @Test void scopedBenchmarkSponsoredWithdrawalStopsNewAssignmentButOrdinaryEntryStillRequiresPayment(){
+        prepareScopedAssignment();importScopedSponsor(scopedSponsorAuthority());jdbc.update("UPDATE economy_task_benchmark_sponsorship SET withdrawn=TRUE");
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,this::assignScopedSponsor);assertAssignmentAbsent(2);
+        assertThrows(cn.jia.agent.service.AgentTaskExecutionGrantException.class,()->assignment.assignForDeliberation(SCOPE,TASK,"scope-sponsored",AGENT,0,1,null));
+        assertEquals(0,count("economy_task_cost_sample"));verifyNoInteractions(scopedProfiles,scopedSpecs,scopedRoutes);
+    }
+
     private AgentTaskExecutionGrantDTO assign() {
         return assignment.assignForDeliberation(SCOPE, TASK, "assign-1", AGENT, 0, 1,
                 new AgentTaskExecutionGrantService.Payment(PAYER, quoteId, "recommendation-1"));

@@ -25,6 +25,11 @@ public interface TaskBenchmarkAdmission {
     ScopedEnrollment prepareScopedPaidIfPresent(TaskBillingService.Task task,String agentId,
             java.util.function.Function<cn.jia.economy.pricing.GroupMeanPricing.ScopedPolicy,ObservedScopeGroup> observer);
 
+    /** Existing separate sponsorship authority, matched to the actual assignment under its task lock.
+     * No quote, charge or retrospective conversion of a paid sample. */
+    Sponsorship sponsorScope(TaskBillingService.Task task,String agentId,String actionId,String assignmentSha,
+            String initialIntentSha,java.util.function.Function<cn.jia.economy.pricing.GroupMeanPricing.ScopedPolicy,ObservedScopeGroup> observer);
+
     /** Optional, operator-approved before execution; never inferred from text or output files. */
     record GroupInput(String operation,cn.jia.economy.pricing.GroupMeanPricing.Configuration configuration) {
         public GroupInput { if(configuration==null||!configuration.supportsImage(operation))throw new IllegalArgumentException("Invalid benchmark cost configuration"); }

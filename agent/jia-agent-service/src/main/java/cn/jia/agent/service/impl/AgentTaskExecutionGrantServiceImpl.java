@@ -143,6 +143,14 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
             String key, String targetAgentId, long expectedTaskVersion, long requirementRevision, Payment payment) {
         if (payment == null) throw bad("Selected task quote is required");
         exact(payment.payerUserId(), "payerUserId", 100);
+        return assignDeliberation(scope,taskId,key,targetAgentId,expectedTaskVersion,requirementRevision,payment,false);
+    }
+
+    @Override
+    public AgentTaskExecutionGrantDTO assignSponsoredForDeliberation(Scope scope,String taskId,String key,String targetAgentId,long expectedTaskVersion,long requirementRevision){
+        return assignDeliberation(scope,taskId,key,targetAgentId,expectedTaskVersion,requirementRevision,null,true);
+    }
+    private AgentTaskExecutionGrantDTO assignDeliberation(Scope scope,String taskId,String key,String targetAgentId,long expectedTaskVersion,long requirementRevision,Payment payment,boolean sponsored){
         validateScope(scope); exact(taskId,"taskId",100); exact(key,"Idempotency-Key",100);
         exact(targetAgentId,"targetAgentId",100);
         if (expectedTaskVersion<0 || expectedTaskVersion==Long.MAX_VALUE || requirementRevision<1)
@@ -164,11 +172,11 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                 request.setWorkflowVersion(2); request.setBusinessAction(ACTION);
                 request.setAgentId(canonicalAgent); request.setExpectedTaskVersion(expectedTaskVersion);
                 request.setRequirementRevision(requirementRevision);
-                request.setQuoteId(payment.quoteId()); request.setRecommendationId(payment.recommendationId());
+                if(!sponsored){request.setQuoteId(payment.quoteId()); request.setRecommendationId(payment.recommendationId());}
                 request.setRequestedOperations(List.of("DELIBERATE","EXECUTE_SKILL"));
                 request.setInitialOperation("DELIBERATE"); request.setInputRefs(inputs);
                 ValidAssign valid=validateAssign(scope,taskId,key,request);
-                return assignLocked(scope,valid,canonicalAgent,validatedAssignmentHash(valid,canonicalAgent),actionId,root,payment.payerUserId(),AdmissionPath.DELIBERATION);
+                return assignLocked(scope,valid,canonicalAgent,sponsored?hashAssign(valid,canonicalAgent):validatedAssignmentHash(valid,canonicalAgent),actionId,root,sponsored?null:payment.payerUserId(),sponsored?AdmissionPath.SPONSORED:AdmissionPath.DELIBERATION);
             });
         } catch (AgentTaskCollaborationException failure) { throw translate(failure); }
     }
@@ -246,7 +254,7 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
         }
     }
 
-    private enum AdmissionPath { DIRECT, DELIBERATION, CONTROLLED_IMAGE }
+    private enum AdmissionPath { DIRECT, DELIBERATION, CONTROLLED_IMAGE, SPONSORED }
 
     private AgentTaskExecutionGrantDTO assignLocked(Scope scope, ValidAssign valid,
             String canonicalAgent, String requestHash, String actionId, AgentTaskMetaEntity root, String payerUserId, AdmissionPath path) {
@@ -264,7 +272,11 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                         scope.ownerJiacn(), actionId);
         if (replay != null) {
             AgentTaskExecutionGrantDTO result = replay(requestHash,valid.taskId(),replay);
-            try { billing.reservation(billingTask(scope, valid.taskId()), valid.quoteId(), payerUserId, valid.recommendationId()); }
+            try {
+                if(path==AdmissionPath.SPONSORED)benchmarks.replaySponsor(billingTask(scope,valid.taskId()),canonicalAgent,actionId,requestHash,requirement.sha256(),
+                        inputCatalogue(readInputs(replay.getInputScopeJson())).digest());
+                else billing.reservation(billingTask(scope, valid.taskId()), valid.quoteId(), payerUserId, valid.recommendationId());
+            } catch(cn.jia.economy.task.TaskBenchmarkAdmission.NotAdmitted failure){throw invalidState("Recorded sponsorship differs from this assignment");}
             catch (cn.jia.economy.task.TaskBillingException failure) { throw billingFailure(failure); }
             if (valid.initialOperation()==null) {
                 throw bad("assign_and_start requires exactly one initial permitted operation");
@@ -307,17 +319,21 @@ public final class AgentTaskExecutionGrantServiceImpl implements AgentTaskExecut
                                 snapshot.set(validateAndSnapshotInputs(scope,valid.taskId(),valid.inputs()));
                                 // Point-and-deliberate already read the complete catalogue under this root.
                                 // Reuse the same snapshots instead of locking/reading every file twice.
-                                var allInputs = path == AdmissionPath.DELIBERATION ? valid.inputs()
+                                var allInputs = path == AdmissionPath.DELIBERATION || path == AdmissionPath.SPONSORED ? valid.inputs()
                                         : canonicalInputs(allTaskMaterials(scope, valid.taskId()));
                                 var catalogue = inputCatalogue(allInputs.equals(valid.inputs()) ? snapshot.get()
                                         : validateAndSnapshotInputs(scope, valid.taskId(), allInputs));
                                 var taskBilling = billingTask(scope, valid.taskId());
                                 try {
+                                    if(path==AdmissionPath.SPONSORED){
+                                        benchmarks.sponsor(taskBilling,target.get(),requirement,catalogue,actionId,requestHash);
+                                    }else{
                                     var enrollment=benchmarks.prepare(taskBilling,target.get(),requirement,catalogue);
                                     var binding=new cn.jia.economy.task.TaskBillingService.Binding(requirement.revision(),
                                             requirement.sha256(),catalogue.digest(),canonicalAgent,valid.recommendationId());
                                     if(enrollment==null)billing.reserve(taskBilling,valid.quoteId(),binding,payerUserId);
                                     else billing.reserve(taskBilling,valid.quoteId(),binding,payerUserId,enrollment);
+                                    }
                                 } catch (cn.jia.economy.task.TaskBenchmarkAdmission.NotAdmitted failure) {
                                     throw invalidState("Approved benchmark no longer matches this assignment");
                                 } catch (cn.jia.economy.task.TaskBillingException failure) {

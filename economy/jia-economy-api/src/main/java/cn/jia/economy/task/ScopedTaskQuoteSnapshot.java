@@ -62,7 +62,8 @@ public record ScopedTaskQuoteSnapshot(String schema,TaskBillingService.Binding b
         }
         public long amountWen(){return mean==null?1:GroupMeanPricing.amountWen(mean.sumCostYuan(),mean.sampleCount());}
     }
-    public String featureSha(){return cn.jia.core.util.CanonicalValueEncoding.digest(Map.of("schema","SCOPED_QUOTE_FEATURE_V1",
+    public String featureSha(){return featureSha(scopePin);}
+    public static String featureSha(ScopePin scopePin){Objects.requireNonNull(scopePin);return cn.jia.core.util.CanonicalValueEncoding.digest(Map.of("schema","SCOPED_QUOTE_FEATURE_V1",
             "requirementRevision",Long.toString(scopePin.requirementRevision()),"requirementSha256",scopePin.requirementSha256(),
             "scopeSha256",scopePin.scopeSha256(),"inputSnapshotDigest",scopePin.inputSnapshotDigest()));}
     @Override public String toString(){return "ScopedTaskQuoteSnapshot[private]";}

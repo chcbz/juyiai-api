@@ -55,6 +55,18 @@ public interface TaskBenchmarkMapper {
             @Param("quote") String quoteId,@Param("sample") String sampleId,@Param("feature") String featureSha,
             @Param("shape") String shapeSha,@Param("policy") String policySha);
 
+    @Insert("""
+        INSERT INTO economy_task_cost_sample(sample_id,tenant_id,client_id,owner_jiacn,task_id,benchmark_case_id,
+          sample_definition_version,initial_requirement_sha256,initial_input_snapshot_sha256,initial_feature_sha256,
+          history_group_sha256,scope_sha256,scope_shape_sha256,scoped_group_sha256,scoped_policy_sha256,
+          lifecycle_state,evidence_revision,sample_state)
+        VALUES(#{sha},#{m.task.scope.tenantId},#{m.task.scope.clientId},#{m.task.ownerJiacn},#{m.task.taskId},#{m.caseId},
+          'TASK_LIFECYCLE_V1',#{m.scopePin.requirementSha256},#{m.scopePin.inputSnapshotDigest},#{feature},NULL,
+          #{m.scopePin.scopeSha256},#{shape},#{m.groupSha},#{m.policy.sha},'ACTIVE',1,'WAITING_EVIDENCE')
+        """)
+    int seedScopedSponsored(@Param("m") cn.jia.economy.task.ScopedBenchmarkManifest manifest,@Param("sha") String manifestSha,
+            @Param("feature") String featureSha,@Param("shape") String shapeSha);
+
     record FundingRow(String authorityJson, String authoritySha, String state, boolean withdrawn) {}
     @Select("SELECT authority_json,authority_sha,state,withdrawn FROM economy_task_benchmark_sponsorship WHERE " + SCOPE + " FOR UPDATE")
     FundingRow funding(@Param("t") Task task);

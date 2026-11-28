@@ -14,6 +14,11 @@ public interface AgentTaskExecutionGrantService {
             String idempotencyKey, String targetAgentId, long expectedTaskVersion,
             long requirementRevision, Payment payment);
 
+    /** Internal approved benchmark entry. No browser route and no synthetic payment.
+     * Exact imported sponsorship authority remains mandatory in the assignment transaction. */
+    AgentTaskExecutionGrantDTO assignSponsoredForDeliberation(Scope scope,String taskId,String idempotencyKey,
+            String targetAgentId,long expectedTaskVersion,long requirementRevision);
+
     AgentTaskExecutionGrantDTO revoke(Scope scope, String taskId, String grantId,
             String idempotencyKey, long expectedGrantVersion);
 
