@@ -62,18 +62,66 @@ public final class SharedBudgetEnrollment {
             return body;
         }
     }
+    record ExportRequest(cn.jia.economy.task.TaskBillingService.Task task,
+            cn.jia.economy.task.TaskHistoryCatalog.Revision source,cn.jia.economy.usage.BenchmarkSampleEvidence.Pin pin) {}
+    static ExportRequest parseExport(String body){
+        var json=tools.jackson.databind.json.JsonMapper.builder(tools.jackson.core.json.JsonFactory.builder()
+                .enable(tools.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION).build())
+                .enable(tools.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES,
+                    tools.jackson.databind.DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES)
+                .disable(tools.jackson.databind.MapperFeature.ALLOW_COERCION_OF_SCALARS).build();
+        var r=json.readValue(body,ExportRequest.class);
+        if(r.source().sampleId().isBlank() || r.source().revision()<1 || r.pin().caseId().isBlank()
+                || !sha(r.pin().manifestSha()) || !sha(r.pin().reviewSha()) || !sha(r.pin().fact()))
+            throw new IllegalArgumentException("Invalid scoped observation request");
+        return r;
+    }
+    static void writeObservation(Path root,cn.jia.economy.task.TaskCalibrationObservations.Frozen artifact) throws IOException {
+        byte[] bytes=artifact.json().getBytes(StandardCharsets.UTF_8);
+        if(!sha(artifact.sha256()) || !artifact.sha256().equals(cn.jia.core.util.CanonicalValueEncoding.sha256(bytes)))
+            throw new IOException("Invalid observation digest");
+        Path tmp=Files.createTempFile(root,".observation-",".tmp",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        try {
+            try(var file=java.nio.channels.FileChannel.open(tmp,StandardOpenOption.WRITE)){
+                var buffer=ByteBuffer.wrap(bytes);while(buffer.hasRemaining())file.write(buffer);file.force(true);
+            }
+            try { Files.createLink(root.resolve(artifact.sha256()),tmp); }
+            catch(FileAlreadyExistsException exists){
+                var target=root.resolve(artifact.sha256());
+                if(!Files.isRegularFile(target,LinkOption.NOFOLLOW_LINKS))throw new IOException("Conflicting observation");
+                try(var in=Files.newInputStream(target,StandardOpenOption.READ,LinkOption.NOFOLLOW_LINKS)){
+                    if(!java.util.Arrays.equals(bytes,in.readNBytes(bytes.length+1)))throw new IOException("Conflicting observation");
+                }
+            }
+        } finally {Files.deleteIfExists(tmp);}
+        try(var dir=java.nio.channels.FileChannel.open(root,StandardOpenOption.READ)){dir.force(true);}
+    }
     public static void main(String[] args) throws IOException {
+        boolean exporting=args.length>0 && "--export-reviewed".equals(args[0]);
         boolean importing=args.length>0 && "--import-approved".equals(args[0]);
-        var original=importing?parseImport(args):null;
+        var readArgs=args.clone();if(exporting)readArgs[0]="--import-approved";
+        var original=importing||exporting?parseImport(readArgs):null;
         var body=original==null?null:readOriginal(original);
-        var command=importing?null:parse(args);
+        ExportRequest request=null;
+        if(exporting)try {request=parseExport(body);}catch(RuntimeException rejected){throw new IllegalArgumentException("Invalid scoped observation request");}
+        var command=importing||exporting?null:parse(args);
         var app=new SpringApplication(Context.class);app.setWebApplicationType(WebApplicationType.NONE);
         app.setAdditionalProfiles("shared-budget-enrollment");
         try(var ctx=app.run()){
             var scope=ctx.getBean(FixedTenantAdmissionPolicy.class);
             if(scope.clientId()==null)throw new IllegalStateException("A fixed maintenance client is required");
             var domain=new EconomyScope(scope.businessTenantId(),scope.clientId());
-            if(importing){
+            if(exporting){
+                try {
+                    if(!domain.equals(request.task().scope()))throw new IllegalArgumentException("Observation domain differs");
+                    var observation=ctx.getBean(cn.jia.economy.usage.BenchmarkSampleEvidence.class).freezeScopedReviewed(
+                            request.task(),request.source(),request.pin(),ctx.getBean(cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder.class));
+                    writeObservation(original.objects().toRealPath(),observation);
+                    System.out.println("EXPORTED_REVIEWED_OBSERVATION "+observation.sha256());
+                }catch(RuntimeException rejected){throw new IllegalStateException("Scoped observation export rejected: "+rejected.getClass().getSimpleName());}
+            }else if(importing){
                 try {
                     var kind=ctx.getBean(BudgetOriginalImport.class).importApproved(domain,original.sha(),body);
                     System.out.println("IMPORTED_OR_IDENTICAL_REPLAY "+kind+" "+original.sha());
@@ -92,16 +140,28 @@ public final class SharedBudgetEnrollment {
     }
     @Configuration(proxyBeanMethods=false) @Profile("shared-budget-enrollment")
     @EnableTransactionManagement(proxyTargetClass=true) @ImportAutoConfiguration(DataSourceAutoConfiguration.class)
-    @Import({ProcessTenantConfiguration.class,GroupPublicationEnrollment.class,DatabaseScopedGroupPolicies.class,BudgetOriginalImport.class})
+    @Import({ProcessTenantConfiguration.class,GroupPublicationEnrollment.class,DatabaseScopedGroupPolicies.class,BudgetOriginalImport.class,
+        cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader.class,cn.jia.economy.service.impl.UsageCostServiceImpl.class,
+        cn.jia.agent.service.usage.NativeSampleResponseDecoder.class,cn.jia.agent.dao.impl.PersonalWorkspaceExecutionDaoImpl.class,
+        cn.jia.agent.dao.impl.SkillExecutionDaoImpl.class})
     public static class Context {
         @Bean DataSourceTransactionManager enrollmentTx(DataSource source){return new DataSourceTransactionManager(source);}
         @Bean ObjectMapper enrollmentJson(){return new ObjectMapper();}
         @Bean SqlSessionTemplate enrollmentSession(DataSource ds)throws Exception{
             var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
             config.addMapper(GroupBaselineMaintenanceMapper.class);config.addMapper(ScopedGroupPolicyMapper.class);config.addMapper(BudgetOriginalImportMapper.class);
+            for(var type:java.util.List.of(cn.jia.economy.mapper.ConfirmedSampleMapper.class,cn.jia.economy.mapper.EconomyUsageCostMapper.class,
+                    cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper.class,cn.jia.agent.mapper.PersonalWorkspaceExecutionInputMapper.class,
+                    cn.jia.agent.mapper.PersonalWorkspaceExecutionOutputMapper.class,cn.jia.agent.mapper.SkillExecutionMapper.class))config.addMapper(type);
             var factory=new MybatisSqlSessionFactoryBean();factory.setDataSource(ds);factory.setConfiguration(config);
             return new SqlSessionTemplate(factory.getObject());
         }
+        @Bean cn.jia.economy.mapper.ConfirmedSampleMapper observationSql(SqlSessionTemplate s){return s.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);}
+        @Bean cn.jia.economy.mapper.EconomyUsageCostMapper usageSql(SqlSessionTemplate s){return s.getMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class);}
+        @Bean cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper executionsSql(SqlSessionTemplate s){return s.getMapper(cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper.class);}
+        @Bean cn.jia.agent.mapper.PersonalWorkspaceExecutionInputMapper inputsSql(SqlSessionTemplate s){return s.getMapper(cn.jia.agent.mapper.PersonalWorkspaceExecutionInputMapper.class);}
+        @Bean cn.jia.agent.mapper.PersonalWorkspaceExecutionOutputMapper outputsSql(SqlSessionTemplate s){return s.getMapper(cn.jia.agent.mapper.PersonalWorkspaceExecutionOutputMapper.class);}
+        @Bean cn.jia.agent.mapper.SkillExecutionMapper skillsSql(SqlSessionTemplate s){return s.getMapper(cn.jia.agent.mapper.SkillExecutionMapper.class);}
         @Bean GroupBaselineMaintenanceMapper enrollmentSql(SqlSessionTemplate session){return session.getMapper(GroupBaselineMaintenanceMapper.class);}
         @Bean BudgetOriginalImportMapper originalSql(SqlSessionTemplate session){return session.getMapper(BudgetOriginalImportMapper.class);}
         @Bean ScopedGroupPolicyMapper policySql(SqlSessionTemplate session){return session.getMapper(ScopedGroupPolicyMapper.class);}

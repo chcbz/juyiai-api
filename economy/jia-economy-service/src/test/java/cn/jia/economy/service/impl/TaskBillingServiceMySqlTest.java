@@ -946,6 +946,39 @@ class TaskBillingServiceMySqlTest {
     private ConfirmedSampleEvidence.ScopedMeasured measureScoped(ScopedReview p,ConfirmedSampleEvidence.Decoder decoder){
         return tx.execute(st->new ConfirmedSampleEvidenceReader(originals,new ObjectMapper()).measureScopedReviewed(TASK,p.sample(),p.source().manifest().caseId(),p.source().sha(),p.fact(),p.review(),decoder));
     }
+    private cn.jia.economy.task.TaskCalibrationObservations.Frozen freezeScoped(ScopedReview p,long revision,ConfirmedSampleEvidence.Decoder decoder){
+        return tx.execute(st->new ConfirmedSampleEvidenceReader(originals,new ObjectMapper()).freezeScopedReviewed(TASK,
+                new cn.jia.economy.task.TaskHistoryCatalog.Revision(p.sample(),revision),
+                new BenchmarkSampleEvidence.Pin(p.source().manifest().caseId(),p.source().sha(),p.fact(),p.review()),decoder));
+    }
+    @Test void scopedObservationExportsActualSampleRevisionOriginalsAndEveryResourceWithoutPrices(){
+        var p=scopedReviewedSource();var frozen=freezeScoped(p,1,scopedDecoder(p,false));var json=new ObjectMapper();
+        assertEquals(GroupPublicationEnrollment.digest(frozen.json()),frozen.sha256());
+        var saved=json.readValue(frozen.json(),FrozenScopedBenchmarkObservation.class);
+        assertEquals(FrozenScopedBenchmarkObservation.SCHEMA,saved.schema());
+        assertEquals(p.sample(),saved.source().sampleId());assertNotEquals(p.source().sha(),saved.source().sampleId());
+        assertEquals(1,saved.source().revision());assertEquals(p.source().sha(),GroupPublicationEnrollment.digest(saved.manifest()));
+        assertEquals(p.review(),GroupPublicationEnrollment.digest(saved.review()));
+        assertEquals(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,
+                TaskBenchmarkAdmissionService.decodeScoped(saved.manifest(),p.source().sha()).purpose());
+        assertTrue(saved.observedBy()>=saved.featuresAt());assertTrue(saved.featuresAt()>0);
+        assertEquals(ConfirmedSampleEvidence.Verdict.MATCHED,saved.assessment().verdict());assertEquals(2,saved.assessment().members());
+        assertEquals(2,saved.operations().size());assertEquals(List.of(1L,2L),saved.operations().stream().map(r->r.operation().memberRevision()).toList());
+        for(var row:saved.operations()){
+            assertEquals("actual-source",row.resource().namespace());assertEquals("actual-model",row.resource().modelOrTool());
+            var fact=row.operation().fact(json);assertInstanceOf(MeasuredTaskRepricing.Tokens.class,fact.quantity());
+            assertEquals(10L,((MeasuredTaskRepricing.Tokens)fact.quantity()).disjoint().get(ModelTokenPrice.Category.INPUT));
+        }
+        assertFalse(frozen.json().contains("evidenceJson"));assertFalse(frozen.json().contains("referenceCost"));
+        assertEquals(0,count("economy_budget_group_head"));
+    }
+    @Test void scopedObservationCannotFreezeWrongRevisionWithdrawnOrPartialEvidence(){
+        var p=scopedReviewedSource();
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->freezeScoped(p,2,scopedDecoder(p,false)));
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->freezeScoped(p,1,scopedDecoder(p,true)));
+        jdbc.update("UPDATE economy_task_benchmark_review SET withdrawn=TRUE");
+        assertThrows(cn.jia.economy.task.TaskCalibrationObservations.NotEligible.class,()->freezeScoped(p,1,scopedDecoder(p,false)));
+    }
     @Test void scopedReviewedPaidSampleUsesActualIdentityAfterCaptureWithoutLegacyDispatchFields(){
         var p=scopedReviewedSource();var decoder=scopedDecoder(p,false);
         assertEquals(State.CAPTURED,inTask(TASK,()->billing.capture(TASK)).state());

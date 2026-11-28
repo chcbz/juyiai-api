@@ -124,6 +124,32 @@ public class ConfirmedSampleEvidenceReader implements ConfirmedSampleEvidence,cn
                 measured.operations().stream().map(op->ProjectedTaskOperation.from(op,json)).toList());
         snapshot.sample(json,task,group,selected,pin,family,split);return snapshot.seal(json);
     }
+    @Override @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public cn.jia.economy.task.TaskCalibrationObservations.Frozen freezeScopedReviewed(Task task,
+            cn.jia.economy.task.TaskHistoryCatalog.Revision selected,Pin pin,Decoder decoder){
+        java.util.Objects.requireNonNull(selected);java.util.Objects.requireNonNull(pin);java.util.Objects.requireNonNull(decoder);
+        var measured=measureScopedReviewed(task,selected.sampleId(),pin.caseId(),pin.manifestSha(),pin.fact(),pin.reviewSha(),decoder);
+        if(measured==null || measured.assessment().verdict()!=MATCHED || measured.assessment().members()==0
+                || measured.assessment().evidenceRevision()!=selected.revision()
+                || !java.util.Objects.equals(pin.fact(),measured.assessment().terminalFactId()))
+            throw new cn.jia.economy.task.TaskCalibrationObservations.NotEligible();
+        var originals=db.scopedBenchmarkOriginals(task,selected.sampleId(),pin.caseId(),pin.manifestSha(),pin.reviewSha());
+        if(originals==null || !pin.manifestSha().equals(GroupPublicationEnrollment.digest(originals.manifest()))
+                || !pin.reviewSha().equals(GroupPublicationEnrollment.digest(originals.review())))
+            throw new cn.jia.economy.task.TaskCalibrationObservations.NotEligible();
+        var manifest=TaskBenchmarkAdmissionService.decodeScoped(originals.manifest(),pin.manifestSha());
+        var review=json.readValue(originals.review(),Review.class);
+        if(!task.equals(manifest.task()) || !pin.caseId().equals(manifest.caseId())
+                || !"benchmark-review-v1".equals(review.schema()) || !"ACCEPTED".equals(review.decision())
+                || !pin.caseId().equals(review.caseId()) || !pin.manifestSha().equals(review.manifestSha())
+                || !pin.fact().equals(review.terminalFactId()))
+            throw new cn.jia.economy.task.TaskCalibrationObservations.NotEligible();
+        var rows=measured.operations().stream().map(op->new FrozenScopedBenchmarkObservation.Row(op.resource(),ProjectedTaskOperation.from(op.operation(),json)))
+                .sorted(java.util.Comparator.comparingLong((FrozenScopedBenchmarkObservation.Row r)->r.operation().memberRevision())
+                    .thenComparing(r->r.operation().captureId()).thenComparing(r->r.operation().recordId()).thenComparing(r->r.resource().sha())).toList();
+        return new FrozenScopedBenchmarkObservation(FrozenScopedBenchmarkObservation.SCHEMA,selected,pin,originals.featuresAt(),
+                db.observedByMillis(),originals.manifest(),originals.review(),measured.assessment(),rows).seal(json);
+    }
     private Measured measureHeader(Task task,String id,Decoder decoder,ConfirmedSampleMapper.Header h){
         if(h==null)return null;
         var a=assess(task,id,h);if(a.verdict()!=MATCHED)return new Measured(a,java.util.List.of());
