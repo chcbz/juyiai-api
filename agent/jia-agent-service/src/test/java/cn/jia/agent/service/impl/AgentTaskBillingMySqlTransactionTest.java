@@ -900,9 +900,10 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         when(hist.candidatePage(BILLING_TASK,group,pin,"")).thenAnswer(call->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return List.of(new cn.jia.economy.task.TaskHistoryCatalog.Entry(rev,"history",features));});
         var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("fixture","op"),"draw","frame","proof",new MeasuredTaskRepricing.Units(new TaskQuoteCalculator.ToolKey("test","draw","frame"),BigDecimal.ONE));
         when(hist.candidateQuantities(BILLING_TASK,group,pin,rev)).thenReturn(List.of(fact));
-        cn.jia.economy.pricing.TaskReferencePricing prices=(scope,version,routes,kinds)->{
+        var prices=mock(cn.jia.economy.pricing.TaskReferencePricing.class);
+        when(prices.freeze(any(),any(),any(),any())).thenAnswer(call->{
             assertFalse(org.springframework.transaction.support.TransactionSynchronizationManager.hasResource(jdbc.getDataSource()));
-            return new TransactionTemplate(manager).execute(tx->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return fixtureReference();});};
+            return new TransactionTemplate(manager).execute(tx->{assertEquals(1,jdbc.queryForObject("SELECT 1",Integer.class));return fixtureReference();});});
         var engine=proxy(new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(hist,prices),cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine.class);
         var estimator=proxy(new cn.jia.economy.service.impl.TaskBudgetEstimatorService(cal,hist,engine),cn.jia.economy.task.TaskBudgetEstimator.class);
         assertEquals(25,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(BILLING_TASK,features,terms)).preparation().estimate().wen());
@@ -1110,7 +1111,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             System.out.printf(java.util.Locale.ROOT,"QUOTE_PROBE shared=%s run=%d rows=%d buildMs=%.3f walkMs=%.3f%n",shared,run,seen.size(),build/1e6,ns/1e6);}
         var scal=TaskNeighborSearch.trainingScales(List.of(query));var params=new TaskNeighborSearch.Parameters(scal,1,1,1,1,1,0.1,0.2,3,1,1,1);
         var pin=new cn.jia.economy.task.TaskCalibrationCatalog.Pin(groupSha,1,"0".repeat(64));
-        cn.jia.economy.pricing.TaskReferencePricing reference=(scope,v,routes,kinds)->fixtureReference();
+        var reference=mock(cn.jia.economy.pricing.TaskReferencePricing.class);when(reference.freeze(any(),any(),any(),any())).thenReturn(fixtureReference());
         var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(projection,reference,java.util.Optional.of(registry));
         var originalEngine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,reference);
         var priced=new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,fixtureBookPin(fixtureReference()));

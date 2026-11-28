@@ -29,7 +29,9 @@ public class SharedGroupMaintenanceService implements SharedGroupMaintenance {
         if(w.attempt()>=5){if(db.exhaustExpired(w)==1)LOG.warn("Shared pricing expired five attempts group={} generation={}",w.groupSha(),w.generation());return;}
         String claim=UUID.randomUUID().toString();if(db.claim(w,claim,LEASE)!=1)return;
         try{
-            var policy=GroupStudyPolicy.read(w,db.study(w),json);var pins=roster.freeze(w,claim);
+            var bytes=db.study(w);
+            if(GroupStudyPolicy.isScoped(bytes,json)){runScoped(w,claim,GroupStudyPolicy.readScoped(w,bytes),decoder);return;}
+            var policy=GroupStudyPolicy.read(w,bytes,json);var pins=roster.freeze(w,claim);
             if(pins.size()<policy.policy().minSupport())throw new GroupBaselinePublisher.MoreInputRequired();
             var book=tariffs.freezeGroupBook(new EconomyScope(w.tenantId(),w.clientId()),w.bookEpoch(),policy.receiptSha(),policy.routes());
             var rows=new ArrayList<GroupBaselinePublisher.Eligible>();long renewed=System.nanoTime();
@@ -40,6 +42,17 @@ public class SharedGroupMaintenanceService implements SharedGroupMaintenance {
         catch(GroupPublicationEnrollment.NotApproved|GroupBaselinePublisher.MoreInputRequired|MeasuredTaskRepricing.Unavailable|TaskPricingService.Unavailable missing){db.waitForInput(w,claim);}
         catch(RuntimeException fault){int attempt=w.attempt()+1;LOG.warn("Shared pricing maintenance fault group={} generation={} attempt={} type={}",w.groupSha(),w.generation(),attempt,fault.getClass().getSimpleName());
             if(attempt>=5)exhaust(w,claim);else db.retry(w,claim,Math.min(1<<attempt,60));}
+    }
+    private void runScoped(Work w,String claim,GroupStudyPolicy.ScopedSelected policy,ConfirmedSampleEvidence.Decoder decoder){
+        var pins=roster.freeze(w,claim);var selected=policy.approved();
+        if(pins.size()<selected.policy().minSupport())throw new GroupBaselinePublisher.MoreInputRequired();
+        var book=tariffs.freezeScopedBook(new EconomyScope(w.tenantId(),w.clientId()),w.bookEpoch(),selected.approvalSha(),policy.routes());
+        var rows=new ArrayList<GroupBaselinePublisher.ScopedEligible>();long renewed=System.nanoTime();
+        for(var pin:pins){
+            if(rows.size()%128==0||System.nanoTime()-renewed>=30_000_000_000L){if(db.renew(w,claim,LEASE)!=1)return;renewed=System.nanoTime();}
+            rows.add(usage.readScoped(w,pin,policy,decoder));
+        }
+        publisher.publish(publisher.calculateScoped(w,claim,book,rows,selected.policy().minSupport(),selected.approvalSha()));
     }
     private void exhaust(Work w,String claim){if(db.waitForInput(w,claim)==1)LOG.warn("Shared pricing maintenance exhausted group={} generation={}",w.groupSha(),w.generation());}
 }

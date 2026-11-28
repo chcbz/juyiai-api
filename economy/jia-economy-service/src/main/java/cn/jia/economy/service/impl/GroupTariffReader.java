@@ -17,6 +17,11 @@ public class GroupTariffReader {
     private final GroupBaselineMaintenanceMapper maintenance;
     public GroupTariffReader(TaskReferencePricing prices,GroupBaselineMaintenanceMapper maintenance){this.prices=prices;this.maintenance=maintenance;}
     @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public GroupTariffSnapshot.Scoped freezeScopedBook(EconomyScope domain,long expectedEpoch,String version,Map<CostRouteReference,CostPricingRoute> routes){
+        if(!Objects.equals(maintenance.readDomainEpoch(domain),expectedEpoch))throw new TaskBudgetEstimator.Stale();
+        return GroupTariffSnapshot.capture(prices.freezeScoped(domain,version,routes));
+    }
+    @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
     public GroupTariffSnapshot freezeGroupBook(EconomyScope domain,long expectedEpoch,String version,Map<String,Map<String,CostPricingRoute>> routes) {
         if(!Objects.equals(maintenance.readDomainEpoch(domain),expectedEpoch))throw new TaskBudgetEstimator.Stale();
         return GroupTariffSnapshot.capture(prices.freeze(domain,version,routes,routes.keySet()));

@@ -37,6 +37,53 @@ public final class MeasuredTaskRepricing {
     }
     public record Line(Fact fact,Rate price,BigDecimal yuan) {}
     public record Result(String referenceVersion,List<Line> lines,BigDecimal yuan) {public Result{lines=List.copyOf(lines);} }
+    public record ResourceFact(CostRouteReference resource,Fact fact) {
+        public ResourceFact {Objects.requireNonNull(resource);Objects.requireNonNull(fact);
+            if(!resource.kind().equals(fact.kind())||!resource.component().equals(fact.component()))throw new IllegalArgumentException("Measured resource mismatch");}
+    }
+    private record Resource(String kind,String namespace,String modelOrTool) {
+        static Resource of(CostRouteReference r){return new Resource(r.kind(),r.namespace(),r.modelOrTool());}
+    }
+    /** Complete component contract per actual resource, not one rate per kind across all models. */
+    public record ResourceReference(String version,Map<CostRouteReference,Rate> rates) {
+        public ResourceReference {
+            required(version);rates=Map.copyOf(rates);if(rates.isEmpty())throw new IllegalArgumentException("Missing resources");
+            var components=new HashMap<Resource,Set<String>>();
+            for(var e:rates.entrySet()){
+                if(!components.computeIfAbsent(Resource.of(e.getKey()),k->new HashSet<>()).add(e.getKey().component()))
+                    throw new IllegalArgumentException("Ambiguous resource component");
+                if(e.getValue() instanceof TokenRate r&&!r.normalizationBasis().equals(e.getKey().normalizationBasis()))
+                    throw new IllegalArgumentException("Resource rate basis differs");
+            }
+        }
+    }
+    public record ResourceLine(ResourceFact fact,Rate price,BigDecimal yuan) {}
+    public record ResourceResult(String referenceVersion,List<ResourceLine> lines,BigDecimal yuan) {
+        public ResourceResult {lines=List.copyOf(lines);}
+    }
+    public static ResourceResult reprice(ResourceReference reference,List<ResourceFact> facts){
+        if(facts.isEmpty())throw new Unavailable("OPERATION_EVIDENCE_MISSING");
+        var operations=new TreeMap<Operation,Map<String,ResourceFact>>(Comparator.comparing(Operation::namespace).thenComparing(Operation::externalId));
+        var resources=new HashMap<Operation,Resource>();
+        for(var row:facts){
+            if(!reference.rates().containsKey(row.resource()))throw new Unavailable("BILLING_ROUTE_MISSING");
+            var op=row.fact().operation();var resource=Resource.of(row.resource());var previousResource=resources.putIfAbsent(op,resource);
+            if(previousResource!=null&&!previousResource.equals(resource))throw new Unavailable("OPERATION_RESOURCE_CONFLICT");
+            var components=operations.computeIfAbsent(op,k->new TreeMap<>());var previous=components.putIfAbsent(row.fact().component(),row);
+            if(previous!=null&&!previous.equals(row))throw new Unavailable("CHARGE_COMPONENT_CONFLICT");
+        }
+        var contracts=new HashMap<Resource,Map<String,Rate>>();
+        reference.rates().forEach((r,rate)->contracts.computeIfAbsent(Resource.of(r),k->new TreeMap<>()).put(r.component(),rate));
+        var lines=new ArrayList<ResourceLine>();var total=BigDecimal.ZERO;
+        for(var e:operations.entrySet()){
+            var resource=resources.get(e.getKey());var components=e.getValue();
+            // Reuse the original complete-component and per-call TOKEN/UNIT/ZERO arithmetic.
+            var priced=reprice(new Reference(reference.version(),Map.of(resource.kind(),contracts.get(resource))),components.values().stream().map(ResourceFact::fact).toList());
+            for(var line:priced.lines())lines.add(new ResourceLine(components.get(line.fact().component()),line.price(),line.yuan()));
+            total=total.add(priced.yuan());
+        }
+        return new ResourceResult(reference.version(),lines,total);
+    }
     public static final class Unavailable extends RuntimeException { Unavailable(String reason){super(reason);} }
     private static void required(String s){if(s==null||s.isBlank())throw new IllegalArgumentException("Missing pricing identity");}
     public static Result reprice(Reference reference,List<Fact> facts){

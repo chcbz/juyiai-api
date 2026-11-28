@@ -23,6 +23,15 @@ public record GroupTariffSnapshot(MeasuredTaskRepricing.Reference reference,Stri
                 HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(b)), Base64.getEncoder().encodeToString(b));
         } catch(IOException | NoSuchAlgorithmException impossible) {throw new IllegalStateException(impossible);}
     }
+    public record Scoped(MeasuredTaskRepricing.ResourceReference reference,String tariffSha,String canonicalBase64) {}
+    public static Scoped capture(MeasuredTaskRepricing.ResourceReference reference){
+        var buffer=new ByteArrayOutputStream();
+        try(var out=new DataOutputStream(buffer)){
+            field(out,"scope-group-tariff-1");var refs=reference.rates().keySet().stream().sorted(Comparator.comparing(CostRouteReference::sha)).toList();out.writeInt(refs.size());
+            for(var ref:refs){for(var value:List.of(ref.kind(),ref.component(),ref.namespace(),ref.modelOrTool(),ref.normalizationBasis()))field(out,value);rate(out,reference.rates().get(ref));}
+            out.flush();byte[] bytes=buffer.toByteArray();return new Scoped(reference,HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)),Base64.getEncoder().encodeToString(bytes));
+        }catch(IOException|NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+    }
     private static void rate(DataOutputStream out,MeasuredTaskRepricing.Rate value) throws IOException {
         switch(value) {
             case MeasuredTaskRepricing.TokenRate token -> {

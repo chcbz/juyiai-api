@@ -97,14 +97,25 @@ public class DatabaseTaskPricingService implements TaskPricingService, ModelPric
         for(String kind:kinds){
             var rules=contract.get(kind);if(rules==null||rules.isEmpty())throw new Unavailable(BILLING_ROUTE_MISSING);
             var prices=new LinkedHashMap<String,MeasuredTaskRepricing.Rate>();
-            rules.forEach((component,rule)->prices.put(component,cache.computeIfAbsent(rule,r->switch(r){
-                case TokenRoute m -> new MeasuredTaskRepricing.TokenRate(m.normalizationBasis(),find(scope,m.channel(),m.model(),m.tier()).orElseThrow(()->new Unavailable(MODEL_PRICE_MISSING)));
-                case UnitRoute u -> new MeasuredTaskRepricing.UnitRate(u.tool(),toolPrice(scope,u.tool()));
-                case ZeroRoute z -> new MeasuredTaskRepricing.ExplicitZero(z.contractVersion());
-            })));
+            rules.forEach((component,rule)->prices.put(component,cache.computeIfAbsent(rule,r->referenceRate(scope,r))));
             selected.put(kind,prices);
         }
         return new MeasuredTaskRepricing.Reference(version,selected);
+    }
+
+    private MeasuredTaskRepricing.Rate referenceRate(EconomyScope scope,CostPricingRoute route){
+        return switch(route){
+            case TokenRoute m -> new MeasuredTaskRepricing.TokenRate(m.normalizationBasis(),find(scope,m.channel(),m.model(),m.tier()).orElseThrow(()->new Unavailable(MODEL_PRICE_MISSING)));
+            case UnitRoute u -> new MeasuredTaskRepricing.UnitRate(u.tool(),toolPrice(scope,u.tool()));
+            case ZeroRoute z -> new MeasuredTaskRepricing.ExplicitZero(z.contractVersion());
+        };
+    }
+    @Override @org.springframework.transaction.annotation.Transactional(readOnly=true,isolation=org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public MeasuredTaskRepricing.ResourceReference freezeScoped(EconomyScope scope,String version,Map<cn.jia.economy.pricing.CostRouteReference,CostPricingRoute> contract){
+        var cache=new java.util.HashMap<CostPricingRoute,MeasuredTaskRepricing.Rate>();
+        var rates=new java.util.HashMap<cn.jia.economy.pricing.CostRouteReference,MeasuredTaskRepricing.Rate>();
+        contract.forEach((ref,route)->rates.put(ref,cache.computeIfAbsent(route,r->referenceRate(scope,r))));
+        return new MeasuredTaskRepricing.ResourceReference(version,rates);
     }
 
     private ModelTokenPrice modelPrice(EconomyModelPriceRow row) {

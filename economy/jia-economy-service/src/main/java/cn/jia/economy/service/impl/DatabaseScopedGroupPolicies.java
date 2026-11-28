@@ -48,7 +48,9 @@ public class DatabaseScopedGroupPolicies implements ScopedGroupPolicies {
     private static void amount(BigDecimal value){
         require(value!=null && value.signum()>=0 && value.scale()<=30 && value.precision()-value.scale()<=35);
     }
-    private static Selected decode(EconomyScope scope,ScopedGroupPolicyMapper.Row row){
+    record Decoded(Receipt receipt,Selected selected) {}
+    static Selected decode(EconomyScope scope,ScopedGroupPolicyMapper.Row row){return decodeOriginal(scope,row).selected();}
+    static Decoded decodeOriginal(EconomyScope scope,ScopedGroupPolicyMapper.Row row){
         try {
             require(row.body()!=null && row.byteLength()!=null && row.byteLength()>0 && row.byteLength()<=MAX_BYTES);
             require(row.byteLength()==CanonicalValueEncoding.utf8(row.body()).length);
@@ -67,7 +69,7 @@ public class DatabaseScopedGroupPolicies implements ScopedGroupPolicies {
             var group=new GroupMeanPricing.ScopeGroup(policy.featureVersion(),policy.sha(),r.scopeShape(),r.bucketIds(),r.compatibleConfig());
             policy.requireInput(group.input());
             require(group.key().equals(r.groupSha()) && group.input().key().equals(r.inputSha()));
-            return new Selected(row.approvalSha(),policy,group);
+            return new Decoded(r,new Selected(row.approvalSha(),policy,group));
         }catch(RuntimeException invalid){throw new Corrupt();}
     }
     private List<ScopedGroupPolicyMapper.Row> rows(EconomyScope scope,List<String> keys,boolean lock){

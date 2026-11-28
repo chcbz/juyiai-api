@@ -13,6 +13,14 @@ public record CostRouteReference(String kind,String component,String namespace,S
         }
     }
     public Map<String,Object> canonical(){return Map.of("kind",kind,"component",component,"namespace",namespace,"modelOrTool",modelOrTool,"normalizationBasis",normalizationBasis);}
+    /** Boundary codecs already own duplicate-key and size checks. No lossy string coercion. */
+    public static CostRouteReference fromCanonical(Map<String,Object> value){
+        if(value==null || !value.keySet().equals(java.util.Set.of("kind","component","namespace","modelOrTool","normalizationBasis")))
+            throw new IllegalArgumentException("Invalid measured resource fields");
+        for(var v:value.values())if(!(v instanceof String))throw new IllegalArgumentException("Invalid measured resource value");
+        return new CostRouteReference((String)value.get("kind"),(String)value.get("component"),(String)value.get("namespace"),
+                (String)value.get("modelOrTool"),(String)value.get("normalizationBasis"));
+    }
     public String sha(){return CanonicalValueEncoding.digest(canonical());}
     @Override public String toString(){return "CostRouteReference[private]";}
 }

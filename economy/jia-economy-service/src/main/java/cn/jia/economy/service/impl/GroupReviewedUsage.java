@@ -38,6 +38,31 @@ public class GroupReviewedUsage {
         var measured=evidence.measureReviewed(task,m.caseId(),m.manifestSha(),review.terminalFactId(),m.reviewSha(),decoder);
         return measured(m,review.terminalFactId(),group,measured);
     }
+    private record ScopedRow(CostRouteReference resource,ProjectedTaskOperation operation) {}
+    @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW,isolation=Isolation.REPEATABLE_READ)
+    public GroupBaselinePublisher.ScopedEligible readScoped(Work w,SourcePin pin,GroupStudyPolicy.ScopedSelected policy,ConfirmedSampleEvidence.Decoder decoder){
+        var m=approvals.decode(pin.approvalSha(),db.publicationSnapshot(pin.approvalSha()));
+        require(w.tenantId().equals(m.tenant())&&w.clientId().equals(m.client())&&w.groupSha().equals(m.groupSha())&&w.policySha().equals(m.policySha())&&policy.approved().policy().sha().equals(w.policySha()));
+        require(pin.equals(new SourcePin(m.sampleId(),m.sourceOwner(),m.sourceTask(),m.evidenceRevision(),m.manifestSha(),m.reviewSha(),m.approvalSha())));
+        var task=new TaskBillingService.Task(new EconomyScope(m.tenant(),m.client()),m.sourceOwner(),m.sourceTask());
+        var originals=samples.scopedBenchmarkOriginals(task,m.sampleId(),m.caseId(),m.manifestSha(),m.reviewSha());
+        require(originals!=null&&m.manifestSha().equals(GroupPublicationEnrollment.digest(originals.manifest()))&&m.reviewSha().equals(GroupPublicationEnrollment.digest(originals.review())));
+        var manifest=TaskBenchmarkAdmissionService.decodeScoped(originals.manifest(),m.manifestSha());
+        require(manifest.purpose()==ScopedBenchmarkManifest.Purpose.TRAIN&&manifest.task().equals(task)&&manifest.caseId().equals(m.caseId())
+                &&manifest.groupSha().equals(w.groupSha())&&manifest.policy().sha().equals(w.policySha()));
+        var review=CANON.readValue(originals.review(),BenchmarkSampleEvidence.Review.class);
+        var measured=evidence.measureScopedReviewed(task,m.sampleId(),m.caseId(),m.manifestSha(),review.terminalFactId(),m.reviewSha(),decoder);
+        require(measured!=null);var a=measured.assessment();
+        require(a.verdict()==ConfirmedSampleEvidence.Verdict.MATCHED&&a.members()>0&&a.evidenceRevision()==m.evidenceRevision()
+                &&m.sampleId().equals(a.sampleId())&&Objects.equals(review.terminalFactId(),a.terminalFactId()));
+        var rows=new ArrayList<ScopedRow>();
+        for(var op:measured.operations()){
+            require(policy.routes().containsKey(op.resource()));rows.add(new ScopedRow(op.resource(),ProjectedTaskOperation.from(op.operation(),CANON)));
+        }
+        require(!rows.isEmpty());rows.sort(Comparator.comparingLong((ScopedRow r)->r.operation().memberRevision()).thenComparing(r->r.operation().captureId()).thenComparing(r->r.operation().recordId()).thenComparing(r->r.resource().sha()));
+        return new GroupBaselinePublisher.ScopedEligible(m.sampleId(),m.evidenceRevision(),m.manifestSha(),m.reviewSha(),m.approvalSha(),
+                GroupPublicationEnrollment.digest(CANON.writeValueAsString(rows)),rows.stream().map(r->new MeasuredTaskRepricing.ResourceFact(r.resource(),r.operation().fact(CANON))).toList());
+    }
     static GroupMeanPricing.Group classify(TaskBenchmarkAdmission.Manifest manifest,GroupMeanPricing.Policy policy){
         require(manifest.groupInput()!=null);
         var basis=manifest.groupInput();var features=manifest.features();var dims=new EnumMap<GroupMeanPricing.Dimension,Long>(GroupMeanPricing.Dimension.class);

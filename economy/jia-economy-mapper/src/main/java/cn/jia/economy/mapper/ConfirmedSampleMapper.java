@@ -192,6 +192,14 @@ public interface ConfirmedSampleMapper {
         WHERE b.tenant_id=#{t.scope.tenantId} AND b.client_id=#{t.scope.clientId} AND b.owner_jiacn=#{t.ownerJiacn} AND b.task_id=#{t.taskId}
           AND b.benchmark_case_id=#{id} AND b.manifest_sha=#{sha} AND v.review_sha=#{review} AND NOT b.retired AND NOT v.withdrawn
         """) Originals benchmarkOriginals(@Param("t") Task task,@Param("id") String id,@Param("sha") String sha,@Param("review") String review);
+    @Select("""
+        SELECT b.manifest_json,v.review_json,CAST(UNIX_TIMESTAMP(b.recorded_at)*1000 AS UNSIGNED)
+        FROM economy_task_benchmark_case b JOIN economy_task_cost_sample s ON s.tenant_id=b.tenant_id AND s.client_id=b.client_id
+          AND s.owner_jiacn=b.owner_jiacn AND s.task_id=b.task_id AND s.benchmark_case_id=b.benchmark_case_id AND s.sample_id=#{sample}
+        JOIN economy_task_benchmark_review v ON v.sample_id=s.sample_id
+        WHERE b.tenant_id=#{t.scope.tenantId} AND b.client_id=#{t.scope.clientId} AND b.owner_jiacn=#{t.ownerJiacn} AND b.task_id=#{t.taskId}
+          AND b.benchmark_case_id=#{id} AND b.manifest_sha=#{sha} AND v.review_sha=#{review} AND NOT b.retired AND NOT v.withdrawn
+        """) Originals scopedBenchmarkOriginals(@Param("t") Task task,@Param("sample") String sample,@Param("id") String id,@Param("sha") String sha,@Param("review") String review);
     record Member(long revision,String attached,String coverage,String groupVersion,String executionConfig,String route,String tools,String policy) {}
     @Select("""
         SELECT r.membership_revision,m.execution_id,c.coverage_state,g.group_version,g.execution_config_sha256,g.route_sha256,g.tool_config_sha256,g.capture_policy_version
