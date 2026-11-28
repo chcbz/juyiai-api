@@ -61,7 +61,7 @@ public final class ScopedBenchmarkEnrollment {
         var metadata=new HashMap<String,CapabilityQuoteSpec.InputMetadata>();
         for(var input:catalogue.inputs()){
             String ref=input.fileId()+"@"+input.version();
-            var value=new CapabilityQuoteSpec.InputMetadata(ref,input.version(),input.contentMimeType(),input.contentHash(),null,null,Map.of());
+            var value=cn.jia.agent.service.PersonalWorkspaceInputMetadata.fixedVersion(input.fileId(),input.version(),input.contentMimeType(),input.contentHash(),input.byteLength());
             var previous=metadata.putIfAbsent(ref,value);
             if(previous!=null && !previous.equals(value))throw new TaskBenchmarkAdmission.NotAdmitted();
         }

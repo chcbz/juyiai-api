@@ -1,6 +1,7 @@
 package cn.jia.agent.service.recommendation;
 
 import cn.jia.agent.hosting.HostingRentHttp.Actor;
+import cn.jia.agent.service.PersonalWorkspaceInputMetadata;
 import cn.jia.agent.mapper.skill.CapabilityQuoteSpecMapper.SpecKey;
 import cn.jia.agent.requirement.ConfirmedScope;
 import cn.jia.agent.requirement.ConfirmedScope.*;
@@ -173,13 +174,48 @@ class ScopedGroupQuoteInputsTest {
     @Test void unparsedCostMetadataAndOutOfDistributionAvoidRouteCallsButMissingReferenceIsStale(){
         var f=new Fixture(List.of("document.extract"),List.of("a"),true,"1");f.report("a",List.of(f.measurement("a","context")));
         var read=f.service.read(f.fresh);assertEquals(TaskQuoteBatches.Reason.COST_INPUT_MISSING,((CandidateGroupOffers.Missing)read.bases().get("a")).reason());
-        var metadata=RecommendationMaterials.quoteMetadata(f.fresh.metadata()).get("file@1");assertNull(metadata.parserVersion());assertTrue(metadata.values().isEmpty());
+        var metadata=RecommendationMaterials.quoteMetadata(f.fresh.metadata()).get("file@1");assertEquals(PersonalWorkspaceInputMetadata.PRODUCER,metadata.parserVersion());assertEquals("100",metadata.values().get("byteLength").value());assertFalse(metadata.values().containsKey("bytes"));
         verifyNoInteractions(f.bindings,f.policies);locked(()->f.service.recheck(read));
         var missing=new TaskQuoteIntentService.Fresh(f.fresh.key(),f.fresh.intent(),f.fresh.facts(),f.fresh.candidates(),List.of(),null,f.fresh.confirmedScope());
         assertThrows(TaskQuoteIntentService.Stale.class,()->f.service.read(missing));
         var outside=new Fixture(List.of("text.summary"),List.of("a"),false,"3");outside.report("a",List.of(outside.measurement("a","context")));
         assertEquals(TaskQuoteBatches.Reason.OUT_OF_DISTRIBUTION,((CandidateGroupOffers.Missing)outside.service.read(outside.fresh).bases().get("a")).reason());
         verifyNoInteractions(outside.bindings,outside.policies);
+    }
+    @Test void storedByteLengthUsesDeclaredStorageSchemaAndProducesOrdinaryGroup() {
+        var f=new Fixture(List.of("document.extract"),List.of("a"),true,"1");
+        var key=new SpecKey("document.extract","1");var old=f.declarations.get(key);
+        f.declarations.put(key,new CapabilityQuoteSpec(old.schema(),old.capabilityId(),old.version(),old.fields(),
+                List.of(new CapabilityQuoteSpec.CostDimension("size",CapabilityQuoteSpec.Source.INPUT_SUM,
+                        "byteLength",ValueType.INTEGER,"unit/bytes",PersonalWorkspaceInputMetadata.SCHEMA,Set.of())),old.buckets()));
+        // Rebuild the authoritative capability binding after changing the synthetic published spec.
+        var c=f.capabilities.get("a");var declaration=f.declarations.get(key);
+        f.capabilities.put("a",new RegisteredPricingProfiles.CapabilityObserved(c.agent(),c.provider(),c.binding(),
+                c.installation(),c.host(),c.instance(),c.generation(),Set.of(new SkillManagementService.QuoteCapability(
+                declaration.capabilityId(),"1",declaration.specSha(),"skill-0","1",H,"a-skill-0"))));
+        var selected=f.approved("a","context");var prepared=f.service.read(f.fresh);
+        assertInstanceOf(CandidateGroupOffers.ScopedGroup.class,prepared.bases().get("a"));
+        assertNotNull(selected);locked(()->f.service.recheck(prepared));
+    }
+    @Test void storageProjectionPreservesVersionZeroAndLargeSizeWithoutInventingParserFacts() {
+        var zero=PersonalWorkspaceInputMetadata.fixedVersion("f",1,"application/octet-stream",H,0);
+        assertEquals("0",zero.values().get("byteLength").value());
+        var large=PersonalWorkspaceInputMetadata.fixedVersion("f",2,"application/octet-stream",H,Long.MAX_VALUE);
+        assertEquals("f@2",large.reference());assertEquals(2,large.fileVersion());assertEquals(H,large.contentSha256());
+        assertEquals(Long.toString(Long.MAX_VALUE),large.values().get("byteLength").value());
+        assertEquals(Set.of("byteLength"),large.values().keySet());
+        assertThrows(IllegalStateException.class,()->PersonalWorkspaceInputMetadata.fixedVersion("f",1,"text/plain",H,-1));
+        assertThrows(IllegalArgumentException.class,()->PersonalWorkspaceInputMetadata.fixedVersion("f",0,"text/plain",H,1));
+        assertThrows(IllegalArgumentException.class,()->PersonalWorkspaceInputMetadata.fixedVersion("f",1,"text/plain","bad",1));
+    }
+    @Test void quoteStorageProjectionMatchesAdmissionProjectionAndRejectsConflictingVersions() {
+        var f=new Fixture(List.of("document.extract"),List.of("a"),true,"1");var o=f.fresh.metadata().getFirst();
+        assertEquals(PersonalWorkspaceInputMetadata.fixedVersion(o.fileId(),o.material().version(),
+                o.material().contentMimeType(),o.sha256(),o.byteLength()),RecommendationMaterials.quoteMetadata(List.of(o)).get("file@1"));
+        assertEquals(1,RecommendationMaterials.quoteMetadata(List.of(o,o)).size());
+        var changed=new RecommendationMaterials.Observation(o.relationId(),o.relationRevision(),o.fileId(),
+                o.metadataRevision(),o.sha256(),o.byteLength()+1,o.material());
+        assertThrows(TaskQuoteIntentService.Stale.class,()->RecommendationMaterials.quoteMetadata(List.of(o,changed)));
     }
     @Test void finishRejectsCapabilityLossButIgnoresUnrelatedSkillChanges(){
         var f=single();f.approved("a","context");var prepared=f.service.read(f.fresh);var before=f.capabilities.get("a");

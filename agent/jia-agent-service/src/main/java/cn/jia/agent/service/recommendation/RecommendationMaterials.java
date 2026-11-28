@@ -77,17 +77,15 @@ public final class RecommendationMaterials {
         return List.copyOf(result);
     }
 
-    /** Already authorized and fixed-version observations. Workspace currently has no versioned
-     * professional parser result: absence is explicit, never inferred from a file name or MIME.
-     * MIME/count remain usable; INPUT_SUM waits for the real metadata producer. */
+    /** Uses authorized immutable storage facts only. No professional parser result is invented. */
     static java.util.Map<String,cn.jia.agent.skill.quote.CapabilityQuoteSpec.InputMetadata> quoteMetadata(List<Observation> observations) {
         var result=new HashMap<String,cn.jia.agent.skill.quote.CapabilityQuoteSpec.InputMetadata>();
         for(var observation:observations) {
             var material=observation.material();
             if(!"ACTIVE".equals(material.fileState()))throw new TaskQuoteIntentService.Stale();
             String ref=observation.fileId()+"@"+material.version();
-            var value=new cn.jia.agent.skill.quote.CapabilityQuoteSpec.InputMetadata(ref,material.version(),
-                    material.contentMimeType(),observation.sha256(),null,null,java.util.Map.of());
+            var value=cn.jia.agent.service.PersonalWorkspaceInputMetadata.fixedVersion(observation.fileId(),material.version(),
+                    material.contentMimeType(),observation.sha256(),observation.byteLength());
             var previous=result.putIfAbsent(ref,value);
             if(previous!=null && !previous.equals(value))throw new TaskQuoteIntentService.Stale();
         }
