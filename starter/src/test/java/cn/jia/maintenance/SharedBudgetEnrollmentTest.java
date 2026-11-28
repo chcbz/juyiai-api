@@ -72,6 +72,7 @@ class SharedBudgetEnrollmentTest {
                 assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(c.getBean(DatabaseScopedGroupPolicies.class)));
                 assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(c.getBean(BudgetOriginalImport.class)));
                 assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(c.getBean(cn.jia.economy.usage.BenchmarkSampleEvidence.class)));
+                assertTrue(org.springframework.aop.support.AopUtils.isAopProxy(c.getBean(cn.jia.economy.service.impl.ScopedBenchmarkReferenceExport.class)));
                 assertInstanceOf(cn.jia.agent.service.usage.NativeSampleResponseDecoder.class,c.getBean(cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder.class));
                 assertTrue(c.getBeansOfType(org.springframework.scheduling.TaskScheduler.class).isEmpty());
                 assertTrue(c.getBeansOfType(org.springframework.boot.ApplicationRunner.class).isEmpty());

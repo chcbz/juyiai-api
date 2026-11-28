@@ -99,7 +99,8 @@ public final class SharedBudgetEnrollment {
         try(var dir=java.nio.channels.FileChannel.open(root,StandardOpenOption.READ)){dir.force(true);}
     }
     public static void main(String[] args) throws IOException {
-        boolean exporting=args.length>0 && "--export-reviewed".equals(args[0]);
+        boolean reference=args.length>0 && "--export-scoped-reference".equals(args[0]);
+        boolean exporting=reference || args.length>0 && "--export-reviewed".equals(args[0]);
         boolean importing=args.length>0 && "--import-approved".equals(args[0]);
         var readArgs=args.clone();if(exporting)readArgs[0]="--import-approved";
         var original=importing||exporting?parseImport(readArgs):null;
@@ -116,10 +117,18 @@ public final class SharedBudgetEnrollment {
             if(exporting){
                 try {
                     if(!domain.equals(request.task().scope()))throw new IllegalArgumentException("Observation domain differs");
+                    if(reference){
+                        var result=ctx.getBean(cn.jia.economy.service.impl.ScopedBenchmarkReferenceExport.class).freeze(request.task(),request.source(),request.pin(),
+                                ctx.getBean(cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder.class));
+                        writeObservation(original.objects().toRealPath(),result.observation());writeObservation(original.objects().toRealPath(),result.reference());
+                        writeObservation(original.objects().toRealPath(),result.provenance());
+                        System.out.println("EXPORTED_SCOPED_REFERENCE "+result.reference().sha256()+" SOURCE "+result.provenance().sha256());
+                    }else{
                     var observation=ctx.getBean(cn.jia.economy.usage.BenchmarkSampleEvidence.class).freezeScopedReviewed(
                             request.task(),request.source(),request.pin(),ctx.getBean(cn.jia.economy.usage.ConfirmedSampleEvidence.Decoder.class));
                     writeObservation(original.objects().toRealPath(),observation);
                     System.out.println("EXPORTED_REVIEWED_OBSERVATION "+observation.sha256());
+                    }
                 }catch(RuntimeException rejected){throw new IllegalStateException("Scoped observation export rejected: "+rejected.getClass().getSimpleName());}
             }else if(importing){
                 try {
@@ -141,7 +150,7 @@ public final class SharedBudgetEnrollment {
     @Configuration(proxyBeanMethods=false) @Profile("shared-budget-enrollment")
     @EnableTransactionManagement(proxyTargetClass=true) @ImportAutoConfiguration(DataSourceAutoConfiguration.class)
     @Import({ProcessTenantConfiguration.class,GroupPublicationEnrollment.class,DatabaseScopedGroupPolicies.class,BudgetOriginalImport.class,
-        cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader.class,cn.jia.economy.service.impl.UsageCostServiceImpl.class,
+        cn.jia.economy.service.impl.ConfirmedSampleEvidenceReader.class,cn.jia.economy.service.impl.ScopedBenchmarkReferenceExport.class,cn.jia.economy.service.impl.DatabaseTaskPricingService.class,cn.jia.economy.service.impl.UsageCostServiceImpl.class,
         cn.jia.agent.service.usage.NativeSampleResponseDecoder.class,cn.jia.agent.dao.impl.PersonalWorkspaceExecutionDaoImpl.class,
         cn.jia.agent.dao.impl.SkillExecutionDaoImpl.class})
     public static class Context {
@@ -150,12 +159,13 @@ public final class SharedBudgetEnrollment {
         @Bean SqlSessionTemplate enrollmentSession(DataSource ds)throws Exception{
             var config=new MybatisConfiguration();config.setMapUnderscoreToCamelCase(true);
             config.addMapper(GroupBaselineMaintenanceMapper.class);config.addMapper(ScopedGroupPolicyMapper.class);config.addMapper(BudgetOriginalImportMapper.class);
-            for(var type:java.util.List.of(cn.jia.economy.mapper.ConfirmedSampleMapper.class,cn.jia.economy.mapper.EconomyUsageCostMapper.class,
+            for(var type:java.util.List.of(cn.jia.economy.mapper.EconomyPriceCatalogMapper.class,cn.jia.economy.mapper.ConfirmedSampleMapper.class,cn.jia.economy.mapper.EconomyUsageCostMapper.class,
                     cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper.class,cn.jia.agent.mapper.PersonalWorkspaceExecutionInputMapper.class,
                     cn.jia.agent.mapper.PersonalWorkspaceExecutionOutputMapper.class,cn.jia.agent.mapper.SkillExecutionMapper.class))config.addMapper(type);
             var factory=new MybatisSqlSessionFactoryBean();factory.setDataSource(ds);factory.setConfiguration(config);
             return new SqlSessionTemplate(factory.getObject());
         }
+        @Bean cn.jia.economy.mapper.EconomyPriceCatalogMapper pricesSql(SqlSessionTemplate s){return s.getMapper(cn.jia.economy.mapper.EconomyPriceCatalogMapper.class);}
         @Bean cn.jia.economy.mapper.ConfirmedSampleMapper observationSql(SqlSessionTemplate s){return s.getMapper(cn.jia.economy.mapper.ConfirmedSampleMapper.class);}
         @Bean cn.jia.economy.mapper.EconomyUsageCostMapper usageSql(SqlSessionTemplate s){return s.getMapper(cn.jia.economy.mapper.EconomyUsageCostMapper.class);}
         @Bean cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper executionsSql(SqlSessionTemplate s){return s.getMapper(cn.jia.agent.mapper.PersonalWorkspaceExecutionMapper.class);}

@@ -1047,6 +1047,23 @@ class TaskBillingServiceMySqlTest {
             };
         });return new ScopedWorker(p,decoder,refs,study);
     }
+    @Test void scopedReferenceExportUsesCurrentDatabasePricesAndOriginalRoutesWithoutPublishing(){
+        var w=scopedWorkerFixture(1);var p=w.source();var json=new ObjectMapper();
+        var prices=cn.jia.economy.config.TaskPricingTestFixture.service(jdbc);
+        var exporter=transactional(new ScopedBenchmarkReferenceExport(transactional(new ConfirmedSampleEvidenceReader(originals,json)),prices,maintenance,json));
+        var result=exporter.freeze(TASK,new cn.jia.economy.task.TaskHistoryCatalog.Revision(p.sample(),1),
+                new BenchmarkSampleEvidence.Pin(p.source().manifest().caseId(),p.source().sha(),p.fact(),p.review()),w.decoder());
+        var provenance=json.readValue(result.provenance().json(),ScopedBenchmarkReferenceExport.Provenance.class);
+        assertEquals(SCOPE,provenance.scope());assertEquals(result.reference().sha256(),provenance.referenceSha());
+        assertEquals(result.observation().sha256(),provenance.observationSha());
+        var book=TaskTariffBook.scoped(json.readValue(result.reference().json(),TaskTariffBook.ScopedBook.class));
+        assertEquals(new java.util.HashSet<>(w.refs()),book.rates().keySet());
+        assertEquals(cn.jia.economy.pricing.GroupTariffSnapshot.capture(book).tariffSha(),provenance.tariffSha());
+        var observation=json.readValue(result.observation().json(),FrozenScopedBenchmarkObservation.class);
+        var actual=MeasuredTaskRepricing.reprice(book,observation.operations().stream().map(row->new MeasuredTaskRepricing.ResourceFact(row.resource(),row.operation().fact(json))).toList());
+        assertEquals(0,new BigDecimal("0.6").compareTo(actual.yuan()));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_head WHERE status='ACTIVE'",Integer.class));
+    }
     private SharedGroupMaintenanceService scopedWorkerService(GroupBaselinePublisher publisher,cn.jia.economy.pricing.TaskReferencePricing prices){
         var json=new ObjectMapper();return new SharedGroupMaintenanceService(maintenance,transactional(new GroupRosterSnapshot(maintenance)),transactional(new GroupTariffReader(prices,maintenance)),
                 transactional(new GroupReviewedUsage(maintenance,new GroupPublicationEnrollment(maintenance,json),originals,transactional(new ConfirmedSampleEvidenceReader(originals,json)))),transactional(publisher),json);

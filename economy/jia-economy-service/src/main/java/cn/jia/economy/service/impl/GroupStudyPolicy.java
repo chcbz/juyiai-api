@@ -43,7 +43,11 @@ final class GroupStudyPolicy {
         var row=new cn.jia.economy.mapper.ScopedGroupPolicyMapper.Row(w.tenantId(),w.clientId(),null,w.groupSha(),bytes.sha(),bytes.body(),(long)cn.jia.core.util.CanonicalValueEncoding.utf8(bytes.body()).length,false);
         var decoded=DatabaseScopedGroupPolicies.decodeOriginal(new cn.jia.economy.service.EconomyScope(w.tenantId(),w.clientId()),row);var approved=decoded.selected();
         require(approved.policy().sha().equals(w.policySha())&&approved.group().key().equals(w.groupSha()));
-        var config=decoded.receipt().compatibleConfig();var routes=new LinkedHashMap<CostRouteReference,CostPricingRoute>();
+        return new ScopedSelected(approved,scopedRoutes(decoded.receipt().compatibleConfig()));
+    }
+    @SuppressWarnings("unchecked")
+    static Map<CostRouteReference,CostPricingRoute> scopedRoutes(Map<String,Object> config){
+        var routes=new LinkedHashMap<CostRouteReference,CostPricingRoute>();
         if(!config.keySet().equals(Set.of("measurement","routes"))||!(config.get("routes") instanceof List<?> list)||list.isEmpty()||list.size()>128
                 ||!(config.get("measurement") instanceof Map<?,?> measurement)||!(measurement.get("routeRefs") instanceof List<?> measured))throw new ScopedGroupPolicies.Corrupt();
         try{
@@ -55,7 +59,7 @@ final class GroupStudyPolicy {
             var actual=new HashSet<CostRouteReference>();for(var value:measured)if(!actual.add(CostRouteReference.fromCanonical((Map<String,Object>)value)))throw new IllegalArgumentException();
             if(!actual.equals(routes.keySet()))throw new IllegalArgumentException();
         }catch(RuntimeException invalid){throw new ScopedGroupPolicies.Corrupt();}
-        return new ScopedSelected(approved,routes);
+        return Map.copyOf(routes);
     }
     private static boolean sha(String v){return v!=null&&v.matches("[0-9a-f]{64}");}
     private static void require(boolean ok){if(!ok)throw new GroupBaselinePublisher.MoreInputRequired();}
