@@ -101,11 +101,25 @@ public class DatabaseScopedGroupPolicies implements ScopedGroupPolicies {
     @Override @Transactional(propagation=Propagation.MANDATORY)
     public Selected select(EconomyScope scope,GroupMeanPricing.ScopeInput input,String approvalSha,String expectedApprovalSha){
         domain(scope);transaction();Objects.requireNonNull(input);sha(approvalSha);if(expectedApprovalSha!=null)sha(expectedApprovalSha);
+        var selected=approved(scope,approvalSha);
+        if(!selected.group().input().equals(input))throw new Conflict();
+        return selectDecoded(scope,selected,expectedApprovalSha);
+    }
+    /** Existing isolated maintenance entry only. Derives the input from the validated approved
+     * original, never from CLI JSON. This entry owns its transaction; online selection does not. */
+    @Transactional
+    public Selected selectApproved(EconomyScope scope,String approvalSha,String expectedApprovalSha){
+        domain(scope);transaction();sha(approvalSha);if(expectedApprovalSha!=null)sha(expectedApprovalSha);
+        return selectDecoded(scope,approved(scope,approvalSha),expectedApprovalSha);
+    }
+    private Selected approved(EconomyScope scope,String approvalSha){
         var original=mapper.approved(approvalSha);
         if(original==null || Boolean.TRUE.equals(original.withdrawn()))throw new Conflict();
         if(original.withdrawn()==null)throw new Corrupt();
-        var selected=decode(scope,original);
-        if(!selected.group().input().equals(input))throw new Conflict();
+        return decode(scope,original);
+    }
+    private Selected selectDecoded(EconomyScope scope,Selected selected,String expectedApprovalSha){
+        var input=selected.group().input();var approvalSha=selected.approvalSha();
         var current=mapper.lockSelection(scope.tenantId(),scope.clientId(),input.key());
         if(approvalSha.equals(current)){
             var existing=read(scope,List.of(input),true).get(input);

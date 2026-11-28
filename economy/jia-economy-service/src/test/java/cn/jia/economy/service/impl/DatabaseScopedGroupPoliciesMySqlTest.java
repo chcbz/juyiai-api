@@ -121,6 +121,32 @@ class DatabaseScopedGroupPoliciesMySqlTest {
         }
     }
 
+    @Test void maintenanceDerivesInputFromOriginalAndRetainsCasRollbackAndIdempotence(){
+        var first=receipt("short",3);var next=receipt("short",4);var a=approved(first);var b=approved(next);
+        head(first);head(next);
+        assertThrows(IllegalStateException.class,()->service.selectApproved(domain,a,null));
+        assertEquals(input(first),tx.execute(s->service.selectApproved(domain,a,null)).group().input());
+        assertEquals(a,tx.execute(s->service.selectApproved(domain,a,null)).approvalSha());
+        assertEquals(2,generation(first));
+        assertThrows(ScopedGroupPolicies.Conflict.class,()->tx.execute(s->service.selectApproved(domain,b,null)));
+        assertThrows(IllegalStateException.class,()->tx.execute(s->{service.selectApproved(domain,b,a);throw new IllegalStateException("rollback");}));
+        assertEquals(a,read(first).approvalSha());assertEquals(2,generation(first));assertEquals(1,generation(next));
+        assertEquals(b,tx.execute(s->service.selectApproved(domain,b,a)).approvalSha());
+        assertEquals(3,generation(first));assertEquals(2,generation(next));
+        assertEquals(2,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_publish_approval",Integer.class));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_member",Integer.class));
+    }
+    @Test void maintenanceRejectsMissingWithdrawnCrossDomainAndInvalidOriginalWithoutSelection(){
+        var r=receipt("short",3);var a=approved(r);
+        assertThrows(ScopedGroupPolicies.Conflict.class,()->tx.execute(s->service.selectApproved(domain,"0".repeat(64),null)));
+        assertThrows(ScopedGroupPolicies.Corrupt.class,()->tx.execute(s->service.selectApproved(new EconomyScope("other","Client"),a,null)));
+        String bad=approved(json.writeValueAsString(r).replace("\"estimatedCases\":10","\"estimatedCases\":9"));
+        assertThrows(ScopedGroupPolicies.Corrupt.class,()->tx.execute(s->service.selectApproved(domain,bad,null)));
+        jdbc.update("UPDATE economy_budget_publish_approval SET withdrawn=TRUE WHERE approval_sha=?",a);
+        assertThrows(ScopedGroupPolicies.Conflict.class,()->tx.execute(s->service.selectApproved(domain,a,null)));
+        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM economy_budget_group_study",Integer.class));
+    }
+
     @Test void findsApprovedPolicyBeforeFinalGroupAndIsolatesDomains(){
         var r=receipt("short",3);var approval=approved(r);var selected=select(r,approval,null);
         assertEquals(approval,selected.approvalSha());assertEquals(r.groupSha(),read(r).group().key());
