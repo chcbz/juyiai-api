@@ -20,15 +20,18 @@ public final class GroupBudgetStudyCommand {
         System.err.println("Group study failed: "+failure.getClass().getSimpleName());System.exit(1);
     }}
     static String run(String... args) throws IOException {
-        boolean forecast=args.length==6&&"forecast".equals(args[0]);
-        if(!forecast&&!(args.length==8&&"compare".equals(args[0])))throw new IllegalArgumentException("Invalid group study command");
+        boolean scoped=args.length>0&&args[0].startsWith("scoped-");
+        boolean forecast=args.length==6&&("forecast".equals(args[0])||"scoped-forecast".equals(args[0]));
+        if(!forecast&&!(args.length==8&&("compare".equals(args[0])||"scoped-compare".equals(args[0]))))throw new IllegalArgumentException("Invalid group study command");
         Path root=Path.of(args[1]).toRealPath();if(!Files.isDirectory(root)||!Files.getPosixFilePermissions(root).equals(PosixFilePermissions.fromString("rwx------")))throw new IOException("Expected private object directory");
         Function<String,String> objects=pin->{if(pin==null||!pin.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid object pin");
             Path path=root.resolve(pin);try(var in=Files.newInputStream(path,READ,LinkOption.NOFOLLOW_LINKS)){
                 return new String(in.readAllBytes(),StandardCharsets.UTF_8);
             }catch(IOException e){throw new UncheckedIOException(e);}};
         var study=new FrozenCalibrationStudy(new ObjectMapper(),null);var scope=new EconomyScope(args[2],args[3]);
-        var artifact=forecast?study.groupForecasts(scope,args[4],args[5],objects):study.freeze(study.compareGroups(scope,args[4],args[5],args[6],args[7],objects));
+        cn.jia.economy.task.TaskCalibrationObservations.Frozen artifact;
+        if(scoped){var generic=new FrozenScopedGroupStudy();artifact=forecast?generic.forecast(scope,args[4],args[5],objects):generic.compare(scope,args[4],args[5],args[6],args[7],objects);}
+        else {var old=forecast?study.groupForecasts(scope,args[4],args[5],objects):study.freeze(study.compareGroups(scope,args[4],args[5],args[6],args[7],objects));artifact=new cn.jia.economy.task.TaskCalibrationObservations.Frozen(old.sha256(),old.json());}
         // Publish only a complete file. Replays accept identical bytes but cannot overwrite originals.
         Path tmp=Files.createTempFile(root,".study-",".tmp",PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
         try{try(var channel=FileChannel.open(tmp,WRITE)){var bytes=ByteBuffer.wrap(artifact.json().getBytes(StandardCharsets.UTF_8));while(bytes.hasRemaining())channel.write(bytes);channel.force(true);}

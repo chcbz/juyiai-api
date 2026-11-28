@@ -26,5 +26,25 @@ final class TaskTariffBook {
     }
     static String sha(String body){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(body.getBytes(StandardCharsets.UTF_8)));}
         catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}}
+    record ScopedRate(cn.jia.economy.pricing.CostRouteReference resource,String type,String body) {}
+    record ScopedBook(String version,List<ScopedRate> rates) {}
+    static String encodeScoped(MeasuredTaskRepricing.ResourceReference book){
+        var rows=book.rates().entrySet().stream().sorted(java.util.Comparator.comparing(e->e.getKey().sha())).map(e->{
+            String type=switch(e.getValue()){case MeasuredTaskRepricing.TokenRate ignored->"token";case MeasuredTaskRepricing.UnitRate ignored->"unit";case MeasuredTaskRepricing.ExplicitZero ignored->"zero";};
+            return new ScopedRate(e.getKey(),type,JSON.writeValueAsString(e.getValue()));}).toList();
+        return JSON.writeValueAsString(new ScopedBook(book.version(),rows));
+    }
+    static MeasuredTaskRepricing.ResourceReference scoped(ScopedBook book){
+        var rates=new java.util.HashMap<cn.jia.economy.pricing.CostRouteReference,MeasuredTaskRepricing.Rate>();
+        for(var row:book.rates()){
+            MeasuredTaskRepricing.Rate rate=switch(row.type()){
+                case "token"->JSON.readValue(row.body(),MeasuredTaskRepricing.TokenRate.class);
+                case "unit"->JSON.readValue(row.body(),MeasuredTaskRepricing.UnitRate.class);
+                case "zero"->JSON.readValue(row.body(),MeasuredTaskRepricing.ExplicitZero.class);
+                default->throw new IllegalArgumentException("Unknown scoped tariff type");};
+            if(rates.putIfAbsent(row.resource(),rate)!=null)throw new IllegalArgumentException("Duplicate scoped tariff resource");
+        }
+        return new MeasuredTaskRepricing.ResourceReference(book.version(),rates);
+    }
     private TaskTariffBook(){}
 }
