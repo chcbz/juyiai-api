@@ -23,7 +23,8 @@ public class GroupPublicationEnrollment {
     Member read(String sha){
         if(sha==null||!sha.matches("[0-9a-f]{64}"))throw new NotApproved();var raw=db.approvedPublication(sha);return decode(sha,raw);
     }
-    Member decode(String sha,String raw){
+    Member decode(String sha,String raw){return decode(sha,raw,json);}
+    static Member decode(String sha,String raw,ObjectMapper json){
         if(raw==null)throw new NotApproved();
         if(!sha.equals(digest(raw)))throw new IllegalStateException("Damaged aggregate approval");var a=json.readValue(raw,Approval.class);
         if(!"GROUP_AGGREGATE".equals(a.purpose())||!"TRAIN".equals(a.split())||a.evidenceRevision()<1)throw new NotApproved();
