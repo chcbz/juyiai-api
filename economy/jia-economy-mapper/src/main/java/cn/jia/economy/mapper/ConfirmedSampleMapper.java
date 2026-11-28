@@ -219,4 +219,61 @@ public interface ConfirmedSampleMapper {
         ORDER BY r.membership_revision,e.record_id LIMIT 64
         """) List<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> responses(@Param("t") Task task,@Param("fact") String fact,
             @Param("agent") String agent,@Param("rev") long after,@Param("record") String afterRecord);
+    record ReviewedScope(long evidenceRevision,String fact,long memberCount,String agent,String manifest,
+            String scopeSha,String shapeSha,String groupSha,String policySha,String requirementSha,String inputSha,String featureSha,String quoteJson) {}
+    @Select("""
+        SELECT s.evidence_revision,r.fact_id,r.member_count,b.manifest_json->>'$.agentId' AS agent,b.manifest_json AS manifest,
+          s.scope_sha256 AS scope_sha,s.scope_shape_sha256 AS shape_sha,s.scoped_group_sha256 AS group_sha,
+          s.scoped_policy_sha256 AS policy_sha,s.initial_requirement_sha256 AS requirement_sha,s.initial_input_snapshot_sha256 AS input_sha,
+          s.initial_feature_sha256 AS feature_sha,q.snapshot_json AS quote_json
+        FROM economy_task_cost_sample s JOIN economy_task_benchmark_case b ON b.tenant_id=s.tenant_id AND b.client_id=s.client_id
+          AND b.owner_jiacn=s.owner_jiacn AND b.task_id=s.task_id AND b.benchmark_case_id=s.benchmark_case_id
+          AND b.manifest_sha=#{sha} AND SHA2(b.manifest_json,256)=b.manifest_sha AND NOT b.retired
+        JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id AND q.client_id=s.client_id
+          AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id
+          AND q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1'
+          AND q.snapshot_json->>'$.scopePin.scopeSha256'=s.scope_sha256
+          AND q.snapshot_json->>'$.binding.agentId'=b.manifest_json->>'$.agentId'
+        JOIN economy_task_charge ch ON ch.tenant_id=q.tenant_id AND ch.client_id=q.client_id AND ch.owner_jiacn=q.owner_jiacn
+          AND ch.task_id=q.task_id AND ch.quote_id=q.quote_id AND ch.payer_user_id=q.payer_user_id AND ch.state IN ('HELD','CAPTURED')
+        JOIN economy_task_benchmark_closure x ON x.sample_id=s.sample_id AND x.completed AND x.terminal_fact_id=#{fact}
+        JOIN economy_task_membership_receipt r ON r.tenant_id=s.tenant_id AND r.client_id=s.client_id AND r.owner_jiacn=s.owner_jiacn AND r.task_id=s.task_id
+          AND r.fact_id=x.terminal_fact_id AND r.membership_verified AND r.outcome='ACCEPTED' AND r.member_count=x.attached_count AND r.membership_revision=x.after_revision
+        JOIN economy_task_benchmark_review v ON v.sample_id=s.sample_id AND v.review_sha=#{review} AND SHA2(v.review_json,256)=v.review_sha AND NOT v.withdrawn
+          AND v.review_json->>'$.schema'='benchmark-review-v1' AND v.review_json->>'$.decision'='ACCEPTED'
+          AND v.review_json->>'$.caseId'=b.benchmark_case_id AND v.review_json->>'$.manifestSha'=b.manifest_sha
+          AND v.review_json->>'$.terminalFactId'=r.fact_id AND v.review_json->>'$.membershipSha'=r.set_digest
+          AND JSON_TYPE(JSON_EXTRACT(v.review_json,'$.reviewerRef'))='STRING' AND LENGTH(TRIM(v.review_json->>'$.reviewerRef'))>0
+          AND JSON_TYPE(JSON_EXTRACT(v.review_json,'$.deliverableEvidenceRef'))='STRING' AND LENGTH(TRIM(v.review_json->>'$.deliverableEvidenceRef'))>0
+        WHERE s.tenant_id=#{t.scope.tenantId} AND s.client_id=#{t.scope.clientId} AND s.owner_jiacn=#{t.ownerJiacn} AND s.task_id=#{t.taskId}
+          AND s.sample_id=#{sample} AND s.benchmark_case_id=#{id} AND s.sample_definition_version='TASK_LIFECYCLE_V1' AND s.lifecycle_state='ACCEPTED'
+          AND b.manifest_json->>'$.schema'='SCOPED_BENCHMARK_V1'
+        """) ReviewedScope reviewedScopedBenchmark(@Param("t") Task task,@Param("sample") String sample,
+            @Param("id") String id,@Param("sha") String sha,@Param("fact") String fact,@Param("review") String review);
+    record ScopedMember(long revision,String attached,Long capturePk,String captureId,String execution,String run,
+            Long captureRevision,String coverage) {}
+    @Select("""
+        SELECT r.membership_revision,m.execution_id AS attached,c.id AS capture_pk,r.capture_id,r.execution_id AS execution,
+          r.run_id AS run,c.input_revision AS capture_revision,c.coverage_state AS coverage
+        FROM economy_task_membership_received_run r
+        LEFT JOIN economy_task_cost_sample_member m ON m.sample_id=#{id} AND m.execution_id=r.execution_id
+          AND m.run_id=r.run_id AND m.capture_id <=> r.capture_id
+        LEFT JOIN economy_usage_capture c ON c.tenant_id=r.tenant_id AND c.client_id=r.client_id AND c.owner_jiacn=#{t.ownerJiacn}
+          AND c.task_id=#{t.taskId} AND c.agent_id=#{agent} AND c.execution_id=r.execution_id AND c.run_id=r.run_id
+          AND c.capture_id=m.capture_id AND c.input_revision=c.projection_revision AND c.conflict_reason IS NULL
+        WHERE r.tenant_id=#{t.scope.tenantId} AND r.client_id=#{t.scope.clientId} AND r.fact_id=#{fact} AND r.membership_revision>#{after}
+        ORDER BY r.membership_revision LIMIT 64
+        """) List<ScopedMember> scopedMembers(@Param("t") Task task,@Param("id") String sample,@Param("fact") String fact,
+            @Param("agent") String agent,@Param("after") long after);
+    // Same associated-head/revision-prefix semantics as the original projection, but inside the sample MVCC transaction.
+    @Select("""
+        SELECT g.record_id,g.revisions,h.source_revision,h.evidence_sha256,h.evidence_json FROM (
+          SELECT r.capture_pk,r.record_id,COUNT(*) AS revisions FROM economy_usage_capture_record r
+          JOIN economy_usage_capture c ON c.id=r.capture_pk AND c.tenant_id=#{t.scope.tenantId} AND c.client_id=#{t.scope.clientId}
+            AND c.owner_jiacn=#{t.ownerJiacn} AND c.task_id=#{t.taskId}
+          WHERE r.capture_pk=#{pk} AND r.record_id>#{after} GROUP BY r.capture_pk,r.record_id ORDER BY r.record_id LIMIT 64
+        ) g LEFT JOIN economy_usage_capture_record h ON h.capture_pk=g.capture_pk AND h.record_id=g.record_id AND h.is_associated_head=1
+        ORDER BY g.record_id
+        """) List<cn.jia.economy.usage.UsageCaptureProjection.Row> scopedRecords(@Param("t") Task task,@Param("pk") long capturePk,@Param("after") String after);
+
 }

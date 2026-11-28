@@ -12,7 +12,27 @@ public interface ConfirmedSampleEvidence {
     record Response(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
                     String evidenceSha,String evidenceJson,String execution,String run,String kind,boolean expectsChild) { @Override public String toString(){return "Response[private]";} }
     interface Decoder { boolean coversAllOperations(String groupVersion,String capturePolicy); cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decode(Response response);
-        default cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decodeChild(Task task,Response close){return null;} }
+        default cn.jia.economy.pricing.MeasuredTaskRepricing.Fact decodeChild(Task task,Response close){return null;}
+        /** Null means this adapter cannot independently prove a scoped capture, not zero usage. */
+        default ScopedFold openScoped(Task task,ScopedExecution execution){return null;}
+    }
+    record ScopedExecution(String agent,String execution,String run,String captureId,long captureRevision,long memberRevision) {}
+    interface ScopedFold {
+        void accept(UsageCaptureProjection.Row row);
+        /** Null means incomplete/unproven; never returns a partial list. */
+        ScopedCapture finish();
+    }
+    record ScopedOperation(cn.jia.economy.pricing.CostRouteReference resource,Operation operation) {
+        public ScopedOperation { java.util.Objects.requireNonNull(resource);java.util.Objects.requireNonNull(operation);
+            if(!resource.kind().equals(operation.fact().kind())||!resource.component().equals(operation.fact().component()))
+                throw new IllegalArgumentException("Measured resource/component mismatch"); }
+    }
+    record ScopedCapture(String measurementSha,java.util.List<ScopedOperation> operations) {
+        public ScopedCapture {if(measurementSha==null||!measurementSha.matches("[a-f0-9]{64}"))throw new IllegalArgumentException("Missing actual configuration");operations=java.util.List.copyOf(operations);}
+    }
+    record ScopedMeasured(Assessment assessment,java.util.List<ScopedOperation> operations) {
+        public ScopedMeasured {operations=java.util.List.copyOf(operations);}
+    }
     record Operation(long memberRevision,String captureId,long captureRevision,String recordId,String sourceRevision,
                      cn.jia.economy.pricing.MeasuredTaskRepricing.Fact fact) {}
     record Measured(Assessment assessment,java.util.List<Operation> operations) {

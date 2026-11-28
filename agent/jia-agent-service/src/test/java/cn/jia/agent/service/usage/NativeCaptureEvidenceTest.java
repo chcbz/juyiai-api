@@ -89,7 +89,7 @@ class NativeCaptureEvidenceTest {
         img.put("invocationId","other/run");assertThrows(IllegalArgumentException.class,()->NativeCaptureEvidence.captureFinalKeys(o));
     }
     @Test void sealedImageSampleReadsOnlyTwoPinnedLedgerRevisionsAndNeverWritesACost(){
-        var costs=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class);var decoder=new NativeSampleResponseDecoder(costs);
+        var costs=org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class);var decoder=new NativeSampleResponseDecoder(costs,org.mockito.Mockito.mock(cn.jia.agent.dao.PersonalWorkspaceExecutionDao.class),org.mockito.Mockito.mock(cn.jia.agent.dao.SkillExecutionDao.class));
         var task=new cn.jia.economy.task.TaskBillingService.Task(new cn.jia.economy.service.EconomyScope("t","c"),"owner","task");
         String id="11111111-1111-4111-8111-111111111111", cap=NativeCaptureEvidence.captureIdentity("exec","run"),rid=NativeCaptureEvidence.digest(List.of("USAGE_RECORD_V2",cap,"CAPTURE_FINAL",List.of()));
         var binding=new cn.jia.economy.usage.UsageCostService.Binding(task.scope(),"owner","task","NATIVE_PROVIDER_CALL","exec:"+id);
@@ -123,7 +123,7 @@ class NativeCaptureEvidenceTest {
                 records.put(d.get("recordId").asText(),d.toString());
             }
         }
-        var persisted=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var decode=new NativeSampleResponseDecoder(org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class));assertFalse(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","NATIVE_EXECUTION_UNVERIFIED_V1"));assertTrue(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","TEXT_MODEL_ONLY_V1"));
+        var persisted=(tools.jackson.databind.node.ObjectNode)JSON.readTree(response);var decode=new NativeSampleResponseDecoder(org.mockito.Mockito.mock(cn.jia.economy.usage.UsageCostService.class),org.mockito.Mockito.mock(cn.jia.agent.dao.PersonalWorkspaceExecutionDao.class),org.mockito.Mockito.mock(cn.jia.agent.dao.SkillExecutionDao.class));assertFalse(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","NATIVE_EXECUTION_UNVERIFIED_V1"));assertTrue(decode.coversAllOperations("NATIVE_DISPATCH_GROUP_V1","TEXT_MODEL_ONLY_V1"));
         var q=(tools.jackson.databind.node.ObjectNode)persisted.path("observation").path("measuredQuantities");
         java.util.function.Supplier<cn.jia.economy.usage.ConfirmedSampleEvidence.Response> row=()->new cn.jia.economy.usage.ConfirmedSampleEvidence.Response(1, persisted.get("captureId").asText(),3,persisted.get("recordId").asText(),persisted.get("sourceRevision").asText(),"h",persisted.toString(),null,null,"RESPONSE",false);
         assertNull(decode.decode(row.get()));q.put("normalizationBasis","RESPONSES_TEXT_TOKENS_V1");var decoded=decode.decode(row.get());assertEquals(id,decoded.operation().externalId());

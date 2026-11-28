@@ -806,11 +806,13 @@ class TaskBillingServiceMySqlTest {
         TaskBenchmarkAdmission.ObservedScopeGroup observed(){return new TaskBenchmarkAdmission.ObservedScopeGroup(manifest.scopePin(),manifest.group());}
     }
     private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero){
+        return scopedPaidCase(purpose,zero,Map.<String,Object>of("strategy","native-summary","routes",List.of("text-model")));
+    }
+    private PaidCase scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose purpose,boolean zero,Map<String,Object> config){
         usageSchema();new cn.jia.economy.config.ScopedCostSampleSchemaInitializer(jdbc).afterPropertiesSet();
         new org.springframework.jdbc.datasource.init.ResourceDatabasePopulator(new org.springframework.core.io.ClassPathResource("db/economy-task-benchmark-case-v1.sql")).execute(jdbc.getDataSource());
         var quote=scopedSnapshot("agent",zero,zero);
         var slots=List.of(new GroupMeanPricing.ScopeSlot(0,"text.summary","1","a".repeat(64),List.of()));
-        var config=Map.<String,Object>of("strategy","native-summary","routes",List.of("text-model"));
         var input=new GroupMeanPricing.ScopeInput(slots,List.of("short"),cn.jia.core.util.CanonicalValueEncoding.digest(config));
         var policy=new GroupMeanPricing.ScopedPolicy("f1",input.specShas(),input.scopeShapeSha(),"config-1",GroupMeanPricing.ScopedPolicy.definitionsSha(input.specShas()),3);
         var group=new GroupMeanPricing.ScopeGroup("f1",policy.sha(),slots,List.of("short"),config);
@@ -890,6 +892,77 @@ class TaskBillingServiceMySqlTest {
         jdbc.update("UPDATE economy_task_benchmark_case SET retired=TRUE");
         assertThrows(GroupPublicationEnrollment.NotApproved.class,()->registerPaid(p));
         assertEquals(2,jdbc.queryForObject("SELECT generation FROM economy_budget_group_head",Integer.class));
+    }
+
+    private record ScopedReview(PaidCase source,String sample,String review,String fact,String measurement) {}
+    private ScopedReview scopedReviewedSource(){
+        var measured=Map.<String,Object>of("fixture","independently-measured-config");
+        var c=scopedPaidCase(cn.jia.economy.task.ScopedBenchmarkManifest.Purpose.TRAIN,false,Map.of("measurement",measured,"routes",List.of("fixture-only")));
+        reservePaid(c);installPublicationSchema();
+        String sample=jdbc.queryForObject("SELECT sample_id FROM economy_task_cost_sample",String.class),fact="a".repeat(64),membership="b".repeat(64);
+        jdbc.update("UPDATE economy_task_cost_sample SET lifecycle_state='ACCEPTED'");
+        jdbc.update("INSERT INTO economy_task_benchmark_closure VALUES(?,?,2,2,1)",sample,fact);
+        jdbc.update("INSERT INTO economy_task_membership_receipt VALUES(?,?,?,?,?,'ACCEPTED',1,1,2,2,?,2,2,?,1)",SCOPE.tenantId(),SCOPE.clientId(),TASK.ownerJiacn(),TASK.taskId(),fact,membership,membership);
+        var review=new BenchmarkSampleEvidence.Review("benchmark-review-v1",c.manifest().caseId(),c.sha(),fact,membership,"ACCEPTED","test-reviewer","test-deliverable");
+        String raw=new ObjectMapper().writeValueAsString(review),sha=GroupPublicationEnrollment.digest(raw);
+        jdbc.update("INSERT INTO economy_task_benchmark_review VALUES(?,?,?,false)",sample,sha,raw);
+        for(int i=1;i<=2;i++){
+            String capture=Integer.toString(i).repeat(64),exec="execution-"+i,run="run-"+i;
+            jdbc.update("INSERT INTO economy_task_membership_received_run VALUES(?,?,?,?,?,?,?,?)",SCOPE.tenantId(),SCOPE.clientId(),fact,i,exec,run,capture,membership);
+            jdbc.update("INSERT INTO economy_task_cost_sample_member VALUES(?,?,?,?)",sample,exec,run,capture);
+            jdbc.update("INSERT INTO economy_usage_capture(tenant_id,client_id,owner_jiacn,task_id,agent_id,execution_id,run_id,capture_id,input_revision,projection_revision,coverage_state) VALUES(?,?,?,?,?,?,?,?,1,1,'COMPLETE')",SCOPE.tenantId(),SCOPE.clientId(),TASK.ownerJiacn(),TASK.taskId(),"agent",exec,run,capture);
+            long pk=jdbc.queryForObject("SELECT id FROM economy_usage_capture WHERE execution_id=?",Long.class,exec);
+            // Synthetic adapter bytes exercise two keyset pages; native parsing is covered by Agent tests.
+            for(int n=1;n<=65;n++)jdbc.update("INSERT INTO economy_usage_capture_record(capture_pk,record_id,revision_key,source_revision,kind,evidence_sha256,binding_sha256,evidence_json,is_associated_head,association_state) VALUES(?,?,SHA2('1',256),'1','RESPONSE',?,?,'{}',1,'ASSOCIATED')",pk,String.format("%064x",n),membership,membership);
+        }
+        return new ScopedReview(c,sample,sha,fact,cn.jia.core.util.CanonicalValueEncoding.digest(measured));
+    }
+    private ConfirmedSampleEvidence.Decoder scopedDecoder(ScopedReview source,boolean mixed){
+        var decoder=org.mockito.Mockito.mock(ConfirmedSampleEvidence.Decoder.class);
+        org.mockito.Mockito.when(decoder.openScoped(org.mockito.ArgumentMatchers.eq(TASK),org.mockito.ArgumentMatchers.any())).thenAnswer(call->{
+            ConfirmedSampleEvidence.ScopedExecution e=call.getArgument(1);var fold=org.mockito.Mockito.mock(ConfirmedSampleEvidence.ScopedFold.class);
+            var ref=new cn.jia.economy.pricing.CostRouteReference("MODEL_RESPONSE","INFERENCE","actual-source","actual-model","basis");
+            var fact=new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("actual-source",e.execution()),ref.kind(),ref.component(),"c".repeat(64),new MeasuredTaskRepricing.Tokens("basis",Map.of(ModelTokenPrice.Category.INPUT,10L)));
+            var op=new ConfirmedSampleEvidence.ScopedOperation(ref,new ConfirmedSampleEvidence.Operation(e.memberRevision(),e.captureId(),e.captureRevision(),"d".repeat(64),"1",fact));
+            var seen=new java.util.ArrayList<String>();
+            org.mockito.Mockito.doAnswer(inv->{cn.jia.economy.usage.UsageCaptureProjection.Row row=inv.getArgument(0);seen.add(row.recordId());return null;}).when(fold).accept(org.mockito.ArgumentMatchers.any());
+            org.mockito.Mockito.when(fold.finish()).thenAnswer(inv->{assertEquals(65,seen.size());assertEquals(65,new java.util.HashSet<>(seen).size());assertEquals(String.format("%064x",65),seen.getLast());return new ConfirmedSampleEvidence.ScopedCapture(mixed&&e.memberRevision()==2?"0".repeat(64):source.measurement(),List.of(op));});return fold;
+        });return decoder;
+    }
+    private ConfirmedSampleEvidence.ScopedMeasured measureScoped(ScopedReview p,ConfirmedSampleEvidence.Decoder decoder){
+        return tx.execute(st->new ConfirmedSampleEvidenceReader(originals,new ObjectMapper()).measureScopedReviewed(TASK,p.sample(),p.source().manifest().caseId(),p.source().sha(),p.fact(),p.review(),decoder));
+    }
+    @Test void scopedReviewedPaidSampleUsesActualIdentityAfterCaptureWithoutLegacyDispatchFields(){
+        var p=scopedReviewedSource();var decoder=scopedDecoder(p,false);
+        assertEquals(State.CAPTURED,inTask(TASK,()->billing.capture(TASK)).state());
+        var measured=measureScoped(p,decoder);assertNotNull(measured);assertEquals(ConfirmedSampleEvidence.Verdict.MATCHED,measured.assessment().verdict());
+        assertEquals(p.sample(),measured.assessment().sampleId());assertNotEquals(p.source().sha(),p.sample());
+        assertEquals(2,measured.operations().size());assertEquals(2,measured.assessment().members());
+        assertEquals(0,count("economy_usage_capture_dispatch_group"));
+        org.mockito.Mockito.verify(decoder,org.mockito.Mockito.never()).coversAllOperations(org.mockito.ArgumentMatchers.any(),org.mockito.ArgumentMatchers.any());
+    }
+    @Test void scopedReviewedOriginalReviewClosureAndMembershipCannotBeBypassed(){
+        var p=scopedReviewedSource();var decoder=scopedDecoder(p,false);
+        for(String sql:List.of("UPDATE economy_task_benchmark_case SET retired=TRUE","UPDATE economy_task_benchmark_review SET withdrawn=TRUE",
+                "UPDATE economy_task_benchmark_closure SET completed=FALSE","UPDATE economy_task_membership_receipt SET membership_verified=FALSE",
+                "UPDATE economy_task_membership_receipt SET member_count=1","UPDATE economy_task_membership_receipt SET membership_revision=1",
+                "UPDATE economy_task_membership_receipt SET set_digest=REPEAT('0',64)","UPDATE economy_task_cost_sample SET lifecycle_state='CANCELLED'")){
+            org.mockito.Mockito.clearInvocations(decoder);
+            tx.executeWithoutResult(st->{jdbc.update(sql);assertNull(measureScoped(p,decoder));org.mockito.Mockito.verifyNoInteractions(decoder);st.setRollbackOnly();});
+        }
+        assertNotNull(measureScoped(p,decoder));
+    }
+    @Test void scopedReviewedMixedOrMissingMemberNeverReturnsPartialTaskCost(){
+        var p=scopedReviewedSource();var mixed=measureScoped(p,scopedDecoder(p,true));
+        assertEquals(ConfirmedSampleEvidence.Verdict.MIXED_EXECUTION_CONFIG,mixed.assessment().verdict());assertTrue(mixed.operations().isEmpty());
+        var decoder=scopedDecoder(p,false);
+        for(String sql:List.of("DELETE FROM economy_task_cost_sample_member WHERE execution_id='execution-2'",
+                "UPDATE economy_usage_capture SET input_revision=2 WHERE execution_id='execution-2'",
+                "UPDATE economy_usage_capture SET coverage_state='INCOMPLETE' WHERE execution_id='execution-2'")){
+            tx.executeWithoutResult(st->{jdbc.update(sql);var result=measureScoped(p,decoder);assertNotEquals(ConfirmedSampleEvidence.Verdict.MATCHED,result.assessment().verdict());assertTrue(result.operations().isEmpty());st.setRollbackOnly();});
+        }
+        jdbc.update("UPDATE economy_task_cost_sample SET scoped_policy_sha256=REPEAT('0',64)");
+        assertThrows(IllegalStateException.class,()->measureScoped(p,decoder));
     }
 
     @Test void scopedPaidAdmissionCreatesExactlyOneQuoteLinkedSampleAndNeverReenrollsReplay(){

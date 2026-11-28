@@ -13,7 +13,14 @@ import tools.jackson.databind.ObjectMapper;
 public final class NativeSampleResponseDecoder implements ConfirmedSampleEvidence.Decoder {
     private static final ObjectMapper JSON=new ObjectMapper();
     private final cn.jia.economy.usage.UsageCostService costs;
-    public NativeSampleResponseDecoder(cn.jia.economy.usage.UsageCostService costs){this.costs=costs;}
+    private final cn.jia.agent.dao.PersonalWorkspaceExecutionDao admissions;
+    private final cn.jia.agent.dao.SkillExecutionDao skills;
+    public NativeSampleResponseDecoder(cn.jia.economy.usage.UsageCostService costs,cn.jia.agent.dao.PersonalWorkspaceExecutionDao admissions,cn.jia.agent.dao.SkillExecutionDao skills){
+        this.costs=java.util.Objects.requireNonNull(costs);this.admissions=java.util.Objects.requireNonNull(admissions);this.skills=java.util.Objects.requireNonNull(skills);
+    }
+    @Override public ConfirmedSampleEvidence.ScopedFold openScoped(cn.jia.economy.task.TaskBillingService.Task task,ConfirmedSampleEvidence.ScopedExecution execution){
+        return NativeScopedSampleCapture.open(task,execution,costs,admissions,skills,this);
+    }
     @Override public MeasuredTaskRepricing.Fact decodeChild(cn.jia.economy.task.TaskBillingService.Task task,ConfirmedSampleEvidence.Response close){return NativeImageSampleOperation.read(costs,task,close);}
     // Never infer zero tools merely because every MODEL response had measured tokens.
     @Override public boolean coversAllOperations(String groupVersion,String policy){

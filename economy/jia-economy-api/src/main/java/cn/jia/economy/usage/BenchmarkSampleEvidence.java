@@ -11,4 +11,7 @@ public interface BenchmarkSampleEvidence {
             cn.jia.economy.task.TaskHistoryCatalog.Revision source,Pin pin,String family,cn.jia.economy.pricing.TaskEstimateEvaluation.Split split,ConfirmedSampleEvidence.Decoder decoder);
     /** null: no matching current admitted review. A present but incomplete measurement has no usable operation list. */
     ConfirmedSampleEvidence.Measured measureReviewed(Task task,String caseId,String manifestSha,String fact,String reviewSha,ConfirmedSampleEvidence.Decoder decoder);
+    /** Scoped source uses the real sample identity; caller owns one read-only consistent transaction. */
+    ConfirmedSampleEvidence.ScopedMeasured measureScopedReviewed(Task task,String sampleId,String caseId,String manifestSha,
+            String fact,String reviewSha,ConfirmedSampleEvidence.Decoder decoder);
 }
