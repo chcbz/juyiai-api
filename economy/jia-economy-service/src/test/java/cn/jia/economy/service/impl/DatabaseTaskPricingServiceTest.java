@@ -149,7 +149,8 @@ class DatabaseTaskPricingServiceTest {
         when(history.candidateQuantities(query,group,pin,rev)).thenReturn(java.util.List.of(new MeasuredTaskRepricing.Fact(new MeasuredTaskRepricing.Operation("gw","one"),"text","model","proof",new MeasuredTaskRepricing.Tokens("disjoint",Map.of(ModelTokenPrice.Category.INPUT,1000000L)))));
         var params=result.report().points().winner().parameters();
         when(catalog.resolve(query,group)).thenReturn(new cn.jia.economy.task.TaskCalibrationCatalog.Active(pin,params,study.freezeReference(complete.apply("0.25")).sha256()));
-        var estimator=new TaskBudgetEstimatorService(catalog,history,new MeasuredHistoryEstimateEngine(history,(scope,v,r,kinds)->{calls.incrementAndGet();assertEquals(contract.keySet(),kinds);return current.get();}));
+        var reference=mock(TaskReferencePricing.class);when(reference.freeze(any(),any(),any(),any())).thenAnswer(call->{calls.incrementAndGet();assertEquals(contract.keySet(),call.getArgument(3));return current.get();});
+        var estimator=new TaskBudgetEstimatorService(catalog,history,new MeasuredHistoryEstimateEngine(history,reference));
         assertEquals(100,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(query,features,terms)).preparation().estimate().wen());
         current.set(complete.apply("0.2500000000000000000000001"));
         assertEquals(new cn.jia.economy.task.TaskBudgetEstimator.Unavailable(cn.jia.economy.task.TaskQuoteBatches.Reason.NO_BASELINE),estimator.prepare(query,features,terms));

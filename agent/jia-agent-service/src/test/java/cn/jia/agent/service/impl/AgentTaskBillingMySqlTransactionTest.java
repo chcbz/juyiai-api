@@ -793,10 +793,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var fitted=new cn.jia.economy.pricing.TaskEstimateCalibration.Fit("fixture",searchParams,scores);
         var report=new cn.jia.economy.pricing.TaskEstimateCalibration.Report(group.privateCalibrationGroup(query),group.execution().routeVersion(),fitted,scores,true);
         var structured=new cn.jia.economy.task.TaskCalibrationCatalog.Receipt(cn.jia.economy.pricing.TaskNeighborSearch.VERSION,"1".repeat(64),"2".repeat(64),fixtureBookPin(fixtureModelReference()),"4".repeat(64),roster.sha256(),gate,report);
-        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(candidates,(priceScope,v,routes,kinds)->{
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(candidates,referenceFixture(call->{
+            var priceScope=call.getArgument(0);String v=call.getArgument(1);var kinds=call.getArgument(3);
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
-            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
+            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));}));
         var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
         String receipt=json.writeValueAsString(structured); // synthetic passing calibration, not evidence of production accuracy
         var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,candidates,engine);
@@ -909,6 +910,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(25,assertInstanceOf(cn.jia.economy.task.TaskBudgetEstimator.Available.class,estimator.prepare(BILLING_TASK,features,terms)).preparation().estimate().wen());
         locked(()->{assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->estimator.prepare(BILLING_TASK,features,terms));
             assertThrows(org.springframework.transaction.IllegalTransactionStateException.class,()->engine.estimate(BILLING_TASK,measured,features,cal.resolve(BILLING_TASK,group),terms.routes()));return null;});
+    }
+    private static cn.jia.economy.pricing.TaskReferencePricing referenceFixture(org.mockito.stubbing.Answer<MeasuredTaskRepricing.Reference> answer){
+        var reference=mock(cn.jia.economy.pricing.TaskReferencePricing.class);when(reference.freeze(any(),any(),any(),any())).thenAnswer(answer);return reference;
     }
     private boolean attachedProbe;
     private record AttachedQuote(TaskEstimateFeatures reference,MeasuredNeighborEstimate.Estimate expected){}
@@ -1223,7 +1227,7 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
             int slot=switch(method.getName()){case "candidatePage"->0;case "candidateQuantities"->1;default->throw new AssertionError(method.getName());};long t=System.nanoTime();
             try{return method.invoke(historyCatalog,args);}catch(java.lang.reflect.InvocationTargetException e){throw e.getCause();}finally{phase[slot]+=System.nanoTime()-t;phase[slot+2]++;}
         }));
-        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(timed,(scope,v,routes,kinds)->{assertEquals(java.util.Set.of("draw"),kinds);return fixtureReference();});
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(timed,referenceFixture(call->{assertEquals(java.util.Set.of("draw"),call.getArgument(3));return fixtureReference();}));
         var beforeProbe=recShapes();assertEquals(64,historyCatalog.page(reader,group,"").size());var digests=new java.util.ArrayList<String>();
         recShapes().forEach((key,now)->{var old=beforeProbe.getOrDefault(key,new Shape(0,0,0,0));if(now.calls()-old.calls()==1 && now.sent()-old.sent()==64)digests.add(key);});assertEquals(1,digests.size());
         List<String> firstSelection=null;
@@ -1439,8 +1443,8 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var unit=new TaskQuoteCalculator.ToolKey("test","draw","frame");
         var allTerms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(offeredGroup.execution(),Map.of("draw",Map.of("frame",new cn.jia.economy.pricing.CostPricingRoute.UnitRoute(unit)),
                 "MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
-        var book=study.freezeContractReference(BILLING_TASK,allTerms,(scope,version,routes,kinds)->{assertEquals(BILLING_TASK.scope(),scope);assertEquals("r1",version);
-            assertEquals(allTerms.routes(),routes);assertEquals(java.util.Set.of("draw","MODEL_RESPONSE"),kinds);return fixtureReference();});
+        var book=study.freezeContractReference(BILLING_TASK,allTerms,referenceFixture(call->{assertEquals(BILLING_TASK.scope(),call.getArgument(0));assertEquals("r1",call.getArgument(1));
+            assertEquals(allTerms.routes(),call.getArgument(2));assertEquals(java.util.Set.of("draw","MODEL_RESPONSE"),call.getArgument(3));return fixtureReference();}));
         // Same contract version and same rounded forecast, even identical model rates for all actual operations.
         // Only the tool rate used by the original neighbour differs in the 25th decimal place.
         var changed=study.freezeReference(new MeasuredTaskRepricing.Reference("r1",Map.of("MODEL_RESPONSE",fixtureReference().byKind().get("MODEL_RESPONSE"),
@@ -1505,10 +1509,11 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertNull(calibrationCatalog.resolve(query,group));assertFalse(locked(()->calibrationCatalog.lockCurrent(query,active.pin())));
         jdbc.update("UPDATE economy_task_estimator_current SET generation=3,receipt_sha=SHA2(?,256) WHERE group_sha=?",receiptJson,group.digest());
         assertFalse(locked(()->calibrationCatalog.lockCurrent(query,active.pin()))); // reactivation of same bytes cannot resurrect stale preparation
-        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,(priceScope,v,routes,kinds)->{
+        var engine=new cn.jia.economy.service.impl.MeasuredHistoryEstimateEngine(historyCatalog,referenceFixture(call->{
+            var priceScope=call.getArgument(0);String v=call.getArgument(1);var kinds=call.getArgument(3);
             assertEquals(query.scope(),priceScope);assertEquals("r1",v);assertEquals(java.util.Set.of("MODEL_RESPONSE"),kinds);
             var ref=new ModelTokenPrice("fixture","model","tier","test-price","synthetic",Map.of(ModelTokenPrice.Category.INPUT,new BigDecimal("10000")),null,Map.of());
-            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));});
+            return new MeasuredTaskRepricing.Reference(v,Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new MeasuredTaskRepricing.TokenRate("fixture",ref))));}));
         var prediction=engine.estimate(query,group.execution(),needle,calibrationCatalog.resolve(query,group),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));assertEquals(65L,prediction.wen());assertEquals(sid,prediction.contributions().getFirst().sampleId());
         var estimator=new cn.jia.economy.service.impl.TaskBudgetEstimatorService(calibrationCatalog,historyCatalog,engine);
         var terms=new cn.jia.economy.task.TaskBudgetEstimator.Terms(group.execution(),Map.of("MODEL_RESPONSE",Map.of("INFERENCE",new cn.jia.economy.pricing.CostPricingRoute.TokenRoute("fixture","model","tier","fixture"))));
