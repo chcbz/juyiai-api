@@ -33,13 +33,14 @@ class NativeScopedSampleCaptureTest {
         var row=new UsageCaptureProjection.Row(id,1,"1",NativeCaptureEvidence.digest(envelope),JSON.writeValueAsString(envelope));rows.put(id,row);return row;
     }
     private String tuples(List<UsageCaptureProjection.Row> members){return NativeCaptureEvidence.digest(members.stream().sorted(Comparator.comparing(UsageCaptureProjection.Row::recordId)).map(r->List.of(r.recordId(),r.sourceRevision(),r.evidenceSha256())).toList());}
-    private void fixture(boolean image)throws Exception{
+    private void fixture(boolean image)throws Exception{fixture(image,true);}
+    private void fixture(boolean image,boolean withSkill)throws Exception{
         var selected=new HashMap<String,Object>(Map.of("key","summary","version","1.0.0","installationId","installed","packageSha256",H));selected.put("manifestSha256",null);
         var scope=Map.of("kind","TASK","conversationId","conversation","conversationGeneration","1","taskId","task");
-        var snapshot=Map.of("scope",scope,"executionProtocolVersion",6,"targetAgentId","agent","skills",List.of(Map.of("skill",selected)));
+        var snapshot=Map.of("scope",scope,"executionProtocolVersion",6,"targetAgentId","agent","skills",withSkill?List.of(Map.of("skill",selected)):List.of());
         var binding=new HashMap<String,Object>(Map.of("executionId","exec1","agentId","agent","scopeSha256",NativeCaptureEvidence.digest(scope),"grantRevision","1","skillKey","summary","skillVersion","1.0.0","skillInstallationId","installed","packageSha256",H,"productVersionId","product","approvedPermissionsSha256",C));binding.put("manifestSha256",null);
         var bound=new HashMap<>(selected);bound.remove("installationId");
-        skill=new SkillExecutionEntity().setSnapshotJson(JSON.writeValueAsString(snapshot)).setSnapshotSha256(NativeCaptureEvidence.digest(snapshot)).setTaskSkillBindingJson(JSON.writeValueAsString(List.of(Map.of("skill",bound,"executionBinding",binding))));
+        skill=new SkillExecutionEntity().setSnapshotJson(JSON.writeValueAsString(snapshot)).setSnapshotSha256(NativeCaptureEvidence.digest(snapshot)).setTaskSkillBindingJson(JSON.writeValueAsString(withSkill?List.of(Map.of("skill",bound,"executionBinding",binding)):List.of()));
         var parent=new CostRouteReference("MODEL_RESPONSE","INFERENCE","native-parent","parent","RESPONSES_TEXT_TOKENS_V1");
         var refs=new ArrayList<Object>();refs.add(parent.canonical());Map<String,Object> child=null;
         if(image){
@@ -57,7 +58,7 @@ class NativeScopedSampleCaptureTest {
         var config=NativeCaptureEvidence.costConfiguration(configuration);
         admitted=new PersonalWorkspaceExecutionEntity().setTaskId("task").setRunId("run1").setTargetAgentId("agent").setBusinessScope("TASK").setExecutionProtocolVersion(6).setUsageMode("RESPONSE_V2").setCaptureProtocol("METERED_CAPTURE_V2").setGrantRevision(1L).setCaptureProfileSha256(NativeCaptureEvidence.configurationProfile(config));
         when(admissions.find("t","c","owner","exec1")).thenReturn(admitted);when(skills.find("t","c","owner","exec1")).thenReturn(skill);
-        var measurement=new HashMap<>(config.canonical());measurement.put("skillPackages",List.of(Map.of("skillKey","summary","skillVersion","1.0.0","packageSha",H)));measurementSha=CanonicalValueEncoding.digest(measurement);
+        var measurement=new HashMap<>(config.canonical());measurement.put("skillPackages",withSkill?List.of(Map.of("skillKey","summary","skillVersion","1.0.0","packageSha",H)):List.of());measurementSha=CanonicalValueEncoding.digest(measurement);
         String route=image?NativeCaptureEvidence.digest(List.of("NATIVE_COMPOSITE_ROUTE_V1","native-parent","parent",child.get("childRouteSha256"))):H;
         var plan=new HashMap<String,Object>(Map.of("captureProtocol","METERED_CAPTURE_V2","executionConfigSha256",H,"rootSourceId","root","snapshotSha256",skill.getSnapshotSha256(),"engineVersion","codex-cli-0.167.0","coveragePolicyVersion",policy,"costConfiguration",configuration,"dispatchGroup",Map.of("version","NATIVE_DISPATCH_GROUP_V1","executionConfigSha256",H,"routeSha256",route,"toolConfigSha256",C)));
         if(image)plan.put("imageRoute",Map.of("model","parent","childRouteSha256",child.get("childRouteSha256")));
@@ -78,6 +79,18 @@ class NativeScopedSampleCaptureTest {
         assertTrue(measured.operations().stream().allMatch(o->o.resource().namespace().equals("native-parent")&&o.resource().modelOrTool().equals("parent")));
         assertNotEquals(measured.operations().get(0).operation().fact().operation(),measured.operations().get(1).operation().fact().operation());
         verifyNoInteractions(costs);
+    }
+    @Test void readsExplicitNoSkillLocalAdmissionWithoutInventingPackages()throws Exception{
+        fixture(false,false);var measured=read();assertNotNull(measured);
+        assertEquals(measurementSha,measured.measurementSha());assertEquals(2,measured.operations().size());
+        verifyNoInteractions(costs);
+        skill.setTaskSkillBindingJson(null);assertNull(read());
+        skill.setTaskSkillBindingJson("[{}]");assertNull(read());
+        skill.setTaskSkillBindingJson("[]");assertNotNull(read());
+        when(skills.find("t","c","owner","exec1")).thenReturn(null);assertNull(read());
+    }
+    @Test void noSkillAdmissionCannotClaimProviderCoverage()throws Exception{
+        fixture(true,false);assertNull(read());
     }
     @Test void readsChildOnlyFromActualFinalReferenceAndOriginalLedger()throws Exception{
         fixture(true);var measured=read();assertNotNull(measured);assertEquals(measurementSha,measured.measurementSha());assertEquals(3,measured.operations().size());

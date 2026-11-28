@@ -38,7 +38,9 @@ final class NativeScopedSampleCapture implements ScopedFold {
         if(!"TASK".equals(scope.get("kind"))||!task.taskId().equals(scope.get("taskId"))
                 ||!execution.agent().equals(snapshot.get("targetAgentId"))||!Integer.valueOf(6).equals(snapshot.get("executionProtocolVersion")))return null;
         var selected=(List<?>)snapshot.get("skills");var stored=JSON.readValue(skill.getTaskSkillBindingJson(),List.class);
-        if(selected==null||selected.isEmpty()||selected.size()!=stored.size())return null;
+        // An explicit empty selection plus its original empty binding is a valid native
+        // local execution, not a missing skill snapshot. Missing snapshots still fail above.
+        if(selected==null||stored==null||selected.size()!=stored.size())return null;
         var packages=new ArrayList<Map<String,String>>();var installations=new HashSet<String>();
         for(int i=0;i<selected.size();i++){
             var selection=object(object(selected.get(i)).get("skill"));var original=object(stored.get(i));
@@ -95,6 +97,9 @@ final class NativeScopedSampleCapture implements ScopedFold {
         var result=coverage.finish(row->child!=null&&child.operation().recordId().equals(row.recordId()));
         var configuration=coverage.costConfiguration();
         if(incomplete||result.state()!=UsageCaptureProjection.Coverage.COMPLETE||configuration==null||!snapshotSha.equals(planSnapshot)||parents.isEmpty())return null;
+        // The no-package adapter only proves local-artifact/model work. Do not admit a
+        // provider operation merely because its package list happened to be empty.
+        if(packages.isEmpty()&&!NativeCaptureCoverage.LOCAL_POLICY.equals(configuration.capturePolicyVersion()))return null;
         var parent=configuration.routeRefs().stream().filter(r->r.kind().equals("MODEL_RESPONSE")&&r.component().equals("INFERENCE")).toList();
         if(parent.size()!=1)return null;
         var operations=new ArrayList<ScopedOperation>();for(var op:parents)operations.add(new ScopedOperation(parent.getFirst(),op));
