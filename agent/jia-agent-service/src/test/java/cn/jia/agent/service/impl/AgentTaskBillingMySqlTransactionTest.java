@@ -119,6 +119,9 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
     private AgentTaskMutationTransactionImpl roots;
     private TaskBillingService billing,inlineBilling;
     private ScopedBenchmarkEnrollment scopedEnrollment;
+    private AgentTaskRequirementSnapshotService.Snapshot scopedRequirement;
+    private CapabilityQuoteSpec scopedSpecification;
+    private RegisteredPricingProfiles.Observed scopedObserved;
     private RegisteredPricingProfiles scopedProfiles;
     private PublishedCapabilityQuoteSpecs scopedSpecs;
     private CostRouteBindings scopedRoutes;
@@ -4076,12 +4079,14 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         var scope=new ConfirmedScope(1,payload.requirementDigest("Fixture title","Fixture description",digest),payload.digest(digest),digest,ConfirmedScope.VERSION,1,List.of(item),payload.acceptanceText());
         var requirements=(AgentTaskRequirementSnapshotService)ReflectionTestUtils.getField(assignment,"requirementSnapshots");
         var requirement=new AgentTaskRequirementSnapshotService.Snapshot(TENANT,CLIENT,OWNER,TASK,1,"Fixture title","Fixture description",scope.requirementSha256(),"SCOPED",scope);
+        scopedRequirement=requirement;scopedSpecification=spec;
         when(requirements.freezeCurrent(any(),eq(TASK),eq(1L))).thenReturn(requirement);when(requirements.read(SCOPE,TASK,1)).thenReturn(requirement);
         var ref=new CostRouteReference("MODEL_RESPONSE","INFERENCE","fixture-provider","fixture-model","TOKENS_V1");
         var route=new CostPricingRoute.TokenRoute("fixture","fixture-model","standard","TOKENS_V1");
         var measured=new MeasuredCostProfile("profile",1,0,List.of(new MeasuredCostProfile.Slot(0,"text.summary","1",spec.specSha(),List.of(),"summary","1",h,"install-skill")),"native-1","context-1",h,h,"capture-1",List.of(ref));
         var report=new CostProfileReport(1,List.of(measured));
-        when(scopedProfiles.atAssignment(any())).thenReturn(new RegisteredPricingProfiles.Observed(AGENT,OWNER,1,"install","host","runtime",1,1,report.sha256(),CostProfileReportJson.write(report)));
+        scopedObserved=new RegisteredPricingProfiles.Observed(AGENT,OWNER,1,"install","host","runtime",1,1,report.sha256(),CostProfileReportJson.write(report));
+        when(scopedProfiles.atAssignment(any())).thenReturn(scopedObserved);
         var key=new cn.jia.agent.mapper.skill.CapabilityQuoteSpecMapper.SpecKey("text.summary","1");
         when(scopedSpecs.lockActive(eq(TENANT),eq(CLIENT),anyList())).thenReturn(Map.of(key,spec));
         when(scopedRoutes.read(eq(BILLING_TASK.scope()),anyList(),anyBoolean())).thenReturn(Map.of(ref,new CostRouteBindings.Binding(ref,1,h,route)));
@@ -4120,6 +4125,56 @@ class AgentTaskBillingMySqlTransactionTest extends cn.jia.agent.skill.SkillManag
         assertEquals(quoteId,jdbc.queryForObject("SELECT quote_id FROM economy_task_cost_sample",String.class));
         var input=locked(()->assignment.snapshotTaskInputsWithinLockedTask(SCOPE,TASK)).inputs().getFirst();
         assertEquals("file-0",input.fileId());assertEquals(1,input.version());assertEquals(7,input.byteLength());
+    }
+    @Test void scopedBenchmarkHttpQuoteReserveReplayAndAcceptanceUsesOneFixedPrice() throws Exception {
+        var workspace=quoteWorkspace();
+        ReflectionTestUtils.setField(assignment,"taskLinks",workspace.links());
+        ReflectionTestUtils.setField(assignment,"workspace",workspace.files());
+        attachQuoteFile(0);prepareScopedAssignment(true);
+        var requirements=(AgentTaskRequirementSnapshotService)ReflectionTestUtils.getField(assignment,"requirementSnapshots");
+        var req=scopedRequirement;
+        when(requirements.readCurrentWithinLockedTask(eq(SCOPE),eq(TASK),any())).thenReturn(
+                new AgentTaskRequirementSnapshotService.CurrentSnapshot(TASK,0,1,req.title(),req.description(),req.sha256(),"SCOPED",req.confirmedScope()));
+        var candidates=mock(AgentExternalServicePolicyService.class);
+        when(candidates.quoteTargets(eq(SCOPE),eq(TASK),eq(List.of(AGENT)),anyBoolean())).thenReturn(
+                List.of(new AgentExternalServicePolicyService.QuoteTarget(AGENT,OWNER,1,0)));
+        var key=new cn.jia.agent.mapper.skill.CapabilityQuoteSpecMapper.SpecKey("text.summary","1");
+        when(scopedSpecs.readActive(eq(TENANT),eq(CLIENT),anyList())).thenReturn(Map.of(key,scopedSpecification));
+        var capability=new cn.jia.agent.skill.SkillManagementService.QuoteCapability("text.summary","1",scopedSpecification.specSha(),"summary","1","a".repeat(64),"install-skill");
+        when(scopedProfiles.readCapabilities(eq(TENANT),eq(CLIENT),anyList(),anyBoolean())).thenReturn(Map.of(AGENT,
+                new RegisteredPricingProfiles.CapabilityObserved(AGENT,OWNER,1,"install","host","runtime",1,Set.of(capability))));
+        when(scopedProfiles.read(eq(TENANT),eq(CLIENT),anyList(),anyBoolean())).thenReturn(Map.of(AGENT,scopedObserved));
+        var materials=new cn.jia.agent.service.recommendation.RecommendationMaterials(
+                proxy(new PersonalWorkspaceTaskLinkServiceImpl(workspace.links()),PersonalWorkspaceTaskLinkService.class),
+                new PersonalWorkspaceServiceImpl(workspace.files(),mock(PersonalWorkspaceStorage.class),mock(PersonalWorkspaceWriteService.class)));
+        var policy=mock(ScopedGroupPolicies.class);when(policy.read(any(),anyList(),anyBoolean())).thenReturn(Map.of());
+        var baseline=mock(cn.jia.economy.task.GroupBudgetQuotes.class);
+        independentQuoteController=cn.jia.agent.service.recommendation.QuoteHttpTestWiring.scoped(roots,batches,requirements,assignment,candidates,materials,billing,scopedProfiles,scopedSpecs,scopedRoutes,policy,baseline);
+        startHttp();var json=new ObjectMapper();String token=httpToken();int before=count("economy_task_quote");
+        try(var client=HttpClient.newHttpClient()){
+            String body=json.writeValueAsString(Map.of("protocolVersion",1,"requestId","scope-quote","data",Map.of("expectedTaskVersion","0","agentIds",List.of(AGENT))));
+            class Post {tools.jackson.databind.JsonNode run(boolean authenticated,int status)throws Exception{
+                var request=HttpRequest.newBuilder(URI.create(origin+"/agent/tasks/"+TASK+"/quotes"))
+                        .header("Content-Type","application/json").header("X-Request-Id","scope-quote").header("Idempotency-Key","scope-http-quote")
+                        .POST(HttpRequest.BodyPublishers.ofString(body));
+                if(authenticated)request.header("Authorization","Bearer "+token);
+                var reply=client.send(request.build(),HttpResponse.BodyHandlers.ofString());assertEquals(status,reply.statusCode(),reply.body());
+                return status==200?json.readTree(reply.body()).path("data"):null;
+            }}var post=new Post();post.run(false,401);assertEquals(before,count("economy_task_quote"));
+            var first=post.run(true,200);assertEquals(first,post.run(true,200));var row=first.path("quotes").get(0);
+            assertEquals("AVAILABLE",row.path("state").asText());assertEquals("1",row.at("/amount/amountMinor").asText());
+            assertEquals("FIXED_FALLBACK",row.at("/estimateSummary/method").asText());
+            quoteId=row.path("quoteId").asText();assertTrue(quoteId.startsWith("tq_s1_"));String recommendation=row.path("recommendationId").asText();
+            assertEquals(before+1,count("economy_task_quote"));assertEquals(100,wallet(independent));assertEquals(0,count("economy_task_charge"));
+            String assignBody=json.writeValueAsString(Map.of("targetAgentId",AGENT,"expectedTaskVersion","0","requirementRevision","1","quoteId",quoteId,"recommendationId",recommendation));
+            httpPost("/point-and-deliberate",assignBody,"scope-http-assign",true,200);
+            httpPost("/point-and-deliberate",assignBody,"scope-http-assign",true,200);
+            assertEquals(99,wallet(independent));assertEquals("HELD",charge());assertEquals(1,count("economy_task_cost_sample"));
+            // Acceptance is the real application transaction; no provider execution is asserted here.
+            prepareSubmitted();decide("accepted");assertTrue(decide("accepted").getReplayed());
+            assertEquals("CAPTURED",charge());assertEquals(99,wallet(independent));assertEquals(1,count("agent_task_execution_grant"));
+            assertEquals(first,post.run(true,200));verifyNoInteractions(baseline);
+        }
     }
     @Test void scopedBenchmarkStoredBytesChangedBeforeAssignmentCannotUseFrozenManifest() throws Exception {
         prepareScopedStoredFile();
