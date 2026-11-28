@@ -232,7 +232,7 @@ public interface ConfirmedSampleMapper {
         JOIN economy_task_quote_resolved q ON q.quote_id=s.quote_id AND q.tenant_id=s.tenant_id AND q.client_id=s.client_id
           AND q.owner_jiacn=s.owner_jiacn AND q.task_id=s.task_id
           AND q.snapshot_json->>'$.schema'='SCOPED_FIXED_TASK_QUOTE_V1'
-          AND q.snapshot_json->>'$.scopePin.scopeSha256'=s.scope_sha256
+          AND CAST(q.snapshot_json->>'$.scopePin.scopeSha256' AS BINARY)=CAST(s.scope_sha256 AS BINARY)
           AND q.snapshot_json->>'$.binding.agentId'=b.manifest_json->>'$.agentId'
         JOIN economy_task_charge ch ON ch.tenant_id=q.tenant_id AND ch.client_id=q.client_id AND ch.owner_jiacn=q.owner_jiacn
           AND ch.task_id=q.task_id AND ch.quote_id=q.quote_id AND ch.payer_user_id=q.payer_user_id AND ch.state IN ('HELD','CAPTURED')
